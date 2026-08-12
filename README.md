@@ -2,9 +2,10 @@
 <p align="center">
   <img src="assets/textures/Снимок экрана 2026-08-12 182317.png" width="800">
 </p>
+
 > **Текстуры:** NYukichi.I  
 > **Код:** Claude (Anthropic)  
-> **Соавтор / Благодарность:** George (исправлено)
+> **Код:** **George Perry Floyd Jr**
 
 Воксельная игра на Rust: клиент на wgpu + авторитативный сервер на tokio. Одиночная игра и сетевая — на одном и том же сервере.
 
