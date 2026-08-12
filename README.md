@@ -1,7 +1,7 @@
 # Primitive
 
 > Текстуры: **NYukichi.I**  
-> Код: **сlaude**  
+> Код: **Claude (Anthropic)**  
 > Код: **George Perry Floyd Jr**
 
 Воксельная игра на Rust: клиент на wgpu + авторитативный сервер на tokio. Одиночная игра и сетевая — на одном и том же сервере.
