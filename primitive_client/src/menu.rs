@@ -1622,7 +1622,10 @@ impl Menu {
 pub const CREDITS: &[(&str, &str)] = &[
     ("TEXTURES", "NYukichi.I"),
     ("CODE", "Claude (Anthropic)"),
+    ("CODE", "George Perry Floyd Jr"),
     ("ENGINE", "Rust, wgpu, tokio"),
+    
+
 ];
 
 /// What the menus need to read in order to draw themselves.
