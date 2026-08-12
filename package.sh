@@ -14,7 +14,12 @@ name="Primitive-$version"
 target="$root/dist/$name"
 
 echo "building $name (release)"
-(cd "$root" && cargo build --release --workspace)
+# Two invocations, not one `--workspace`: cargo unifies features across a
+# single build, and the client asks for the server without its `plugins`
+# feature precisely so the scripting engine stays out of the game binary.
+# Built together, the union wins and the client ships rhai anyway.
+(cd "$root" && cargo build --release -p primitive_client)
+(cd "$root" && cargo build --release -p primitive_server)
 
 rm -rf "$target"
 mkdir -p "$target"
@@ -27,7 +32,7 @@ done
 # first, so a packaged build finds them without any configuration.
 cp -r "$root/assets" "$target/assets"
 cp -r "$root/plugins" "$target/plugins"
-cp "$root/README.md" "$root/CHANGELOG.md" "$root/LICENSE" "$target/"
+cp "$root/GUIDE.md" "$root/README.md" "$root/CHANGELOG.md" "$root/LICENSE" "$target/"
 
 echo "packaged $target ($(du -sh "$target" | cut -f1))"
 
