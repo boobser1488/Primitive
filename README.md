@@ -1,5 +1,7 @@
 # Primitive
-
+<p align="center">
+  <img src="assets/textures/Снимок экрана 2026-08-12 182317.png" width="800">
+</p>
 > Текстуры: **NYukichi.I**  
 > Код: **Claude (Anthropic)**  
 > Код: **George Perry Floyd Jr**
