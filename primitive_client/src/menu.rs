@@ -105,6 +105,8 @@ pub enum Screen {
     Editing(Option<usize>),
     /// Everything the game can change without a text editor.
     Settings,
+    /// Who made what.
+    Credits,
     /// A yes/no gate in front of something irreversible.
     ///
     /// The confirmed action is carried in the screen rather than
@@ -264,6 +266,7 @@ pub enum Action {
     OpenWorlds,
     OpenServers,
     OpenSettings,
+    OpenCredits,
     Quit,
     Back,
     Select(usize),
@@ -377,6 +380,7 @@ impl Menu {
                 Action::OpenWorlds,
                 Action::OpenServers,
                 Action::OpenSettings,
+                Action::OpenCredits,
                 Action::Quit,
             ],
             Screen::Paused => vec![
@@ -394,8 +398,20 @@ impl Menu {
         if count == 0 {
             return;
         }
-        let current = self.button_focus.map(|i| i as i32).unwrap_or(-1);
-        self.button_focus = Some((((current + delta) % count + count) % count) as usize);
+        self.button_focus = Some(match self.button_focus {
+            Some(current) => (((current as i32 + delta) % count + count) % count) as usize,
+            // Nothing focused yet: forwards goes to the first entry,
+            // backwards to the last.
+            //
+            // This used to treat "nothing" as index -1 and fall through
+            // to the same arithmetic, which got Down right and Up wrong:
+            // -1 - 1 wraps to `count - 2`, so pressing Up on a fresh
+            // menu skipped the last entry and landed on the one above
+            // it. The menu had three items when that was written, so it
+            // looked like an off-by-one nobody could see.
+            None if delta < 0 => (count - 1) as usize,
+            None => 0,
+        });
         // The keyboard now owns the highlight.
         self.cursor = None;
     }
@@ -565,6 +581,11 @@ impl Menu {
                     _ => None,
                 }
             }
+
+            Screen::Credits => match key {
+                Key::Escape | Key::Enter => Some(self.apply(Action::Back)),
+                _ => None,
+            },
 
             Screen::Confirm { action, .. } => match key {
                 // Enter is *not* bound to the destructive answer. The
@@ -771,6 +792,11 @@ impl Menu {
                 self.screen = Screen::Worlds;
             }
 
+            Action::OpenCredits => {
+                self.notice = None;
+                self.screen = Screen::Credits;
+            }
+
             // ---- settings ----
             Action::OpenSettings => {
                 self.notice = None;
@@ -904,6 +930,7 @@ impl Menu {
             Screen::Servers => self.build_servers(&mut p, hover, ctx),
             Screen::Editing(existing) => self.build_form(&mut p, hover, ctx, existing.is_some()),
             Screen::Settings => self.build_settings(&mut p, hover, ctx),
+            Screen::Credits => self.build_credits(&mut p, hover, ctx),
             Screen::Confirm {
                 question,
                 detail,
@@ -1172,6 +1199,45 @@ impl Menu {
         );
     }
 
+    fn build_credits(&mut self, p: &mut Painter, cursor: Option<(f32, f32)>, ctx: &MenuContext) {
+        self.backdrop(p, ctx);
+        self.title(p, "CREDITS", 0.74);
+
+        let panel = Rect::new(-1.0, -0.34, 1.0, 0.52);
+        p.panel(panel);
+
+        // Role on the left, who did it on the right. Two columns rather
+        // than one line each, because the question a credits screen
+        // answers is "who did the art", and a list of names does not
+        // answer it.
+        let row_height = 0.115;
+        let mut y = panel.y1 - 0.05 - row_height;
+        for (role, who) in CREDITS {
+            let row = Rect::new(panel.x0 + 0.04, y, panel.x1 - 0.04, y + row_height);
+            p.label_left(row, role, 0.02, 0.9, ui::TEXT_DIM);
+            let width = ui::measure(who, 1.1);
+            p.label_left(
+                Rect::new(row.x1 - width, row.y0, row.x1, row.y1),
+                who,
+                0.0,
+                1.1,
+                ui::TEXT,
+            );
+            y -= row_height;
+        }
+
+        p.text_centred(ctx.version, 0.0, panel.y0 + 0.09, 0.8, ui::TEXT_DIM);
+
+        self.add_button(
+            p,
+            cursor,
+            Rect::centred(0.0, -0.52, 0.6, 0.105),
+            "BACK",
+            Action::Back,
+            true,
+        );
+    }
+
     fn build_confirm(
         &mut self,
         p: &mut Painter,
@@ -1279,6 +1345,7 @@ impl Menu {
             ("SINGLEPLAYER", Action::OpenWorlds),
             ("MULTIPLAYER", Action::OpenServers),
             ("SETTINGS", Action::OpenSettings),
+            ("CREDITS", Action::OpenCredits),
             ("QUIT", Action::Quit),
         ]
         .into_iter()
@@ -1546,6 +1613,17 @@ impl Menu {
         }
     }
 }
+
+/// Who made what, in the order the screen shows them.
+///
+/// A table rather than a formatted block of text: the screen lays it out
+/// in two columns, and a credit whose role is not spelled out is not
+/// really a credit.
+pub const CREDITS: &[(&str, &str)] = &[
+    ("TEXTURES", "NYukichi.I"),
+    ("CODE", "Claude (Anthropic)"),
+    ("ENGINE", "Rust, wgpu, tokio"),
+];
 
 /// What the menus need to read in order to draw themselves.
 ///
@@ -1902,6 +1980,7 @@ mod tests {
             Screen::Servers,
             Screen::Editing(None),
             Screen::Settings,
+            Screen::Credits,
             Screen::Confirm {
                 question: "DELETE THIS WORLD?".into(),
                 detail: "Home".into(),
@@ -2011,8 +2090,12 @@ mod tests {
         // Regression: the pause screen used to open with its third
         // button lit because the main menu had been left on index 2.
         let mut menu = Menu::new(ServerList::default());
-        menu.key(Key::Up); // lands on the last entry
-        assert_eq!(menu.button_focus, Some(2));
+        // Derived, not written down: a hardcoded index here breaks
+        // every time a menu entry is added, which says nothing about
+        // the behaviour the test is actually for.
+        let last = menu.focus_actions().len() - 1;
+        menu.key(Key::Up); // wraps to the last entry
+        assert_eq!(menu.button_focus, Some(last));
         menu.apply(Action::OpenServers);
         assert_eq!(menu.button_focus, None);
     }
@@ -2294,6 +2377,55 @@ mod tests {
         assert_eq!(menu.screen, Screen::Settings);
         menu.apply(Action::Back);
         assert_eq!(menu.screen, Screen::Paused);
+    }
+
+    #[test]
+    fn up_on_a_fresh_menu_selects_the_last_entry_and_down_the_first() {
+        // Regression: "nothing selected" was encoded as index -1 and run
+        // through the wrapping arithmetic, which put Up one short of the
+        // end.
+        let mut menu = Menu::new(ServerList::default());
+        let last = menu.focus_actions().len() - 1;
+        menu.key(Key::Up);
+        assert_eq!(menu.button_focus, Some(last), "Up should reach the last entry");
+
+        let mut menu = Menu::new(ServerList::default());
+        menu.key(Key::Down);
+        assert_eq!(menu.button_focus, Some(0));
+    }
+
+    #[test]
+    fn the_main_menu_has_a_way_into_the_credits() {
+        let mut menu = Menu::new(ServerList::default());
+        assert!(point_at(&mut menu, &Action::OpenCredits));
+        assert_eq!(menu.click(), Some(Action::OpenCredits));
+        assert_eq!(menu.screen, Screen::Credits);
+    }
+
+    #[test]
+    fn the_credits_screen_names_everyone_and_says_what_they_did() {
+        let mut menu = Menu::new(ServerList::default());
+        menu.screen = Screen::Credits;
+        let vertices = build(&mut menu);
+        assert!(!vertices.is_empty());
+        // A role with no name, or a name with no role, is not a credit.
+        for (role, who) in CREDITS {
+            assert!(!role.is_empty() && !who.is_empty());
+            assert!(
+                who.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+                "{who:?} contains characters the font cannot draw"
+            );
+        }
+    }
+
+    #[test]
+    fn the_credits_screen_can_be_left() {
+        for key in [Key::Escape, Key::Enter] {
+            let mut menu = Menu::new(ServerList::default());
+            menu.screen = Screen::Credits;
+            assert_eq!(menu.key(key), Some(Action::Back));
+            assert_eq!(menu.screen, Screen::Main);
+        }
     }
 
     #[test]
