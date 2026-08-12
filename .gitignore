@@ -1,0 +1,16 @@
+/target
+/dist
+
+# Auto-generated on first run with defaults; edit the copy next to your
+# binary, don't commit one -- see primitive_client/src/settings.rs and
+# primitive_server/src/settings.rs.
+settings.toml
+client_settings.toml
+servers.toml
+
+# Worlds. `world/` is the standalone server's, `saves/` is singleplayer's.
+/world
+/saves
+
+# Local tool configuration: machine-specific paths, not project state.
+/.claude

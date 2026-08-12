@@ -1,0 +1,44 @@
+[package]
+name = "primitive_client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Game client for Primitive"
+publish = false
+
+# Explicit target -- see the note in primitive_server/Cargo.toml.
+[[bin]]
+name = "primitive_client"
+path = "src/main.rs"
+
+[dependencies]
+primitive_shared = { path = "../primitive_shared" }
+# Singleplayer runs the real server in-process. `default-features =
+# false` turns off the `plugins` feature, so the game binary carries no
+# scripting engine: a local world has no plugins to run, and Rhai is a
+# large dependency to link into a client for nothing.
+primitive_server = { path = "../primitive_server", default-features = false }
+tokio = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+anyhow = { workspace = true }
+
+# winit's default features pull in Wayland support too, whose dependency
+# chain (wayland-scanner -> quick-xml, etc.) needed newer Cargo-edition
+# features than the toolchain this was built with supports. X11-only is
+# fine for this prototype (and irrelevant on Windows/macOS, where winit
+# uses a different backend entirely) -- drop this restriction if you want
+# Wayland on Linux and have a modern-enough toolchain.
+winit = { version = "0.29", default-features = false, features = ["rwh_06", "x11"] }
+wgpu = "0.19"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.27"
+toml = { workspace = true }
+image = { version = "0.24", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+# Same shader compiler wgpu 0.19 uses internally. Pulled in so the WGSL
+# can be parsed and type-checked by `cargo test`, rather than only
+# failing at pipeline-creation time on a machine with a GPU.
+naga = { version = "0.19", features = ["wgsl-in"] }

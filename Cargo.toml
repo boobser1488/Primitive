@@ -1,0 +1,82 @@
+[workspace]
+resolver = "2"
+members = [
+    "primitive_shared",
+    "primitive_server",
+    "primitive_client",
+]
+
+[workspace.package]
+version = "1.2.0"
+edition = "2021"
+license = "LicenseRef-Proprietary"
+authors = ["Primitive"]
+repository = ""
+
+[workspace.dependencies]
+# Not "full". That pulls tokio's filesystem and process modules, which
+# nothing here uses -- the world is saved with `std::fs` on a blocking
+# task -- and `parking_lot`, whose locks are not on any hot path in a
+# game that spends its time meshing chunks. What is left is exactly what
+# the three crates reach for; adding a feature is one line when
+# something needs it.
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread", # the runtime the client and server both spawn onto
+    "macros",          # #[tokio::main] and select!
+    "net",             # TcpListener / TcpStream
+    "io-util",         # length-prefixed framing in primitive_shared::net
+    "io-std",          # the server console reads stdin
+    "sync",            # mpsc, oneshot, watch, Notify
+    "time",            # tick intervals and connection timeouts
+    "signal",          # Ctrl-C shutdown
+] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+anyhow = "1"
+toml = "0.8"
+noise = "0.8"
+
+# Release builds are what players get, so they are tuned for the game
+# rather than for build time: one codegen unit and fat LTO across the
+# whole workspace, because the hot paths (meshing, lighting, world
+# generation) cross crate boundaries constantly and are worthless
+# un-inlined. `panic = "abort"` drops the unwinding tables; nothing in
+# the game catches a panic.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+# The mesher and the lighting flood-fill are unusably slow unoptimised --
+# a debug build spends more time meshing one chunk than it has in a whole
+# frame. Optimising just the dependencies and the shared crate keeps
+# `cargo run` debuggable where the game logic lives while making it
+# playable.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.primitive_shared]
+opt-level = 2
+
+# Size over speed for the crates that only ever run at startup.
+#
+# `naga` compiles the four WGSL shaders once; `image` decodes fourteen
+# 16x16 PNGs once; `toml` reads three config files once. None of them is
+# on the frame path, so trading their inlining for smaller code costs
+# nothing a player can measure. Everything actually hot -- the mesher,
+# the lighting flood-fill, glam, wgpu's per-frame encoding -- stays at
+# opt-level 3.
+[profile.release.package.naga]
+opt-level = "s"
+[profile.release.package.image]
+opt-level = "s"
+[profile.release.package.png]
+opt-level = "s"
+[profile.release.package.toml]
+opt-level = "s"
+[profile.release.package.toml_edit]
+opt-level = "s"
+[profile.release.package.winit]
+opt-level = "s"

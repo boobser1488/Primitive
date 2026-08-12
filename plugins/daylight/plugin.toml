@@ -1,0 +1,5 @@
+name = "daylight"
+version = "1.0"
+author = "primitive"
+description = "Announces nightfall once per night. Disabled by default; set enabled = true to try it."
+enabled = false

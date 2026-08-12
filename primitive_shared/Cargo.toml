@@ -1,0 +1,18 @@
+[package]
+name = "primitive_shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared world model, protocol and lighting for Primitive"
+publish = false
+
+# Explicit target -- see the note in primitive_server/Cargo.toml.
+[lib]
+name = "primitive_shared"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+noise = { workspace = true }

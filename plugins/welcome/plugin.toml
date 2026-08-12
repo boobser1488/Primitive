@@ -1,0 +1,6 @@
+name = "welcome"
+version = "1.0"
+author = "primitive"
+description = "Greets players, announces departures, and adds /online."
+script = "main.rhai"
+enabled = true

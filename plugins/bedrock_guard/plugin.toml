@@ -1,0 +1,4 @@
+name = "bedrock_guard"
+version = "1.0"
+author = "primitive"
+description = "Protects the bottom of the world and the area around spawn."

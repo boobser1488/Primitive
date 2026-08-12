@@ -1,0 +1,37 @@
+[package]
+name = "primitive_server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Authoritative world server for Primitive"
+publish = false
+
+# Targets are declared explicitly rather than relying on Cargo's
+# automatic discovery. Auto-discovery produces a confusing error ("no
+# targets specified in the manifest") when a file is missing -- for
+# instance after an incomplete zip extraction, which Windows Explorer's
+# built-in handler is prone to. With the paths spelled out, Cargo instead
+# says exactly which file it couldn't find.
+[lib]
+name = "primitive_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "primitive_server"
+path = "src/main.rs"
+
+[features]
+default = ["plugins"]
+# Scripted plugins. On for the standalone server; the game client embeds
+# this crate with `default-features = false` so a singleplayer world
+# doesn't ship a scripting engine it has no use for.
+plugins = ["dep:rhai"]
+
+[dependencies]
+primitive_shared = { path = "../primitive_shared" }
+tokio = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+anyhow = { workspace = true }
+toml = { workspace = true }
+rhai = { version = "1.16", features = ["sync"], optional = true }
