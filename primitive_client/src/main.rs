@@ -2794,6 +2794,21 @@ fn respawn_gate(chunks: &ChunkManager, x: f32, z: f32, world_ready: &mut bool) {
     *world_ready = chunks.is_area_ready(ChunkManager::chunk_for_world_pos(x, z));
 }
 
+/// **Every argument is a piece of the frame's own state**, and that is
+/// why there are so many of them.
+///
+/// This is the seam between the socket and the game: a message arrives
+/// and lands in the chunk map, the light map, the inventory, the death
+/// screen, the chat, the player's body. Naming them one by one is what
+/// makes the borrow checker prove, at the call site, that the frame is
+/// not handing the same thing to two places at once.
+///
+/// Bundling them into a `struct Frame<'a>` was tried and reverted: it
+/// moves the same fields behind one more name, the borrows become
+/// whole-struct rather than per-field, and the loop that owns them then
+/// cannot touch any of them while this runs. That is a real loss of
+/// checking in exchange for a shorter signature.
+#[allow(clippy::too_many_arguments)]
 fn drain_network(
     net: &mut network::NetworkHandle,
     chunks: &mut ChunkManager,
