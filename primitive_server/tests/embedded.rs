@@ -210,3 +210,116 @@ async fn an_embedded_server_loads_no_plugins_even_when_some_are_there() {
     );
     hosted.stop().await;
 }
+
+/// Reads server messages until one is a chat line, or gives up.
+///
+/// The join sequence pushes health, inventory and chunks before anything
+/// anyone typed, and their number depends on the view distance -- so a
+/// test that wants to see a reply has to skip whatever is in front of it
+/// rather than count on a fixed position in the stream.
+async fn next_chat(socket: &mut TcpStream) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let message = tokio::time::timeout_at(
+            deadline,
+            read_message::<_, ServerMessage>(socket),
+        )
+        .await
+        .expect("timed out waiting for a chat line")
+        .expect("read failed");
+        if let ServerMessage::Chat { text, .. } = message {
+            return text;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_player_made_an_operator_has_the_rights_on_their_next_line() {
+    // The seam `/op` exists for: permission is looked up per command
+    // from the profile store, so this must work without the player
+    // reconnecting. A unit test of the parser cannot see any of it --
+    // the interesting part is the connection asking the profiles who
+    // this is, on a real socket, while the player is standing there.
+    let server = primitive_server::start(test_settings(), RunOptions::embedded())
+        .await
+        .expect("should start");
+    let address = server.address().to_string();
+
+    let mut socket = TcpStream::connect(&address).await.expect("connect");
+    write_message(
+        &mut socket,
+        &ClientMessage::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            username: "tester".to_string(),
+        },
+    )
+    .await
+    .expect("hello");
+
+    // A plain player is refused an operator command.
+    write_message(&mut socket, &ClientMessage::Chat("/say hello".to_string()))
+        .await
+        .expect("chat");
+    let refusal = next_chat(&mut socket).await;
+    assert!(
+        refusal.contains("operator-only"),
+        "a plain player was allowed /say: {refusal}"
+    );
+
+    // The console promotes them, and says so to both parties.
+    let replies = server.console_command("/op tester");
+    assert_eq!(replies, vec!["tester is now an operator".to_string()]);
+    let told = next_chat(&mut socket).await;
+    assert_eq!(told, "you are now an operator");
+
+    // Saying it twice is not the same as doing it twice.
+    assert_eq!(
+        server.console_command("/op tester"),
+        vec!["tester is already an operator".to_string()]
+    );
+
+    // No reconnect, no relog: the very next line goes through.
+    write_message(&mut socket, &ClientMessage::Chat("/say hello".to_string()))
+        .await
+        .expect("chat");
+    let broadcast = next_chat(&mut socket).await;
+    assert_eq!(broadcast, "hello", "the promotion did not take effect");
+    // The caller hears their own command's answer as well as the
+    // broadcast it caused; both arrive, and this one has to be taken off
+    // the wire before the next thing can be read.
+    assert_eq!(next_chat(&mut socket).await, "broadcast: hello");
+
+    // ...and taking it away is just as immediate.
+    assert_eq!(
+        server.console_command("/deop tester"),
+        vec!["tester is no longer an operator".to_string()]
+    );
+    let told = next_chat(&mut socket).await;
+    assert_eq!(told, "you are no longer an operator");
+    write_message(&mut socket, &ClientMessage::Chat("/say hello".to_string()))
+        .await
+        .expect("chat");
+    let refusal = next_chat(&mut socket).await;
+    assert!(
+        refusal.contains("operator-only"),
+        "a demoted player kept their rights: {refusal}"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn opping_a_name_nobody_has_played_under_is_refused() {
+    // `Uuid::of_name` answers for every string, so an unchecked `/op`
+    // would happily file a promotion under a typo -- and leave it there
+    // for whoever guesses the misspelling.
+    let server = primitive_server::start(test_settings(), RunOptions::embedded())
+        .await
+        .expect("should start");
+    let replies = server.console_command("/op nobody");
+    assert_eq!(
+        replies,
+        vec!["no player called 'nobody' has ever played here".to_string()]
+    );
+    server.stop().await;
+}

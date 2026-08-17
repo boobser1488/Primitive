@@ -175,7 +175,7 @@ impl Default for AntiCheatSettings {
             max_teleport_distance: 24.0,
             max_airborne_ascent: 4.0,
             max_hover_seconds: 3.0,
-            max_reach: 7.5,
+            max_reach: 5.5,
             verify_ground: true,
             world_border: 2_000_000.0,
 

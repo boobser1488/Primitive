@@ -538,6 +538,11 @@ fn seam_cells(pos: ChunkPos, dx: i32, dz: i32) -> Vec<((i32, i32), (i32, i32))> 
 /// going through here is 16,384 chunk lookups for data you're holding.
 /// Kept for callers that genuinely only have a `BlockSource`.
 pub fn chunk_blocks<S: BlockSource>(src: &S, pos: ChunkPos) -> Vec<BlockId> {
+    // One memcpy when the implementor has the chunk contiguously --
+    // that is the whole reason `chunk_data` exists.
+    if let Some(data) = src.chunk_data(pos) {
+        return data.to_vec();
+    }
     let origin_x = pos.x * CHUNK_SIZE_X as i32;
     let origin_z = pos.z * CHUNK_SIZE_Z as i32;
     let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
@@ -562,7 +567,8 @@ pub fn compute_isolated(blocks: &[BlockId]) -> Vec<u8> {
     let mut sky_queue: VecDeque<usize> = VecDeque::new();
     let mut block_queue: VecDeque<usize> = VecDeque::new();
 
-    // Direct sunlight, top down.
+    // Direct sunlight, top down. Levels only: what gets *queued* is
+    // decided afterwards, and it is far less than this.
     for lz in 0..CHUNK_SIZE_Z {
         for lx in 0..CHUNK_SIZE_X {
             let mut level = MAX_LIGHT;
@@ -571,11 +577,33 @@ pub fn compute_isolated(blocks: &[BlockId]) -> Vec<u8> {
                 let id = blocks[idx];
                 level = sky_below(level, id);
                 data[idx] = (data[idx] & 0xF0) | level;
-                if level > 1 {
-                    sky_queue.push_back(idx);
-                }
                 if level == 0 {
                     break;
+                }
+            }
+        }
+    }
+
+    // Seed the flood with the cells that can actually give light away.
+    //
+    // The column pass above already leaves every *vertical* pair
+    // consistent -- each cell's level is derived from the one above it
+    // through the same rule the flood would apply -- so the only cells
+    // with anything to contribute are those whose *horizontal*
+    // neighbours are darker. Under open sky that is almost none of them:
+    // the previous version queued every lit cell, which on a chunk with
+    // a normal skyline is ten thousand pushes and pops that each
+    // discover their four neighbours are already at fifteen.
+    for lz in 0..CHUNK_SIZE_Z {
+        for lx in 0..CHUNK_SIZE_X {
+            for y in 0..CHUNK_SIZE_Y {
+                let idx = Chunk::index(lx, y, lz);
+                let level = data[idx] & 0x0F;
+                if level <= 1 {
+                    continue;
+                }
+                if spreads_sideways(blocks, &data, lx, y, lz, level) {
+                    sky_queue.push_back(idx);
                 }
             }
         }
@@ -592,6 +620,31 @@ pub fn compute_isolated(blocks: &[BlockId]) -> Vec<u8> {
     flood_local(blocks, &mut data, sky_queue, Channel::Sky);
     flood_local(blocks, &mut data, block_queue, Channel::Block);
     data
+}
+
+/// Whether a sky-lit cell has a horizontal neighbour it could brighten.
+///
+/// Only horizontal: see the seeding loop in `compute_isolated`. Cells on
+/// the chunk's edge are not seeded on account of what is outside it --
+/// the seam pass in `LightMap::insert_precomputed` owns that.
+fn spreads_sideways(blocks: &[BlockId], data: &[u8], lx: usize, y: usize, lz: usize, level: u8) -> bool {
+    for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+        let nx = lx as i32 + dx;
+        let nz = lz as i32 + dz;
+        if nx < 0 || nz < 0 || nx >= CHUNK_SIZE_X as i32 || nz >= CHUNK_SIZE_Z as i32 {
+            continue;
+        }
+        let nidx = Chunk::index(nx as usize, y, nz as usize);
+        let id = blocks[nidx];
+        if is_opaque(id) {
+            continue;
+        }
+        let arriving = level.saturating_sub(1u8.saturating_add(light_opacity(id)));
+        if arriving > 0 && (data[nidx] & 0x0F) < arriving {
+            return true;
+        }
+    }
+    false
 }
 
 fn flood_local(
@@ -941,11 +994,26 @@ pub(crate) mod tests {
             // cases, where light passes but is attenuated. Those exercise
             // the cost arithmetic in propagation and removal, which
             // all-or-nothing blocks never touch.
-            let id = match lcg(&mut rng) % 6 {
+            //
+            // Layers matter for the opposite reason: a shallow drift of
+            // snow is the same *material* as a block that stops light
+            // dead, and stops none at all. A predicate that forgot to
+            // ask how deep it was would light the world differently
+            // depending on which half of the pair got there first, and
+            // this is the test that would catch it.
+            let id = match lcg(&mut rng) % 8 {
                 0 => BLOCK_STONE,
                 1 => BLOCK_GLOWSTONE,
                 2 => crate::types::BLOCK_WATER,
                 3 => crate::types::BLOCK_LEAVES,
+                4 => crate::types::with_layers(
+                    crate::types::BLOCK_SNOW,
+                    1 + (lcg(&mut rng) % 8) as u8,
+                ),
+                5 => crate::types::with_layers(
+                    crate::types::BLOCK_GRAVEL,
+                    1 + (lcg(&mut rng) % 8) as u8,
+                ),
                 _ => BLOCK_AIR,
             };
             world.set(gx, gy, gz, id);
@@ -1185,5 +1253,37 @@ mod recheck_tests {
         }
         assert!(light.block(14, 31, 14) > 0, "light must cross the corner");
         assert!(light.block(18, 31, 18) > 0);
+    }
+}
+
+#[cfg(test)]
+mod real_terrain_lighting {
+    use super::*;
+
+    /// Checksums the isolated light of real generated chunks.
+    ///
+    /// Run before and after a change to `compute_isolated`: the numbers
+    /// must match. A change that only *mostly* seeds the flood produces
+    /// darker chunks that the cross-chunk pass then has to repair on the
+    /// main thread, which is a stutter rather than a visible fault.
+    #[test]
+    #[ignore = "diagnostic: prints a checksum"]
+    fn checksum_real_terrain_lighting() {
+        use crate::worldgen::WorldGen;
+        let gen = WorldGen::new(4242);
+        let mut total: u64 = 0xcbf29ce484222325;
+        let mut lit = 0u64;
+        for cx in -3..=3 {
+            for cz in -3..=3 {
+                let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                let data = compute_isolated(&chunk.blocks);
+                for b in &data {
+                    total ^= *b as u64;
+                    total = total.wrapping_mul(0x100000001b3);
+                    lit += (*b & 0x0F) as u64;
+                }
+            }
+        }
+        println!("isolated light checksum {total:016x} sum {lit}");
     }
 }

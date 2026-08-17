@@ -1201,7 +1201,7 @@ checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
 name = "primitive_client"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1221,7 +1221,7 @@ dependencies = [
 
 [[package]]
 name = "primitive_server"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1234,9 +1234,10 @@ dependencies = [
 
 [[package]]
 name = "primitive_shared"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "bincode",
+ "image",
  "noise",
  "serde",
  "tokio",

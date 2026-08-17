@@ -22,6 +22,16 @@ pub struct ClientSettings {
     pub username: String,
     pub window_width: u32,
     pub window_height: u32,
+    /// Start in fullscreen, and stay there next time.
+    ///
+    /// Borderless rather than exclusive: exclusive changes the display
+    /// mode, which on Windows means a black flicker on every alt-tab
+    /// and a real chance of leaving the desktop at the wrong resolution
+    /// if the game exits badly. Borderless is a window the size of the
+    /// screen with no frame, which is what "fullscreen" means to almost
+    /// everybody who asks for it.
+    #[serde(default)]
+    pub fullscreen: bool,
     pub vsync: bool,
     pub fov_degrees: f32,
     pub render_distance_chunks: i32,
@@ -50,6 +60,92 @@ pub struct ClientSettings {
     pub block_light_boost: f32,
     /// 0.0 disables ambient occlusion, 1.0 makes creases very dark.
     pub ambient_occlusion: f32,
+    /// Anisotropic filtering, as a sample count: 1 turns it off.
+    ///
+    /// Only the *minification* end of filtering changes with it --
+    /// magnification stays nearest-neighbour, so a block you are
+    /// standing next to keeps its hard texel edges. What it cures is the
+    /// crawl on faces seen edge-on at a distance.
+    pub anisotropy: u16,
+    /// How much smaller than the frame the sky is drawn, before being
+    /// stretched back over it. 1 draws it at full size.
+    ///
+    /// The sky is the single most expensive thing in the frame -- with
+    /// the horizon in view it measured 0.68 ms of a 1.25 ms one -- and
+    /// every attempt to make its shader cheaper failed on measurement.
+    /// Giving it fewer pixels is the one saving left, and it cannot
+    /// fail, because it is less work rather than faster work: a quarter
+    /// of the pixels at 2, a ninth at 3.
+    ///
+    /// What softens is stars and the rims of the sun and the moon. The
+    /// gradient and the clouds barely notice -- the clouds are already
+    /// drawn on a grid about twelve blocks square, far coarser than a
+    /// pixel.
+    ///
+    /// **On by default at 3.** The sky is the largest single item in
+    /// the frame and three attempts to make its shader cheaper were
+    /// measured and failed, one of them making it a third slower.
+    /// Fewer pixels is the only saving there is. Measured on the
+    /// benchmark world, twenty-five samples each:
+    ///
+    /// ```text
+    /// sky_scale=1   930 fps   gpu 0.759   sky 0.253
+    /// sky_scale=2   997 fps   gpu 0.676   sky 0.186
+    /// sky_scale=3  1087 fps   gpu 0.599   sky 0.103
+    /// ```
+    ///
+    /// Three rather than two because the stars stopped being the reason
+    /// not to: they are grid-aligned squares now (see `sky.wgsl`), and a
+    /// square survives being drawn small and stretched in a way a
+    /// sub-pixel point never could. `sky_scale = 1` puts it back.
+    pub sky_scale: u32,
+    /// Whether leaves are drawn see-through.
+    ///
+    /// On, a leaf texture's holes are cut out and you can see through a
+    /// canopy into the tree. That costs the GPU early depth rejection on
+    /// every draw the cutout shader touches -- and a canopy is layer
+    /// over layer of fragments, each shaded before the depth test throws
+    /// it away, which is why standing under one is the slowest place in
+    /// the world.
+    ///
+    /// Off, leaves are solid. The tree is a shape rather than a texture
+    /// with gaps, and the pass gets its early-Z back. It is the classic
+    /// detail-versus-speed setting, and it is offered for the classic
+    /// reason: on a weak machine it is worth several tens of frames a
+    /// second, and that is the sort of thing a player should get to
+    /// decide.
+    #[serde(default = "default_transparent_leaves")]
+    pub transparent_leaves: bool,
+    /// How far out the small stuff is drawn, as a fraction of the fog
+    /// distance.
+    ///
+    /// Tufts of grass and loose stones are the densest thing in the
+    /// world -- a plains chunk is a tuft every three columns -- and the
+    /// least worth drawing at range, where each one is a couple of
+    /// pixels the fog is already washing out. Cutting them short is the
+    /// single biggest lever on frame rate in open country.
+    ///
+    /// 1.0 draws them as far as anything else. Below about 0.4 the line
+    /// where they stop starts to be visible as you walk, because the fog
+    /// has not thickened enough to hide it yet.
+    #[serde(default = "default_detail_distance")]
+    pub detail_distance: f32,
+    /// How much of the sky the cloud layer covers, 0 (clear) to 1
+    /// (overcast). Weather is not simulated, so this is a dial rather
+    /// than something the world decides.
+    #[serde(default = "default_cloudiness")]
+    pub cloudiness: f32,
+    /// What language the interface is in. See `ui::lang`.
+    ///
+    /// Defaults to English rather than to the system locale: guessing
+    /// wrong puts a player into a language they cannot read *and*
+    /// cannot navigate out of, and the settings row that fixes it is
+    /// two screens in. English until asked is the recoverable mistake.
+    #[serde(default)]
+    pub language: crate::ui::lang::Language,
+    /// What each key does. See `keybinds`.
+    #[serde(default)]
+    pub keybinds: crate::ui::keybinds::Keybinds,
 
     // ---- performance ----
     /// Worker threads for chunk meshing and lighting. 0 = use every
@@ -102,6 +198,24 @@ pub struct ClientSettings {
     pub debug_overlay_on_start: bool,
 }
 
+/// Fancy leaves, because that is what the game has always looked like
+/// and a setting that quietly changes the picture on upgrade is a
+/// setting nobody asked for.
+fn default_transparent_leaves() -> bool {
+    true
+}
+
+/// Seven tenths of the way to the fog: far enough that the cut is inside
+/// haze rather than in clear air, near enough to be worth having.
+fn default_detail_distance() -> f32 {
+    0.7
+}
+
+/// Enough cloud to break the sky up, not enough to close it in.
+fn default_cloudiness() -> f32 {
+    0.45
+}
+
 impl Default for ClientSettings {
     fn default() -> Self {
         Self {
@@ -109,6 +223,7 @@ impl Default for ClientSettings {
             username: "player".to_string(),
             window_width: 1280,
             window_height: 720,
+            fullscreen: false,
             vsync: true,
             fov_degrees: 70.0,
             render_distance_chunks: 6,
@@ -124,6 +239,16 @@ impl Default for ClientSettings {
             ambient_light: 0.06,
             block_light_boost: 1.0,
             ambient_occlusion: 0.45,
+            // On by default at a modest level: the shimmer it removes is
+            // most of what makes distant terrain look noisy, and 4x is
+            // free on anything with a discrete GPU.
+            anisotropy: 4,
+            sky_scale: 3,
+            transparent_leaves: true,
+            detail_distance: 0.7,
+            cloudiness: 0.45,
+            language: crate::ui::lang::Language::English,
+            keybinds: crate::ui::keybinds::Keybinds::default(),
 
             worker_threads: 0,
             chunk_budget_ms: 3.0,
@@ -186,6 +311,7 @@ impl ClientSettings {
     /// treatment, and duplicating the limits is how the two drift.
     pub fn sanitize(&mut self) {
         self.clamp();
+        self.keybinds.sanitize();
     }
 
     /// Server settings for a singleplayer world.
@@ -203,7 +329,7 @@ impl ClientSettings {
     /// physics disagreement with themselves.
     pub fn singleplayer_server(
         &self,
-        world: &crate::worlds::World,
+        world: &crate::logic::worlds::World,
     ) -> primitive_server::settings::ServerSettings {
         primitive_server::settings::ServerSettings {
             bind_addr: "127.0.0.1:0".to_string(),
@@ -242,6 +368,18 @@ impl ClientSettings {
         self.ambient_light = self.ambient_light.clamp(0.0, 0.6);
         self.block_light_boost = self.block_light_boost.clamp(0.0, 3.0);
         self.ambient_occlusion = self.ambient_occlusion.clamp(0.0, 1.0);
+        // Powers of two only, and never past 16: wgpu rejects anything
+        // else outright, and a settings file is user input.
+        self.detail_distance = self.detail_distance.clamp(0.2, 1.0);
+        self.cloudiness = self.cloudiness.clamp(0.0, 1.0);
+        self.anisotropy = match self.anisotropy {
+            0..=1 => 1,
+            2..=3 => 2,
+            4..=7 => 4,
+            8..=15 => 8,
+            _ => 16,
+        };
+        self.sky_scale = self.sky_scale.clamp(1, 4);
         self.mesh_budget_ms = self.mesh_budget_ms.clamp(0.5, 33.0);
         self.chunk_budget_ms = self.chunk_budget_ms.clamp(0.5, 33.0);
         self.worker_threads = self.worker_threads.min(64);
@@ -348,8 +486,8 @@ mod tests {
         assert!(parsed.fog_enabled);
     }
 
-    fn test_world() -> crate::worlds::World {
-        crate::worlds::World {
+    fn test_world() -> crate::logic::worlds::World {
+        crate::logic::worlds::World {
             name: "Test".to_string(),
             seed: Some(77),
             directory: std::path::PathBuf::from("saves/test"),
@@ -397,7 +535,7 @@ mod tests {
             singleplayer_seed: 4242,
             ..Default::default()
         };
-        let legacy = crate::worlds::World {
+        let legacy = crate::logic::worlds::World {
             seed: None,
             ..test_world()
         };
@@ -478,5 +616,48 @@ mod file_tests {
     fn a_broken_file_falls_back_instead_of_refusing_to_start() {
         let parsed = ClientSettings::parse("this is not toml {{{", SETTINGS_PATH);
         assert_eq!(parsed.server_addr, ClientSettings::default().server_addr);
+    }
+
+    #[test]
+    fn a_file_written_before_a_setting_existed_keeps_the_old_look() {
+        // Every setting added later needs a `serde` default, and the
+        // default has to be what the game did before it existed --
+        // otherwise upgrading silently changes the picture. Leaves are
+        // the case in hand: they have always been see-through.
+        let old = "server_addr = \"127.0.0.1:7878\"
+";
+        let parsed = ClientSettings::parse(old, SETTINGS_PATH);
+        assert!(
+            parsed.transparent_leaves,
+            "upgrading turned the canopy solid"
+        );
+    }
+
+    #[test]
+    // Written field by field on purpose: the point of the test is that
+    // *each* one round-trips, and a struct literal would silently keep
+    // passing when a new field is added.
+    #[allow(clippy::field_reassign_with_default)]
+    fn every_setting_survives_being_written_and_read_back() {
+        // The screen edits these and the file stores them; a setting
+        // that does not round-trip is one that resets itself whenever
+        // the player restarts.
+        // Written field by field on purpose: the point of the test is
+        // that *each* one round-trips, and a struct literal would
+        // silently keep passing when a new field is added.
+        let mut settings = ClientSettings::default();
+        settings.transparent_leaves = false;
+        settings.fog_enabled = false;
+        settings.anisotropy = 8;
+        settings.render_distance_chunks = 12;
+        settings.sky_scale = 2;
+
+        let text = toml::to_string_pretty(&settings).expect("settings should serialise");
+        let parsed = ClientSettings::parse(&text, SETTINGS_PATH);
+        assert!(!parsed.transparent_leaves);
+        assert!(!parsed.fog_enabled);
+        assert_eq!(parsed.anisotropy, 8);
+        assert_eq!(parsed.render_distance_chunks, 12);
+        assert_eq!(parsed.sky_scale, 2);
     }
 }

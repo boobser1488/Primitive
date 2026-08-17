@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.2.0"
+version = "1.4.0"
 edition = "2021"
 license = "LicenseRef-Proprietary"
 authors = ["Primitive"]
@@ -30,7 +30,9 @@ tokio = { version = "1", default-features = false, features = [
     "time",            # tick intervals and connection timeouts
     "signal",          # Ctrl-C shutdown
 ] }
-serde = { version = "1", features = ["derive"] }
+# `rc`: `Arc<Chunk>` on the wire, serialised as a plain chunk. See
+# `protocol::ServerMessage::ChunkData` for what that saves.
+serde = { version = "1", features = ["derive", "rc"] }
 bincode = "1"
 anyhow = "1"
 toml = "0.8"

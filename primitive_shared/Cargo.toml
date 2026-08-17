@@ -16,3 +16,9 @@ tokio = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 noise = { workspace = true }
+
+# Tests only, and only one of them: `worldgen`'s map dump writes a
+# picture of the world so terrain can be *looked* at. Nothing a check
+# can assert tells you that a coastline reads as a coastline.
+[dev-dependencies]
+image = { version = "0.24", default-features = false, features = ["png"] }
