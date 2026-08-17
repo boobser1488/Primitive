@@ -3,8 +3,8 @@
 # The Linux/macOS twin of package.ps1 -- see that file for why the
 # settings files are deliberately *not* included.
 #
-#   ./package.sh            -> dist/Primitive-1.0.0
-#   ./package.sh --tar      -> also dist/Primitive-1.0.0.tar.gz
+#   ./package.sh            -> dist/Primitive-<version>
+#   ./package.sh --tar      -> also dist/primitive_linux64.tar.gz
 
 set -euo pipefail
 
@@ -37,7 +37,15 @@ cp "$root/GUIDE.md" "$root/README.md" "$root/CHANGELOG.md" "$root/LICENSE" "$tar
 echo "packaged $target ($(du -sh "$target" | cut -f1))"
 
 if [ "${1:-}" = "--tar" ]; then
-    archive="$root/dist/$name.tar.gz"
+    # Named by platform rather than by version, exactly as the Windows
+    # script names its zip: this is the file people link to and
+    # download, and a name that changes every release breaks every link
+    # to it. The version is inside, in the folder name and in the game's
+    # own menu.
+    archive="$root/dist/primitive_linux64.tar.gz"
+    rm -f "$archive"
+    # The folder goes in with it, so extracting does not scatter eight
+    # files into whatever directory the user happened to be in.
     tar -czf "$archive" -C "$root/dist" "$name"
-    echo "wrote $archive"
+    echo "wrote $archive ($(du -h "$archive" | cut -f1))"
 fi

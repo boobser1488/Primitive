@@ -18,6 +18,20 @@
 # or unreadable file falls back to a magenta/black checkerboard and logs
 # a warning instead of stopping the game.
 
+# Some names are loaded without being listed here, because they are not
+# block faces: `break.0.png` .. `break.4.png` are the damage drawn on a
+# block while it is being mined. Transparent everywhere except the
+# damage -- alpha is what says "there is a crack here", and the colour
+# under it is how much darker that texel makes the block.
+#
+# They are *multiplied* into the face rather than laid over it, so what
+# you see is the block's own texture, its own light and its own fog with
+# the damage taken out of it. A black texel is a hole and a mid-grey one
+# is a scuff; a white one would do nothing at all. Nothing here can add
+# brightness, which is deliberate: damage that glowed in a dark cave was
+# the old behaviour and it read as a decal hanging in front of the
+# block.
+
 resolution = 16
 
 [textures]
@@ -29,6 +43,98 @@ snow = "snow.png"
 water = "water.png"
 log = { top = "log_top.png", bottom = "log_top.png", side = "log_side.png" }
 leaves = "leaves.png"
+# Birch: a second wood, not a variant of the first. See
+# `types::BLOCK_BIRCH_LOG` for why that is three ids and three files
+# rather than a bit in an id.
+birch_log = { top = "birch_log_top.png", bottom = "birch_log_top.png", side = "birch_log_side.png" }
+birch_leaves = "birch_leaves.png"
+birch_planks = "birch_planks.png"
 glowstone = "glowstone.png"
 planks = "planks.png"
 cobblestone = "cobblestone.png"
+# The cross-shaped plants: one texture, drawn on two crossed planes
+# rather than on six faces. See `is_cross` in primitive_shared::types.
+tall_grass = "grass_mesh.png"
+stick = "stick.png"
+
+cactus = { top = "cactus_top.png", bottom = "cactus_top.png", side = "cactus.png" }
+# Not a block: fibre is an item, and this is what it looks like lying on
+# the ground and in the pack. Opaque on purpose -- see `generate_fiber`.
+fiber = "fiber.png"
+
+# Loose stones lying on the ground, drawn as a single flat quad rather
+# than a cube or a cross. See `is_flat` in primitive_shared::types.
+pebble = "pebble.png"
+# Nodules of flint, the same flat shape as a pebble. Dark and angular
+# where a pebble is grey and round -- the two lie side by side on a
+# stony hillside, so they have to be told apart at a glance.
+flint = "flint.png"
+
+# A chest. Its bottom is the planks it is made of -- nobody ever sees it,
+# and a face nobody sees is a face not worth a file.
+chest = { top = "chest_top.png", bottom = "planks.png", side = "chest_side.png" }
+
+# A dead player's pack. Two pictures rather than three: the flap is what
+# you see from above and the straps are what you see from every side, and
+# the underside of a bag standing on the ground is nobody's business --
+# it gets the side, because a bag has no boards to fall back on the way
+# the chest does.
+backpack = { top = "backpack_top.png", side = "backpack_side.png", bottom = "backpack_side.png" }
+
+# What is left of a wood that burned. The same picture on every face: a
+# drift of it is a drift whichever way you look at it.
+#
+# `item` is the one place in this file where a block asks for a picture
+# that is not one of its faces, and it is the reason that key exists. A
+# tile of ash says what a *floor* of ash looks like; in the pack it is a
+# grey square, indistinguishable from stone and from gravel and from
+# every other grey square, and a lie about what is in your hand besides.
+# The icon is a handful, seen against nothing.
+ash = { all = "ash.png", item = "ash_item.png" }
+
+# Riverbank clay and river gravel. Both are the same picture on every
+# face for the same reason as ash: a deposit has no up.
+clay = "clay.png"
+gravel = "gravel.png"
+
+# ---- ore and metal ----
+#
+# The four ores are the same picture on every face: a vein has no up, and
+# in any case what you see of one is a face in a wall of stone. Each is
+# the stone texture with nodules of its own colour stamped into it, which
+# is what makes them readable as ore *at a distance* -- the eye picks out
+# a speckle against known rock much faster than it picks out a new grey.
+coal_ore = "coal_ore.png"
+copper_ore = "copper_ore.png"
+tin_ore = "tin_ore.png"
+iron_ore = "iron_ore.png"
+
+# The things you carry. None of these is ever a face of anything -- they
+# are items -- so the single picture is the icon in the pack and the
+# object lying on the ground where it was dropped.
+coal = "coal.png"
+copper_ingot = "copper_ingot.png"
+tin_ingot = "tin_ingot.png"
+bronze_ingot = "bronze_ingot.png"
+iron_ingot = "iron_ingot.png"
+
+# ---- the stone age ----
+#
+# The chain that makes a tool, in the order it is made: a flake struck
+# off a nodule, a haft whittled with the flake, a head shaped from more
+# flint, and the three tools each of those bind into. Every one of them
+# shares a palette with `flint.png`, so a pack full of halfway-made
+# things reads as one project rather than as seven unrelated items.
+#
+# The copper, bronze and iron picks were here and are gone with the
+# blocks they drew. Their PNGs are left in this folder unlisted: the
+# metals are still in the game and the tools are the obvious next thing,
+# and a picture nobody is drawing costs a kilobyte of disk.
+flint_flake = "flint_flake.png"
+worked_stick = "worked_stick.png"
+flint_knife_head = "flint_knife_head.png"
+flint_axe_head = "flint_axe_head.png"
+flint_pick_head = "flint_pick_head.png"
+flint_knife = "flint_knife.png"
+flint_axe = "flint_axe.png"
+flint_pickaxe = "flint_pickaxe.png"

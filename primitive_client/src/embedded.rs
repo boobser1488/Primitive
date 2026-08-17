@@ -31,20 +31,68 @@ pub const BLOCKS_TOML: &str =
 ///
 /// PNGs only -- `blocks.toml` itself has its own constant above.
 pub const TEXTURES: &[(&str, &[u8])] = &[
+    ("break.0.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/break.0.png"))),
+    ("break.1.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/break.1.png"))),
+    ("break.2.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/break.2.png"))),
+    ("break.3.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/break.3.png"))),
+    ("break.4.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/break.4.png"))),
     ("cobblestone.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/cobblestone.png"))),
+    ("cactus.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/cactus.png"))),
+    ("cactus_top.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/cactus_top.png"))),
+    ("grass_mesh.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/grass_mesh.png"))),
+    ("stick.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/stick.png"))),
+    ("fiber.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/fiber.png"))),
     ("dirt.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/dirt.png"))),
     ("glowstone.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/glowstone.png"))),
     ("grass_side.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/grass_side.png"))),
     ("grass_top.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/grass_top.png"))),
     ("leaves.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/leaves.png"))),
+    ("birch_log_side.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/birch_log_side.png"))),
+    ("birch_log_top.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/birch_log_top.png"))),
+    ("birch_leaves.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/birch_leaves.png"))),
+    ("birch_planks.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/birch_planks.png"))),
     ("log_side.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/log_side.png"))),
     ("log_top.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/log_top.png"))),
     ("planks.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/planks.png"))),
+    ("pebble.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/pebble.png"))),
+    ("flint.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/flint.png"))),
+    ("chest_side.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/chest_side.png"))),
+    ("chest_top.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/chest_top.png"))),
+    ("backpack_side.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/backpack_side.png"))),
+    ("backpack_top.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/backpack_top.png"))),
+    ("ash.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ash.png"))),
+    ("ash_item.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ash_item.png"))),
+    ("sky_clouds.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/sky_clouds.png"))),
+    ("clay.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/clay.png"))),
+    ("gravel.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/gravel.png"))),
     ("sand.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/sand.png"))),
     ("snow.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/snow.png"))),
     ("stone.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/stone.png"))),
     ("water.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/water.png"))),
     ("workbench_side.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/workbench_side.png"))),
+    // Ore and metal. Nine files: four ores, four ingots and a lump of
+    // coal.
+    ("coal_ore.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/coal_ore.png"))),
+    ("copper_ore.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/copper_ore.png"))),
+    ("tin_ore.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/tin_ore.png"))),
+    ("iron_ore.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/iron_ore.png"))),
+    ("coal.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/coal.png"))),
+    ("copper_ingot.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/copper_ingot.png"))),
+    ("tin_ingot.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/tin_ingot.png"))),
+    ("bronze_ingot.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/bronze_ingot.png"))),
+    ("iron_ingot.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/iron_ingot.png"))),
+    // The stone age: a flake, a haft, three heads and the three tools
+    // they bind into. The metal picks that used to be here are gone with
+    // their blocks -- their files are still on disk and no longer worth
+    // carrying inside the binary.
+    ("flint_flake.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/flint_flake.png"))),
+    ("worked_stick.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/worked_stick.png"))),
+    ("flint_knife_head.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/flint_knife_head.png"))),
+    ("flint_axe_head.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/flint_axe_head.png"))),
+    ("flint_pick_head.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/flint_pick_head.png"))),
+    ("flint_knife.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/flint_knife.png"))),
+    ("flint_axe.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/flint_axe.png"))),
+    ("flint_pickaxe.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/flint_pickaxe.png"))),
 ];
 
 /// The built-in copy of one texture, if there is one.
@@ -81,7 +129,7 @@ mod tests {
     fn the_window_icon_is_embedded_too() {
         // It is not in blocks.toml -- it is not a block -- so nothing
         // else would catch it going missing.
-        assert!(texture(crate::texture::ICON_FILE).is_some());
+        assert!(texture(crate::engine::texture::ICON_FILE).is_some());
     }
 
     #[test]

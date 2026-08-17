@@ -1,0 +1,83 @@
+# Builds the downloadable archives for a tagged release.
+#
+# Separate from `ci.yml` on purpose. CI answers "does this compile and
+# pass" on every push and has to be fast; this answers "what do people
+# download" and runs when a version is tagged. Sharing one workflow would
+# mean either building release binaries on every branch push or shipping
+# artifacts nobody asked for.
+#
+# Both platforms are built natively rather than cross-compiled. The
+# client links a real graphics stack and winit's X11 headers on Linux;
+# cross-compiling that from one host is a toolchain project of its own,
+# and the two runners are free.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # So a release can be rehearsed without tagging anything. The artifacts
+  # come out identical; only the GitHub release step is skipped.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            script: pwsh -File package.ps1 -Zip
+            archive: dist/primitive_win64.zip
+          - os: ubuntu-latest
+            script: ./package.sh --tar
+            archive: dist/primitive_linux64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # winit is built X11-only, so the client needs the X11 headers to
+      # link on Linux even though a packaged build may never open a
+      # window on the machine that made it.
+      - name: Install X11 development headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The archives are what players run, so they are built from a tree
+      # that passed its own tests rather than from one that merely
+      # compiled.
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Package
+        run: ${{ matrix.script }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ runner.os }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*/*
+          # The tag's own notes, written by hand from the CHANGELOG.
+          # Generating them from commit subjects produces a list of
+          # commit subjects, which is not what the CHANGELOG is for.
+          draft: true
