@@ -32,7 +32,7 @@ jobs:
             script: pwsh -File package.ps1 -Zip
             archive: dist/primitive_win64.zip
           - os: ubuntu-latest
-            script: ./package.sh --tar
+            script: bash package.sh --tar
             archive: dist/primitive_linux64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
