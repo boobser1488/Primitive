@@ -360,6 +360,12 @@ fn ui_snapshot() {
                 grime: 0.65,
                 recovery: 0.72,
                 diet_groups: 2,
+                // A cold hut of boards, smoky, with its door in the wind
+                // and a smoke hole: every line the place can put on the
+                // health page at once, under the wounds, so the picture
+                // shows whether they all fit above its floor.
+                shelter: primitive_shared::shelter::Reading { air_c: 4.0, indoors: true, draught: 0.5, keeps_out: 0.55, roof_open: true },
+                smoke: 0.3,
             },
             &belt,
             // **A refusal, drawn.** The notice was never in this

@@ -217,6 +217,10 @@ pub struct Context {
     /// breath asks it about smoke, the resin gesture relights a torch and
     /// the save writes it. See `logic::wildfire`.
     pub wildfire: std::sync::Mutex<crate::logic::wildfire::Wildfire>,
+    /// Which room each player stands in, cached, and the warmth each room
+    /// holds from its fire. Taken on the warmth's sample only, never under
+    /// another lock. See `logic::shelters`.
+    pub shelters: std::sync::Mutex<crate::logic::shelters::Shelters>,
     /// Bushes waiting to fill again. Same reasoning: the tick loop has
     /// to hand it the player positions its sample walks out from.
     pub growth: std::sync::Mutex<growth::Growth>,
@@ -771,6 +775,14 @@ impl Server {
     /// same way.
     pub fn set_peat_progress(&self, at: (i32, i32, i32), progress: f32) {
         self.ctx.peat.lock().unwrap_or_else(|e| e.into_inner()).set_progress(at, progress);
+    }
+
+    /// Fills a hearth's room with smoke at once, `peat_progress`'s way: a
+    /// scenario sets the room a breath from full and watches the ordinary
+    /// step keep it there or clear it, rather than waiting the minute and a
+    /// half the smoke takes to rise (`wildfire::SMOKE_RISE_PER_SECOND`).
+    pub fn set_smoke(&self, hearth: (i32, i32, i32), thickness: f32) {
+        self.ctx.wildfire.lock().unwrap_or_else(|e| e.into_inner()).set_smoke(hearth, thickness);
     }
 
     /// Runs until something stops it (`/stop`, or `request_shutdown`),
@@ -1338,6 +1350,7 @@ fn build_context(settings: ServerSettings, options: RunOptions) -> anyhow::Resul
         fires: std::sync::Mutex::new(fires),
         pits: std::sync::Mutex::new(pits),
         wildfire: std::sync::Mutex::new(wildfire),
+        shelters: std::sync::Mutex::new(crate::logic::shelters::Shelters::new()),
         growth: std::sync::Mutex::new(growth::Growth::new()),
         carrion: std::sync::Mutex::new(carrion),
         vermin: std::sync::Mutex::new(vermin),
@@ -2660,19 +2673,48 @@ async fn tick_loop(ctx: Arc<Context>) {
                         drop(state);
                         let weather =
                             ctx.sky.lock().unwrap_or_else(|e| e.into_inner()).weather();
-                        let sampled = {
+                        // **The room, with the shelters' lock let go before
+                        // the fires' is taken** and taken again after: the
+                        // lock order stays the fact the note above says it
+                        // is. See `logic::shelters` for why the room is
+                        // cached and the warmth is the room's.
+                        let days = ctx.clock.world_days();
+                        let wind = primitive_shared::raft::wind(days, weather);
+                        let feet_cell = (
+                            position.0.floor() as i32,
+                            position.1.floor() as i32,
+                            position.2.floor() as i32,
+                        );
+                        let (room, afterglow) = {
+                            let mut shelters = ctx.shelters.lock().unwrap_or_else(|e| e.into_inner());
+                            let room = shelters.room_at(&ctx.world, feet_cell);
+                            let afterglow = room.as_deref().map_or(0.0, |r| shelters.warmth(r, f64::from(days)));
+                            (room, afterglow)
+                        };
+                        let (sampled, reading, hearth) = {
                             let fires = ctx.fires.lock().unwrap_or_else(|e| e.into_inner());
-                            climate::Ambient::of(
+                            climate::Ambient::of_player(
                                 &ctx.world,
                                 &fires,
                                 primitive_shared::geometry::narrow(position),
-                                ctx.clock.world_days(),
+                                days,
                                 weather,
+                                room.as_deref().map(|room| climate::Indoors { room, wind, afterglow }),
                             )
                         };
+                        if let Some(room) = &room {
+                            ctx.shelters
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .warmed(room, wind, hearth, f64::from(days));
+                        }
                         let mut state =
                             handle.state.lock().unwrap_or_else(|e| e.into_inner());
                         state.ambient = sampled;
+                        if state.shelter_reported.is_none_or(|told| told.differs(&reading)) {
+                            state.shelter_reported = Some(reading);
+                            handle.send(ServerMessage::Shelter { reading });
+                        }
                         let wetness = sampled
                             .step_wetness(state.vitals.wetness(), climate::SAMPLE_INTERVAL_SECS);
                         (sampled, worn, wetness)

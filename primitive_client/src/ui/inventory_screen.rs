@@ -1381,7 +1381,72 @@ fn health_page(p: &mut Painter, vitals: &Vitals, injuries: &Injuries, language: 
     }
     if !said_anything {
         p.text(language.text(Msg::NoWounds), wounds_left, y, note, widgets::TEXT_GOOD);
+        y -= widgets::cell_height(note) + 0.010;
     }
+
+    // ---- the place, under the wounds ----
+    //
+    // Under them and not above, because a wound is the more urgent line
+    // and the list sorts by danger; and fitted to the same room, stopping
+    // at the same floor, for the same reasons.
+    y -= 0.024;
+    for (text, colour) in shelter_lines(body, language) {
+        if y - widgets::cell_height(note) < panel.y0 + FOOTER_HEIGHT {
+            break;
+        }
+        let fitted = widgets::fitted_scale(&text, note, room, 0.45);
+        p.text(&text, wounds_left, y, fitted, colour);
+        y -= widgets::cell_height(note) + 0.010;
+    }
+}
+
+/// What the health page says about the place the player is in: the air
+/// their skin is drifting towards, and each thing about the room that is
+/// costing or earning them warmth.
+///
+/// **The causes, in words, and never a score.** The comfort note above
+/// says why a hidden number stays hidden; the same goes for a room. What a
+/// player can act on is "the wind comes in at the door" and "the smoke
+/// hole lets heat out" -- each names the thing to change -- and the air's
+/// temperature is there so the change can be seen to work. The walls are
+/// named only at the ends -- warm or thin -- because a middling wall is
+/// not a decision anybody has to make again.
+pub(crate) fn shelter_lines(body: &crate::ui::hud::BodyGauges, language: Language) -> Vec<(String, [f32; 4])> {
+    let shelter = &body.shelter;
+    let mut lines = Vec::new();
+    if shelter.air_c.is_finite() {
+        let colour = match primitive_shared::body::Comfort::of(shelter.air_c) {
+            primitive_shared::body::Comfort::Comfortable => widgets::TEXT_GOOD,
+            primitive_shared::body::Comfort::Freezing | primitive_shared::body::Comfort::Scorching => widgets::TEXT_BAD,
+            _ => widgets::ACCENT,
+        };
+        lines.push((format!("{} {:.0}C", language.text(Msg::ShelterAir), shelter.air_c), colour));
+    }
+    // A fifth: the fog is already grey at it, and the breath goes at half
+    // (`wildfire::SMOKE_CHOKES`), which is too late to be the first thing
+    // the page says.
+    if body.smoke >= 0.2 {
+        let colour = if body.smoke >= primitive_shared::wildfire::SMOKE_CHOKES {
+            widgets::TEXT_BAD
+        } else {
+            widgets::ACCENT
+        };
+        lines.push((language.text(Msg::ShelterSmoky).to_string(), colour));
+    }
+    if shelter.indoors && shelter.draught >= 0.25 {
+        lines.push((language.text(Msg::ShelterDraughty).to_string(), widgets::ACCENT));
+    }
+    if shelter.roof_open {
+        lines.push((language.text(Msg::ShelterHoleTakesHeat).to_string(), widgets::INK_DIM));
+    }
+    if shelter.indoors {
+        if shelter.keeps_out >= 0.85 {
+            lines.push((language.text(Msg::ShelterWallsWarm).to_string(), widgets::TEXT_GOOD));
+        } else if shelter.keeps_out <= 0.6 {
+            lines.push((language.text(Msg::ShelterWallsThin).to_string(), widgets::ACCENT));
+        }
+    }
+    lines
 }
 
 /// Draws the three tabs.
@@ -4672,6 +4737,35 @@ mod touch_layout_tests {
                         "at {aspect:.2} and size {requested} a bandage aimed at {part:?} missed it"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn the_health_page_names_what_is_wrong_with_the_room_and_only_that() {
+        use primitive_shared::shelter::Reading;
+        let field = crate::ui::hud::BodyGauges {
+            shelter: Reading { air_c: 12.0, ..Reading::default() },
+            ..Default::default()
+        };
+        let said = shelter_lines(&field, Language::English);
+        assert_eq!(said.len(), 1, "a field said more than its air: {said:?}");
+        assert!(said[0].0.contains("12C"));
+
+        let hut = crate::ui::hud::BodyGauges {
+            shelter: Reading { air_c: 4.0, indoors: true, draught: 0.5, keeps_out: 0.55, roof_open: true },
+            smoke: 0.6,
+            ..Default::default()
+        };
+        for language in Language::ALL {
+            let said: Vec<String> = shelter_lines(&hut, *language).into_iter().map(|(text, _)| text).collect();
+            for msg in [
+                Msg::ShelterSmoky,
+                Msg::ShelterDraughty,
+                Msg::ShelterHoleTakesHeat,
+                Msg::ShelterWallsThin,
+            ] {
+                assert!(said.iter().any(|line| line == language.text(msg)), "{language:?} never said {msg:?}: {said:?}");
             }
         }
     }

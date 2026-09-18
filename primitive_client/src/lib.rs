@@ -8422,6 +8422,19 @@ fn drain_network(
 
             ServerMessage::Smoke { thickness } => {
                 *smoke = if thickness.is_finite() { thickness.clamp(0.0, 1.0) } else { 0.0 };
+                body.smoke = *smoke;
+            }
+
+            // The place, for the health page. Cleaned like everything off a
+            // socket: a NaN would print in the middle of a page of numbers.
+            ServerMessage::Shelter { reading } => {
+                let clean = |v: f32, fallback: f32| if v.is_finite() { v } else { fallback };
+                body.shelter = primitive_shared::shelter::Reading {
+                    air_c: clean(reading.air_c, primitive_shared::body::NEUTRAL_C).clamp(-80.0, 80.0),
+                    draught: clean(reading.draught, 0.0).clamp(0.0, 1.0),
+                    keeps_out: clean(reading.keeps_out, 0.0).clamp(0.0, 1.0),
+                    ..reading
+                };
             }
 
             // A fish on the bank, by name, in the player's words. The splash

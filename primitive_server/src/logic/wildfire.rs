@@ -162,6 +162,15 @@ impl Wildfire {
         self.pending.push((x, y, z));
     }
 
+    /// Sets how thick a hearth's smoke is now, for a scenario that cannot
+    /// wait the minute and a half a room takes to fill. The room and the
+    /// rest are the next step's: it rises or clears from here towards
+    /// whatever the room's openings allow, which is the thing under test.
+    pub fn set_smoke(&mut self, hearth: Cell, thickness: f32) {
+        let thickness = if thickness.is_finite() { thickness.clamp(0.0, 1.0) } else { 0.0 };
+        self.smoke.entry(hearth).or_default().thickness = thickness;
+    }
+
     /// How thick the smoke is in the cell a player's eyes are in: the
     /// thickest room they are standing in, or nought.
     pub fn smoke_at(&self, eye: Cell) -> f32 {

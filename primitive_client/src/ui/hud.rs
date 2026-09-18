@@ -964,6 +964,14 @@ pub struct BodyGauges {
     pub recovery: f32,
     /// How many food groups the recent diet has in it, 0..4.
     pub diet_groups: u8,
+    /// The place the body is in, as the server last said
+    /// (`ServerMessage::Shelter`): read by the health page to say *why*
+    /// the warmth is going where it is.
+    pub shelter: primitive_shared::shelter::Reading,
+    /// The smoke at the eyes, 0..1 (`ServerMessage::Smoke`), kept here as
+    /// well as in the fog so the same page can say what it is doing to
+    /// the room.
+    pub smoke: f32,
 }
 
 impl Default for BodyGauges {
@@ -978,6 +986,11 @@ impl Default for BodyGauges {
             grime: 0.0,
             recovery: 1.0,
             diet_groups: 0,
+            shelter: primitive_shared::shelter::Reading {
+                air_c: primitive_shared::body::NEUTRAL_C,
+                ..Default::default()
+            },
+            smoke: 0.0,
         }
     }
 }
@@ -2858,6 +2871,8 @@ mod tests {
             grime: 0.0,
             recovery: 1.0,
             diet_groups: 0,
+            shelter: Default::default(),
+            smoke: 0.0,
         }
     }
 
@@ -2915,6 +2930,8 @@ mod tests {
                 grime: 0.0,
                 recovery: 1.0,
                 diet_groups: 0,
+                shelter: Default::default(),
+                smoke: 0.0,
             },
             &Inventory::new(),
             None,
@@ -2994,6 +3011,8 @@ mod tests {
             grime: 0.0,
             recovery: 1.0,
             diet_groups: 0,
+            shelter: Default::default(),
+            smoke: 0.0,
         };
         for (name, reading) in [
             ("air running out", (0.3f32, 1.0f32, all_well())),
@@ -3185,6 +3204,8 @@ mod tests {
                 grime: 0.0,
                 recovery: 1.0,
                 diet_groups: 0,
+                shelter: Default::default(),
+                smoke: 0.0,
             },
             &Inventory::new(),
             None,
@@ -3322,6 +3343,8 @@ mod tests {
             grime: 0.0,
             recovery: 1.0,
             diet_groups: 0,
+            shelter: Default::default(),
+            smoke: 0.0,
         };
         let everything = stack_at(
             &mut Attention::default(),
@@ -3392,6 +3415,8 @@ mod tests {
                 grime: 0.0,
                 recovery: 1.0,
                 diet_groups: 0,
+                shelter: Default::default(),
+                smoke: 0.0,
             },
         );
         let right = BAR_LEFT - ICON_GAP;

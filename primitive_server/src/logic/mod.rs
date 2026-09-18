@@ -5,6 +5,7 @@
 //! | `world`     | what block is where, generation, saving and loading   |
 //! | `chunkgen`  | the queue and thread pool that terrain is made on     |
 //! | `climate`   | how cold it is where a particular player is standing  |
+//! | `shelters`  | which room a player is in, and the warmth it holds    |
 //! | `drying`    | hides on racks, and the weather they cure in          |
 //! | `survival`  | health, falls, drowning, suffocation, respawn         |
 //! | `items`     | dropped stacks, their motion, and who picks them up   |
@@ -58,6 +59,7 @@ pub mod plugins;
 pub mod profiles;
 pub mod rafts;
 pub mod rng;
+pub mod shelters;
 pub mod rot;
 pub mod simulation;
 pub mod smelting;

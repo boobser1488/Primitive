@@ -530,13 +530,60 @@ fn smoke_passes(block: BlockId) -> bool {
 /// straight on the flame -- is `Vented`: that fire is smothered, not
 /// smoking a room, and its soot goes on that block.
 pub fn smoke_room(look: impl Fn(i32, i32, i32) -> Option<BlockId>, fire: (i32, i32, i32)) -> Room {
-    let start = (fire.0, fire.1 + 1, fire.2);
+    match walk_room(look, (fire.0, fire.1 + 1, fire.2), fire.1 + ROOM_MAX_RISE, |_| {}) {
+        None => Room::Vented,
+        Some(walk) if walk.side == 0 && walk.roof == 0 => Room::Closed(walk.cells),
+        Some(walk) => {
+            let kept = smoke_kept(walk.side, walk.roof);
+            Room::Leaky(walk.cells, kept)
+        }
+    }
+}
+
+/// One face of a room met by [`walk_room`]: where its air stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Face {
+    /// A way out, from a cell of the room in a direction: `dir.1` is one
+    /// for a hole in the roof and nought for a gap in a wall.
+    Opening { from: (i32, i32, i32), dir: (i32, i32, i32) },
+    /// Something the air cannot pass, beside the room (`ceiling` false) or
+    /// over it (`ceiling` true). The floor is never met: the walk does not
+    /// go down.
+    Solid { block: BlockId, ceiling: bool },
+}
+
+/// The air [`walk_room`] followed, and how many ways out it found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Walk {
+    /// Sorted, so the first is the same cell whoever walked it.
+    pub cells: Vec<(i32, i32, i32)>,
+    pub side: usize,
+    pub roof: usize,
+}
+
+/// The walk under [`smoke_room`], from `start`, with ceilings looked for up
+/// to `top`, handing every face it meets to `face`. `None` is air that is
+/// not a room: no roof near, a cell nobody has loaded, or more than
+/// [`ROOM_MAX_CELLS`].
+///
+/// **One walk for the smoke and the warmth** (`shelter::survey`). They ask
+/// different things of a room -- where the smoke goes; what the walls are
+/// made of and which way the gaps face the wind -- and the obvious thing
+/// was a second flood fill for the second question. Two walks are two rules
+/// for what a room is, and the day they disagree a hut is smoky like a
+/// house and cold like a field. So the walk is written once, and each asker
+/// keeps what it wants out of the faces.
+pub fn walk_room(
+    look: impl Fn(i32, i32, i32) -> Option<BlockId>,
+    start: (i32, i32, i32),
+    top: i32,
+    mut face: impl FnMut(Face),
+) -> Option<Walk> {
     match look(start.0, start.1, start.2) {
-        None => return Room::Vented,
-        Some(block) if !smoke_passes(block) => return Room::Vented,
+        None => return None,
+        Some(block) if !smoke_passes(block) => return None,
         _ => {}
     }
-    let top = fire.1 + ROOM_MAX_RISE;
     // Open air is a fire with no roof over it *or beside it*. A fire under
     // its own smoke hole has sky straight over it and a roof all round, and
     // that is a room with a hole in it, not a field.
@@ -545,7 +592,7 @@ pub fn smoke_room(look: impl Fn(i32, i32, i32) -> Option<BlockId>, fire: (i32, i
             .into_iter()
             .any(|(dx, dz)| roofed(&look, (start.0 + dx, start.1, start.2 + dz), top));
     if !roof_near {
-        return Room::Vented;
+        return None;
     }
     let mut seen: std::collections::HashSet<(i32, i32, i32)> = std::collections::HashSet::new();
     let mut queue = std::collections::VecDeque::new();
@@ -558,10 +605,9 @@ pub fn smoke_room(look: impl Fn(i32, i32, i32) -> Option<BlockId>, fire: (i32, i
             if seen.contains(&next) {
                 continue;
             }
-            let Some(block) = look(next.0, next.1, next.2) else {
-                return Room::Vented;
-            };
+            let block = look(next.0, next.1, next.2)?;
             if !smoke_passes(block) {
+                face(Face::Solid { block, ceiling: dy > 0 });
                 continue;
             }
             if next.1 > top || !roofed(&look, next, top) {
@@ -570,22 +616,19 @@ pub fn smoke_room(look: impl Fn(i32, i32, i32) -> Option<BlockId>, fire: (i32, i
                 } else {
                     side += 1;
                 }
+                face(Face::Opening { from: (x, y, z), dir: (dx, dy, dz) });
                 continue;
             }
             seen.insert(next);
             if seen.len() > ROOM_MAX_CELLS {
-                return Room::Vented;
+                return None;
             }
             queue.push_back(next);
         }
     }
     let mut cells: Vec<_> = seen.into_iter().collect();
     cells.sort_unstable();
-    if side == 0 && roof == 0 {
-        Room::Closed(cells)
-    } else {
-        Room::Leaky(cells, smoke_kept(side, roof))
-    }
+    Some(Walk { cells, side, roof })
 }
 
 /// How thick a closed room of this many cells gets with one fire in it.

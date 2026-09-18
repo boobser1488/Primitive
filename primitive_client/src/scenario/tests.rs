@@ -557,3 +557,85 @@ fn a_player_who_dies_in_a_rucksack_finds_everything_in_the_corpse() {
     no_corrections(&s);
 }
 
+// ---------------------------------------------------------------- shelter
+
+/// The last thing the server said about the smoke at the player's eyes.
+fn last_smoke(s: &Scenario) -> f32 {
+    s.heard
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            ServerMessage::Smoke { thickness } => Some(*thickness),
+            _ => None,
+        })
+        .unwrap_or(0.0)
+}
+
+/// ...and about the place they stand in.
+fn last_shelter(s: &Scenario) -> Option<primitive_shared::shelter::Reading> {
+    s.heard.iter().rev().find_map(|m| match m {
+        ServerMessage::Shelter { reading } => Some(*reading),
+        _ => None,
+    })
+}
+
+/// A shut stone hut, inside `x..=x+3` by `z..=z+3` and three high, with a
+/// lit campfire in the corner at `(x, z)`; with a smoke hole straight over
+/// the fire if asked. Returns the fire's cell.
+fn stone_hut_with_a_fire(s: &mut Scenario, x: i32, z: i32, smoke_hole: bool) -> (i32, i32, i32) {
+    let floor = GROUND + 1;
+    s.fill((x - 1, floor, z - 1), (x + 4, floor + 3, z + 4), t::BLOCK_STONE);
+    s.fill((x, floor, z), (x + 3, floor + 2, z + 3), t::BLOCK_AIR);
+    if smoke_hole {
+        s.build(&[((x, floor + 3, z), t::BLOCK_AIR)]);
+    }
+    // Straight to the server rather than through `build`: a lit fire is
+    // the fire map's from the moment it lands, and the block the client is
+    // told about is not bound to be the one that was placed.
+    let fire = (x, floor, z);
+    s.server().place_block(fire.0, fire.1, fire.2, t::BLOCK_CAMPFIRE_LIT);
+    s.seconds(0.5);
+    fire
+}
+
+#[test]
+fn a_hut_with_a_fire_and_no_smoke_hole_fills_with_smoke_and_with_one_it_clears_but_is_cooler() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.server().console_command("/weather clear");
+    // Out in the field first, so the client has the chunks the huts go in.
+    s.stand_at(feet_on(x0 - 3, z));
+    let shut = stone_hut_with_a_fire(&mut s, x0, z, false);
+    let holed = stone_hut_with_a_fire(&mut s, x0 + 7, z, true);
+    let chokes = primitive_shared::wildfire::SMOKE_CHOKES;
+
+    // In the shut hut, in the corner away from the fire. The smoke is set
+    // a breath from full rather than waited for (`Server::set_smoke`): what
+    // is under test is whether the room lets it go.
+    s.stand_at(feet_on(x0 + 3, z + 3));
+    s.server().set_smoke(shut, 0.95);
+    s.seconds(6.0);
+    let in_the_shut = last_smoke(&s);
+    assert!(in_the_shut >= chokes, "a hut with no way out for the smoke held only {in_the_shut}");
+    let warm = last_shelter(&s).expect("the page was never told about the place");
+    assert!(warm.indoors, "a shut stone hut was not a room");
+    assert!(!warm.roof_open);
+
+    // The same hut with a hole over the hearth.
+    s.stand_at(feet_on(x0 + 7 + 3, z + 3));
+    s.server().set_smoke(holed, 0.95);
+    let cleared = s.until(20.0, |s| last_smoke(s) < chokes);
+    assert!(cleared, "the smoke hole never cleared the room: still {}", last_smoke(&s));
+    s.seconds(1.0);
+    let cooler = last_shelter(&s).expect("the page was never told about the second hut");
+    assert!(cooler.indoors, "a smoke hole unmade the hut");
+    assert!(cooler.roof_open, "the page was not told the heat goes up the hole");
+    assert!(
+        cooler.air_c < warm.air_c - 2.0,
+        "the smoke hole cost no warmth: {} under it, {} in the shut hut",
+        cooler.air_c,
+        warm.air_c
+    );
+    no_corrections(&s);
+}
+
