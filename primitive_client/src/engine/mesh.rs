@@ -580,6 +580,9 @@ pub fn surface_tint(id: BlockId) -> Option<u32> {
 /// next code after moss. The shader's arm for it comes before the weather's,
 /// which would otherwise take every code from five up.
 pub const TIRED_FURROW_TINT: u32 = SURFACE_TINT_BASE + 10;
+// The code travels in a byte of the vertex; one past it would draw as a
+// climate tint on some other block.
+const _: () = assert!(TIRED_FURROW_TINT <= 255);
 
 /// Packs a climate into the byte the shader turns into a colour.
 ///
@@ -8485,7 +8488,6 @@ mod tests {
         assert_eq!(surface_tint(tired), Some(TIRED_FURROW_TINT));
         assert_ne!(surface_tint(dressed(BLOCK_FARMLAND).unwrap()), Some(TIRED_FURROW_TINT));
         assert_eq!(surface_tint(BLOCK_FARMLAND), None);
-        assert!(TIRED_FURROW_TINT <= 255);
         let shader = include_str!("shader.wgsl");
         let arm = shader.find("stage == 10u").expect("shader.wgsl has no arm for a tired furrow");
         let weather = shader.find("stage >= 5u").expect("shader.wgsl lost the weather arm");

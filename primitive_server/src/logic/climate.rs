@@ -442,6 +442,11 @@ pub struct Ambient {
     /// How fast a wet player dries here, per second: [`DRYING_PER_SECOND`]
     /// in mild air, faster in hot dry air -- see [`HEAT_DRYING`].
     pub drying_per_second: f32,
+    /// How damp the country is here, 0 (desert) to 1 (swamp): the climate
+    /// field itself, not the weather. Read by the racks, whose drying is
+    /// slowed by damp air unless there is a fire under them
+    /// (`drying::Drying::rate`).
+    pub humidity: f32,
 }
 
 impl Default for Ambient {
@@ -454,6 +459,7 @@ impl Default for Ambient {
             in_water: false,
             sun_c: 0.0,
             drying_per_second: DRYING_PER_SECOND,
+            humidity: 0.5,
         }
     }
 }
@@ -700,6 +706,7 @@ impl Ambient {
             // a soaked player -- the thing `body::WET_METABOLIC_LOSS`
             // says a fire is worth doing for.
             drying_per_second: drying_rate(degrees + sun_c, humidity),
+            humidity: humidity.clamp(0.0, 1.0),
         }
     }
 

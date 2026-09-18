@@ -106,6 +106,37 @@ pub const FULL_CURE_AT_C: f32 = 24.0;
 /// fast.
 pub const FIRE_FLOOR: f32 = 0.75;
 
+/// Above this humidity the air itself slows a rack that has no fire under
+/// it ([`damp_share`]).
+///
+/// **Six tenths, so the meadow is not touched**: the starting country sits
+/// at about half, and every rack time the game was tuned on was tuned there.
+/// What is slowed is the wet end of the map -- the swamp, the rainforest, the
+/// sea coast -- where anybody who has tried to dry fish in the open knows the
+/// flesh sours before it cures.
+pub const DAMP_FROM: f32 = 0.6;
+
+/// How much of a rack's pace the dampest air takes away: at humidity one,
+/// an unsmoked rack goes at two fifths.
+///
+/// **This is why smoking exists.** Sun-drying is the dry country's answer;
+/// in wet country the peoples who lived off fish -- the salmon coast of
+/// the Pacific Northwest, the Baltic -- hung it over a fire, because smoke
+/// is heat that dries whatever the air is doing. Here that is the fire
+/// already under a rack ([`FIRE_FLOOR`]), which lifts the damp as well: a
+/// swamp camp can cure its catch, but only at a hearth, and a hearth wants
+/// wood.
+pub const DAMP_SLOWS: f32 = 0.6;
+
+/// What share of its pace a rack keeps in air this damp, before the fire.
+pub fn damp_share(humidity: f32) -> f32 {
+    if !humidity.is_finite() {
+        return 1.0;
+    }
+    let damp = ((humidity - DAMP_FROM) / (1.0 - DAMP_FROM)).clamp(0.0, 1.0);
+    1.0 - DAMP_SLOWS * damp
+}
+
 /// Its own file beside the chests', on exactly the terms `containers`
 /// gives: a world saved before racks existed has no such file, which
 /// reads as "no racks", and nothing has to be migrated.
@@ -256,9 +287,12 @@ impl Drying {
             / (FULL_CURE_AT_C - NO_CURE_BELOW_C))
             .clamp(0.0, 1.0);
         if ambient.near_fire {
+            // Smoke dries whatever the air is doing, which is the whole of
+            // what a fire under a rack is for in wet country: the damp is
+            // not counted. See `DAMP_SLOWS`.
             warmth.max(FIRE_FLOOR)
         } else {
-            warmth
+            warmth * damp_share(ambient.humidity)
         }
     }
 
@@ -510,6 +544,26 @@ mod tests {
             // reads, so whatever a calm, mild day says.
             ..Ambient::default()
         }
+    }
+
+    #[test]
+    fn damp_country_slows_a_rack_and_a_fire_under_it_does_not_care() {
+        let swamp = Ambient {
+            humidity: 1.0,
+            ..fair()
+        };
+        let meadow = Ambient {
+            humidity: 0.55,
+            ..fair()
+        };
+        assert_eq!(Drying::rate(&meadow, Weather::Clear), Drying::rate(&fair(), Weather::Clear), "the meadow was slowed");
+        let open = Drying::rate(&swamp, Weather::Clear);
+        assert!(
+            open < Drying::rate(&meadow, Weather::Clear) * 0.5,
+            "a swamp rack dried at {open}, not much slower than a meadow's"
+        );
+        let smoked = Drying::rate(&Ambient { near_fire: true, ..swamp }, Weather::Clear);
+        assert!(smoked > open * 1.5, "a fire under a swamp rack was worth nothing: {smoked} against {open}");
     }
 
     fn a_frame_with(hides: u32) -> Chests {

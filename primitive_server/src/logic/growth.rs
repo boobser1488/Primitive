@@ -54,7 +54,8 @@
 //!   it does not grow at all ([`min_growing_c`]): wheat is hardy and
 //!   cotton is not. Below it the clock *stops* rather than resetting, so
 //!   a cold night costs a night and not the crop.
-//! - **Is it freezing?** At [`FROST_C`] a crop that is still growing dies
+//! - **Is it freezing?** At its own frost line ([`frost_kills_at_c`] --
+//!   six below for wheat, freezing for the warm crops) a crop that is still growing dies
 //!   and leaves `types::BLOCK_WITHERED_CROP` standing in the furrow. That
 //!   is what turns the season into a decision: sow in spring, reap before
 //!   the autumn nights, and a field sown at the end of summer is a bet.
@@ -270,6 +271,33 @@ pub const WATER_REACH: i32 = 4;
 /// toss on the whole field. Two below is a night a player can see
 /// coming: autumn in the meadow, any night in the hills, all of winter.
 pub const FROST_C: f32 = -2.0;
+
+/// The air at and below which *this* growing crop dies: [`FROST_C`] for
+/// anything the table does not name.
+///
+/// **A cool-season grass and a warm-season one do not die at the same
+/// frost**, and one line for all of them made the choice of crop a choice
+/// of speed and nothing else. Wheat shrugs off a hard spring frost -- its
+/// growing point sits under the soil until it runs to stalk, and winter
+/// wheat lives through the whole of a winter -- so it dies at six below.
+/// Cotton and millet are tropical plants that blacken at the first frost
+/// there is, so they die at freezing.
+///
+/// What it makes of the year: wheat can go in early and come out late, and
+/// a warm crop in the temperate meadow is a summer crop or a lost one.
+/// That is the difference between the crops of the north and the south,
+/// and it is why a player who brings cotton seed home has to plan the
+/// sowing rather than just the field.
+pub fn frost_kills_at_c(block: BlockId) -> f32 {
+    match block_kind(block) {
+        BLOCK_SEEDS | BLOCK_WHEAT => -6.0,
+        BLOCK_COTTON_SEEDS
+        | BLOCK_COTTON_PLANT
+        | primitive_shared::types::BLOCK_MILLET
+        | primitive_shared::types::BLOCK_MILLET_PLANT => 0.0,
+        _ => FROST_C,
+    }
+}
 
 /// How often a growing crop's water and air are looked at, in seconds.
 ///
@@ -612,8 +640,9 @@ fn look(world: &dyn BlockWorld, soil: &dyn Soil, at: Cell) -> Look {
         return Look::Growing(0.0);
     };
     // Frost first: air below the frost line is also below every crop's
-    // minimum, and a crop in it has to die rather than merely wait.
-    if air <= FROST_C {
+    // minimum, and a crop in it has to die rather than merely wait. The
+    // line is the crop's own (`frost_kills_at_c`).
+    if air <= frost_kills_at_c(here) {
         return Look::Frozen;
     }
     if air < needs {
@@ -2179,7 +2208,7 @@ mod tests {
             let world = field(crop, true);
             let mut growth = Growth::seeded(5);
             growth.on_block_changed(AT.0, AT.1, AT.2);
-            let changes = growth.step(&world, &Air::at(FROST_C - 3.0), 0.0, 64);
+            let changes = growth.step(&world, &Air::at(frost_kills_at_c(crop) - 1.0), 0.0, 64);
             assert_eq!(here(&world), BLOCK_WITHERED_CROP, "{name} lived through a frost");
             assert_eq!(changes.len(), 1, "the frost was not sent to anybody");
             assert_eq!(changes[0].block_id, BLOCK_WITHERED_CROP);
@@ -2207,6 +2236,34 @@ mod tests {
         let mut growth = Growth::seeded(5);
         grow_for(&mut growth, &world, &Air::at(FROST_C + 0.5), CROP_STAGE_SECONDS);
         assert_eq!(here(&world), BLOCK_SEEDS, "a chilly night above the frost line killed a crop");
+    }
+
+    #[test]
+    fn wheat_lives_through_a_frost_that_blackens_cotton_and_millet() {
+        let frost = Air::at(-3.0);
+        for (crop, survives) in [
+            (BLOCK_SEEDS, true),
+            (BLOCK_WHEAT, true),
+            (BLOCK_COTTON_SEEDS, false),
+            (BLOCK_COTTON_PLANT, false),
+            (primitive_shared::types::BLOCK_MILLET, false),
+            (primitive_shared::types::BLOCK_MILLET_PLANT, false),
+        ] {
+            let world = field(crop, true);
+            let mut growth = Growth::seeded(5);
+            growth.on_block_changed(AT.0, AT.1, AT.2);
+            growth.step(&world, &frost, 0.0, 64);
+            let name = primitive_shared::types::block_name(crop);
+            if survives {
+                assert_eq!(here(&world), crop, "{name} died in three degrees of frost");
+            } else {
+                assert_eq!(here(&world), BLOCK_WITHERED_CROP, "{name} lived through three degrees of frost");
+            }
+        }
+        // Every warm crop dies no lower than the default line, and wheat no
+        // higher: the table only ever moves a crop the way its season says.
+        assert!(frost_kills_at_c(BLOCK_COTTON_PLANT) > FROST_C);
+        assert!(frost_kills_at_c(BLOCK_WHEAT) < FROST_C);
     }
 
     #[test]

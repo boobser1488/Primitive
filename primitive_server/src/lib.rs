@@ -7062,6 +7062,37 @@ fn leave_dung(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, feet: (i3
     handle.state.lock().unwrap_or_else(|e| e.into_inner()).vitals.went();
 }
 
+/// Digs a pat of dung cleared from `at` into the furrow under it, if there is
+/// one: the furrow is dressed, exactly as ash dresses it
+/// (`wildfire::dressed`), and a tired one is rested by the same stroke.
+///
+/// **Muck is what a field was fed with before anything else was**, and the
+/// dung already existed with nothing to do (`types::BLOCK_DUNG`). It stays
+/// no item -- carrying it about would be a way to foul somebody's house --
+/// so the only dung a field gets is dung dropped on it, and a body that is
+/// due waits for the open air (`comfort::goes_now`). Where a player goes is
+/// now a choice with a use: the fallow strip beside the wheat, rather than
+/// the doorstep, where it is filth to everybody's comfort.
+///
+/// Rejected: dung fertilising the ground it lies on by itself, on a clock.
+/// It would be a second fallow timer beside the one the furrow already has,
+/// and a pat nobody clears is filth that nobody chose to put to use.
+pub(crate) fn manure_the_furrow_under(ctx: &Arc<Context>, at: (i32, i32, i32)) {
+    let below = (at.0, at.1 - 1, at.2);
+    let Some(ground) = ctx.world.cached_block(below.0, below.1, below.2) else {
+        return;
+    };
+    let Some(field) = primitive_shared::wildfire::dressed(ground) else {
+        return;
+    };
+    if !ctx.world.set_block(below.0, below.1, below.2, field) {
+        return;
+    }
+    ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+    notify_mechanics(ctx, below.0, below.1, below.2);
+    broadcast_block(ctx, below, field);
+}
+
 /// Tells a player how warm they are and how much water they have left.
 fn send_body(handle: &Arc<players::PlayerHandle>) {
     let (temperature_c, comfort, hydration, fatigue, recovery, wetness, grime, diet_groups) = {
@@ -16176,6 +16207,25 @@ mod fire_gesture_tests {
         assert!(primitive_shared::wildfire::is_dressed(field), "the ash did not go into the furrow");
         use_block(&ctx, &handle, FIRE);
         assert_eq!(handle.state.lock().unwrap().inventory.count(BLOCK_ASH), 1, "a dressed furrow took ash again");
+    }
+
+    #[test]
+    fn dung_cleared_off_a_tired_furrow_is_dug_into_it() {
+        use primitive_shared::types::{BLOCK_FARMLAND, BLOCK_STONE};
+        use primitive_shared::wildfire::{after_harvest, is_dressed, is_tired};
+        // A pat can land on a furrow at all: `leave_dung` wants ground that
+        // holds a roof under the cell it drops into.
+        assert!(primitive_shared::types::blocks_the_sky(after_harvest(BLOCK_FARMLAND).unwrap()));
+        let (ctx, _handle, _rx) = a_hunter();
+        let furrow = (FIRE.0, FIRE.1 - 1, FIRE.2);
+        assert!(ctx.world.set_block(furrow.0, furrow.1, furrow.2, after_harvest(BLOCK_FARMLAND).unwrap()));
+        manure_the_furrow_under(&ctx, FIRE);
+        let field = ctx.world.cached_block(furrow.0, furrow.1, furrow.2).unwrap();
+        assert!(is_dressed(field) && !is_tired(field), "the muck did not go into the furrow");
+        // ...and on anything that is not a furrow it does nothing.
+        assert!(ctx.world.set_block(furrow.0, furrow.1, furrow.2, BLOCK_STONE));
+        manure_the_furrow_under(&ctx, FIRE);
+        assert_eq!(ctx.world.cached_block(furrow.0, furrow.1, furrow.2), Some(BLOCK_STONE));
     }
 }
 

@@ -1019,6 +1019,11 @@ async fn read_loop(
 
                 if block_id == BLOCK_AIR {
                     if let Some(broken) = was {
+                        // Dung cleared off a furrow is dug into it. See
+                        // `manure_the_furrow_under`.
+                        if primitive_shared::types::block_kind(broken) == primitive_shared::types::BLOCK_DUNG {
+                            crate::manure_the_furrow_under(&ctx, (global_x, global_y, global_z));
+                        }
                         // A fire taken apart stops burning, whatever it
                         // had left. Before the drop, so the map is
                         // straight even if the drop path bails.

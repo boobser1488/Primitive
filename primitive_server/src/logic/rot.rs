@@ -45,9 +45,10 @@
 //! **Cool slows it**, between the frost and [`COOL_BELOW_C`]: a stack there
 //! ages at half its pace ([`Keeping`]). That is the cellar -- the ground
 //! holds the year's average (`climate::earth_shares`), and in temperate
-//! country the year's average is cellar-cold. The carcasses on the ground
-//! are not given the band: they are a clock of their own (`carrion`) and a
-//! kill left in a cave is not somebody's larder.
+//! country the year's average is cellar-cold. A carcass on the ground is
+//! given the same band on its own clock (`carrion`), because "a day is a
+//! day" has to mean the same thing for a haunch in a pack and for the animal
+//! it was cut from.
 //!
 //! Rain is deliberately **not** a factor here, though it is for the
 //! racks: wet stops drying, and it would be reasonable for wet to
@@ -202,11 +203,6 @@ impl Rot {
         self.since = (self.since - step).min(step);
         self.step = self.step.wrapping_add(1);
         true
-    }
-
-    /// Does food keep in this weather?
-    pub fn keeps(ambient: &Ambient) -> bool {
-        ambient.temperature_c <= KEEPS_BELOW_C
     }
 
     /// Is there anything in here that could go off?
@@ -438,6 +434,7 @@ impl Rot {
         // then carrion alone to age, then items alone to leave the
         // bones. What comes back is written into the world outside all
         // three -- `set_block` and `broadcast_block` take their own.
+        let step = self.step;
         let spoiled = {
             let fires = ctx.fires.lock().unwrap_or_else(|e| e.into_inner());
             let mut carrion = ctx.carrion.lock().unwrap_or_else(|e| e.into_inner());
@@ -450,7 +447,9 @@ impl Rot {
                     time_of_day,
                     weather,
                 );
-                Some((block, Self::keeps(&ambient)))
+                // Rests this step if frozen, and on every other step if
+                // cellar-cool: a carcass in a cave is meat in a cave.
+                Some((block, Keeping::of(&ambient).clock(step).is_none()))
             })
         };
         for gone in spoiled {

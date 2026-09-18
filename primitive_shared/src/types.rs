@@ -1073,9 +1073,10 @@ pub const BLOCK_ROTTEN: BlockId = 144;
 ///
 /// Broken by hand into nothing and loose like soil, so clearing it up
 /// dirties the one who does (`comfort::GRIME_PER_FILTHY_BLOCK`). It gives no
-/// item: carrying it about would be a way to spoil somebody else's house,
-/// and nothing uses it yet -- there is no compost or manure rule for it to
-/// feed, and one invented for it alone would be a second feature.
+/// item: carrying it about would be a way to spoil somebody else's house.
+/// **Cleared off a furrow it is dug into it** and dresses it as ash does,
+/// resting a tired one (`manure_the_furrow_under` on the server), so the
+/// only dung a field gets is the dung that was dropped on it.
 pub const BLOCK_DUNG: BlockId = 700;
 
 /// The canopy of an apple tree with nothing on it.
