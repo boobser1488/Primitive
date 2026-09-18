@@ -423,6 +423,7 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "bowl_raw", en: "Unfired bowl", simple: "Wet clay bowl", ru: "Сырая миска", pl: "Surowa miska" },
     Name { id: "bowl", en: "Bowl", simple: "Bowl", ru: "Миска", pl: "Miska" },
     Name { id: "stew", en: "Bowl of stew", simple: "Stew", ru: "Миска похлёбки", pl: "Miska gulaszu" },
+    Name { id: "bowl_milk", en: "Bowl of milk", simple: "Milk", ru: "Миска молока", pl: "Miska mleka" },
     Name { id: "jug_water", en: "Jug of water", simple: "Jug of water", ru: "Кувшин с водой", pl: "Dzban wody" },
     Name { id: "leather_cap", en: "Leather cap", simple: "Leather hat", ru: "Кожаная шапка", pl: "Skórzana czapka" },
     Name { id: "leather_tunic", en: "Leather tunic", simple: "Leather shirt", ru: "Кожаная рубаха", pl: "Skórzana tunika" },

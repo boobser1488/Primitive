@@ -3268,6 +3268,17 @@ pub const BLOCK_BOWL: BlockId = 686;
 /// porridge is already the quick grain meal that needs nothing but a jug,
 /// and making it want bowls would be a toll on it rather than a choice.
 pub const BLOCK_STEW: BlockId = 687;
+/// **A bowl of ewe's milk**, drawn from a kept ewe with a lamb at foot, once
+/// a day (`husbandry::MILK_EVERY_DAYS`). The bowl comes back when it is
+/// drunk, as the stew's does.
+///
+/// **In a bowl and not a jug**, because a jug is a measure of water with
+/// levels, a barrel to pour into and a dough that asks for it by name, and
+/// milk in it would be milk in every one of those. And because the decision
+/// the milk carries is small and daily -- this bowl, or the lamb grows a day
+/// faster -- and a bowl a day is its size. It sours within the day: what a
+/// flock gives is eaten at home.
+pub const BLOCK_BOWL_MILK: BlockId = 694;
 /// A bolt of plain woven cotton, and the material of the cloth set.
 pub const BLOCK_CLOTH: BlockId = 190;
 /// What cloth is worn as, one per slot. What they do is in
@@ -4402,6 +4413,7 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     (BLOCK_BOWL_RAW, "bowl_raw"),
     (BLOCK_BOWL, "bowl"),
     (BLOCK_STEW, "stew"),
+    (BLOCK_BOWL_MILK, "bowl_milk"),
     (BLOCK_CLOTH, "cloth"),
     (BLOCK_CLOTH_CAP, "cloth_cap"),
     (BLOCK_CLOTH_TUNIC, "cloth_tunic"),

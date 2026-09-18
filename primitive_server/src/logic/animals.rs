@@ -203,6 +203,7 @@ use primitive_shared::types::{
 };
 
 use crate::logic::falling::BlockWorld;
+use primitive_shared::husbandry;
 use primitive_shared::youth;
 use crate::logic::rng::Rng;
 
@@ -1408,6 +1409,9 @@ pub struct PlayerSign {
     pub low: bool,
     /// Under half their health. What a wolf pack waits for.
     pub wounded: bool,
+    /// What is in their hand, if anything: feed held out is a lure to an
+    /// animal that eats it (`lure`).
+    pub held: Option<primitive_shared::types::BlockId>,
 }
 
 /// Under this, in blocks a second, a person is standing still.
@@ -1529,6 +1533,8 @@ struct Figure {
     /// Which way they face, if the tick loop said.
     facing: Option<f32>,
     wounded: bool,
+    /// What is in their hand: see `PlayerSign::held`.
+    held: Option<primitive_shared::types::BlockId>,
 }
 
 /// One player's movement over the running `GAIT_WINDOW`.
@@ -2113,6 +2119,10 @@ pub struct Animal {
     /// Seconds of its fall left, once it is dead. See `FALL_SECONDS`; only a
     /// body in `Animals::falling` has any.
     dying_for: f32,
+    /// What people have done to it: `None` for every wild animal nobody has
+    /// fed. See `husbandry::Keeping` -- and `forget_the_distant`, which parks
+    /// an animal with one of these instead of forgetting it.
+    keep: Option<husbandry::Keeping>,
 }
 
 /// Where one of an animal's own family is, as of the start of the tick.
@@ -2485,6 +2495,19 @@ pub struct Animals {
     /// The wind, as (x, z) scaled by its strength -- `raft::Wind::vector`.
     /// Calm until the tick loop says otherwise (`feel_wind`).
     wind: (f32, f32),
+    /// **Kept animals nobody is near**, with the world day each was left on.
+    ///
+    /// Out of the simulation, off the wire, and not forgotten: see
+    /// `forget_the_distant`, which puts them here, and `unpark`, which brings
+    /// them back when somebody comes within `UNPARK_DISTANCE` -- with the
+    /// days they were alone in them (`Keeping::pass_days`), so a flock left
+    /// for a week is a flock that was not fed for a week.
+    parked: Vec<(Animal, f32)>,
+    /// Where a kept animal left a pat of dung this step, for the tick loop to
+    /// write into the world -- this file cannot (see `staked` for the shape).
+    dung: Vec<(f64, f64, f64)>,
+    /// The night a raid on the pens was last rolled for: see `raid_the_pens`.
+    raided: Option<i64>,
     /// Line-of-sight rays cast since the world started. Test-only, for the
     /// budget test.
     #[cfg(test)]
@@ -2544,6 +2567,9 @@ impl Animals {
             signs: Vec::new(),
             tracks: Vec::new(),
             wind: (0.0, 0.0),
+            parked: Vec::new(),
+            dung: Vec::new(),
+            raided: None,
             #[cfg(test)]
             rays_cast: 0,
             #[cfg(test)]
@@ -2819,11 +2845,19 @@ impl Animals {
 
     /// The young grow by the days that have gone by, and the calm adults
     /// give birth: see `primitive_shared::youth`.
-    fn raise_young(&mut self) {
-        let days = std::mem::take(&mut self.days_pending);
+    fn raise_young(&mut self, days: f32) {
         if days <= 0.0 {
             return;
         }
+        // **The milk is the lamb's.** A lamb whose mother was milked within
+        // the day grows at `husbandry::MILKED_LAMB_GROWTH`: see
+        // `husbandry::MILK_EVERY_DAYS` for the decision that is.
+        let short: Vec<EntityId> = self
+            .animals
+            .iter()
+            .filter(|a| a.keep.is_some_and(|k| k.lamb_goes_short()))
+            .filter_map(|a| a.young)
+            .collect();
         let mut grown_up = Vec::new();
         for animal in &mut self.animals {
             animal.birth_rest = (animal.birth_rest - days).max(0.0);
@@ -2831,7 +2865,8 @@ impl Animals {
                 continue;
             }
             let before = youth::strength(animal.growth);
-            animal.growth = (animal.growth + days / youth::GROWN_DAYS).min(youth::GROWN);
+            let rate = if short.contains(&animal.id) { husbandry::MILKED_LAMB_GROWTH } else { 1.0 };
+            animal.growth = (animal.growth + days * rate / youth::GROWN_DAYS).min(youth::GROWN);
             // A bigger body has more to lose: the health grows with it, by
             // the difference, so a fawn that was hurt is still that much hurt.
             animal.health += animal.species.health() * (youth::strength(animal.growth) - before);
@@ -2857,6 +2892,25 @@ impl Animals {
                 || animal.birth_rest > 0.0
                 || self.animals.iter().any(|a| Some(a.id) == animal.young)
             {
+                continue;
+            }
+            // **A kept animal breeds on its keeper's terms, not the
+            // meadow's**: both of a pair tame and thriving -- fed, on a rich
+            // ration, in condition (`Keeping::thriving`) -- and the season's
+            // rate with a partner. Grass alone keeps a flock; grain grows it.
+            if let Some(keep) = animal.keep.filter(|k| k.tame) {
+                let partner = keep.thriving()
+                    && self.animals.iter().any(|other| {
+                        other.id != animal.id
+                            && other.species == animal.species
+                            && !youth::is_young(other.growth)
+                            && other.keep.is_some_and(|k| k.thriving())
+                            && (other.at().0 - animal.at().0).hypot(other.at().2 - animal.at().2)
+                                <= youth::PARTNER_RANGE
+                    });
+                if partner && self.rng.range(0.0, 1.0) < youth::births_per_day(self.season, true) * days {
+                    mothers.push(animal.id);
+                }
                 continue;
             }
             // Safe and fed: nothing it is running from or remembers being hurt
@@ -2896,7 +2950,7 @@ impl Animals {
         {
             return None;
         }
-        let (species, at, yaw) = (parent.species, parent.at(), parent.yaw);
+        let (species, at, yaw, parent_keep) = (parent.species, parent.at(), parent.yaw, parent.keep);
         // At her flank, a body's width to the side: a newborn put *in* her
         // would be two animals in one cell, which `unstack` would then shove
         // apart on the next tick anyway.
@@ -2909,6 +2963,8 @@ impl Animals {
         young.yaw = yaw;
         young.wants_yaw = yaw;
         young.mother = Some(mother);
+        // Born to a kept mother, kept: see `Keeping::born_to`.
+        young.keep = parent_keep.filter(|k| k.tame).map(|k| husbandry::Keeping::born_to(&k));
         if let Some(parent) = self.animals.iter_mut().find(|a| a.id == mother) {
             parent.young = Some(id);
             parent.birth_rest = youth::BIRTH_REST_DAYS;
@@ -2992,28 +3048,15 @@ impl Animals {
         }
     }
 
-    /// Puts one in the world at a stated place. What the spawner uses,
-    /// and what a test or a plugin can call directly.
-    pub fn spawn(&mut self, species: Species, at: (f32, f32, f32)) -> Option<EntityId> {
-        // **Each class against its own ceiling.** The sea's animals and the
-        // land's are capped separately (`MAX_FISH`, `MAX_ANIMALS`): one
-        // list, one wire, two budgets -- a coast full of schools must not be
-        // why a mod's deer refuses to appear, and a crowded meadow must not
-        // empty the river.
-        let (class, ceiling) = if species.swims() {
-            (self.animals.iter().filter(|a| a.species.swims()).count(), MAX_FISH)
-        } else {
-            (self.animals.iter().filter(|a| !a.species.swims()).count(), MAX_ANIMALS)
-        };
-        if class >= ceiling {
-            return None;
-        }
+    /// A new animal of `species` standing at `at`, with its own id, and not
+    /// yet anywhere: `spawn` puts it in the world, and `load_herd` puts a
+    /// kept one back into `parked` with what the save file says of it.
+    fn make(&mut self, species: Species, at: (f32, f32, f32)) -> Animal {
         self.next_ordinal += 1;
         self.spawned += 1;
         let id = entity_id(EntitySource::Animal, self.next_ordinal);
-        self.births.push((id, at));
         let yaw = self.rng.range(0.0, std::f32::consts::TAU);
-        self.animals.push(Animal {
+        Animal {
             id,
             species,
             position: primitive_shared::geometry::wide(at),
@@ -3097,7 +3140,30 @@ impl Animals {
             birth_rest: 0.0,
             speed_cap: f32::INFINITY,
             dying_for: 0.0,
-        });
+            keep: None,
+        }
+    }
+
+    /// Puts one in the world at a stated place. What the spawner uses,
+    /// and what a test or a plugin can call directly.
+    pub fn spawn(&mut self, species: Species, at: (f32, f32, f32)) -> Option<EntityId> {
+        // **Each class against its own ceiling.** The sea's animals and the
+        // land's are capped separately (`MAX_FISH`, `MAX_ANIMALS`): one
+        // list, one wire, two budgets -- a coast full of schools must not be
+        // why a mod's deer refuses to appear, and a crowded meadow must not
+        // empty the river.
+        let (class, ceiling) = if species.swims() {
+            (self.animals.iter().filter(|a| a.species.swims()).count(), MAX_FISH)
+        } else {
+            (self.animals.iter().filter(|a| !a.species.swims()).count(), MAX_ANIMALS)
+        };
+        if class >= ceiling {
+            return None;
+        }
+        let animal = self.make(species, at);
+        let id = animal.id;
+        self.births.push((id, at));
+        self.animals.push(animal);
         // **A bear's den is where it was first found.** See
         // `TERRITORY_RADIUS`: the ground it keeps is round this.
         if species.keeps_territory() {
@@ -3133,6 +3199,9 @@ impl Animals {
         time_of_day: f32,
     ) -> Vec<Blow> {
         let mut blows = Vec::new();
+        // A kept flock somebody has just walked back to is in the world
+        // before anything looks at it. See `parked`.
+        self.unpark(world, players);
         // What each animal can see of its own kind, worked out before
         // anything moves.
         //
@@ -3231,12 +3300,18 @@ impl Animals {
         // so a body killed this tick has its whole `FALL_SECONDS` still ahead
         // of it less one tick.
         self.settle_the_falling(world, dt);
-        self.raise_young();
+        // The days that went by, once, for both uses: the kept animals'
+        // belly and fleece, and the young growing and being born.
+        let days = std::mem::take(&mut self.days_pending);
+        self.keep_the_kept(world, days);
+        self.raise_young(days);
         self.forget_the_distant(players);
         self.next_spawn -= dt;
         if self.next_spawn <= 0.0 {
             self.next_spawn = SPAWN_INTERVAL;
             self.populate(world, players, is_night(time_of_day));
+            // ...and, on a night, whatever comes for the pens.
+            self.raid_the_pens(world, is_night(time_of_day));
             // ...and the water, on the same clock and its own cap. One
             // attempt each, for the reason `populate` gives: a player in the
             // middle of a desert costs one failed search for water and no
@@ -3317,6 +3392,7 @@ impl Animals {
                 visibility,
                 facing: sign.map(|s| s.facing),
                 wounded: sign.is_some_and(|s| s.wounded),
+                held: sign.and_then(|s| s.held),
             });
         }
         figures
@@ -3870,6 +3946,41 @@ impl Animals {
         if self.animals.is_empty() {
             return;
         }
+        // **The rule, written down: a wild animal nobody is near is forgotten;
+        // a kept one is parked.** "Kept" is anything with a `Keeping` -- fed
+        // once, tamed, penned, or born to a kept mother -- and a parked animal
+        // is saved with the world (`save_herd`) and comes back when somebody
+        // does (`unpark`). A wild deer eighty blocks off is still simply let
+        // go: the meadow makes another, and saving every animal ever seen
+        // would be a save file that grows as the player explores.
+        let day = self.calendar.unwrap_or(0.0);
+        let far = |a: &Animal| {
+            let at = a.at();
+            !players.iter().any(|&(_, p)| (p.0 - at.0).hypot(p.2 - at.2) <= DESPAWN_DISTANCE)
+        };
+        // Taken apart only when there is somebody to park: this runs every
+        // tick, and a world with no flock in it should not pay for one.
+        let (kept, wild): (Vec<Animal>, Vec<Animal>) = if self.animals.iter().any(|a| a.keep.is_some() && far(a)) {
+            std::mem::take(&mut self.animals).into_iter().partition(|a| a.keep.is_some())
+        } else {
+            (Vec::new(), std::mem::take(&mut self.animals))
+        };
+        self.animals = wild;
+        for animal in kept {
+            let at = animal.at();
+            let near = players
+                .iter()
+                .any(|&(_, p)| (p.0 - at.0).hypot(p.2 - at.2) <= DESPAWN_DISTANCE);
+            if near {
+                self.animals.push(animal);
+            } else {
+                self.deaths.push(animal.id);
+                self.parked.push((animal, day));
+            }
+        }
+        if self.animals.is_empty() {
+            return;
+        }
         let before = self.animals.len();
         // Nobody online: everything goes. A world ticking over with no
         // players in it should not be simulating a herd.
@@ -3881,6 +3992,10 @@ impl Animals {
         }
         let deaths = &mut self.deaths;
         self.animals.retain(|animal| {
+            // Kept animals were sorted out above, and are all near somebody.
+            if animal.keep.is_some() {
+                return true;
+            }
             // A fish is forgotten nearer, because it is born nearer
             // (`FISH_SPAWN_MAX`) and seen nearer: the underwater fog closes
             // at eighteen blocks, so a school sixty blocks off is a school
@@ -4305,6 +4420,418 @@ impl Animals {
     }
 }
 
+/// How near somebody has to come to a parked flock for it to be put back in
+/// the world, in blocks. **Well inside `DESPAWN_DISTANCE`**, so an animal
+/// at the edge is not parked and unparked on alternate ticks as a player
+/// paces about -- each of which is an entity appearing and vanishing on
+/// every screen near it.
+const UNPARK_DISTANCE: f32 = 64.0;
+
+/// How far off a raid on the pens starts, in blocks: outside the pen and
+/// out of the lamplight, inside what a wolf can smell (`Species::awareness`).
+const RAID_DISTANCE: (f32, f32) = (14.0, 20.0);
+
+/// The chance, at each of the spawner's tries through a night, that the
+/// night's raid comes now. Rolled until it comes once, then not again until
+/// the next night (`Animals::raided`): most nights, at a time nobody can
+/// wait up for.
+const RAID_CHANCE: f32 = 0.05;
+
+/// Near enough to put a hand on it, in blocks from the eye to the animal's
+/// feet: a block reach and a body's width more, because an animal is not a
+/// cell and a sheep's back is a metre from its feet.
+const TEND_REACH: f32 = 3.5;
+
+/// What a right click with something in hand did to a kept animal. See
+/// `Animals::tend`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tended {
+    /// It took the feed -- `tamed` if that was the feed that did it.
+    Fed { tamed: bool },
+    /// Sheared: this much wool.
+    Shorn(u32),
+    /// A bowl of milk.
+    Milked,
+    /// Nothing happened, and this is why, in the words the player is told.
+    Refused(&'static str),
+}
+
+/// A kept animal as the save file holds it: what it is, where, and what
+/// people have made of it. **Not the whole `Animal`** -- a wolf's grudge, a
+/// deer's thirst and a bird's nest are this minute's business and are born
+/// fresh after a restart; what a player did to it is what has to last.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KeptRecord {
+    species: Species,
+    position: (f64, f64, f64),
+    yaw: f32,
+    health: f32,
+    growth: f32,
+    birth_rest: f32,
+    /// Its mother, as an index into the same file's list.
+    mother: Option<u32>,
+    keep: husbandry::Keeping,
+    /// The world day it was parked on, if it was.
+    parked_on: Option<f32>,
+}
+
+const HERD_FORMAT_VERSION: u32 = 1;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HerdFile {
+    version: u32,
+    /// The world day it was written on: what an animal that was in the world
+    /// at the time counts its absence from.
+    day: f32,
+    animals: Vec<KeptRecord>,
+}
+
+impl Animals {
+    /// A right click on animal `id` from a player whose eye is at `from`,
+    /// with `held` in hand: feed, knife or bowl. What the item does to the
+    /// pack is the caller's -- this file never sees a pack -- and it does it
+    /// only on the answer this gives.
+    pub fn tend(
+        &mut self,
+        id: EntityId,
+        from: (f32, f32, f32),
+        held: Option<primitive_shared::types::BlockId>,
+    ) -> Tended {
+        use primitive_shared::types::{block_kind, is_knife, BLOCK_BOWL};
+        let Some(held) = held else {
+            return Tended::Refused("you have nothing in your hand");
+        };
+        // Her lamb, while it is still one: asked before the mutable borrow.
+        let has_lamb = self
+            .find(id)
+            .and_then(|a| a.young)
+            .and_then(|young| self.find(young))
+            .is_some_and(|young| youth::is_young(young.growth));
+        let Some(animal) = self.animals.iter_mut().find(|a| a.id == id) else {
+            return Tended::Refused("it is gone");
+        };
+        let at = animal.at();
+        let (dx, dy, dz) = (at.0 - from.0, at.1 - from.1, at.2 - from.2);
+        if (dx * dx + dy * dy + dz * dz).sqrt() > TEND_REACH + animal.species.width() * 0.5 {
+            return Tended::Refused("too far away");
+        }
+        if !husbandry::tameable(animal.species) {
+            return Tended::Refused("that animal cannot be kept");
+        }
+        let tame = animal.keep.is_some_and(|k| k.tame);
+        if is_knife(held) {
+            if animal.species != Species::Sheep {
+                return Tended::Refused("there is nothing on it to shear");
+            }
+            if !tame {
+                return Tended::Refused("it will not stand for the knife: tame it first");
+            }
+            return match animal.keep.as_mut().and_then(|k| k.shear()) {
+                Some(wool) => Tended::Shorn(wool),
+                None => Tended::Refused("the fleece has not grown back yet"),
+            };
+        }
+        if block_kind(held) == BLOCK_BOWL {
+            if animal.species != Species::Sheep || youth::is_young(animal.growth) || !tame || !has_lamb {
+                return Tended::Refused("only a tame ewe with a lamb gives milk");
+            }
+            return if animal.keep.as_mut().is_some_and(|k| k.milk(has_lamb)) {
+                Tended::Milked
+            } else {
+                Tended::Refused("she has no milk to give yet")
+            };
+        }
+        let fresh = animal.keep.is_none();
+        let keep = animal.keep.get_or_insert_with(husbandry::Keeping::wild);
+        match keep.feed(animal.species, held, at) {
+            Ok(tamed) => {
+                // Its head is in your hand: whatever it was wary of, it is
+                // not now.
+                animal.wary_for = 0.0;
+                animal.threat_at = None;
+                animal.target = None;
+                if animal.mind != Mind::Flee {
+                    animal.mind = Mind::Idle;
+                }
+                Tended::Fed { tamed }
+            }
+            Err(refused) => {
+                // Offered the wrong thing, a wild animal is still nobody's:
+                // a keeping put on it only to be refused would be an animal
+                // parked and saved for having been shown a plank.
+                if fresh {
+                    animal.keep = None;
+                }
+                Tended::Refused(match refused {
+                    husbandry::Refused::Sated => "it is not hungry yet",
+                    husbandry::Refused::NotItsFood => "it does not eat that",
+                })
+            }
+        }
+    }
+
+    /// Where kept animals left dung since the tick loop last asked.
+    pub fn take_dung(&mut self) -> Vec<(f64, f64, f64)> {
+        std::mem::take(&mut self.dung)
+    }
+
+    /// The days that went by, for every kept animal in the world: hunger,
+    /// fleece, trust, condition and dung (`Keeping::pass_days`). **Grazing is
+    /// asked of the ground under it**, so a pen on turf is half a flock's keep
+    /// and a pen on bare earth is none.
+    fn keep_the_kept(&mut self, world: &dyn BlockWorld, days: f32) {
+        if days <= 0.0 {
+            return;
+        }
+        for animal in &mut self.animals {
+            let Some(keep) = animal.keep.as_mut() else {
+                continue;
+            };
+            let (x, y, z) = animal.position;
+            let grazing = world
+                .block(x.floor() as i32, y.floor() as i32 - 1, z.floor() as i32)
+                .is_some_and(is_pasture);
+            for _ in 0..keep.pass_days(days, grazing) {
+                self.dung.push(animal.position);
+            }
+            if keep.forgotten() {
+                animal.keep = None;
+            }
+        }
+    }
+
+    /// Puts parked animals back in the world when somebody comes near, with
+    /// the days they were alone passed over them.
+    ///
+    /// **The absence counts as bare ground unless it is turf**, read off the
+    /// cell it was left standing on: a flock parked in a meadow pen grazed
+    /// while nobody watched. No dung is laid for the absence -- a week of
+    /// pats landing in one tick is a pen buried the moment a player looks at
+    /// it -- and that is the one thing a parked flock does differently from
+    /// a watched one.
+    fn unpark(&mut self, world: &dyn BlockWorld, players: &[(PlayerId, (f32, f32, f32))]) {
+        if self.parked.is_empty() || players.is_empty() {
+            return;
+        }
+        let mut index = 0;
+        while index < self.parked.len() {
+            let at = self.parked[index].0.at();
+            let (bx, by, bz) = (at.0.floor() as i32, at.1.floor() as i32, at.2.floor() as i32);
+            let near = players.iter().any(|&(_, p)| (p.0 - at.0).hypot(p.2 - at.2) <= UNPARK_DISTANCE);
+            // **Only onto ground that is there.** Put back over a chunk the
+            // server has not loaded yet, it would fall through the world.
+            let under = world.block(bx, by - 1, bz);
+            if !near || under.is_none() || world.block(bx, by, bz).is_none() {
+                index += 1;
+                continue;
+            }
+            let (mut animal, since) = self.parked.swap_remove(index);
+            if let Some(today) = self.calendar {
+                let away = (today - since).max(0.0);
+                let grazing = under.is_some_and(is_pasture);
+                if let Some(keep) = animal.keep.as_mut() {
+                    let _pats_nobody_saw = keep.pass_days(away, grazing);
+                    if keep.forgotten() {
+                        animal.keep = None;
+                    }
+                }
+                if youth::is_young(animal.growth) {
+                    animal.growth = (animal.growth + away / youth::GROWN_DAYS).min(youth::GROWN);
+                }
+                animal.birth_rest = (animal.birth_rest - away).max(0.0);
+            }
+            self.births.push((animal.id, at));
+            self.animals.push(animal);
+        }
+    }
+
+    /// **Something comes for the pens at night.** Once a night at most, at a
+    /// random try (`RAID_CHANCE`), a hunter that lives in that country and
+    /// eats what is kept is put down `RAID_DISTANCE` from one kept animal's
+    /// home -- and from there it is an ordinary hungry wolf: it finds the
+    /// flock by `survey`'s quarry, and it gets in or it does not.
+    ///
+    /// **What keeps it out is the pen, not a rule here.** Two blocks of wall
+    /// is more than anything steps (`STEP_HEIGHT`), a fire inside keeps a
+    /// wolf off as it does in the open (`FIRE_RADIUS`), and a flock grazing
+    /// loose on its leash has no wall at all. A one-block wall is a step for
+    /// the wolf and the sheep alike; a ring of stakes cuts the flock every
+    /// time one of them is shoved against it (`stakes`), which makes it a pen
+    /// that butchers what it keeps.
+    ///
+    /// Rejected: **a raid that always comes.** Then the pen is a tax paid in
+    /// walls, and there is no night on which leaving the flock out is a bet
+    /// that might come off.
+    fn raid_the_pens(&mut self, world: &dyn BlockWorld, night: bool) {
+        let Some(today) = self.calendar else {
+            return;
+        };
+        // Noon to noon: one number for the whole of one night.
+        let this_night = (today + 0.5).floor() as i64;
+        if !night || self.raided == Some(this_night) || self.rng.range(0.0, 1.0) >= RAID_CHANCE {
+            return;
+        }
+        let homes: Vec<(Species, (f32, f32, f32))> = self
+            .animals
+            .iter()
+            .filter_map(|a| a.keep.filter(|k| k.tame).and_then(|k| k.home).map(|home| (a.species, home)))
+            .collect();
+        let Some(&(prey, home)) = self.rng.pick(&homes) else {
+            return;
+        };
+        self.raided = Some(this_night);
+        self.raid(world, prey, home);
+    }
+
+    /// The raid itself: hunters of `prey` round `home`, as many as the
+    /// smallest group of their kind. Split out so a test can send one.
+    fn raid(&mut self, world: &dyn BlockWorld, prey: Species, home: (f32, f32, f32)) -> Vec<EntityId> {
+        let country = world.biome(home.0.floor() as i32, home.2.floor() as i32).unwrap_or(UNKNOWN_COUNTRY);
+        let hunters: Vec<Species> = Species::ALL
+            .iter()
+            .copied()
+            .filter(|h| h.is_predator() && h.hunts(prey) && h.lives_in(country) && !h.needs_trees())
+            .collect();
+        let Some(&hunter) = self.rng.pick(&hunters) else {
+            return Vec::new();
+        };
+        let bearing = self.rng.range(0.0, std::f32::consts::TAU);
+        let distance = self.rng.range(RAID_DISTANCE.0, RAID_DISTANCE.1);
+        let (low, _) = primitive_shared::animals::group_size(hunter);
+        let mut sent = Vec::new();
+        for n in 0..low.max(1) {
+            let heading = bearing + n as f32 * 0.3;
+            let (x, z) = (home.0 + heading.cos() * distance, home.2 + heading.sin() * distance);
+            let Some(ground) = surface_under(world, x, home.1 + 16.0, z) else {
+                continue;
+            };
+            if fits(world, (f64::from(x), f64::from(ground as f32), f64::from(z)), hunter) {
+                sent.extend(self.spawn(hunter, (x, ground as f32, z)));
+            }
+        }
+        sent
+    }
+
+    /// Writes every kept animal -- in the world and parked -- to `herd.bin`
+    /// beside the other saves, atomically, the way the carcasses are written.
+    pub fn save_herd(&self, dir: &std::path::Path) -> std::io::Result<usize> {
+        let day = self.calendar.unwrap_or(0.0);
+        let kept: Vec<(&Animal, Option<f32>)> = self
+            .animals
+            .iter()
+            .filter(|a| a.keep.is_some())
+            .map(|a| (a, None))
+            .chain(self.parked.iter().map(|(a, since)| (a, Some(*since))))
+            .collect();
+        let index_of = |id: EntityId| kept.iter().position(|(a, _)| a.id == id).map(|i| i as u32);
+        let animals: Vec<KeptRecord> = kept
+            .iter()
+            .filter_map(|&(a, parked_on)| {
+                Some(KeptRecord {
+                    species: a.species,
+                    position: a.position,
+                    yaw: a.yaw,
+                    health: a.health,
+                    growth: a.growth,
+                    birth_rest: a.birth_rest,
+                    mother: a.mother.and_then(index_of),
+                    keep: a.keep?,
+                    parked_on,
+                })
+            })
+            .collect();
+        let count = animals.len();
+        let bytes = bincode::serialize(&HerdFile { version: HERD_FORMAT_VERSION, day, animals })
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::create_dir_all(dir)?;
+        let final_path = dir.join("herd.bin");
+        let tmp_path = final_path.with_extension("bin.tmp");
+        std::fs::write(&tmp_path, &bytes)?;
+        std::fs::rename(&tmp_path, &final_path)?;
+        Ok(count)
+    }
+
+    /// Reads the kept animals back, **parked**: each comes into the world the
+    /// first time somebody is near it (`unpark`), with the days since the
+    /// save passed over it. A missing, unreadable or older file is a world
+    /// with no kept animals -- the carcasses' bargain: losing a flock is bad,
+    /// and refusing to open the world over it is worse.
+    pub fn load_herd(&mut self, dir: &std::path::Path) -> std::io::Result<usize> {
+        let bytes = match std::fs::read(dir.join("herd.bin")) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        let Ok(file) = bincode::deserialize::<HerdFile>(&bytes) else {
+            return Ok(0);
+        };
+        if file.version != HERD_FORMAT_VERSION {
+            return Ok(0);
+        }
+        // Index in the file to the animal made for it, so the family can be
+        // tied back up below. A record with a bad position is skipped, and
+        // its lamb is simply motherless.
+        let mut made: Vec<Option<EntityId>> = Vec::with_capacity(file.animals.len());
+        for record in &file.animals {
+            let (x, y, z) = record.position;
+            if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+                made.push(None);
+                continue;
+            }
+            let mut animal = self.make(record.species, primitive_shared::geometry::narrow(record.position));
+            animal.position = record.position;
+            animal.yaw = record.yaw;
+            animal.wants_yaw = record.yaw;
+            animal.health = record.health.clamp(0.1, record.species.health());
+            animal.growth = if record.growth.is_finite() { record.growth.clamp(0.0, youth::GROWN) } else { youth::GROWN };
+            animal.birth_rest = record.birth_rest.max(0.0);
+            animal.keep = Some(record.keep);
+            made.push(Some(animal.id));
+            self.parked.push((animal, record.parked_on.unwrap_or(file.day)));
+        }
+        for (n, record) in file.animals.iter().enumerate() {
+            let (Some(young), Some(Some(mother))) =
+                (made[n], record.mother.and_then(|m| made.get(m as usize).copied()))
+            else {
+                continue;
+            };
+            for (animal, _) in &mut self.parked {
+                if animal.id == young {
+                    animal.mother = Some(mother);
+                } else if animal.id == mother {
+                    animal.young = Some(young);
+                }
+            }
+        }
+        Ok(made.iter().flatten().count())
+    }
+
+    /// Kept animals out of the world just now.
+    pub fn parked_count(&self) -> usize {
+        self.parked.len()
+    }
+
+    /// What people have made of one animal. Tests and mods.
+    pub fn keeping(&self, id: EntityId) -> Option<husbandry::Keeping> {
+        self.find(id).and_then(|a| a.keep)
+    }
+
+    /// Every kept animal in the world, and what it is. Tests.
+    #[cfg(test)]
+    pub fn kept(&self) -> Vec<(EntityId, Species, husbandry::Keeping)> {
+        self.animals.iter().filter_map(|a| a.keep.map(|k| (a.id, a.species, k))).collect()
+    }
+
+    /// Puts a keeping on an animal outright. Tests only: a test about a
+    /// pen should not have to spend a day and a half taming its flock.
+    #[cfg(test)]
+    pub fn keep_for_test(&mut self, id: EntityId, keep: husbandry::Keeping) {
+        if let Some(animal) = self.animals.iter_mut().find(|a| a.id == id) {
+            animal.keep = Some(keep);
+        }
+    }
+}
+
 /// Decides what an animal is doing, at most once a second.
 ///
 /// Split in two because the two halves have nothing in common beyond the
@@ -4462,9 +4989,13 @@ fn think(
     // for on the tick `survey` sees one is due. Not while it is running,
     // charging or chasing, which re-think often anyway, and not while it is
     // already watching something, which is the look this would cut short.
+    // ...not for a tame animal, which has nothing to decide about a person:
+    // woken early by every passer-by, its grazing would be re-rolled ten
+    // times a second and it would stand twitching in the pen.
     if animal.next_thought > dt
         && !matches!(animal.mind, Mind::Flee | Mind::Charge | Mind::Chase | Mind::Watch)
         && animal.angry_for <= 0.0
+        && !animal.keep.is_some_and(|k| k.tame)
     {
         animal.looks = animal.looks.wrapping_add(1);
         if animal.looks.is_multiple_of(LOOK_EVERY) {
@@ -4546,6 +5077,12 @@ fn think(
             animal.next_thought = 0.5;
             return;
         }
+    }
+
+    // **Food held out, and a home to go back to**, before any question of
+    // who to run from or charge: see `tend_thought`.
+    if tend_thought(animal, senses.figures, seen, world, rng, time_of_day) {
+        return;
     }
 
     // How keen its senses are just now: everything's own, except a gull's,
@@ -4741,6 +5278,106 @@ fn think(
 /// decisions are actually made. Reached only from `think`'s "nothing in
 /// sight" branch, which is what makes every rule below outranked by a
 /// person, a wolf and a fright without a line of code saying so.
+/// How far off feed held out is noticed by an animal nobody has tamed, in
+/// blocks -- and only from somebody creeping or standing (`LURE_LOUDNESS`).
+///
+/// **Inside the distance it would bolt at**, so the lure is a thing done
+/// slowly: a player who walks up to a flock with grain in hand scatters it
+/// as anybody would, and one who creeps the last ten blocks and stands has
+/// them come to the hand.
+const LURE_RANGE: f32 = 10.0;
+
+/// ...and by a tame one, from anybody walking or running: a flock follows
+/// the sack. **This is how animals are moved**, into a pen or across a
+/// valley, and there is no lead rope because the grain is the rope.
+///
+/// Rejected: following only the person who tamed it. A flock is then
+/// unstealable, and a server where a neighbour's sheep can be walked off
+/// with a handful of grain is a server with a reason to build a gate.
+const FOLLOW_RANGE: f32 = 16.0;
+
+/// Loudest a person may be, against a walk, and still lure a wild animal:
+/// creeping (0.3) or standing (0). See `Gait::loudness`.
+const LURE_LOUDNESS: f32 = 0.5;
+
+/// Near enough to the feed: it stops and waits at the hand rather than
+/// walking into the player.
+const LURE_CLOSE: f32 = 1.6;
+
+/// **How far a tame animal lets itself graze from home** before it turns
+/// back, in blocks. A pen is a few blocks across, so inside it this never
+/// bites and the walls do the holding; outside one, it is what keeps a
+/// flock from drifting off across the map while nobody watches it.
+const KEPT_LEASH: f32 = 5.0;
+
+/// The part of a thought that is about people as keepers rather than as
+/// danger. `true` if it decided what the animal does.
+///
+/// Three things, in order. **A predator beats everything**: a sheep with a
+/// wolf in sight runs whatever is held out to it -- and a boar, which does
+/// not run from wolves, is let through to its own rules. **Feed beats
+/// home**: a tame animal follows food from `FOLLOW_RANGE`, a wild one comes
+/// to a still hand from `LURE_RANGE`. And **a tame animal with nothing to
+/// follow grazes near home**, and never flees or charges a person at all --
+/// the rest of `think` is not asked, so a kept boar is not a boar that
+/// gores whoever opens the pen.
+fn tend_thought(
+    animal: &mut Animal,
+    figures: &[Figure],
+    seen: &Neighbours,
+    world: &dyn BlockWorld,
+    rng: &mut Rng,
+    time_of_day: f32,
+) -> bool {
+    if !husbandry::tameable(animal.species) || animal.angry_for > 0.0 || animal.mind == Mind::Flee {
+        return false;
+    }
+    if seen.threat.is_some() && !animal.fights() {
+        return false;
+    }
+    let tame = animal.keep.is_some_and(|k| k.tame);
+    let reach = if tame { FOLLOW_RANGE } else { LURE_RANGE };
+    let at = animal.at();
+    let lure = figures
+        .iter()
+        .filter(|f| f.held.is_some_and(|held| husbandry::ration(animal.species, held).is_some()))
+        .filter(|f| tame || f.loudness <= LURE_LOUDNESS)
+        .map(|f| (f.at, (f.at.0 - at.0).hypot(f.at.2 - at.2)))
+        .filter(|&(_, distance)| distance <= reach)
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    if let Some((to, distance)) = lure {
+        animal.target = None;
+        animal.charge_at = None;
+        animal.attitude = primitive_shared::protocol::Attitude::Easy;
+        animal.wants_yaw = (to.2 - at.2).atan2(to.0 - at.0);
+        animal.mind = if distance > LURE_CLOSE { Mind::Wander } else { Mind::Idle };
+        animal.next_thought = 0.5;
+        return true;
+    }
+    if !tame {
+        return false;
+    }
+    animal.target = None;
+    animal.charge_at = None;
+    if let Some(home) = animal.keep.and_then(|k| k.home) {
+        let (dx, dz) = (home.0 - at.0, home.2 - at.2);
+        if dx.hypot(dz) > KEPT_LEASH {
+            animal.mind = Mind::Wander;
+            animal.attitude = primitive_shared::protocol::Attitude::Easy;
+            animal.wants_yaw = open_heading(world, animal, dz.atan2(dx));
+            animal.next_thought = rng.range(1.0, 2.0);
+            return true;
+        }
+    }
+    graze(animal, seen, world, rng, time_of_day);
+    // **Asked again soon**, whatever `graze` chose: a wander held for five
+    // seconds carried a tame sheep that far past its leash before the leash
+    // was next looked at, and a flock left in the open drifted off by
+    // whole wanders at a time.
+    animal.next_thought = animal.next_thought.min(1.5);
+    true
+}
+
 fn homing(animal: &mut Animal, world: &dyn BlockWorld, rng: &mut Rng, time_of_day: f32) -> bool {
     // **Thirst first, and it belongs to `graze`.** A bird that flew home
     // rather than drinking would be a bird that never drinks, because
@@ -13565,7 +14202,7 @@ mod tests {
     /// in the open, by day, standing, whole.
     fn figure_at(at: (f32, f32, f32), speed: f32) -> Figure {
         let gait = Gait::of_speed(speed);
-        Figure { who: 1, at, loudness: gait.loudness(), visibility: gait.visibility(), facing: None, wounded: false }
+        Figure { who: 1, at, loudness: gait.loudness(), visibility: gait.visibility(), facing: None, wounded: false, held: None }
     }
 
     /// The furthest a person moving at `speed` is noticed by one of these,
@@ -13962,6 +14599,7 @@ mod tests {
                     airborne: false,
                     low: false,
                     wounded: false,
+                    held: None,
                 }]);
                 animals.step(&world, &player((0.5, 21.0, 0.5)), 0.05, NOON);
                 if pack.iter().any(|&id| animals.find(id).expect("alive").mind == Mind::Charge) {
@@ -13982,7 +14620,7 @@ mod tests {
         let id = animals.spawn(Species::Wolf, (4.0, 21.0, 0.5)).expect("wolf");
         let mut charged = false;
         for _ in 0..200 {
-            animals.player_signs(vec![PlayerSign { who: 1, facing: 0.0, working: false, airborne: false, low: false, wounded: true }]);
+            animals.player_signs(vec![PlayerSign { who: 1, facing: 0.0, working: false, airborne: false, low: false, wounded: true, held: None }]);
             animals.step(&world, &player((1.0, 21.0, 0.5)), 0.05, NOON);
             charged |= animals.find(id).expect("alive").mind == Mind::Charge;
         }
@@ -14542,5 +15180,381 @@ mod tests {
         let at = animals.find(sow).expect("sow").at();
         animals.strike(sow, (at.0 - 1.0, at.1 + 0.4, at.2), 3.0, 0.1);
         assert_ne!(animals.find(sow).expect("sow").mind, Mind::Flee, "a sow with a piglet broke off");
+    }
+}
+
+/// Keeping animals: the lure, the home, the pen, parking, the save, and what a
+/// kept flock gives. See `primitive_shared::husbandry` for the day rules, which
+/// are tested there.
+#[cfg(test)]
+mod husbandry_tests {
+    use super::*;
+    use crate::logic::falling::tests::TestWorld;
+    use primitive_shared::husbandry::Keeping;
+    use primitive_shared::types::{BLOCK_AIR, BLOCK_BOWL, BLOCK_FLINT_KNIFE, BLOCK_GRAIN, BLOCK_PLANKS, BLOCK_STONE};
+
+    const NOON: f32 = 0.5;
+    const MIDNIGHT: f32 = 0.0;
+
+    fn meadow(span: i32) -> TestWorld {
+        let world = TestWorld::default();
+        for z in -span..=span {
+            for x in -span..=span {
+                world.put(x, 20, z, BLOCK_GRASS);
+                for y in 21..30 {
+                    world.put(x, y, z, BLOCK_AIR);
+                }
+            }
+        }
+        world
+    }
+
+    /// A ring of stone `high` blocks tall, `radius` out from the origin: the
+    /// pen. Nothing else here makes one -- see `raid_the_pens`.
+    fn pen(world: &TestWorld, radius: i32, high: i32) {
+        for a in -radius..=radius {
+            for (x, z) in [(a, -radius), (a, radius), (-radius, a), (radius, a)] {
+                for y in 21..21 + high {
+                    world.put(x, y, z, BLOCK_STONE);
+                }
+            }
+        }
+    }
+
+    fn at(x: f32, z: f32) -> Vec<(PlayerId, (f32, f32, f32))> {
+        vec![(1, (x, 21.0, z))]
+    }
+
+    fn holding(animals: &mut Animals, held: Option<primitive_shared::types::BlockId>) {
+        animals.player_signs(vec![PlayerSign {
+            who: 1,
+            facing: 0.0,
+            working: false,
+            airborne: false,
+            low: false,
+            wounded: false,
+            held,
+        }]);
+    }
+
+    /// Tame, at home in the middle of the pen, fed and well.
+    fn tame_at_home() -> Keeping {
+        Keeping { trust: 1.0, tame: true, home: Some((0.5, 21.0, 0.5)), hunger: 0.0, well_fed: 1.0, ..Keeping::wild() }
+    }
+
+    fn run(animals: &mut Animals, world: &TestWorld, players: &[(PlayerId, (f32, f32, f32))], seconds: f32, time: f32) {
+        for _ in 0..(seconds / 0.05) as usize {
+            animals.step(world, players, 0.05, time);
+        }
+    }
+
+    #[test]
+    fn a_wild_sheep_comes_to_a_still_hand_holding_grain_and_not_to_one_holding_planks() {
+        for (held, comes) in [(BLOCK_GRAIN, true), (BLOCK_PLANKS, false)] {
+            let world = meadow(30);
+            let mut animals = Animals::seeded(7);
+            let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+            holding(&mut animals, Some(held));
+            run(&mut animals, &world, &at(9.5, 0.5), 20.0, NOON);
+            let p = animals.position(sheep).expect("alive");
+            // At the hand, where the lure stops it (`LURE_CLOSE`), and not
+            // merely somewhere near after a wander.
+            let near = (p.0 - 9.5).hypot(p.2 - 0.5) < LURE_CLOSE + 0.5;
+            assert_eq!(near, comes, "holding {held}: did the sheep come to the hand?");
+        }
+    }
+
+    #[test]
+    fn feeding_a_sheep_by_hand_three_times_a_quarter_day_apart_tames_it_and_a_second_feed_at_once_is_refused() {
+        let world = meadow(20);
+        let mut animals = Animals::seeded(3);
+        let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+        let eye = (2.0, 22.6, 0.5);
+        animals.calendar(0.0);
+        assert_eq!(animals.tend(sheep, eye, Some(BLOCK_GRAIN)), Tended::Fed { tamed: false });
+        assert_eq!(animals.tend(sheep, eye, Some(BLOCK_GRAIN)), Tended::Refused("it is not hungry yet"));
+        let mut tamed = false;
+        for n in 1..=2 {
+            animals.calendar(n as f32 * 0.6);
+            animals.step(&world, &at(2.0, 0.5), 0.05, NOON);
+            let eye = animals.position(sheep).map(|p| (p.0 + 1.5, 22.6, p.2)).expect("still here");
+            tamed = animals.tend(sheep, eye, Some(BLOCK_GRAIN)) == Tended::Fed { tamed: true };
+        }
+        assert!(tamed, "the third feed did not tame it");
+        assert!(animals.keeping(sheep).is_some_and(|k| k.tame && k.home.is_some()));
+    }
+
+    #[test]
+    fn planks_held_out_to_a_wild_sheep_leave_it_nobody_s() {
+        let mut animals = Animals::seeded(3);
+        let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+        assert_eq!(animals.tend(sheep, (2.0, 22.6, 0.5), Some(BLOCK_PLANKS)), Tended::Refused("it does not eat that"));
+        assert_eq!(animals.keeping(sheep), None, "shown a plank, it is kept and saved for ever");
+    }
+
+    #[test]
+    fn a_deer_cannot_be_kept() {
+        let mut animals = Animals::seeded(3);
+        let deer = animals.spawn(Species::Deer, (0.5, 21.0, 0.5)).expect("deer");
+        assert!(matches!(animals.tend(deer, (2.0, 22.6, 0.5), Some(BLOCK_GRAIN)), Tended::Refused(_)));
+    }
+
+    #[test]
+    fn a_tame_sheep_follows_grain_and_walks_home_when_the_grain_is_put_away() {
+        let world = meadow(40);
+        let mut animals = Animals::seeded(11);
+        let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+        animals.keep_for_test(sheep, tame_at_home());
+        holding(&mut animals, Some(BLOCK_GRAIN));
+        // Walking away with the sack, which a wild sheep would not follow.
+        for step in 0..600 {
+            let x = 0.5 + step as f32 * 0.025;
+            animals.step(&world, &at(x, 0.5), 0.05, NOON);
+        }
+        let followed = animals.position(sheep).expect("alive");
+        assert!(followed.0 > 9.0, "the tame sheep did not follow the grain: {followed:?}");
+        holding(&mut animals, None);
+        run(&mut animals, &world, &at(15.5, 0.5), 40.0, NOON);
+        let home = animals.position(sheep).expect("alive");
+        assert!(home.0.hypot(home.2) <= KEPT_LEASH + 2.0, "it did not go home: {home:?}");
+    }
+
+    #[test]
+    fn a_tame_sheep_does_not_run_from_a_running_player() {
+        let world = meadow(40);
+        let mut animals = Animals::seeded(5);
+        let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+        animals.keep_for_test(sheep, tame_at_home());
+        holding(&mut animals, None);
+        for step in 0..200 {
+            let x = 20.0 - step as f32 * 0.35;
+            animals.step(&world, &at(x, 0.5), 0.05, NOON);
+            assert_ne!(animals.find(sheep).expect("alive").mind, Mind::Flee, "a tame sheep bolted from its keeper");
+        }
+    }
+
+    #[test]
+    fn a_two_block_wall_holds_a_flock_from_the_grain_outside_and_a_one_block_wall_does_not() {
+        for (high, holds) in [(2, true), (1, false)] {
+            let world = meadow(30);
+            pen(&world, 3, high);
+            let mut animals = Animals::seeded(9);
+            let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+            animals.keep_for_test(sheep, tame_at_home());
+            holding(&mut animals, Some(BLOCK_GRAIN));
+            run(&mut animals, &world, &at(9.5, 0.5), 40.0, NOON);
+            let p = animals.position(sheep).expect("alive");
+            let inside = p.0.abs() < 3.0 && p.2.abs() < 3.0;
+            assert_eq!(inside, holds, "a wall {high} high: the sheep ended at {p:?}");
+        }
+    }
+
+    #[test]
+    fn a_kept_sheep_nobody_is_near_is_parked_not_forgotten_and_comes_back_when_somebody_does() {
+        let world = meadow(20);
+        let mut animals = Animals::seeded(2);
+        let kept = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+        let wild = animals.spawn(Species::Sheep, (2.5, 21.0, 0.5)).expect("sheep");
+        animals.keep_for_test(kept, tame_at_home());
+        animals.step(&world, &at(500.0, 500.0), 0.05, NOON);
+        assert!(animals.find(wild).is_none() && animals.find(kept).is_none());
+        assert_eq!(animals.parked_count(), 1, "the wild one was kept or the kept one forgotten");
+        // ...and with nobody online at all, the same.
+        animals.step(&world, &[], 0.05, NOON);
+        assert_eq!(animals.parked_count(), 1);
+        animals.step(&world, &at(10.0, 0.5), 0.05, NOON);
+        assert_eq!(animals.parked_count(), 0, "somebody came back and the flock did not");
+        assert!(animals.keeping(kept).is_some_and(|k| k.tame), "it came back somebody else's");
+    }
+
+    #[test]
+    fn a_parked_flock_comes_back_hungry_for_the_days_it_was_left() {
+        let world = meadow(20);
+        // Bare earth under it: nothing to graze while nobody watched.
+        for z in -20..=20 {
+            for x in -20..=20 {
+                world.put(x, 20, z, primitive_shared::types::BLOCK_DIRT);
+            }
+        }
+        let mut animals = Animals::seeded(2);
+        let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+        animals.keep_for_test(sheep, tame_at_home());
+        animals.calendar(0.0);
+        animals.step(&world, &at(500.0, 0.5), 0.05, NOON);
+        animals.calendar(8.0);
+        animals.step(&world, &at(5.0, 0.5), 0.05, NOON);
+        let keep = animals.keeping(sheep);
+        assert!(!keep.is_some_and(|k| k.tame), "a flock left eight days unfed is still tame: {keep:?}");
+    }
+
+    #[test]
+    fn a_tame_sheep_is_sheared_for_wool_once_and_only_again_when_it_has_grown_back() {
+        let world = meadow(20);
+        let mut animals = Animals::seeded(4);
+        let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+        let eye = (2.0, 22.6, 0.5);
+        let wild = animals.tend(sheep, eye, Some(BLOCK_FLINT_KNIFE));
+        assert!(matches!(wild, Tended::Refused(_)), "a wild sheep stood for the knife");
+        animals.keep_for_test(sheep, tame_at_home());
+        assert_eq!(animals.tend(sheep, eye, Some(BLOCK_FLINT_KNIFE)), Tended::Shorn(husbandry::FLEECE_WOOL));
+        assert!(matches!(animals.tend(sheep, eye, Some(BLOCK_FLINT_KNIFE)), Tended::Refused(_)), "sheared twice");
+        animals.calendar(0.0);
+        for day in 1..=3 {
+            animals.calendar(day as f32);
+            animals.step(&world, &at(2.0, 0.5), 0.05, NOON);
+            let eye = animals.position(sheep).map(|p| (p.0 + 1.5, 22.6, p.2)).expect("alive");
+            assert!(matches!(animals.tend(sheep, eye, Some(BLOCK_GRAIN)), Tended::Fed { .. }));
+        }
+        let eye = animals.position(sheep).map(|p| (p.0 + 1.5, 22.6, p.2)).expect("alive");
+        assert_eq!(animals.tend(sheep, eye, Some(BLOCK_FLINT_KNIFE)), Tended::Shorn(husbandry::FLEECE_WOOL));
+    }
+
+    #[test]
+    fn a_tame_ewe_with_a_lamb_gives_milk_and_the_lamb_grows_slower_for_it() {
+        let world = meadow(30);
+        let mut animals = Animals::seeded(6);
+        let milked = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("ewe");
+        let left = animals.spawn(Species::Sheep, (0.5, 21.0, 12.5)).expect("ewe");
+        let eye = (2.0, 22.6, 0.5);
+        animals.keep_for_test(milked, tame_at_home());
+        animals.keep_for_test(left, Keeping { home: Some((0.5, 21.0, 12.5)), ..tame_at_home() });
+        assert!(matches!(animals.tend(milked, eye, Some(BLOCK_BOWL)), Tended::Refused(_)), "milk with no lamb");
+        let lamb = animals.bear_young(milked).expect("lamb");
+        let other = animals.bear_young(left).expect("lamb");
+        assert!(animals.keeping(lamb).is_some_and(|k| k.tame), "a kept ewe's lamb was born wild");
+        animals.calendar(0.0);
+        let mut milkings = 0;
+        for quarter in 1..=4 {
+            if animals.tend(milked, animals.position(milked).map(|p| (p.0 + 1.5, 22.6, p.2)).unwrap(), Some(BLOCK_BOWL))
+                == Tended::Milked
+            {
+                milkings += 1;
+            }
+            animals.calendar(quarter as f32 * 0.25);
+            animals.step(&world, &at(6.0, 6.0), 0.05, NOON);
+        }
+        assert_eq!(milkings, 1, "milked more than once in a day");
+        let (slow, fast) = (animals.growth(lamb).unwrap(), animals.growth(other).unwrap());
+        assert!(slow < fast, "the milked ewe's lamb grew as fast: {slow} against {fast}");
+    }
+
+    #[test]
+    fn two_fed_tame_sheep_breed_and_two_hungry_ones_do_not() {
+        for fed in [true, false] {
+            let world = meadow(30);
+            let mut animals = Animals::seeded(12);
+            let pair = [
+                animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep"),
+                animals.spawn(Species::Sheep, (2.5, 21.0, 0.5)).expect("sheep"),
+            ];
+            let keep = if fed {
+                tame_at_home()
+            } else {
+                Keeping { hunger: husbandry::HUNGRY_AFTER_DAYS, well_fed: 0.0, ..tame_at_home() }
+            };
+            for id in pair {
+                animals.keep_for_test(id, keep);
+            }
+            animals.calendar(0.0);
+            for tenth in 1..=30 {
+                animals.calendar(tenth as f32 * 0.1);
+                if fed {
+                    for id in pair {
+                        animals.keep_for_test(id, Keeping { home: animals.keeping(id).and_then(|k| k.home), ..tame_at_home() });
+                    }
+                }
+                animals.step(&world, &at(8.0, 8.0), 0.05, NOON);
+            }
+            let flock = animals.kept().len();
+            assert_eq!(flock > 2, fed, "fed {fed}: the flock is {flock}");
+        }
+    }
+
+    #[test]
+    fn a_fed_kept_animal_leaves_dung_as_the_days_go_by() {
+        let world = meadow(20);
+        let mut animals = Animals::seeded(1);
+        let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+        animals.keep_for_test(sheep, tame_at_home());
+        animals.calendar(0.0);
+        animals.calendar(1.0);
+        animals.step(&world, &at(4.0, 0.5), 0.05, NOON);
+        assert_eq!(animals.take_dung().len(), 2, "a day of a fed sheep is two pats");
+    }
+
+    #[test]
+    fn a_raid_on_a_meadow_pen_sends_wolves_and_a_two_block_wall_keeps_them_off_the_flock() {
+        let world = meadow(40);
+        pen(&world, 3, 2);
+        let mut animals = Animals::seeded(21);
+        let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+        animals.keep_for_test(sheep, tame_at_home());
+        let raiders = animals.raid(&world, Species::Sheep, (0.5, 21.0, 0.5));
+        assert!(!raiders.is_empty(), "nothing came for the pen");
+        assert!(raiders.iter().all(|&id| animals.find(id).is_some_and(|w| w.species.hunts(Species::Sheep))));
+        let health = animals.health(sheep).expect("alive");
+        run(&mut animals, &world, &at(30.0, 30.0), 60.0, MIDNIGHT);
+        assert_eq!(animals.health(sheep), Some(health), "the wolves got into a two-block pen");
+    }
+
+    #[test]
+    fn a_raid_comes_at_most_once_a_night() {
+        let world = meadow(40);
+        let mut animals = Animals::seeded(21);
+        let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+        animals.keep_for_test(sheep, tame_at_home());
+        animals.calendar(3.0);
+        let before = animals.len();
+        for _ in 0..2000 {
+            animals.raid_the_pens(&world, true);
+        }
+        let first = animals.len() - before;
+        assert!(first > 0, "two thousand tries and no raid");
+        for _ in 0..2000 {
+            animals.raid_the_pens(&world, true);
+        }
+        assert_eq!(animals.len() - before, first, "a second raid came the same night");
+    }
+
+    /// **The round trip the whole save exists for**: a tamed sheep in a pen,
+    /// sheared and part grown back, with a lamb, written and read into a new
+    /// world -- and put back into it when somebody comes near.
+    #[test]
+    fn a_tamed_penned_sheep_comes_back_from_the_save_with_its_fleece_its_home_and_its_lamb() {
+        let world = meadow(20);
+        pen(&world, 3, 2);
+        let mut animals = Animals::seeded(8);
+        let ewe = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("ewe");
+        animals.keep_for_test(ewe, Keeping { fleece: 0.4, ..tame_at_home() });
+        let lamb = animals.bear_young(ewe).expect("lamb");
+        let wild = animals.spawn(Species::Deer, (8.5, 21.0, 8.5)).expect("deer");
+        let _ = wild;
+        let ewe_keep = animals.keeping(ewe).expect("kept");
+        let dir = std::env::temp_dir().join(format!("primitive-herd-{}", std::process::id()));
+        assert_eq!(animals.save_herd(&dir).expect("written"), 2, "the deer was saved or the flock was not");
+
+        let mut again = Animals::seeded(8);
+        assert_eq!(again.load_herd(&dir).expect("read"), 2);
+        assert!(again.is_empty(), "loaded straight into the world before anybody was near");
+        again.step(&world, &at(4.0, 4.0), 0.05, NOON);
+        let kept = again.kept();
+        let (new_ewe, _, keep) = kept.iter().copied().find(|&(id, _, k)| {
+            k.fleece_ready() == ewe_keep.fleece_ready() && again.growth(id) == Some(youth::GROWN)
+        }).expect("the ewe did not come back");
+        assert_eq!(keep, ewe_keep, "the ewe came back as somebody else");
+        let new_lamb = kept.iter().find(|&&(id, _, _)| id != new_ewe).map(|&(id, _, _)| id).expect("no lamb");
+        assert_eq!(again.mother_of(new_lamb), Some(new_ewe), "the lamb came back an orphan");
+        assert_eq!(again.growth(new_lamb), animals.growth(lamb));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_herd_file_from_another_version_is_a_world_with_no_kept_animals() {
+        let dir = std::env::temp_dir().join(format!("primitive-herd-v-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = bincode::serialize(&HerdFile { version: HERD_FORMAT_VERSION + 1, day: 0.0, animals: Vec::new() }).unwrap();
+        std::fs::write(dir.join("herd.bin"), bytes).unwrap();
+        assert_eq!(Animals::new().load_herd(&dir).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

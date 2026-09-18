@@ -1085,7 +1085,13 @@ impl Species {
     /// where no player can see it.
     pub fn hunts(self, other: Species) -> bool {
         match self {
-            Species::Wolf => matches!(other, Species::Hare | Species::Deer),
+            // **And the sheep**, which was left out while a sheep was only
+            // ever wild: slow, unafraid and no fighter, it is the easiest
+            // dinner on the map, and a wolf that walked past a flock was the
+            // one reason a pen was never needed. With it in, a flock grazing
+            // loose at night is a bet, and a wall two blocks high is the
+            // answer to it (the server's `raid_the_pens`).
+            Species::Wolf => matches!(other, Species::Hare | Species::Deer | Species::Sheep),
             // The savanna's grazers and nothing from the woods: the two
             // never share ground (`lives_in`), and a rule about a deer that
             // strayed over a border is a rule nobody ever sees working. Not
@@ -3355,7 +3361,7 @@ mod tests {
             .filter(|&&s| Species::ALL.iter().any(|p| p.hunts(s)))
             .map(|s| s.name())
             .collect();
-        assert_eq!(hunted, ["hare", "deer", "zebra", "antelope"]);
+        assert_eq!(hunted, ["hare", "deer", "sheep", "zebra", "antelope"]);
         // Nothing hunts itself, and the ones that fight back are left out
         // of each other's business.
         for &species in Species::ALL {

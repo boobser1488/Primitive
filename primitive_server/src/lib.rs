@@ -1093,6 +1093,19 @@ fn build_context(settings: ServerSettings, options: RunOptions) -> anyhow::Resul
         }
     }
 
+    // ...and the kept animals, parked until somebody comes near them. A
+    // world saved before animals were kept has none, and every animal in it
+    // is as wild as it always was -- see `Animals::load_herd`.
+    let mut herd = animals::Animals::new();
+    if let Some(dir) = &world_dir {
+        match herd.load_herd(dir) {
+            Ok(0) => {}
+            Ok(n) if options.logging => println!("[world] {n} kept animal(s)"),
+            Ok(_) => {}
+            Err(e) => eprintln!("[world] could not load the kept animals: {e}"),
+        }
+    }
+
     // ...and where the players live, which is where the rats come out. A
     // world saved before the map was has none: nobody lives anywhere yet,
     // and the house is found again in the few minutes it always took.
@@ -1327,7 +1340,7 @@ fn build_context(settings: ServerSettings, options: RunOptions) -> anyhow::Resul
         carrion: std::sync::Mutex::new(carrion),
         vermin: std::sync::Mutex::new(vermin),
         fishing: std::sync::Mutex::new(fishing),
-        animals: std::sync::Mutex::new(animals::Animals::new()),
+        animals: std::sync::Mutex::new(herd),
         rafts: std::sync::Mutex::new(rafts),
         sky: std::sync::Mutex::new(weather::Sky::new()),
         chests: std::sync::Mutex::new(chests),
@@ -2008,6 +2021,7 @@ async fn tick_loop(ctx: Arc<Context>) {
                     airborne: !state.on_ground && !state.flying,
                     low: state.sitting_on.is_some() || state.sleeping_in.is_some() || state.rowing.is_some(),
                     wounded: state.vitals.health() < logic::survival::MAX_HEALTH * 0.5,
+                    held: state.inventory.block_in(state.selected_slot),
                 });
                 // At the hearth, which is the station, with the hands a
                 // cook uses: see `quality::Maker::craft` for why no tool
@@ -2258,7 +2272,7 @@ async fn tick_loop(ctx: Arc<Context>) {
                 let weather = ctx.sky.lock().unwrap_or_else(|e| e.into_inner()).weather();
                 primitive_shared::raft::wind(ctx.clock.world_days(), weather).vector()
             };
-            let (blows, births, deaths, fallen, staked) = {
+            let (blows, births, deaths, fallen, staked, dung) = {
                 let mut animals = ctx.animals.lock().unwrap_or_else(|e| e.into_inner());
                 animals.carrying_fire(std::mem::take(&mut fire_bearers));
                 animals.player_signs(std::mem::take(&mut player_signs));
@@ -2280,10 +2294,16 @@ async fn tick_loop(ctx: Arc<Context>) {
                     animals.take_deaths(),
                     animals.take_fallen(),
                     animals.take_staked(),
+                    animals.take_dung(),
                 )
             };
             for at in staked {
                 broadcast_staked(&ctx, at);
+            }
+            // What the kept animals left, written after the lock is gone for
+            // the carcasses' reason: `set_block` and the broadcast.
+            for at in dung {
+                lay_animal_dung(&ctx, at);
             }
             for (entity, at) in births {
                 entity_appeared(&ctx, entity, at, true);
@@ -3338,6 +3358,20 @@ fn save_rafts(ctx: &Arc<Context>, dir: &std::path::Path) -> Option<usize> {
 }
 
 /// Writes how old the carcasses are, on the fires' terms exactly.
+/// Writes the kept animals. **Every save, with no dirty flag**: a flock
+/// moves every tick, so "nothing changed" is never true of it, and the file
+/// is a few dozen records.
+fn save_herd(ctx: &Arc<Context>, dir: &std::path::Path) -> Option<usize> {
+    let animals = ctx.animals.lock().unwrap_or_else(|e| e.into_inner());
+    match animals.save_herd(dir) {
+        Ok(n) => Some(n),
+        Err(e) => {
+            eprintln!("[world] kept animal save failed: {e}");
+            None
+        }
+    }
+}
+
 fn save_carrion(ctx: &Arc<Context>, dir: &std::path::Path) -> Option<usize> {
     let mut carrion = ctx.carrion.lock().unwrap_or_else(|e| e.into_inner());
     if !carrion.is_dirty() {
@@ -3864,6 +3898,7 @@ fn save_everything(ctx: &Arc<Context>, dir: &std::path::Path) -> Vec<String> {
             save_wildfire(ctx, dir);
             let racks = save_racks(ctx, dir).unwrap_or(0);
             let carrion = save_carrion(ctx, dir).unwrap_or(0);
+            let herd = save_herd(ctx, dir).unwrap_or(0);
             save_traps(ctx, dir);
             save_haunts(ctx, dir);
             let rafts = save_rafts(ctx, dir).unwrap_or(0);
@@ -3874,7 +3909,7 @@ fn save_everything(ctx: &Arc<Context>, dir: &std::path::Path) -> Vec<String> {
             // this format is answering was an operator being told "the
             // world is saved" when two thirds of it were not.
             said.push(format!(
-                "saved {blocks} block edit(s), {chests} chest(s), {fires} fire(s),                  {racks} rack(s), {carrion} carcass(es), {rafts} raft(s), {} profile(s) and the clock at {clock:.3} to {}",
+                "saved {blocks} block edit(s), {chests} chest(s), {fires} fire(s),                  {racks} rack(s), {carrion} carcass(es), {herd} kept animal(s), {rafts} raft(s), {} profile(s) and the clock at {clock:.3} to {}",
                 profiles.unwrap_or(0),
                 dir.display()
             ));
@@ -3886,6 +3921,7 @@ fn save_everything(ctx: &Arc<Context>, dir: &std::path::Path) -> Vec<String> {
             save_wildfire(ctx, dir);
             save_racks(ctx, dir);
             save_carrion(ctx, dir);
+            save_herd(ctx, dir);
             save_traps(ctx, dir);
             save_haunts(ctx, dir);
             save_rafts(ctx, dir);
@@ -7087,6 +7123,108 @@ fn leave_dung(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, feet: (i3
     }
     broadcast_block(ctx, at, BLOCK_DUNG);
     handle.state.lock().unwrap_or_else(|e| e.into_inner()).vitals.went();
+}
+
+/// Leaves a pat of dung beside a kept animal standing at `feet`.
+///
+/// **`leave_dung`'s rule, and for its reason**: beside the feet, on ground
+/// that holds a roof, never in the cell the body is in -- there it would be
+/// an animal standing inside a block. With nowhere to put it, nothing is
+/// left: a flock packed wall to wall in a pen of bare stone is a pen with
+/// nowhere to foul, and that is not worth a special case.
+///
+/// **This is the dung the field was waiting for** (`manure_the_furrow_under`):
+/// a pen put on a tired strip for a few days leaves it dunged where the flock
+/// stood, and the pats are cleared into the furrows. Rejected: dung as an
+/// item carried from the pen, for `BLOCK_DUNG`'s reason -- carried muck is a
+/// way to foul somebody's house.
+fn lay_animal_dung(ctx: &Arc<Context>, feet: (f64, f64, f64)) {
+    use primitive_shared::types::{blocks_the_sky, is_air, BLOCK_DUNG};
+    let (x, y, z) = (feet.0.floor() as i32, feet.1.floor() as i32, feet.2.floor() as i32);
+    let spot = [(1, 0), (0, 1), (-1, 0), (0, -1)].into_iter().map(|(dx, dz)| (x + dx, y, z + dz)).find(|&(x, y, z)| {
+        ctx.world.cached_block(x, y, z).is_some_and(is_air)
+            && ctx.world.cached_block(x, y - 1, z).is_some_and(blocks_the_sky)
+    });
+    let Some(at) = spot else {
+        return;
+    };
+    if ctx.world.set_block(at.0, at.1, at.2, BLOCK_DUNG) {
+        broadcast_block(ctx, at, BLOCK_DUNG);
+    }
+}
+
+/// A right click on an animal with something to tend it with
+/// (`ClientMessage::TendAnimal`): the animal decides (`Animals::tend`), and
+/// the pack pays for what it decided -- one feed, the knife's wear and the
+/// wool, a bowl for a bowl of milk.
+///
+/// **The pack is checked for room before the animal is asked**, for the wool
+/// and the milk: a fleece taken off a sheep into a full pack would be wool
+/// lost, and the sheep would be bare for three days for nothing.
+pub(crate) fn tend_animal(
+    ctx: &Arc<Context>,
+    handle: &Arc<players::PlayerHandle>,
+    target: primitive_shared::protocol::EntityId,
+) {
+    use primitive_shared::types::{block_kind, is_knife, BLOCK_BOWL, BLOCK_BOWL_MILK, BLOCK_WOOL};
+    let (eye, held, slot) = {
+        let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.vitals.is_dead() {
+            return;
+        }
+        let eye = (
+            state.position.0,
+            state.position.1 + f64::from(primitive_shared::geometry::EYE_HEIGHT),
+            state.position.2,
+        );
+        let slot = state.selected_slot;
+        let held = state.inventory.block_in(slot);
+        let room = match held {
+            Some(h) if is_knife(h) => state.inventory.has_room_for(BLOCK_WOOL, primitive_shared::husbandry::FLEECE_WOOL),
+            // The milk goes where the bowl was if it was the last one, and
+            // needs a slot of its own otherwise.
+            Some(h) if block_kind(h) == BLOCK_BOWL => {
+                state.inventory.count_in(slot) == 1 || state.inventory.has_room_for(BLOCK_BOWL_MILK, 1)
+            }
+            _ => true,
+        };
+        if !room {
+            drop(state);
+            handle.send(ServerMessage::Error("your pack is full".to_string()));
+            return;
+        }
+        (primitive_shared::geometry::narrow(eye), held, slot)
+    };
+    let tended = {
+        let mut animals = ctx.animals.lock().unwrap_or_else(|e| e.into_inner());
+        animals.tend(target, eye, held)
+    };
+    let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+    match tended {
+        animals::Tended::Refused(why) => {
+            drop(state);
+            handle.send(ServerMessage::Error(why.to_string()));
+            return;
+        }
+        animals::Tended::Fed { .. } => {
+            state.inventory.take_from(slot, 1);
+        }
+        animals::Tended::Shorn(wool) => {
+            state.inventory.wear_tool(slot);
+            state.inventory.add(BLOCK_WOOL, wool);
+        }
+        animals::Tended::Milked => {
+            if state.inventory.count_in(slot) == 1 {
+                state.inventory.retype_slot(slot, BLOCK_BOWL_MILK);
+            } else {
+                state.inventory.take_from(slot, 1);
+                state.inventory.add(BLOCK_BOWL_MILK, 1);
+            }
+        }
+    }
+    state.inventory_dirty = true;
+    drop(state);
+    send_inventory(handle);
 }
 
 /// Digs a pat of dung cleared from `at` into the furrow under it, if there is
@@ -14903,6 +15041,39 @@ mod drinking_tests {
         assert_eq!(state.inventory.count(BLOCK_JUG_WATER), 1);
         assert_eq!(state.inventory.count(BLOCK_JUG), 1);
         assert!(state.vitals.hydration_fraction() > 0.4, "the drink did nothing");
+    }
+
+    /// **The pack pays for what the animal decided**: one grain for a feed,
+    /// wool for the knife's wear, a bowl for a bowl of milk -- and nothing at
+    /// all for a feed refused.
+    #[test]
+    fn tending_a_sheep_spends_the_feed_and_pays_out_the_wool_and_the_milk() {
+        use primitive_shared::husbandry::Keeping;
+        use primitive_shared::types::{BLOCK_BOWL, BLOCK_BOWL_MILK, BLOCK_FLINT_KNIFE, BLOCK_GRAIN, BLOCK_WOOL};
+        let (ctx, handle) = a_thirsty_player();
+        let ewe = ctx.animals.lock().unwrap().spawn_at(primitive_shared::animals::Species::Sheep, (1.5, 20.0, 0.5)).unwrap();
+        let hold = |block, count| {
+            let mut state = handle.state.lock().unwrap();
+            state.inventory = primitive_shared::inventory::Inventory::new();
+            assert_eq!(state.inventory.add(block, count), 0);
+            state.selected_slot = 0;
+        };
+        hold(BLOCK_GRAIN, 3);
+        tend_animal(&ctx, &handle, ewe);
+        tend_animal(&ctx, &handle, ewe);
+        assert_eq!(handle.state.lock().unwrap().inventory.count(BLOCK_GRAIN), 2, "a refused feed was spent, or a taken one was not");
+
+        let tame = Keeping { trust: 1.0, tame: true, home: Some((1.5, 20.0, 0.5)), ..Keeping::wild() };
+        ctx.animals.lock().unwrap().keep_for_test(ewe, tame);
+        hold(BLOCK_FLINT_KNIFE, 1);
+        tend_animal(&ctx, &handle, ewe);
+        assert_eq!(handle.state.lock().unwrap().inventory.count(BLOCK_WOOL), primitive_shared::husbandry::FLEECE_WOOL);
+
+        let _lamb = ctx.animals.lock().unwrap().bear_young(ewe).expect("a lamb");
+        hold(BLOCK_BOWL, 2);
+        tend_animal(&ctx, &handle, ewe);
+        let state = handle.state.lock().unwrap();
+        assert_eq!((state.inventory.count(BLOCK_BOWL), state.inventory.count(BLOCK_BOWL_MILK)), (1, 1));
     }
 
     #[test]

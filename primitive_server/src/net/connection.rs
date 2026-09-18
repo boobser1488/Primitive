@@ -1734,6 +1734,10 @@ async fn read_loop(
                 dig_one_slice(&ctx, &handle, (global_x, global_y, global_z), face);
             }
 
+            ClientMessage::TendAnimal { animal } => {
+                crate::tend_animal(&ctx, &handle, animal);
+            }
+
             ClientMessage::Disconnect => return Ok(()),
         }
     }
