@@ -211,6 +211,8 @@ pub fn group(block: BlockId) -> Option<Group> {
         // A stew is the meat it was made to stretch; the root in it is what
         // stretched it, and one group a mouthful is the rule.
         crate::types::BLOCK_STEW => Some(Group::Meat),
+        // Milk is what an animal gives, as an egg is.
+        crate::types::BLOCK_BOWL_MILK => Some(Group::Meat),
         // ...and salted or dried, a haunch and a fish are what they were.
         crate::types::BLOCK_SALTED_MEAT
         | crate::types::BLOCK_SALTED_FISH
@@ -358,6 +360,10 @@ pub fn nutrition(block: BlockId) -> Option<f32> {
         // Under a rack of ribs, which is a whole animal's one best meal. See
         // `types::BLOCK_STEW` for the decision this is the number of.
         crate::types::BLOCK_STEW => Some(12.0),
+        // **A bowl of milk is a roasted root's worth**: a small daily thing,
+        // not a meal. Worth more would make the ewe's lamb the wrong answer
+        // every time; less, and nobody would carry the bowl to the pen.
+        crate::types::BLOCK_BOWL_MILK => Some(5.0),
         // **A fish is a hare's worth raw and most of a haunch cooked.**
         // Under the haunch, because the sea has no stamina bar in it: a
         // school is caught by swimming into it with a spear, not by a
@@ -501,6 +507,7 @@ pub fn rot_per_step(block: BlockId) -> u8 {
         // than the porridge it is the meat twin of.
         | crate::types::BLOCK_MILLET_PORRIDGE
         | crate::types::BLOCK_STEW
+        | crate::types::BLOCK_BOWL_MILK
         | BLOCK_BERRIES
         | BLOCK_ROOT
         | BLOCK_MUSHROOM
@@ -746,7 +753,7 @@ pub fn is_food(block: BlockId) -> bool {
 #[inline]
 pub fn served_in(block: BlockId) -> Option<BlockId> {
     match crate::types::block_kind(block) {
-        crate::types::BLOCK_STEW => Some(crate::types::BLOCK_BOWL),
+        crate::types::BLOCK_STEW | crate::types::BLOCK_BOWL_MILK => Some(crate::types::BLOCK_BOWL),
         _ => None,
     }
 }

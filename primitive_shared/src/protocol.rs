@@ -541,6 +541,8 @@ pub type PlayerId = u64;
 /// [`EntityKind::Animal`]'s [`Attitude`]. Both are one byte in a struct that
 /// already carries several, both read as "nothing unusual" when zero, and
 /// both are carried by 57 for the reason the rest of 57 is.
+/// ...and keeping animals: `TendAnimal` out, appended, and a bowl of milk at
+/// id 694 (`types::BLOCK_BOWL_MILK`). 57 still, which no release speaks.
 pub const PROTOCOL_VERSION: u32 = 57;
 
 /// What kind of container a screen is showing.
@@ -1874,6 +1876,18 @@ pub enum ClientMessage {
         /// other side of, as `dig::Side::from_normal` reads it: one of the
         /// six axial steps, and anything else is refused.
         face: (i8, i8, i8),
+    },
+    /// **A right click on an animal with something to tend it with**: feed
+    /// held out, a knife to shear, an empty bowl to milk into
+    /// (`husbandry::is_tending_tool`). Which of those it is, and whether the
+    /// animal will have it, is the server's (`Animals::tend`): the client
+    /// names the animal and nothing else, the way `UseRaft` names a raft.
+    ///
+    /// Rejected: **the swing, read differently with food in hand.** Then a
+    /// knife would have to shear a tame sheep and cut a wild one, and which
+    /// one a blow does would be a rule nobody could see from the hand.
+    TendAnimal {
+        animal: EntityId,
     },
 }
 

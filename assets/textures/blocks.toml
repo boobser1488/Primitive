@@ -695,6 +695,8 @@ jug_water = "pottery/jug_water.png"
 bowl_raw = "pottery/bowl_raw.png"
 bowl = "pottery/bowl.png"
 stew = "food/stew.png"
+# Milk in the same bowl: the stew's picture with the surface whitened.
+bowl_milk = "food/bowl_milk.png"
 
 # **Twelve garments, four pictures.**
 #

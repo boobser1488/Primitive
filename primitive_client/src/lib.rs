@@ -2973,8 +2973,32 @@ fn run(
                                 return;
                             }
                         }
-                        let aimed = aimed_block(&chunks, &camera);
                         let held = inventory.block_in(input.hotbar_slot);
+                        // **An animal takes the click next, with something to
+                        // tend it with in hand** -- feed, a knife, a bowl
+                        // (`husbandry::is_tending_tool`) -- and nothing else
+                        // does: a player walking planks past a sheep is
+                        // building, not asking it anything. What the click
+                        // does is the server's (`ClientMessage::TendAnimal`).
+                        if let (Some(held), Some(net)) = (held, net.as_ref()) {
+                            if primitive_shared::husbandry::is_tending_tool(held) {
+                                if let Some((animal, distance)) =
+                                    entities.aimed_at(camera.position, camera.forward(), INTERACT_RANGE)
+                                {
+                                    let is_animal = primitive_shared::protocol::entity_source(animal)
+                                        == Some(primitive_shared::protocol::EntitySource::Animal);
+                                    if is_animal
+                                        && physics::raycast_block(&chunks, camera.position, camera.forward(), distance)
+                                            .is_none()
+                                    {
+                                        net.send(ClientMessage::TendAnimal { animal });
+                                        debug_stats.network_messages_out_this_second += 1;
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        let aimed = aimed_block(&chunks, &camera);
                         let mut claim = use_gesture(aimed.map(|(_, block)| block), held);
                         // **Set down, with the modifier held**: anything not
                         // built with, one at a time, on the top of a block --

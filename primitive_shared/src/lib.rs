@@ -59,6 +59,7 @@ pub mod food;
 pub mod geometry;
 pub mod ground;
 pub mod haunt;
+pub mod husbandry;
 pub mod hearth;
 pub mod injury;
 pub mod inventory;
