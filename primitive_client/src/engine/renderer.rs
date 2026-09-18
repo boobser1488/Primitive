@@ -5087,7 +5087,7 @@ mod tests {
 /// renderer could not reproduce, which meant the bug lived on exactly
 /// the stretch of the pipeline nothing could look at.
 #[cfg(test)]
-mod offscreen_repro {
+pub(crate) mod offscreen_repro {
     use super::*;
     use crate::engine::mesh::Vertex;
 
@@ -15092,7 +15092,7 @@ mod offscreen_repro {
     /// by one process on one device from one mesh, and the only
     /// difference between the two pictures is the source string.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn draw_scene(
+    pub(crate) fn draw_scene(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         textures: &TextureManager,

@@ -132,7 +132,19 @@ comparison in a doc comment; that is the house style, not decoration.
 cargo clippy --workspace --all-targets      # must be silent
 cargo test --workspace                      # ~2700 tests
 cargo build --release -p primitive_client
+cargo test -p primitive_client --lib scenario::   # the game, played by a script
 ```
+
+**Every release must pass the scenarios.** `primitive_client/src/scenario/`
+starts a real in-process server with the anticheat on, connects the real
+client state (chunks, physics, mining, screens, mesher) without a window,
+and plays what a player does -- climbs a staircase, walks into a rack, swims
+out of a pool, works an anvil, dies in a rucksack -- asserting on what a
+player would see and feel. They exist because every unit test passed while
+the player found a staircase that lifted a whole block and stakes that
+slowed nobody. A new mechanic gets a scenario; a bug a player finds gets one
+first. `PRIMITIVE_SCENARIO_SHOTS=<absolute dir>` writes PNGs of what a
+scenario looked at through the real renderer.
 
 **Measuring, not guessing.** The game benchmarks itself:
 

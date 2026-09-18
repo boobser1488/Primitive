@@ -87,6 +87,14 @@ pub struct Audio {
     /// What the device is called. Printed once at startup, which is how
     /// somebody with two sound cards finds out which one the game took.
     pub device_name: String,
+    /// Every effect asked for, in order -- kept only under test, where the
+    /// scenario runner (`crate::scenario`) asserts on what a player would
+    /// have *heard*. A silent `Audio` has no mixer to ask, and a sound
+    /// that is never requested is exactly the bug a scenario is for: the
+    /// chest that opens without a creak because the arm that plays it was
+    /// never reached.
+    #[cfg(test)]
+    pub heard: std::sync::Mutex<Vec<Sfx>>,
 }
 
 impl Audio {
@@ -113,6 +121,8 @@ impl Audio {
             sample_rate: 0,
             channels: 0,
             device_name: "none".to_string(),
+            #[cfg(test)]
+            heard: Default::default(),
         }
     }
 
@@ -242,6 +252,8 @@ impl Audio {
             sample_rate: rate,
             channels: config.channels,
             device_name,
+            #[cfg(test)]
+            heard: Default::default(),
         })
     }
 
@@ -299,12 +311,16 @@ impl Audio {
 
     /// The same, with a gain and a playback-rate multiplier.
     pub fn play_flat(&self, sfx: Sfx, gain: f32, pitch: f32) {
+        #[cfg(test)]
+        self.heard.lock().unwrap_or_else(|e| e.into_inner()).push(sfx);
         self.voice(sfx, gain, 0.0, pitch);
     }
 
     /// Plays a sound at a place in the world, placed against where the
     /// listener was last put -- see [`placement`].
     pub fn play_at(&self, sfx: Sfx, at: glam::DVec3, gain: f32, pitch: f32) {
+        #[cfg(test)]
+        self.heard.lock().unwrap_or_else(|e| e.into_inner()).push(sfx);
         let Some(shared) = &self.shared else {
             return;
         };
