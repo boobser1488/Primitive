@@ -94,6 +94,9 @@ pub struct Mining {
     /// A cell this player has asked for and the server has not answered
     /// yet. See `await_placement`.
     awaiting: Option<((i32, i32, i32), BlockId)>,
+    /// A cairn this player piled that the server has just agreed to, and
+    /// that has not yet been asked a name. See `take_piled_cairn`.
+    piled_cairn: Option<(i32, i32, i32)>,
     /// The box the outline and the cracks go on, and the cell it was fitted
     /// to, when the world round the target decides it. See `fit_outline`.
     outline: Option<((i32, i32, i32), Corners)>,
@@ -284,7 +287,20 @@ impl Mining {
         {
             self.awaiting = None;
             self.note_placed(cell, block, at);
+            // **Asked when the server agrees, not on the tap**, for the
+            // settle's reason above: a name typed for a cairn the anticheat
+            // refused would be a mark on the map of a heap that is not
+            // there.
+            if primitive_shared::types::block_kind(block) == primitive_shared::types::BLOCK_CAIRN {
+                self.piled_cairn = Some(cell);
+            }
         }
+    }
+
+    /// The cairn this player has just piled, once: the frame opens the box
+    /// that asks its name (`Chat::open_naming`).
+    pub fn take_piled_cairn(&mut self) -> Option<(i32, i32, i32)> {
+        self.piled_cairn.take()
     }
 
     /// How far along the settle is, 0..1, or `None` when there is
@@ -553,6 +569,8 @@ fn model_faces(block: BlockId, cell: (i32, i32, i32), at: [f32; 3], lid: Option<
         mesh::dripstone_block(at, block, layers, 0xFF, &mut vertices, &mut indices);
     } else if matches!(kind, t::BLOCK_NEST | t::BLOCK_NEST_EGGS) {
         mesh::nest_block(at, block, layers, 0xFF, &mut vertices, &mut indices);
+    } else if kind == t::BLOCK_CAIRN {
+        mesh::cairn_block(at, block, layers, 0xFF, &mut vertices, &mut indices);
     } else if let Some(species) = t::species_in_bones(block) {
         crate::logic::animal_model::build_bones(
             species,

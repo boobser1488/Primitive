@@ -2635,6 +2635,16 @@ pub const BLOCK_BONES_4: BlockId = 690;
 /// in for the cheapest rung (`crafting::TOOL_LADDERS`) and are held at the
 /// anvil (`minigame`). Without this the test would fail for a tool that is
 /// doing exactly what it was made to do.
+/// **An instrument**: something held in the hand to be *read*, and spent on
+/// nothing -- the water compass, whose needle the HUD draws while it is
+/// held (`BLOCK_WATER_COMPASS`). Its own answer for the tests that ask every
+/// made thing what it is for, as `is_workshop_tool` is: it is not a tool, a
+/// garment or food, and a list of names in each test would be two places
+/// to forget the next one.
+pub fn is_instrument(id: BlockId) -> bool {
+    block_kind(id) == BLOCK_WATER_COMPASS
+}
+
 pub fn is_workshop_tool(id: BlockId) -> bool {
     matches!(
         block_kind(id),
@@ -3279,6 +3289,41 @@ pub const BLOCK_STEW: BlockId = 687;
 /// faster -- and a bowl a day is its size. It sours within the day: what a
 /// flock gives is eaten at home.
 pub const BLOCK_BOWL_MILK: BlockId = 694;
+/// **A cairn**: a heap of six stones a player piles up to say "here".
+///
+/// The map draws what the server streamed and nothing else (see
+/// `logic::map` on the client), so until this there was no way to leave
+/// a word on it: a spring, the good clay, the ford. A cairn is that word,
+/// put down *in the world* and read off the map by name -- the client
+/// asks for the name when the placement is confirmed, and keeps it with
+/// the map, not on the server (the map's reason, written there: what you
+/// know of the land is what you walked).
+///
+/// **A block and not a mark drawn on the map from anywhere.** A mark
+/// drawn from the fireside would be knowledge with no trip in it, and
+/// "marks you make" would become a note-taking chore. A cairn costs six
+/// stones carried to the place, stands where anybody walking past can see
+/// it, and is gone when somebody takes it apart -- and so is the mark.
+/// Taking it apart gives the six stones back (`block_drop_count`).
+pub const BLOCK_CAIRN: BlockId = 697;
+/// **A lodestone**: iron ore that is a magnet. One vein cell in eight
+/// gives one beside its ore when it is broken, by the cell and not by a
+/// die (the server's `lodestone_in`), so it is found by mining iron and
+/// in no other way -- which is what puts a compass behind the iron age.
+pub const BLOCK_LODESTONE: BlockId = 698;
+/// **A water compass**: an iron nail stroked on a lodestone, laid on
+/// a leaf floating in a bowl of water. Held in the hand, it gives the HUD
+/// a needle that points north (`ui::hud::compass_dial`).
+///
+/// **North, and never a bag.** There was an arrow on the HUD once that
+/// pointed at the nearest bag, and it was taken away on purpose (the
+/// note in `ui::journal`): an arrow to the goal is a walk with one right
+/// answer. A needle to north is an instrument the map is read *with* --
+/// it says which way the map's top is, and the way is still chosen off
+/// the land. Before iron that is the sky's job, and the sky goes out
+/// under cloud (`logic::bearing`); this is what a player reaches iron
+/// for, if they travel.
+pub const BLOCK_WATER_COMPASS: BlockId = 699;
 /// A bolt of plain woven cotton, and the material of the cloth set.
 pub const BLOCK_CLOTH: BlockId = 190;
 /// What cloth is worn as, one per slot. What they do is in
@@ -4414,6 +4459,9 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     (BLOCK_BOWL, "bowl"),
     (BLOCK_STEW, "stew"),
     (BLOCK_BOWL_MILK, "bowl_milk"),
+    (BLOCK_CAIRN, "cairn"),
+    (BLOCK_LODESTONE, "lodestone"),
+    (BLOCK_WATER_COMPASS, "water_compass"),
     (BLOCK_CLOTH, "cloth"),
     (BLOCK_CLOTH_CAP, "cloth_cap"),
     (BLOCK_CLOTH_TUNIC, "cloth_tunic"),
@@ -4925,6 +4973,9 @@ pub const PLACEABLE_BLOCKS: &[BlockId] = &[
     // ...and the hide frame, the one-cell rack a skin is laced into, back
     // beside it. See `BLOCK_HIDE_FRAME`.
     BLOCK_HIDE_FRAME,
+    // ...and a cairn, piled where a player wants a mark on their map. See
+    // `BLOCK_CAIRN`.
+    BLOCK_CAIRN,
     // Debarked timber, which is a building material like any other --
     // and one a player has plenty of the moment they fell a tree.
     BLOCK_STRIPPED_LOG,
@@ -8515,6 +8566,9 @@ pub fn block_drop_count(id: BlockId) -> u8 {
         // One would make it grass that hurts; two is a reason to go to the
         // riverbank with a blade.
         BLOCK_NETTLE => 2,
+        // **A cairn is the six stones it was piled from**, so taking one
+        // apart to move it costs nothing but the walk.
+        BLOCK_CAIRN => 6,
         // **A hive gives every comb that is in it**, and the empty comb two
         // lumps of wax: taking a hive apart is the end of it, and one lump --
         // two torches -- for the end of a place is a trade nobody would make
@@ -9622,6 +9676,11 @@ mod mining_tests {
                 if crate::fishing::Bait::of_block(drop).is_some() {
                     continue;
                 }
+                // ...and an instrument, which is read in the hand
+                // (`is_instrument`): a compass is spent on nothing.
+                if is_instrument(drop) {
+                    continue;
+                }
                 // ...and a half-dried sod of peat, which nothing is made
                 // from because it is not finished: it is set down again to
                 // finish drying (`BLOCK_DRYING_PEAT`).
@@ -9843,6 +9902,7 @@ mod depth_tests {
                 "barrel_grain",
                 "barrel_seeds",
                 "barrel_millet",
+                "cairn",
                 // ...and a pit kiln while it holds only pots (two eighths)
                 // or fibre (four), and the firepit, a quarter like the
                 // campfire it is on every other rule. See `pit`.

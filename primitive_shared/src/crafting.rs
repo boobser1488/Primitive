@@ -3666,6 +3666,46 @@ pub const RECIPES: &[Recipe] = &[
         returns: &[],
         failure: 0.0,
     },
+    // **A cairn**: six loose stones, piled by hand where it stands -- see
+    // `types::BLOCK_CAIRN` for why a mark on the map is a heap in the world.
+    // Six rather than the four a block of cobble takes, because a cairn has
+    // to be *seen* from a distance and a knee-high heap of four is a rock.
+    Recipe {
+        name: "cairn",
+        inputs: &[(BLOCK_PEBBLE, 6)],
+        output: (crate::types::BLOCK_CAIRN, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **A water compass**: an iron nail stroked on a lodestone until it is a
+    // needle, laid on a leaf in a bowl the jug's water goes into. The
+    // lodestone and the jug come back -- the stone is what magnetises the
+    // needle, not what it is made of, so one lodestone found is every
+    // compass a household will make (`returns` is for exactly that). A nail
+    // rather than an ingot, because an ingot in a hand row is "smelted in a
+    // meadow" (`nothing_that_melts_is_offered_at_a_campfire`), and a nail is
+    // already iron worked at the anvil: the needle is iron-age by what it
+    // is, and the lodestone by where it is found.
+    Recipe {
+        name: "water compass",
+        inputs: &[
+            (crate::types::BLOCK_NAILS, 1),
+            (crate::types::BLOCK_LODESTONE, 1),
+            (crate::types::BLOCK_LEAF_HANDFUL, 1),
+            (crate::types::BLOCK_BOWL, 1),
+            (BLOCK_JUG_WATER, 1),
+        ],
+        output: (crate::types::BLOCK_WATER_COMPASS, 1),
+        // **By hand: not the forge, not the bench.** A forge row is a batch
+        // in a hearth with a heat and a fuel (`hearth`), and nothing here is
+        // heated; a bench row must be a cheaper twin of a hand row
+        // (`a_workshop_row_is_a_cheaper_way_or_a_piece_of_the_house`), and
+        // a compass only at the bench would be a gate.
+        station: Station::Hands,
+        returns: &[(crate::types::BLOCK_LODESTONE, 1), (BLOCK_JUG, 1)],
+        failure: 0.0,
+    },
 ];
 
 /// Why a craft cannot happen, or that it can.
@@ -4952,8 +4992,12 @@ mod tests {
                 // `types::is_workshop_tool` for why it is not any of the
                 // eleven above.
                 let is_workshop_tool = crate::types::is_workshop_tool(r.output.0);
+                // ...and the thirteenth: an instrument, read in the hand
+                // and spent on nothing. See `types::is_instrument`.
+                let is_instrument = crate::types::is_instrument(r.output.0);
                 assert!(
                     is_tool
+                        || is_instrument
                         || is_workshop_tool
                         || is_tackle
                         || is_dressing

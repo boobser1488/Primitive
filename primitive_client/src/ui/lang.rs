@@ -763,6 +763,22 @@ pub enum Msg {
     /// is meant to *talk* about, and the manual and the debug line both
     /// want it in the language they are reading.
     AnimalRat,
+    /// A cairn on the map's legend. See `types::BLOCK_CAIRN`.
+    MapCairn,
+    /// What the chat box says while it is asking for a cairn's name.
+    CairnNamePrompt,
+    /// The sky read for a bearing (`logic::bearing`): which body it was
+    /// read off, then where north is from where the player looks. Two
+    /// halves rather than twelve sentences, because each half is a whole
+    /// phrase in every language here and the pair reads as "by the sun:
+    /// north is to your left".
+    SkyBySun,
+    SkyByMoon,
+    SkyByStars,
+    NorthAhead,
+    NorthRight,
+    NorthBehind,
+    NorthLeft,
 }
 
 /// One line of interface text, in every language at once.
@@ -1239,6 +1255,15 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::RunFine,      en: "struck true - more out of the same", simple: "well struck - you got more", ru: "точно - вышло больше", pl: "celnie - wyszło więcej" },
     Line { msg: Msg::RunFair,      en: "serviceable",  simple: "good enough", ru: "сойдёт", pl: "ujdzie" },
     Line { msg: Msg::RunRuined,    en: "spoiled - the piece is lost", simple: "ruined - you lost it", ru: "испорчено - заготовка пропала", pl: "zepsute - sztuka stracona" },
+    Line { msg: Msg::MapCairn,     en: "cairn",        simple: "stone pile", ru: "тур", pl: "kopiec" },
+    Line { msg: Msg::CairnNamePrompt, en: "name this cairn for your map - empty leaves it unnamed", simple: "give this stone pile a name for your map", ru: "назовите тур для карты - пусто значит без имени", pl: "nazwij ten kopiec na mapie - puste zostawia bez nazwy" },
+    Line { msg: Msg::SkyBySun,     en: "by the sun",   simple: "by the sun", ru: "по солнцу", pl: "według słońca" },
+    Line { msg: Msg::SkyByMoon,    en: "by the moon",  simple: "by the moon", ru: "по луне", pl: "według księżyca" },
+    Line { msg: Msg::SkyByStars,   en: "by the stars", simple: "by the stars", ru: "по звёздам", pl: "według gwiazd" },
+    Line { msg: Msg::NorthAhead,   en: "north is ahead", simple: "north is in front of you", ru: "север впереди", pl: "północ przed tobą" },
+    Line { msg: Msg::NorthRight,   en: "north is to your right", simple: "north is on your right", ru: "север справа", pl: "północ po prawej" },
+    Line { msg: Msg::NorthBehind,  en: "north is behind you", simple: "north is behind you", ru: "север за спиной", pl: "północ za tobą" },
+    Line { msg: Msg::NorthLeft,    en: "north is to your left", simple: "north is on your left", ru: "север слева", pl: "północ po lewej" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as

@@ -1039,6 +1039,86 @@ fn fill_flat_triangle(pixels: &mut [[u8; 4]], points: [(f32, f32); 3], tint: [f3
 /// UI_SNAPSHOT_SIZE=2712x1220 PRIMITIVE_TOUCH_UI=1 UI_SNAPSHOT_DIR=shots \
 ///     cargo test -p primitive_client --lib journal_snapshot -- --ignored --nocapture
 /// ```
+/// Pictures of finding the way: the compass and the sky's line on the
+/// view, the chat box asking a cairn's name over a phone's keyboard, and
+/// the map with named cairns on it.
+///
+/// ```text
+/// UI_SNAPSHOT_SIZE=2712x1220 UI_SNAPSHOT_SCALE=1.5 PRIMITIVE_TOUCH_UI=1 \
+///   UI_SNAPSHOT_DIR=shots/nav cargo test -p primitive_client --lib nav_snapshot -- --ignored
+/// ```
+#[test]
+#[ignore = "a tool: writes PNGs of the way-finding pieces for a person to look at"]
+fn nav_snapshot() {
+    use crate::logic::map::{Ground, Tile};
+    use crate::ui::journal::{Journal, Tab};
+    use crate::ui::lang::Msg;
+    use crate::ui::map_screen::PlayerMark;
+    use crate::ui::widgets::{anchor, scale_about, Painter};
+    use primitive_shared::types::ChunkPos;
+
+    let out = std::env::var("UI_SNAPSHOT_DIR").unwrap_or_else(|_| ".".to_string());
+    std::fs::create_dir_all(&out).expect("output directory");
+    let touch = crate::ui::widgets::touch_layout();
+    let tag = if touch { "_touch" } else { "" };
+    let font = FontAtlas::for_size(32, 1_000);
+    let aspect = width() as f32 / height() as f32;
+    let layout = snapshot_layout();
+
+    // The top of the view: a compass in the hand, facing east, and the sky
+    // read off the dawn sun -- both at once, which is the crowded case.
+    for (language, lang) in [(Language::English, ""), (Language::Russian, "_ru"), (Language::Polish, "_pl")] {
+        let mut p = Painter::onto(font, Vec::new());
+        crate::ui::hud::compass_dial(&mut p, crate::logic::bearing::needle(0.0), 0.0);
+        let hint = format!("{}: {}", language.text(Msg::SkyBySun), language.text(Msg::NorthLeft));
+        crate::ui::hud::sky_hint(&mut p, &hint);
+        let mut vertices = p.into_vertices();
+        scale_about(&mut vertices, anchor::TOP(aspect), ui_scale());
+        write(&format!("{out}/nav_compass_and_sky{lang}{tag}.png"), &vertices, font);
+    }
+
+    // The chat box asking a cairn's name, lifted over the keyboard the way
+    // the frame lifts it.
+    {
+        let mut chat = crate::ui::chat::Chat::new();
+        chat.open_naming((10, 64, 10), "", std::time::Instant::now());
+        chat.set_typed_text("Брод у ивы");
+        for (language, lang) in [(Language::English, ""), (Language::Russian, "_ru")] {
+            let mut vertices = Vec::new();
+            chat.build_into(font, aspect, touch, language, std::time::Instant::now(), &mut vertices);
+            let grown = layout.fit_from_corner(crate::ui::chat::EXTENT);
+            scale_about(&mut vertices, anchor::BOTTOM_LEFT(aspect), grown);
+            crate::ui::widgets::lift(&mut vertices, crate::ui::chat::keyboard_lift(touch, true, grown));
+            write(&format!("{out}/nav_name_cairn{lang}{tag}.png"), &vertices, font);
+        }
+    }
+
+    // The map with three cairns on it, two named -- one name long enough
+    // to be cut at the frame.
+    {
+        let mut journal = Journal::new();
+        for cx in -6..6 {
+            for cz in -4..4 {
+                let ground = if (cx + cz) % 3 == 0 { Ground::Forest } else { Ground::Grass };
+                journal.explored.insert(ChunkPos::new(cx, cz), Tile::uniform(ground, 64));
+            }
+        }
+        journal.explored.insert(ChunkPos::new(1, 0), Tile::uniform(Ground::Rock, 70).with_cairn(4, 71, 4));
+        journal.explored.insert(ChunkPos::new(-2, 1), Tile::uniform(Ground::Grass, 64).with_cairn(8, 65, 8));
+        journal.explored.insert(ChunkPos::new(2, -2), Tile::uniform(Ground::Sand, 62).with_cairn(2, 63, 9));
+        journal.explored.name_mark((20, 71, 4), "Медь в холмах");
+        journal.explored.name_mark((-24, 65, 24), "A spring under the big willow by the ford");
+        let player = PlayerMark { x: 0.0, z: 0.0, yaw: -0.4 };
+        journal.toggle(Tab::Map);
+        let layers = FaceLayers::empty_for_test();
+        for (language, lang) in [(Language::English, ""), (Language::Russian, "_ru")] {
+            let mut vertices = Vec::new();
+            journal.build_into(font, &layers, &a_playing_pack(), player, aspect, language, &mut vertices);
+            write(&format!("{out}/nav_map{lang}{tag}.png"), &vertices, font);
+        }
+    }
+}
+
 #[test]
 #[ignore = "a tool: writes PNGs of the journal for a person to look at"]
 fn journal_snapshot() {

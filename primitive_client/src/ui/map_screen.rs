@@ -9,7 +9,8 @@
 //! of the hill whichever way you were facing when you looked. The arrow
 //! turns instead. There is no compass on the HUD any more to answer "which
 //! way do I turn now" (see the note in `journal`): that is read off this
-//! map, against the land.
+//! map, against the land -- with north found off the sky, or off a water
+//! compass in the hand once there is iron (`logic::bearing`).
 //!
 //! ## What a cell is
 //!
@@ -89,6 +90,12 @@ const PLAYER: [f32; 4] = [1.0, 0.86, 0.30, 1.0];
 const BAG: [f32; 4] = [0.90, 0.22, 0.16, 1.0];
 const SPAWN: [f32; 4] = [0.96, 0.96, 0.96, 1.0];
 const OUTLINE: [f32; 4] = [0.0, 0.0, 0.0, 0.9];
+const CAIRN: [f32; 4] = [0.80, 0.78, 0.72, 1.0];
+/// What a cairn's name is written on, so it reads over snow and forest
+/// alike.
+const LABEL_PLATE: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
+/// How big a cairn's name is written.
+const LABEL_SCALE: f32 = 0.7;
 
 /// A button laid over the corner of the map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -466,6 +473,18 @@ fn marker(p: &mut Painter, at: (f32, f32), size: f32, tint: [f32; 4]) {
     p.quad(Rect::centred(at.0, at.1, size, size), tint);
 }
 
+/// A cairn: three stones stacked, a wide one, a smaller, a smallest --
+/// the shape the thing in the world is, so the legend is hardly needed.
+fn cairn(p: &mut Painter, at: (f32, f32), size: f32) {
+    let stones = [(1.0, -0.33), (0.7, 0.0), (0.4, 0.3)];
+    for (width, up) in stones {
+        p.quad(Rect::centred(at.0, at.1 + up * size, size * width + 0.006, size * 0.36 + 0.006), OUTLINE);
+    }
+    for (width, up) in stones {
+        p.quad(Rect::centred(at.0, at.1 + up * size, size * width, size * 0.36), CAIRN);
+    }
+}
+
 /// Draws the map into `body`.
 #[allow(clippy::too_many_arguments)] // a view, the land, three marks, a place, a pointer, a language
 pub fn paint(
@@ -503,6 +522,30 @@ pub fn paint(
         let (at, inside) = place((bag.0 as f32 + 0.5, bag.2 as f32 + 0.5));
         marker(p, at, if inside { 0.028 } else { 0.018 }, BAG);
     }
+    // **The cairns, only where they are on the map.** A bag off the edge
+    // is drawn at the edge because it is the one place a player must get
+    // back to; cairns are many, and a frame lined with every one of them
+    // is a frame nobody can read. Named ones carry their name beside them,
+    // on a plate, clipped at the frame.
+    for (cell, name) in map.marks() {
+        let (at, inside) = place((cell.0 as f32 + 0.5, cell.2 as f32 + 0.5));
+        if !inside {
+            continue;
+        }
+        cairn(p, at, 0.03);
+        if name.is_empty() {
+            continue;
+        }
+        let left = at.0 + 0.025;
+        let text = widgets::fit(name, LABEL_SCALE, (body.x1 - inset - left).max(0.0));
+        if text.is_empty() {
+            continue;
+        }
+        let cap = widgets::PIXEL * LABEL_SCALE * crate::engine::font::CAP_HEIGHT as f32;
+        let ink = widgets::ink_width(&text, LABEL_SCALE);
+        p.quad(Rect::new(left - 0.006, at.1 - cap / 2.0 - 0.008, left + ink + 0.006, at.1 + cap / 2.0 + 0.008), LABEL_PLATE);
+        p.text(&text, left, at.1 + cap / 2.0, LABEL_SCALE, widgets::TEXT);
+    }
     let (at, _) = place((player.x, player.z));
     arrow(p, at, heading(player.yaw), 0.034, PLAYER);
 
@@ -528,7 +571,7 @@ pub fn paint(
     p.border(body, 0.005, FRAME);
 }
 
-/// The legend along the bottom of the journal: three marks and their
+/// The legend along the bottom of the journal: four marks and their
 /// names, left to right from `left`.
 pub fn legend(p: &mut Painter, left: f32, middle: f32, language: Language) {
     let scale = 0.8;
@@ -542,6 +585,7 @@ pub fn legend(p: &mut Painter, left: f32, middle: f32, language: Language) {
     entry(p, &|p, at| arrow(p, at, (0.0, 1.0), 0.02, PLAYER), language.text(Msg::MapYou));
     entry(p, &|p, at| marker(p, at, 0.018, BAG), language.text(Msg::MapBag));
     entry(p, &|p, at| marker(p, at, 0.016, SPAWN), language.text(Msg::MapSpawn));
+    entry(p, &|p, at| cairn(p, at, 0.024), language.text(Msg::MapCairn));
 }
 
 #[cfg(test)]

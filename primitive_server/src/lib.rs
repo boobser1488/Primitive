@@ -8055,6 +8055,38 @@ pub(crate) fn spawn_block_drop(ctx: &Arc<Context>, broken: u16, at: (i32, i32, i
     if let Some((seed, count)) = primitive_shared::types::also_drops(broken) {
         items.spawn(seed, u32::from(count), primitive_shared::geometry::wide(centre), (0.0, 0.0, 0.0), None, Instant::now());
     }
+    // **A lodestone out of one iron cell in eight**, beside the ore. See
+    // `lodestone_in`.
+    if let Some(stone) = lodestone_in(broken, at) {
+        items.spawn(stone, 1, primitive_shared::geometry::wide(centre), (0.0, 0.0, 0.0), None, Instant::now());
+    }
+}
+
+/// **Whether this iron ore was a lodestone**, and so gives one beside its
+/// ore: one cell in eight, off the hash `fibrous` and `bait_from_the_ground`
+/// use, and **read off bits 40 to 42** -- clear of the fibre's ninth and the
+/// bait's twentieth, the trap `fibrous` names. By the cell rather than a
+/// die, for the bait's reason: the same vein cell answers the same way
+/// however often it is asked.
+///
+/// The honest hole, the same as the worm's: ore set down in a new cell and
+/// broken again is a new cell asked. It is left open because what it buys
+/// is one stone, and one stone is every compass a household makes (the
+/// recipe gives it back). Rejected: a lodestone block of its own in the
+/// generator -- a second ore to find where the point is that it is found
+/// *in the iron*, which is what puts the compass in the iron age.
+fn lodestone_in(broken: u16, at: (i32, i32, i32)) -> Option<primitive_shared::types::BlockId> {
+    use primitive_shared::types::{block_kind, BLOCK_IRON_ORE, BLOCK_LODESTONE};
+    if block_kind(broken) != BLOCK_IRON_ORE {
+        return None;
+    }
+    let mut h = (at.0 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (at.1 as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
+        ^ (at.2 as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 27;
+    ((h >> 40) & 7 == 0).then_some(BLOCK_LODESTONE)
 }
 
 /// **What bait was in this cell**, if any: a worm in soil, a grub in grass.
@@ -16516,6 +16548,21 @@ mod picking_tests {
             said.iter().any(|text| text.contains("full")),
             "the player was not told why nothing came off: {said:?}"
         );
+    }
+
+    #[test]
+    fn about_one_iron_cell_in_eight_is_a_lodestone_and_always_the_same_one() {
+        use primitive_shared::types::{BLOCK_IRON_ORE, BLOCK_LODESTONE, BLOCK_STONE};
+        let cells: Vec<(i32, i32, i32)> =
+            (0..40).flat_map(|x| (0..40).map(move |z| (x - 20, 30 + (x * z) % 7, z - 20))).collect();
+        let found = cells.iter().filter(|&&at| lodestone_in(BLOCK_IRON_ORE, at).is_some()).count();
+        let share = found as f32 / cells.len() as f32;
+        assert!((0.08..0.17).contains(&share), "{found} lodestones in {} iron cells", cells.len());
+        for &at in &cells {
+            assert_eq!(lodestone_in(BLOCK_IRON_ORE, at), lodestone_in(BLOCK_IRON_ORE, at), "{at:?} answered twice differently");
+            assert_eq!(lodestone_in(BLOCK_STONE, at), None, "plain stone at {at:?} gave a lodestone");
+        }
+        assert!(cells.iter().any(|&at| lodestone_in(BLOCK_IRON_ORE, at) == Some(BLOCK_LODESTONE)));
     }
 
     #[test]

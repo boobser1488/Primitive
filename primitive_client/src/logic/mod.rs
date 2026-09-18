@@ -13,6 +13,7 @@
 //! | `hand`          | the player's own arm, and what it is holding      |
 //! | `player_model`  | what another player looks like, and how they move |
 //! | `stamina`       | whether a sprint is available                     |
+//! | `bearing`       | where north is, off the sky or a compass needle   |
 //! | `shake`         | the camera's own motion -- bob, sway, recoil      |
 //! | `worlds`        | the singleplayer saves on disk                    |
 //!
@@ -28,6 +29,7 @@
 //! being implemented twice.
 
 pub mod animal_model;
+pub mod bearing;
 pub mod bbmodel;
 pub mod models;
 mod model_notes;
