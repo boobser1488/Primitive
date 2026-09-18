@@ -1722,6 +1722,8 @@ pub(crate) fn drawn_as_model(id: BlockId) -> bool {
             t::block_kind(id),
             t::BLOCK_NEST
                 | t::BLOCK_NEST_EGGS
+                // A cairn is three stones and the air between them.
+                | t::BLOCK_CAIRN
                 | t::BLOCK_JUG
                 | t::BLOCK_DRYING_RACK
                 | t::BLOCK_HIDE_FRAME
@@ -3447,6 +3449,31 @@ pub fn build_mesh(
                         );
                         continue;
                     }
+
+                    // A cairn is three stones stacked: see `cairn_block`.
+
+                    if primitive_shared::types::block_kind(id) == primitive_shared::types::BLOCK_CAIRN {
+
+                        cairn_block(
+
+                            [x as f32, y as f32, z as f32],
+
+                            id,
+
+                            textures,
+
+                            model_light(cache, cell, y, cover_table),
+
+                            vertices,
+
+                            indices,
+
+                        );
+
+                        continue;
+
+                    }
+
 
                     // A nest is a bowl of twigs with eggs in it, and both
                     // halves are model rather than tile: see `nest_block`.
@@ -6282,6 +6309,39 @@ pub(crate) fn nest_block(
     }
 }
 
+/// A cairn (`types::BLOCK_CAIRN`): three stones stacked, each smaller than
+/// the one under it, in the cobble it wears.
+///
+/// Three boxes and not six: a heap of six pebbles drawn stone for stone
+/// is a pile of dice at any distance a cairn is meant to be seen from,
+/// and what reads as "somebody put this here" is the tapering stack.
+/// Exactly `thickness` (six eighths) tall, the nest's rule: the collider
+/// and the step read that number, and a heap taller than its box is a heap
+/// walked through.
+pub(crate) fn cairn_block(
+    at: [f32; 3],
+    block: BlockId,
+    textures: &crate::engine::texture::FaceLayers,
+    light: u8,
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+) {
+    let (sky, block_light) = (light & 0x0F, (light >> 4) & 0x0F);
+    let stone = textures.layer_for_face(block, 0);
+    // In sixteenths, square about the middle so a quarter turn changes
+    // nothing (the cairn has no front). Each stone stands in from the one
+    // below, so no two faces share a plane (`model_overlap`); the undersides
+    // lie on the stone below, where nothing can see them.
+    const STONES: [([f32; 3], [f32; 3]); 3] = [
+        ([2.5, 0.0, 2.5], [13.5, 5.0, 13.5]),
+        ([4.0, 5.0, 4.0], [12.0, 9.5, 12.0]),
+        ([5.5, 9.5, 5.5], [10.5, 12.0, 10.5]),
+    ];
+    for (from, to) in STONES {
+        push_box(at, from, to, 0, stone, true, sky, block_light, vertices, indices);
+    }
+}
+
 /// What one cell of a rack draws.
 ///
 /// **Three answers, and they were two.** This was an `Option`: `Some` for the
@@ -7751,7 +7811,7 @@ pub(crate) fn has_carried_model(block: BlockId) -> bool {
         || is_furniture(block)
         || t::is_door(block)
         || t::is_step(block)
-        || matches!(kind, t::BLOCK_JUG | t::BLOCK_DRYING_RACK | t::BLOCK_HIDE_FRAME | t::BLOCK_NEST | t::BLOCK_NEST_EGGS | t::BLOCK_COCONUT)
+        || matches!(kind, t::BLOCK_JUG | t::BLOCK_DRYING_RACK | t::BLOCK_HIDE_FRAME | t::BLOCK_NEST | t::BLOCK_NEST_EGGS | t::BLOCK_COCONUT | t::BLOCK_CAIRN)
 }
 
 /// A block as it is carried or dropped: the geometry `build_mesh` draws it
@@ -7820,6 +7880,8 @@ pub(crate) fn carried_model(
         rack_block([0.0; 3], block, RackColumns::Lone, textures, OPEN_SKY, vertices, indices);
     } else if matches!(kind, t::BLOCK_NEST | t::BLOCK_NEST_EGGS) {
         nest_block([0.0; 3], block, textures, OPEN_SKY, vertices, indices);
+    } else if kind == t::BLOCK_CAIRN {
+        cairn_block([0.0; 3], block, textures, OPEN_SKY, vertices, indices);
     } else if kind == t::BLOCK_COCONUT {
         // A nut of the palm's own bunch, not the icon given a texel of
         // thickness: "кокосы надо добавлять как модели".

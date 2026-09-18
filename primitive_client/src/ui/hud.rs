@@ -1495,6 +1495,59 @@ pub fn sail_gauge(painter: &mut Painter, relative_wind: f32, angle: f32, strengt
     spoke(painter, centre, across, -r * 0.76, r * 0.76, r * 0.07, ink);
 }
 
+/// How far right of the middle the compass sits while the sail's dial has
+/// the middle: beside it, a gap apart, so a sailor reads both at once.
+pub const COMPASS_BESIDE_SAIL: f32 = SAIL_DIAL_HALF * 2.0 + 0.03;
+/// The needle's north end: the red a lodestone needle's marked end is
+/// painted, so which end is north is a colour *and* a length.
+const COMPASS_NORTH: [f32; 4] = [0.90, 0.26, 0.20, 1.0];
+const COMPASS_SOUTH: [f32; 4] = [0.82, 0.82, 0.80, 0.9];
+/// The mark at the top of the plate: where the player is looking.
+const COMPASS_LUBBER: [f32; 4] = [0.95, 0.86, 0.55, 0.9];
+
+/// **The water compass** (`types::BLOCK_WATER_COMPASS`), while one is in
+/// the hand: the sail dial's plate, with the top of it the way the player
+/// faces and a needle to north. `needle` is `logic::bearing::needle` --
+/// radians clockwise from the top of the dial -- and `x` is where the
+/// middle of the dial sits across the top of the screen.
+///
+/// **The top is where the player looks, not north.** A dial with north up
+/// and an arrow for the player is the map, which the journal already is;
+/// this answers the question the map cannot while it is shut -- "where is
+/// the map's top from where I am standing" -- the way a real compass in a
+/// hand does. It never points at a bag (see `types::BLOCK_WATER_COMPASS`).
+pub fn compass_dial(painter: &mut Painter, needle: f32, x: f32) {
+    let centre = (x, SAIL_DIAL_Y);
+    let plate = Rect::centred(centre.0, centre.1, SAIL_DIAL_HALF * 2.0, SAIL_DIAL_HALF * 2.0);
+    painter.quad(plate, SAIL_DIAL_BG);
+    painter.border(plate, 0.0025, SAIL_DIAL_EDGE);
+    let r = SAIL_DIAL_HALF;
+    spoke(painter, centre, 0.0, r * 0.74, r * 0.92, r * 0.05, COMPASS_LUBBER);
+    // The needle: a long red half to north and a short pale half behind.
+    spoke(painter, centre, needle, 0.0, r * 0.72, r * 0.075, COMPASS_NORTH);
+    spoke(painter, centre, needle + std::f32::consts::PI, 0.0, r * 0.5, r * 0.06, COMPASS_SOUTH);
+}
+
+/// Where the sky's hint is written: under the dials' row, so a player
+/// with a compass in hand who looks up has both and neither covers the
+/// other.
+const SKY_HINT_TOP: f32 = SAIL_DIAL_Y - SAIL_DIAL_HALF - 0.035;
+const SKY_HINT_SCALE: f32 = 0.85;
+
+/// **What the sky says about north** (`logic::bearing::read_sky`), one
+/// line near the top of the view while the player is looking at the thing
+/// it is read off. Plain words on a plate, and gone the moment they look
+/// away: it is a reading, not an instrument (that is the compass above).
+pub fn sky_hint(painter: &mut Painter, text: &str) {
+    let ink = widgets::ink_width(text, SKY_HINT_SCALE);
+    let cap = widgets::cell_height(SKY_HINT_SCALE);
+    painter.quad(
+        Rect::new(-ink / 2.0 - 0.014, SKY_HINT_TOP - cap - 0.004, ink / 2.0 + 0.014, SKY_HINT_TOP + 0.012),
+        SAIL_DIAL_BG,
+    );
+    painter.text_centred(text, 0.0, SKY_HINT_TOP, SKY_HINT_SCALE, widgets::TEXT);
+}
+
 /// The dark half of every pair. Near-black, and the same behind a
 /// frame, a letter and the stick's ring.
 const EDGE_DARK: [f32; 4] = [0.03, 0.03, 0.04, 0.92];

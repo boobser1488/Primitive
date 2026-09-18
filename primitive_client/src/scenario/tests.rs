@@ -639,3 +639,39 @@ fn a_hut_with_a_fire_and_no_smoke_hole_fills_with_smoke_and_with_one_it_clears_b
     no_corrections(&s);
 }
 
+#[test]
+fn a_cairn_piled_on_the_meadow_asks_its_name_and_is_on_the_map_over_the_grass() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.give(t::BLOCK_CAIRN, 1);
+    s.select(t::BLOCK_CAIRN);
+    let ground = (x0 + 2, GROUND, z);
+    let cairn = (x0 + 2, GROUND + 1, z);
+    s.look_at_face(ground, (0, 1, 0));
+    s.use_aimed();
+    assert!(
+        s.until(3.0, |s| s.block(cairn).is_some_and(|b| t::block_kind(b) == t::BLOCK_CAIRN)),
+        "the cairn never went up: {:?}",
+        s.block(cairn).map(t::block_name)
+    );
+    // The name is asked for once, when the server has agreed -- this is
+    // what opens the chat box in the frame.
+    assert_eq!(s.mining.take_piled_cairn(), Some(cairn), "the piled cairn did not ask for a name");
+    assert_eq!(s.mining.take_piled_cairn(), None, "the name was asked for twice");
+    // Drawn as tall as the box the feet stand on.
+    let (lo, hi) = s.drawn_bounds(cairn, cairn).expect("the cairn is not drawn");
+    assert!((hi[1] - lo[1] - 0.75).abs() < 0.05, "the cairn is drawn {} tall and stands 0.75", hi[1] - lo[1]);
+    // The map, surveyed from the chunks this client holds, has it -- over
+    // the meadow under it, not a patch of building.
+    let mut map = crate::logic::map::ExploredMap::default();
+    map.note_edit(cairn.0, cairn.2);
+    map.catch_up(&s.chunks, std::time::Duration::from_secs(1));
+    assert_eq!(map.mark_name(cairn), Some(""), "the cairn is not on the map");
+    assert_eq!(map.at(cairn.0, cairn.2).map(|(g, _)| g), Some(crate::logic::map::Ground::Grass));
+    map.name_mark(cairn, "the ford");
+    assert_eq!(map.mark_name(cairn), Some("the ford"));
+    s.shot("cairn");
+    no_corrections(&s);
+}
+

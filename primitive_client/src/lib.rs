@@ -1631,10 +1631,7 @@ fn run(
                         );
                         match chat.tapped(graphics.aspect(), touch_controls, authored) {
                             Some(chat::Tap::Send) => {
-                                if let (Some(line), Some(net)) = (chat.submit(), net.as_ref()) {
-                                    net.send(ClientMessage::Chat(line));
-                                    debug_stats.network_messages_out_this_second += 1;
-                                }
+                                submit_chat(&mut chat, net.as_ref(), &mut journal, &mut debug_stats);
                                 close_chat(&mut chat, &window, &mut input, paused);
                             }
                             Some(chat::Tap::Leave) => {
@@ -2041,12 +2038,7 @@ fn run(
                             }
                             match code {
                                 KeyCode::Enter | KeyCode::NumpadEnter if !repeat => {
-                                    if let (Some(line), Some(net)) =
-                                        (chat.submit(), net.as_ref())
-                                    {
-                                        net.send(ClientMessage::Chat(line));
-                                        debug_stats.network_messages_out_this_second += 1;
-                                    }
+                                    submit_chat(&mut chat, net.as_ref(), &mut journal, &mut debug_stats);
                                     close_chat(&mut chat, &window, &mut input, paused);
                                 }
                                 KeyCode::Escape => {
@@ -3949,6 +3941,28 @@ fn run(
                         &mut journal,
                         &mut fishing_float,
                     );
+
+                    // **A cairn the server has just agreed to asks for its
+                    // name**, in the chat box (see `Chat::open_naming` for
+                    // why that box). Not over a screen the player has open
+                    // or a line they are typing: the heap is a mark on the
+                    // map without a name, and the survey has it already.
+                    if let Some(cell) = mining.take_piled_cairn() {
+                        if !paused
+                            && !chat.is_typing()
+                            && !inventory_screen.open
+                            && !chest_screen.is_open()
+                            && !station_screen.is_open()
+                            && !journal.is_open()
+                            && !death.is_open()
+                        {
+                            let current = journal.explored.mark_name(cell).unwrap_or("").to_string();
+                            chat.open_naming(cell, &current, Instant::now());
+                            window.set_ime_visible(true);
+                            release_cursor(&window, &mut input);
+                            input.release_all();
+                        }
+                    }
 
                     // Dying and coming back are the two moments the
                     // cursor changes hands without the player pressing
@@ -5992,6 +6006,63 @@ fn run(
                             );
                         }
 
+                        // **Which way is north**: a needle while a water
+                        // compass is in the hand, and a line off the sky
+                        // while the player is looking at it. Pinned to the
+                        // top with the sail's dial and never faded, for the
+                        // sail's reason. See `logic::bearing` for why the
+                        // sky's reading is a look and not an instrument.
+                        {
+                            let from = ui_vertices.len();
+                            let mut painter = widgets::Painter::onto(
+                                graphics.textures.font,
+                                std::mem::take(&mut ui_vertices),
+                            );
+                            let held_compass = inventory
+                                .block_in(input.hotbar_slot)
+                                .is_some_and(|held| primitive_shared::types::block_kind(held) == primitive_shared::types::BLOCK_WATER_COMPASS);
+                            if held_compass {
+                                let sailing = riding.aboard_raft().is_some_and(|(_, body)| body.sail);
+                                hud::compass_dial(
+                                    &mut painter,
+                                    logic::bearing::needle(camera.yaw),
+                                    if sailing { hud::COMPASS_BESIDE_SAIL } else { 0.0 },
+                                );
+                            }
+                            let eye = camera.position.floor();
+                            let reading = logic::bearing::read_sky(&logic::bearing::SkyView {
+                                look: camera.forward(),
+                                to_sun: -sky.sun_direction(),
+                                to_moon: -sky.moon_direction(),
+                                moon_lit: primitive_shared::moon::illumination(sky.world_days()),
+                                overcast: sky.overcast(),
+                                open_sky: light.sky(eye.x as i32, eye.y as i32, eye.z as i32)
+                                    >= primitive_shared::types::MAX_LIGHT,
+                            });
+                            if let Some(reading) = reading {
+                                use logic::bearing::{Guide, Side};
+                                use ui::lang::Msg;
+                                let by = settings.language.text(match reading.guide {
+                                    Guide::Sun => Msg::SkyBySun,
+                                    Guide::Moon => Msg::SkyByMoon,
+                                    Guide::Stars => Msg::SkyByStars,
+                                });
+                                let north = settings.language.text(match reading.north {
+                                    Side::Ahead => Msg::NorthAhead,
+                                    Side::Right => Msg::NorthRight,
+                                    Side::Behind => Msg::NorthBehind,
+                                    Side::Left => Msg::NorthLeft,
+                                });
+                                hud::sky_hint(&mut painter, &format!("{by}: {north}"));
+                            }
+                            ui_vertices = painter.into_vertices();
+                            widgets::scale_about(
+                                &mut ui_vertices[from..],
+                                widgets::anchor::TOP(ui_aspect),
+                                ui_scale,
+                            );
+                        }
+
                         // The thumb controls, over the HUD and under
                         // everything that can be opened: a player with
                         // their pack open is not steering. Never drawn
@@ -6862,6 +6933,28 @@ fn reconcile_the_editor(
     }
     if let Some(text) = &request.editor {
         window.set_ime_text(text);
+    }
+}
+
+/// Sends the line typed in the chat box -- or, when the box was asking for
+/// a cairn's name, gives the cairn that name on this player's map and sends
+/// nothing (see `Chat::open_naming`). One function for the Enter key and the
+/// touch box's send button, so the two cannot come to disagree about where
+/// a name goes.
+fn submit_chat(
+    chat: &mut chat::Chat,
+    net: Option<&network::NetworkHandle>,
+    journal: &mut ui::journal::Journal,
+    debug_stats: &mut DebugStats,
+) {
+    let naming = chat.naming();
+    match (chat.submit(), naming, net) {
+        (Some(name), Some(at), _) => journal.explored.name_mark(at, &name),
+        (Some(line), None, Some(net)) => {
+            net.send(ClientMessage::Chat(line));
+            debug_stats.network_messages_out_this_second += 1;
+        }
+        _ => {}
     }
 }
 

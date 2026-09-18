@@ -697,6 +697,13 @@ bowl = "pottery/bowl.png"
 stew = "food/stew.png"
 # Milk in the same bowl: the stew's picture with the surface whitened.
 bowl_milk = "food/bowl_milk.png"
+# Navigation. The cairn wears the cobble it is piled from and carries a
+# heap of the pebble picture as its icon; the lodestone is native copper's
+# lump in black iron; the compass is the milk bowl with water, a leaf and
+# a needle on it -- all recolours, the house rule.
+cairn = { all = "terrain/cobblestone.png", item = "terrain/cairn_item.png" }
+lodestone = "metal/lodestone.png"
+water_compass = "tools/water_compass.png"
 
 # **Twelve garments, four pictures.**
 #

@@ -334,6 +334,9 @@ pub struct Chat {
     /// How far back through `sent` the player has walked, or `None`
     /// while they are typing something of their own.
     recall: Option<usize>,
+    /// The cairn whose name the box is asking for, while it is -- see
+    /// [`Chat::open_naming`]. `None` for an ordinary line to say.
+    naming: Option<(i32, i32, i32)>,
 }
 
 impl Chat {
@@ -356,8 +359,33 @@ impl Chat {
         self.unread = 0;
     }
 
+    /// Opens the box to ask for a cairn's name, holding the name it has.
+    ///
+    /// **The chat box, and not a naming screen of its own.** The box is the
+    /// one line of text in a running world that already works on a phone:
+    /// the input method's mirror (`ime::Typing`), the lift above the
+    /// keyboard, the send and leave buttons a touch screen needs because
+    /// an input method's "Done" key is often nothing a game can read. A
+    /// second field would be a second copy of all of it, proven only by a
+    /// human tapping a phone (see `CLAUDE.md`: a phone cannot be driven).
+    /// What changes is where the line goes: `submit` answers it and the
+    /// frame files it with the map rather than sending it to anybody.
+    pub fn open_naming(&mut self, at: (i32, i32, i32), current: &str, now: Instant) {
+        self.open(now);
+        self.naming = Some(at);
+        if let Some(input) = self.input.as_mut() {
+            input.set_text(current);
+        }
+    }
+
+    /// The cairn being named, while the box is asking for a name.
+    pub fn naming(&self) -> Option<(i32, i32, i32)> {
+        self.naming.filter(|_| self.is_typing())
+    }
+
     /// Closes it, throwing away whatever was half-typed.
     pub fn close(&mut self) {
+        self.naming = None;
         self.input = None;
         self.opened_at = None;
         self.recall = None;
@@ -505,6 +533,12 @@ impl Chat {
         self.recall = None;
         self.scroll = 0;
         let trimmed = typed.text().trim();
+        // A name is not a line said: it is not recalled with Up, and an
+        // empty one is an answer (the cairn stays unnamed), so the caller
+        // is told it with the empty string rather than with nothing.
+        if self.naming.take().is_some() {
+            return Some(trimmed.to_string());
+        }
         if trimmed.is_empty() {
             return None;
         }
@@ -875,7 +909,15 @@ impl Chat {
         // summoned it -- rather than in the middle of the screen, which
         // is where a completion popup would put itself and where nobody
         // typing at the bottom-left is looking.
-        let hint = if open { self.command_hint() } else { Vec::new() };
+        // While a cairn is being named, the hint is the question -- the
+        // one thing a box that opened by itself has to say.
+        let hint = if self.naming().is_some() {
+            vec![language.text(Msg::CairnNamePrompt)]
+        } else if open {
+            self.command_hint()
+        } else {
+            Vec::new()
+        };
         let mut y = LOG_BOTTOM;
         for line in hint.iter().rev() {
             let text = widgets::fit(line, SCALE, width - 0.02);
@@ -1502,6 +1544,30 @@ mod tests {
 
     fn now() -> Instant {
         Instant::now()
+    }
+
+    #[test]
+    fn naming_a_cairn_is_not_a_line_said_and_an_empty_name_is_still_an_answer() {
+        let mut chat = Chat::new();
+        chat.open_naming((4, 70, -9), "old", now());
+        assert_eq!(chat.naming(), Some((4, 70, -9)));
+        assert_eq!(chat.typed_text(), "old", "the box did not hold the name the cairn has");
+        chat.set_typed_text("  the ford ");
+        assert_eq!(chat.submit(), Some("the ford".to_string()));
+        assert_eq!(chat.naming(), None);
+        // Up does not bring a cairn's name back as a line to say.
+        chat.open(now());
+        chat.recall(1);
+        assert_eq!(chat.typed_text(), "");
+        chat.close();
+        // Emptied and sent: the answer is "no name", not "nothing happened".
+        chat.open_naming((0, 0, 0), "x", now());
+        chat.set_typed_text("");
+        assert_eq!(chat.submit(), Some(String::new()));
+        // ...and leaving the box is leaving the name as it was.
+        chat.open_naming((0, 0, 0), "x", now());
+        chat.close();
+        assert_eq!(chat.naming(), None);
     }
 
     #[test]

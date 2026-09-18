@@ -783,6 +783,13 @@ const ACCENT: [f32; 4] = [0.95, 0.72, 0.30, 1.0];
 // about. The server still sends the bags (`ServerMessage::Landmarks`),
 // because the map is what draws them.
 //
+// **There is a compass again, and it is not that one.** A water compass
+// (`types::BLOCK_WATER_COMPASS`), made from an iron nail and
+// held in the hand, draws a needle to *north* -- never to a bag. It says
+// which way the top of this map is from where the player stands, which is
+// how a map is read; the way is still chosen off the land. Before iron the
+// sky says the same thing to a player who looks up (`logic::bearing`).
+//
 // Nothing to migrate: the compass was never an item, a recipe or a saved
 // field on the client -- only a picture of the landmarks the map also
 // reads -- so old worlds and profiles load exactly as they did.
