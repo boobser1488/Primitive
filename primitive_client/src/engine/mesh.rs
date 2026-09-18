@@ -7471,6 +7471,8 @@ pub(crate) fn is_furniture(id: BlockId) -> bool {
         // it. It is furniture here all the same -- a model on a stump that
         // leaves the floor of its cell showing round the base.
         || block_kind(id) == primitive_shared::types::BLOCK_ANVIL
+        // ...and the barter stall, a counter on legs under an awning.
+        || block_kind(id) == primitive_shared::types::BLOCK_STALL
 }
 
 /// How many of `push_box`'s quarter turns lay a bed written head-toward
@@ -7586,6 +7588,10 @@ pub(crate) fn furniture_block_hinged(
         primitive_shared::types::BLOCK_ANVIL => {
             (Prop::Anvil, turned_from_north(block_facing(block)))
         }
+        // Written with its front -- the drape, where a buyer stands -- toward
+        // north, so turned the way the chest is: it faces whoever put it down,
+        // and the owner stands behind it.
+        primitive_shared::types::BLOCK_STALL => (Prop::Stall, turned_from_north(block_facing(block))),
         _ => return,
     };
     // Face 4 is +z and 5 is -z, as the piece is written. Measured on the

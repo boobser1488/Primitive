@@ -612,6 +612,9 @@ workbench = { all = "terrain/planks.png", item = "furniture/workbench_item.png" 
 mason_block = { all = "terrain/stone.png", item = "furniture/mason_block_item.png" }
 potters_wheel = { all = "terrain/planks.png", item = "furniture/potters_wheel_item.png" }
 leather_bench = { all = "terrain/planks.png", item = "furniture/leather_bench_item.png" }
+# The barter stall: a model (`furniture/stall.bbmodel`), so its faces are the
+# crumbs' planks and its one picture of its own is the icon.
+stall = { all = "terrain/planks.png", item = "furniture/stall_item.png" }
 
 # ---- the smith and the joiner ----
 #

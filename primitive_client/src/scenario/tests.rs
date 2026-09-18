@@ -639,3 +639,132 @@ fn a_hut_with_a_fire_and_no_smoke_hole_fills_with_smoke_and_with_one_it_clears_b
     no_corrections(&s);
 }
 
+
+// ---------------------------------------------------------------- the stall
+
+/// The pack square holding `block`, as the screen's hit test finds it.
+fn pack_square(s: &Scenario, block: t::BlockId) -> (f32, f32) {
+    let slot = (0..crate::logic::inventory::SLOTS)
+        .find(|&slot| s.inventory.block_in(slot).is_some_and(|b| t::block_kind(b) == t::block_kind(block)))
+        .unwrap_or_else(|| panic!("no {} in the pack", t::block_name(block)));
+    let rect = crate::ui::chest_screen::slot_rect(primitive_shared::protocol::Side::Pack, slot);
+    (rect.centre_x(), rect.centre_y())
+}
+
+fn centre(rect: crate::ui::widgets::Rect) -> (f32, f32) {
+    (rect.centre_x(), rect.centre_y())
+}
+
+/// What the last `ChestState` a client was sent says is in the container.
+fn last_contents(s: &Scenario) -> primitive_shared::inventory::Inventory {
+    s.heard
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            ServerMessage::ChestState { inventory, .. } => Some(inventory.clone()),
+            _ => None,
+        })
+        .expect("never told what is in the container")
+}
+
+#[test]
+fn a_stall_put_down_by_one_player_is_traded_at_by_another_through_both_screens() {
+    use crate::ui::chest_screen::{stall_control_rect, stall_slot_rect, StallControl};
+    use primitive_shared::stall::{Offer, Refusal, STOCK, TAKINGS};
+    let mut owner = Scenario::new();
+    let mut buyer = owner.join("buyer");
+    let (x0, z) = FIELD;
+    let stall = (x0 + 2, GROUND + 1, z);
+
+    // The owner builds it, with their own hands, so the server knows whose.
+    owner.stand_at(feet_on(x0, z));
+    owner.give(t::BLOCK_STALL, 1);
+    owner.select(t::BLOCK_STALL);
+    owner.look_at_face((stall.0, GROUND, stall.2), (0, 1, 0));
+    owner.use_aimed();
+    assert!(
+        owner.until_both(&mut buyer, 3.0, |o, _| o.block(stall).is_some_and(|b| t::block_kind(b) == t::BLOCK_STALL)),
+        "the stall never went down"
+    );
+
+    // Stocks it, and prices it: four flint for a hide, named by holding a
+    // flint off the counter and a hide out of the pack up to the squares.
+    owner.give(t::BLOCK_FLINT, 8);
+    owner.give(t::BLOCK_HIDE, 1);
+    owner.look_at_face(stall, (-1, 0, 0));
+    owner.use_aimed();
+    assert!(
+        owner.until_both(&mut buyer, 3.0, |o, _| o.chest_screen.stall().is_some_and(|v| v.yours)),
+        "the owner's stall did not open as theirs"
+    );
+    let flint = pack_square(&owner, t::BLOCK_FLINT);
+    owner.chest_shift_click(flint);
+    assert!(
+        owner.until_both(&mut buyer, 3.0, |o, _| last_contents(o).count_within(STOCK, t::BLOCK_FLINT) == 8),
+        "the flint never went onto the counter"
+    );
+    owner.chest_click(centre(stall_slot_rect(STOCK.start).unwrap()));
+    owner.chest_click(centre(stall_control_rect(StallControl::Give(0))));
+    for _ in 0..3 {
+        owner.chest_click(centre(stall_control_rect(StallControl::Step { row: 0, take: false, up: true })));
+    }
+    let hide = pack_square(&owner, t::BLOCK_HIDE);
+    owner.chest_click(hide);
+    owner.chest_click(centre(stall_control_rect(StallControl::Take(0))));
+    let price = Offer { give: t::BLOCK_FLINT, give_count: 4, take: t::BLOCK_HIDE, take_count: 1 };
+    assert!(
+        owner.until_both(&mut buyer, 3.0, |o, _| o.chest_screen.stall().is_some_and(|v| v.offers[0] == Some(price))),
+        "the price never reached the server: {:?}",
+        owner.chest_screen.stall()
+    );
+    assert_eq!(owner.inventory.count(t::BLOCK_HIDE), 1, "naming the price spent the sample");
+    owner.shot("stall_owner");
+
+    // The buyer walks up with two hides, opens it, and sees it is not theirs.
+    buyer.stand_at(feet_on(stall.0, stall.2 + 2));
+    buyer.give(t::BLOCK_HIDE, 2);
+    buyer.look_at_face(stall, (0, 0, 1));
+    assert_eq!(buyer.aimed().map(|(cell, _)| cell), Some(stall), "the buyer is not looking at the stall");
+    buyer.use_aimed();
+    assert!(
+        buyer.until_both(&mut owner, 3.0, |b, _| b.chest_screen.stall().is_some_and(|v| !v.yours && v.offers[0] == Some(price))),
+        "the buyer never saw the price: {:?}",
+        buyer.chest_screen.stall()
+    );
+
+    // TRADE, where the screen draws it.
+    buyer.chest_click(centre(stall_control_rect(StallControl::Action(0))));
+    assert!(
+        buyer.until_both(&mut owner, 3.0, |b, _| b.inventory.count(t::BLOCK_FLINT) == 4),
+        "the trade never came back"
+    );
+    assert_eq!(buyer.inventory.count(t::BLOCK_HIDE), 1, "the buyer did not pay exactly the price");
+    // ...and the owner, still at the counter, saw it happen.
+    assert!(
+        owner.until_both(&mut buyer, 3.0, |o, _| {
+            let store = last_contents(o);
+            store.count_within(TAKINGS, t::BLOCK_HIDE) == 1 && store.count_within(STOCK, t::BLOCK_FLINT) == 4
+        }),
+        "the owner's screen never showed the sale"
+    );
+
+    // The buyer cannot help themselves to the rest.
+    buyer.send(ClientMessage::ChestMove { from: (primitive_shared::protocol::Side::Chest, 0), to: (primitive_shared::protocol::Side::Pack, 25), half: false });
+    assert!(
+        buyer.until_both(&mut owner, 3.0, |b, _| b.heard_any(|m| matches!(m, ServerMessage::StallRefused { why: Refusal::NotYours }))),
+        "a stranger reaching into the counter was not refused"
+    );
+    assert_eq!(buyer.inventory.count(t::BLOCK_FLINT), 4, "a stranger took goods off the counter");
+
+    // The owner empties the till.
+    owner.chest_shift_click(centre(stall_slot_rect(TAKINGS.start).unwrap()));
+    assert!(
+        owner.until_both(&mut buyer, 3.0, |o, _| o.inventory.count(t::BLOCK_HIDE) == 2),
+        "the owner never collected the hide"
+    );
+    let store = owner.server().container_at(stall.0, stall.1, stall.2);
+    assert_eq!(store.count_within(TAKINGS, t::BLOCK_HIDE), 0);
+    assert_eq!(store.count_within(STOCK, t::BLOCK_FLINT), 4);
+    no_corrections(&owner);
+    no_corrections(&buyer);
+}

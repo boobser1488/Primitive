@@ -49,7 +49,7 @@ pub mod settings;
 pub use logic::{
     animals, anticheat, carrion, chunkgen, climate, commands, containers, drying, falling, felling,
     fire, growth, peat,
-    items, plugins, profiles, rafts, rng, simulation, smelting, survival, water, weather, world,
+    items, plugins, profiles, rafts, rng, simulation, smelting, stalls, survival, water, weather, world,
 };
 #[cfg(feature = "mods")]
 pub use logic::mods;
@@ -253,6 +253,11 @@ pub struct Context {
     /// unchanged. What differs is which slots take what, and that is
     /// `primitive_shared::hearth`.
     pub chests: std::sync::Mutex<containers::Chests>,
+    /// Who owns each barter stall and what it asks. The goods on one are in
+    /// `chests`, at the stall's cell; see `logic::stalls` for why the two
+    /// halves are kept apart. **Locked after `chests`**, never before: a
+    /// trade holds the buyer, the store and this at once, in that order.
+    pub stalls: std::sync::Mutex<stalls::Stalls>,
     /// Hides on racks, and how far along each of them is.
     ///
     /// Its own field rather than a `CellMechanic`, for the reason the
@@ -626,6 +631,48 @@ impl Server {
         send_inventory(&handle);
         refresh_carried_weight(&handle);
         left
+    }
+
+    // ---- the same doors, for a server with two people on it ----
+    //
+    // **By name**, because "the one connected player" stops being a
+    // question with an answer the moment a second client joins -- which is
+    // what a trade between two people needs (`primitive_client`'s scenario
+    // harness, `Scenario::join`). The unnamed doors above are kept: every
+    // one-player test already says what it means with them.
+
+    fn named(&self, name: &str) -> Option<Arc<players::PlayerHandle>> {
+        self.ctx.registry.handles().into_iter().find(|handle| handle.username == name)
+    }
+
+    /// `give`, to the player called `name`. Answers how many did not fit --
+    /// all of them, if nobody is called that.
+    pub fn give_to(&self, name: &str, block: primitive_shared::types::BlockId, count: u32) -> u32 {
+        let Some(handle) = self.named(name) else {
+            return count;
+        };
+        let left = {
+            let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+            let left = state.inventory.add(block, count);
+            state.inventory_dirty = true;
+            left
+        };
+        send_inventory(&handle);
+        refresh_carried_weight(&handle);
+        left
+    }
+
+    /// `teleport_player`, for the player called `name`.
+    pub fn teleport_named(&self, name: &str, x: f32, y: f32, z: f32) {
+        if let Some(handle) = self.named(name) {
+            teleport(&handle, x, y, z, "scenario");
+        }
+    }
+
+    /// What is in the container at a cell, as the server has it -- a
+    /// stall's counter and till included. Read-only.
+    pub fn container_at(&self, x: i32, y: i32, z: i32) -> primitive_shared::inventory::Inventory {
+        self.ctx.chests.lock().unwrap_or_else(|e| e.into_inner()).contents((x, y, z))
     }
 
     /// Moves the one connected player, the way `/tp` does.
@@ -1149,6 +1196,18 @@ fn build_context(settings: ServerSettings, options: RunOptions) -> anyhow::Resul
     // ...and the rafts, where they were left. A world saved before rafts
     // has none. See `Rafts::load` for why a file that cannot be read is
     // said out loud rather than read as an empty lake.
+    // ...and who owns each stall, from its own file. See `logic::stalls`
+    // for why an unreadable one is said out loud.
+    let mut stall_owners = stalls::Stalls::new();
+    if let Some(dir) = &world_dir {
+        match stall_owners.load(dir) {
+            Ok(0) => {}
+            Ok(n) if options.logging => println!("[world] restored {n} stall(s)"),
+            Ok(_) => {}
+            Err(e) => eprintln!("[world] could not load stalls: {e}"),
+        }
+    }
+
     let mut rafts = rafts::Rafts::new();
     if let Some(dir) = &world_dir {
         match rafts.load(dir) {
@@ -1359,6 +1418,7 @@ fn build_context(settings: ServerSettings, options: RunOptions) -> anyhow::Resul
         rafts: std::sync::Mutex::new(rafts),
         sky: std::sync::Mutex::new(weather::Sky::new()),
         chests: std::sync::Mutex::new(chests),
+        stalls: std::sync::Mutex::new(stall_owners),
         drying: std::sync::Mutex::new(racks),
         peat: std::sync::Mutex::new(sods),
         smelting: std::sync::Mutex::new(smelting::Smelting::new()),
@@ -3259,7 +3319,12 @@ async fn autosave_loop(ctx: Arc<Context>, dir: PathBuf) {
             let logging = ctx.options.logging;
             let ctx = Arc::clone(&ctx);
             let dir = dir.clone();
-            let written = tokio::task::spawn_blocking(move || save_chests(&ctx, &dir)).await;
+            let written = tokio::task::spawn_blocking(move || {
+                let chests = save_chests(&ctx, &dir);
+                save_stalls(&ctx, &dir);
+                chests
+            })
+            .await;
             if let (true, Ok(Some(n))) = (logging, written) {
                 println!("[world] saved {n} chest(s)");
             }
@@ -3381,6 +3446,24 @@ fn save_chests(ctx: &Arc<Context>, dir: &std::path::Path) -> Option<usize> {
         Ok(n) => Some(n),
         Err(e) => {
             eprintln!("[world] chest save failed: {e}");
+            None
+        }
+    }
+}
+
+/// Writes who owns the stalls, on the chests' terms: nothing if nothing
+/// changed. Beside the chests in every save, because a stall is half in
+/// each file and a save that wrote one half is a stall whose prices and
+/// goods are from two different moments.
+fn save_stalls(ctx: &Arc<Context>, dir: &std::path::Path) -> Option<usize> {
+    let mut stalls = ctx.stalls.lock().unwrap_or_else(|e| e.into_inner());
+    if !stalls.is_dirty() {
+        return None;
+    }
+    match stalls.save(dir) {
+        Ok(n) => Some(n),
+        Err(e) => {
+            eprintln!("[world] stall save failed: {e}");
             None
         }
     }
@@ -3938,6 +4021,7 @@ fn save_everything(ctx: &Arc<Context>, dir: &std::path::Path) -> Vec<String> {
             // operator being told "the world is saved" when two thirds
             // of it were not.
             let chests = save_chests(ctx, dir).unwrap_or(0);
+            save_stalls(ctx, dir);
             let fires = save_fires(ctx, dir).unwrap_or(0);
             save_wildfire(ctx, dir);
             let racks = save_racks(ctx, dir).unwrap_or(0);
@@ -3961,6 +4045,7 @@ fn save_everything(ctx: &Arc<Context>, dir: &std::path::Path) -> Vec<String> {
         Err(e) => {
             said.push(format!("world save failed: {e}"));
             save_chests(ctx, dir);
+            save_stalls(ctx, dir);
             save_fires(ctx, dir);
             save_wildfire(ctx, dir);
             save_racks(ctx, dir);
@@ -8368,6 +8453,15 @@ pub(crate) fn open_chest(
         return;
     }
     unseal_ruin_chest(ctx, at);
+    // **A stall nobody owns is claimed by the first player to open it.** A
+    // player's placement records its owner (`stall_placed`), so the only
+    // stalls without one were written by something else -- a mod, an
+    // operator's tool, a world edited by hand -- and a stall nobody may
+    // price is a counter nobody can use. The first to reach it is the only
+    // person the server can tell apart from everybody else.
+    if is_stall(ctx.world.cached_block(at.0, at.1, at.2).unwrap_or(0)) {
+        ctx.stalls.lock().unwrap_or_else(|e| e.into_inner()).claim(at, &handle.username);
+    }
     // **Asked before the screen is opened**, so a mod that refuses is a
     // lock rather than a screen that closes itself half a second later.
     // With nothing held, which is why the position was read and the lock
@@ -8390,6 +8484,183 @@ pub(crate) fn open_chest(
     }
     tell_chest_lid(ctx, at);
     send_chest_state(ctx, handle, at);
+}
+
+// ---- the barter stall ----
+//
+// **A chest with an owner and a price list.** Everything a chest does -- the
+// screen, the store, the save, the spill -- a stall does by being a
+// container (`primitive_shared::stall`); what is here is the three things a
+// chest does not have: who put it down, what it asks, and a trade.
+
+/// Is this block a barter stall?
+pub(crate) fn is_stall(block: primitive_shared::types::BlockId) -> bool {
+    primitive_shared::types::block_kind(block) == primitive_shared::types::BLOCK_STALL
+}
+
+/// Sends one player at a stall whose it is and what it asks, if the
+/// container at `at` is a stall. Nothing for anything else.
+fn tell_stall_offers(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, at: containers::ChestPos) {
+    if !is_stall(ctx.world.cached_block(at.0, at.1, at.2).unwrap_or(0)) {
+        return;
+    }
+    let stall = ctx.stalls.lock().unwrap_or_else(|e| e.into_inner()).get(at).cloned();
+    let Some(stall) = stall else {
+        return;
+    };
+    handle.send(ServerMessage::StallOffers {
+        global_x: at.0,
+        global_y: at.1,
+        global_z: at.2,
+        yours: stall.owner == handle.username,
+        owner: stall.owner,
+        offers: stall.offers,
+    });
+}
+
+/// A stall has just been put down by this player: it is theirs.
+///
+/// **Whatever was stored at the cell is spilled first**, for
+/// `set_down_vessel`'s reason: not every path that replaces a container
+/// empties it, and an orphan left there would be read as this stall's stock
+/// -- somebody's chest turning up for sale on a stranger's counter.
+pub(crate) fn stall_placed(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, at: containers::ChestPos) {
+    let orphan = ctx.chests.lock().unwrap_or_else(|e| e.into_inner()).take(at);
+    if let Some(orphan) = orphan {
+        spill_inventory(ctx, &orphan, (at.0 as f32 + 0.5, at.1 as f32 + 1.0, at.2 as f32 + 0.5));
+    }
+    ctx.stalls.lock().unwrap_or_else(|e| e.into_inner()).place(at, &handle.username);
+}
+
+/// A player has broken a stall. Called before the container spill.
+///
+/// **Its owner takes it down; anybody else breaks it open.** The owner's
+/// counter and till go into their pack -- what does not fit falls at the
+/// stall, which is the only other place it can go -- and the spill that
+/// follows finds nothing. Anybody else's break leaves the goods where
+/// they are, and the spill tips them out like a chest's.
+///
+/// That second half is the decision, and the three ways it could have gone:
+///
+/// * **Unbreakable by anybody but the owner** -- rejected. A block nobody can
+///   remove is a claim on land: a stall dropped in somebody's doorway, or on
+///   the one ford across a river, would stand there for ever. Nothing else in
+///   this world is anybody's by law, and the stall would be the first thing
+///   that was.
+/// * **Breakable, and the goods lost** -- rejected. That punishes the owner
+///   for somebody else's act and rewards nobody, which is spite with no
+///   decision in it.
+/// * **Breakable, and the goods spilled** -- chosen. A stall is a counter, not
+///   a safe: what is on it can be taken by force by anybody willing to be
+///   seen doing it, as a chest can. What that asks of the owner is the
+///   question the stall exists to ask -- how much to put out, and where. A
+///   little flint by the road; the winter's copper in a chest at home.
+pub(crate) fn stall_broken(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, at: containers::ChestPos) {
+    let owned = ctx.stalls.lock().unwrap_or_else(|e| e.into_inner()).is_owner(at, &handle.username);
+    if !owned {
+        return;
+    }
+    close_chest_for_everyone(ctx, at);
+    let Some(goods) = ctx.chests.lock().unwrap_or_else(|e| e.into_inner()).take(at) else {
+        return;
+    };
+    let mut left_over = primitive_shared::inventory::Inventory::chest();
+    {
+        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        for stack in goods.slots().iter().flatten() {
+            // As the thing it is, wear and all: see `stall::trade`.
+            let left = state.inventory.add_worn(stack.block, stack.count, stack.damage);
+            if left > 0 {
+                left_over.add_worn(stack.block, left, stack.damage);
+            }
+        }
+        state.inventory_dirty = true;
+    }
+    send_inventory(handle);
+    refresh_carried_weight(handle);
+    if !left_over.is_empty() {
+        spill_inventory(ctx, &left_over, (at.0 as f32 + 0.5, at.1 as f32 + 0.5, at.2 as f32 + 0.5));
+    }
+}
+
+/// The owner of the open stall setting, or taking down, one row's price.
+pub(crate) fn stall_offer(
+    ctx: &Arc<Context>,
+    handle: &Arc<players::PlayerHandle>,
+    row: u8,
+    offer: Option<primitive_shared::stall::Offer>,
+) {
+    // The owner, within reach, alive, at a stall: `usable_chest` is every
+    // one of those, and says `NotYours` to anybody else.
+    let Some(at) = usable_chest(ctx, handle) else {
+        return;
+    };
+    if !is_stall(ctx.world.cached_block(at.0, at.1, at.2).unwrap_or(0)) {
+        return;
+    }
+    let set = ctx.stalls.lock().unwrap_or_else(|e| e.into_inner()).set_offer(at, row as usize, offer);
+    if set {
+        // Everybody at it, the owner included: a buyer looking at the old
+        // price has to see the new one before their click is refused for it.
+        broadcast_chest_state(ctx, at);
+    } else {
+        handle.send(ServerMessage::StallRefused { why: primitive_shared::stall::Refusal::BadOffer });
+    }
+}
+
+/// A player taking one lot of row `row` at the open stall, at the price
+/// they saw.
+///
+/// **Atomic by its locks**: the buyer's own state, then the container store,
+/// then the stall records -- the order every container gesture takes the
+/// first two in -- held together from the check to the write. Two buyers
+/// reaching for the last lot at once are two calls here, and the store's
+/// lock makes one of them run whole before the other begins: the second
+/// finds the counter short and is refused having paid nothing
+/// (`stall::trade` works on copies). A buyer whose connection drops has
+/// either been through here or not; there is no half of a trade held
+/// anywhere between two messages, because there is no second message. And
+/// a stall broken mid-trade cannot be: the break takes the store's lock to
+/// spill it, so it lands before or after, and a trade after it finds no
+/// stall (`reachable_chest`).
+pub(crate) fn stall_buy(
+    ctx: &Arc<Context>,
+    handle: &Arc<players::PlayerHandle>,
+    row: u8,
+    seen: primitive_shared::stall::Offer,
+) {
+    use primitive_shared::stall::Refusal;
+    let Some(at) = reachable_chest(ctx, handle) else {
+        return;
+    };
+    if !is_stall(ctx.world.cached_block(at.0, at.1, at.2).unwrap_or(0)) {
+        return;
+    }
+    let result = {
+        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut chests = ctx.chests.lock().unwrap_or_else(|e| e.into_inner());
+        let stalls = ctx.stalls.lock().unwrap_or_else(|e| e.into_inner());
+        match stalls.get(at).and_then(|stall| stall.offer(row as usize)) {
+            None => Err(Refusal::NoOffer),
+            Some(offer) if offer != seen => Err(Refusal::OfferChanged),
+            Some(offer) => {
+                let result = chests.edit(at, |store| primitive_shared::stall::trade(&offer, store, &mut state.inventory));
+                if result.is_ok() {
+                    state.inventory_dirty = true;
+                }
+                result
+            }
+        }
+    };
+    match result {
+        Ok(()) => {
+            finish_chest_gesture(ctx, handle, at);
+            refresh_carried_weight(handle);
+        }
+        Err(why) => {
+            handle.send(ServerMessage::StallRefused { why });
+        }
+    }
 }
 
 // ---- the anvil and the potter's wheel ----
@@ -8740,6 +9011,11 @@ fn describe_container(
             }),
         );
     }
+    // A stall's offers travel in a message of their own, just before this
+    // one (`tell_stall_offers`): what is in it is all `ChestState` carries.
+    if is_stall(block) {
+        return (ContainerKind::Stall, None, None);
+    }
     // A jug has nothing going on inside it but what is in it: no fire and
     // no weather, so only its kind travels, which is what gives it a
     // one-slot screen rather than forty squares with some seeds in one.
@@ -8787,6 +9063,7 @@ fn send_chest_state(
         chests.contents(at)
     };
     let (kind, hearth, rack) = describe_container(ctx, at, &inventory);
+    tell_stall_offers(ctx, handle, at);
     handle.send(ServerMessage::ChestState {
         global_x: at.0,
         global_y: at.1,
@@ -9024,6 +9301,7 @@ fn broadcast_chest_state(ctx: &Arc<Context>, at: containers::ChestPos) {
             state.open_chest == Some(at)
         };
         if watching {
+            tell_stall_offers(ctx, &handle, at);
             handle.send(ServerMessage::ChestState {
                 global_x: at.0,
                 global_y: at.1,
@@ -9098,6 +9376,9 @@ enum Roles {
     /// A set-down jug: one slot, loose goods only, a jug's measure of
     /// them. See `inventory::VESSEL_SLOT`.
     Vessel,
+    /// A barter stall: the counter takes anything, the till nothing by hand
+    /// (`stall::accepts`). Who may touch either is `usable_chest`'s.
+    Stall,
 }
 
 fn roles_at(ctx: &Arc<Context>, at: containers::ChestPos) -> Roles {
@@ -9112,6 +9393,9 @@ fn roles_at(ctx: &Arc<Context>, at: containers::ChestPos) -> Roles {
     }
     if primitive_shared::types::opens_as_vessel(block) {
         return Roles::Vessel;
+    }
+    if is_stall(block) {
+        return Roles::Stall;
     }
     if primitive_shared::types::is_corpse(block) {
         return Roles::Body;
@@ -9165,6 +9449,7 @@ impl Roles {
                 slot == primitive_shared::inventory::VESSEL_SLOT
                     && primitive_shared::inventory::jug_room(None, block) > 0
             }
+            Roles::Stall => primitive_shared::stall::accepts(slot, block),
         }
     }
 }
@@ -9483,6 +9768,8 @@ fn shift_into_roles(
         }
         Roles::Hearth(_) => hearth_target(container, stack.block),
         Roles::Rack(trade) => rack_target(trade, stack.block),
+        // Onto the counter, the only place a hand puts anything.
+        Roles::Stall => Some(primitive_shared::stall::STOCK),
         // A jug's slot, capped at a jug's measure -- `add_within` would
         // cap it at a stack. See the same arm in `chest_move`.
         Roles::Vessel => {
@@ -9579,7 +9866,28 @@ pub(crate) fn chest_sort(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>
 }
 
 /// The chest this player may act on right now, if any.
+///
+/// **A stall is somebody's**, and every gesture that moves a thing in or
+/// out of a container comes through here -- so this is where anybody but
+/// its owner is refused, once, rather than in each of six gestures. A
+/// buyer's one gesture at a stall is `stall_buy`, which asks
+/// `reachable_chest` instead.
 fn usable_chest(
+    ctx: &Arc<Context>,
+    handle: &Arc<players::PlayerHandle>,
+) -> Option<containers::ChestPos> {
+    let at = reachable_chest(ctx, handle)?;
+    if is_stall(ctx.world.cached_block(at.0, at.1, at.2).unwrap_or(0))
+        && !ctx.stalls.lock().unwrap_or_else(|e| e.into_inner()).is_owner(at, &handle.username)
+    {
+        handle.send(ServerMessage::StallRefused { why: primitive_shared::stall::Refusal::NotYours });
+        return None;
+    }
+    Some(at)
+}
+
+/// The container this player has open, if they can still reach it.
+fn reachable_chest(
     ctx: &Arc<Context>,
     handle: &Arc<players::PlayerHandle>,
 ) -> Option<containers::ChestPos> {
@@ -10996,6 +11304,9 @@ pub(crate) fn spill_pit(ctx: &Arc<Context>, at: (i32, i32, i32), broken: primiti
 
 pub(crate) fn spill_chest(ctx: &Arc<Context>, at: containers::ChestPos) {
     close_chest_for_everyone(ctx, at);
+    // Whatever took the cell, a stall's owner and prices go with it. See
+    // `Stalls::forget`.
+    ctx.stalls.lock().unwrap_or_else(|e| e.into_inner()).forget(at);
     // A mod breaking a ruin chest nobody has opened gets what was in it;
     // the player's break unseals before it writes the cell, which this
     // line could not do for it.
@@ -18240,5 +18551,221 @@ mod station_round_trip_tests {
             answer.iter().any(|m| matches!(m, ServerMessage::StationResult { .. })),
             "a run handed in on its last blow was refused: {answer:?}"
         );
+    }
+}
+
+/// The barter stall on the server: who may do what at one, and that a trade
+/// moves exactly the goods it names -- once -- whoever else is reaching for
+/// them. The rule of a trade itself is `primitive_shared::stall`'s.
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+    use primitive_shared::stall::{Offer, Refusal, STOCK, TAKINGS};
+    use primitive_shared::types::{BLOCK_AIR, BLOCK_FLINT, BLOCK_HIDE, BLOCK_STALL, BLOCK_STONE};
+
+    const FLOOR: i32 = 19;
+    const STALL: (i32, i32, i32) = (2, FLOOR + 1, 2);
+    const FLINT_FOR_HIDE: Offer = Offer { give: BLOCK_FLINT, give_count: 4, take: BLOCK_HIDE, take_count: 1 };
+
+    fn a_stall() -> Arc<Context> {
+        let ctx = test_context(ServerSettings::default(), RunOptions::embedded());
+        ctx.world.insert(ctx.world.generate(ChunkPos { x: 0, z: 0 }));
+        for x in 0..5 {
+            for z in 0..6 {
+                for y in 0..primitive_shared::types::CHUNK_SIZE_Y as i32 {
+                    let block = if y <= FLOOR { BLOCK_STONE } else { BLOCK_AIR };
+                    assert!(ctx.world.set_block(x, y, z, block));
+                }
+            }
+        }
+        assert!(ctx.world.set_block(STALL.0, STALL.1, STALL.2, BLOCK_STALL));
+        ctx
+    }
+
+    fn a_player(ctx: &Arc<Context>, id: PlayerId) -> (Arc<players::PlayerHandle>, tokio::sync::mpsc::Receiver<players::Outgoing>) {
+        let feet = (f64::from(STALL.0) + 0.5, f64::from(FLOOR + 1), f64::from(STALL.2) + 2.5);
+        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+        let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(8);
+        std::mem::forget(chunk_rx);
+        let handle = Arc::new(players::PlayerHandle::new(
+            id,
+            format!("player{id}"),
+            "127.0.0.1:1".parse().unwrap(),
+            tx,
+            chunk_tx,
+            10_000,
+            feet,
+            crate::logic::anticheat::AntiCheat::new(crate::settings::AntiCheatSettings::default(), 8, feet),
+        ));
+        assert!(ctx.registry.insert_unique(Arc::clone(&handle)));
+        (handle, rx)
+    }
+
+    /// A stall put down by player 1 with `lots` lots of flint on its counter
+    /// at four flint for a hide, and the owner's handle.
+    fn stocked(ctx: &Arc<Context>, lots: u32) -> Arc<players::PlayerHandle> {
+        let (owner, rx) = a_player(ctx, 1);
+        std::mem::forget(rx);
+        stall_placed(ctx, &owner, STALL);
+        if lots > 0 {
+            ctx.chests.lock().unwrap().edit(STALL, |store| store.add_within(STOCK, BLOCK_FLINT, 4 * lots));
+        }
+        open_chest(ctx, &owner, STALL);
+        stall_offer(ctx, &owner, 0, Some(FLINT_FOR_HIDE));
+        assert_eq!(ctx.stalls.lock().unwrap().get(STALL).unwrap().offer(0), Some(FLINT_FOR_HIDE));
+        owner
+    }
+
+    fn refusals(rx: &mut tokio::sync::mpsc::Receiver<players::Outgoing>) -> Vec<Refusal> {
+        let mut seen = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let players::Outgoing::Message(ServerMessage::StallRefused { why }) = message {
+                seen.push(why);
+            }
+        }
+        seen
+    }
+
+    fn pack_count(handle: &Arc<players::PlayerHandle>, block: primitive_shared::types::BlockId) -> u32 {
+        handle.state.lock().unwrap().inventory.count(block)
+    }
+
+    #[test]
+    fn a_trade_at_a_stall_moves_exactly_the_lot_and_the_price() {
+        let ctx = a_stall();
+        let _owner = stocked(&ctx, 2);
+        let (buyer, _rx) = a_player(&ctx, 2);
+        buyer.state.lock().unwrap().inventory.add(BLOCK_HIDE, 3);
+        open_chest(&ctx, &buyer, STALL);
+        stall_buy(&ctx, &buyer, 0, FLINT_FOR_HIDE);
+        assert_eq!(pack_count(&buyer, BLOCK_FLINT), 4);
+        assert_eq!(pack_count(&buyer, BLOCK_HIDE), 2);
+        let store = ctx.chests.lock().unwrap().contents(STALL);
+        assert_eq!(store.count_within(STOCK, BLOCK_FLINT), 4);
+        assert_eq!(store.count_within(TAKINGS, BLOCK_HIDE), 1);
+    }
+
+    #[test]
+    fn two_buyers_racing_for_the_last_lot_are_one_sale_and_one_refusal() {
+        let ctx = a_stall();
+        let _owner = stocked(&ctx, 1);
+        let (first, mut first_rx) = a_player(&ctx, 2);
+        let (second, mut second_rx) = a_player(&ctx, 3);
+        for buyer in [&first, &second] {
+            buyer.state.lock().unwrap().inventory.add(BLOCK_HIDE, 1);
+            open_chest(&ctx, buyer, STALL);
+        }
+        // Both at once, from two threads, as two connections would.
+        std::thread::scope(|scope| {
+            for buyer in [&first, &second] {
+                let ctx = &ctx;
+                scope.spawn(move || stall_buy(ctx, buyer, 0, FLINT_FOR_HIDE));
+            }
+        });
+        let won: Vec<bool> = [&first, &second].iter().map(|b| pack_count(b, BLOCK_FLINT) == 4).collect();
+        let sales = won.iter().filter(|&&w| w).count();
+        assert_eq!(sales, 1, "the last lot was sold {sales} times");
+        let loser = if won[0] { &second } else { &first };
+        assert_eq!(pack_count(loser, BLOCK_FLINT), 0, "the loser got flint");
+        assert_eq!(pack_count(loser, BLOCK_HIDE), 1, "the loser paid for nothing");
+        let store = ctx.chests.lock().unwrap().contents(STALL);
+        assert_eq!(store.count_within(STOCK, BLOCK_FLINT), 0);
+        assert_eq!(store.count_within(TAKINGS, BLOCK_HIDE), 1, "the till took two prices for one lot");
+        let told = [refusals(&mut first_rx), refusals(&mut second_rx)].concat();
+        assert_eq!(told, vec![Refusal::SoldOut], "the loser was not told why");
+    }
+
+    #[test]
+    fn a_price_changed_under_the_buyers_hand_is_refused_and_nothing_moves() {
+        let ctx = a_stall();
+        let owner = stocked(&ctx, 2);
+        let (buyer, mut rx) = a_player(&ctx, 2);
+        buyer.state.lock().unwrap().inventory.add(BLOCK_HIDE, 5);
+        open_chest(&ctx, &buyer, STALL);
+        let dearer = Offer { take_count: 5, ..FLINT_FOR_HIDE };
+        stall_offer(&ctx, &owner, 0, Some(dearer));
+        stall_buy(&ctx, &buyer, 0, FLINT_FOR_HIDE);
+        assert_eq!(refusals(&mut rx), vec![Refusal::OfferChanged]);
+        assert_eq!(pack_count(&buyer, BLOCK_HIDE), 5);
+        assert_eq!(pack_count(&buyer, BLOCK_FLINT), 0);
+    }
+
+    #[test]
+    fn nobody_but_the_owner_can_price_stock_or_empty_a_stall() {
+        let ctx = a_stall();
+        let _owner = stocked(&ctx, 2);
+        let (stranger, mut rx) = a_player(&ctx, 2);
+        stranger.state.lock().unwrap().inventory.add(BLOCK_STONE, 5);
+        open_chest(&ctx, &stranger, STALL);
+        stall_offer(&ctx, &stranger, 0, Some(Offer { give_count: 1, ..FLINT_FOR_HIDE }));
+        chest_move(&ctx, &stranger, (Side::Chest, 0), (Side::Pack, 5), false);
+        chest_bulk_move(&ctx, &stranger, false);
+        chest_move(&ctx, &stranger, (Side::Pack, 0), (Side::Chest, 3), false);
+        assert_eq!(pack_count(&stranger, BLOCK_FLINT), 0, "a stranger took goods off the counter");
+        assert_eq!(pack_count(&stranger, BLOCK_STONE), 5, "a stranger stocked somebody else's stall");
+        assert_eq!(ctx.stalls.lock().unwrap().get(STALL).unwrap().offer(0), Some(FLINT_FOR_HIDE));
+        let told = refusals(&mut rx);
+        assert!(!told.is_empty() && told.iter().all(|&why| why == Refusal::NotYours), "{told:?}");
+    }
+
+    #[test]
+    fn the_owner_stocks_the_counter_but_cannot_put_anything_in_the_till() {
+        let ctx = a_stall();
+        let owner = stocked(&ctx, 0);
+        owner.state.lock().unwrap().inventory.add(BLOCK_STONE, 5);
+        let from = owner.state.lock().unwrap().inventory.slots().iter().position(|s| s.is_some_and(|s| s.block == BLOCK_STONE)).unwrap();
+        chest_move(&ctx, &owner, (Side::Pack, from as u8), (Side::Chest, TAKINGS.start as u8), false);
+        assert_eq!(pack_count(&owner, BLOCK_STONE), 5, "the till took something by hand");
+        chest_move(&ctx, &owner, (Side::Pack, from as u8), (Side::Chest, STOCK.start as u8), false);
+        assert_eq!(ctx.chests.lock().unwrap().contents(STALL).count_within(STOCK, BLOCK_STONE), 5);
+    }
+
+    #[test]
+    fn the_owner_takes_a_stall_down_into_their_pack_and_anybody_else_breaks_it_open() {
+        // The owner's break: everything home, nothing on the floor.
+        let ctx = a_stall();
+        let owner = stocked(&ctx, 2);
+        stall_broken(&ctx, &owner, STALL);
+        spill_chest(&ctx, STALL);
+        assert_eq!(pack_count(&owner, BLOCK_FLINT), 8, "the owner's goods did not come home");
+        assert!(ctx.stalls.lock().unwrap().get(STALL).is_none(), "the stall outlived its block");
+
+        // A stranger's: the goods spill, and not into the stranger's pack.
+        let ctx = a_stall();
+        let _owner = stocked(&ctx, 2);
+        let (stranger, _rx) = a_player(&ctx, 2);
+        stall_broken(&ctx, &stranger, STALL);
+        assert!(ctx.chests.lock().unwrap().holds_anything(STALL), "a stranger's break emptied the counter");
+        spill_chest(&ctx, STALL);
+        assert_eq!(pack_count(&stranger, BLOCK_FLINT), 0);
+        assert!(!ctx.chests.lock().unwrap().holds_anything(STALL));
+        assert!(ctx.stalls.lock().unwrap().get(STALL).is_none());
+    }
+
+    #[test]
+    fn a_stall_survives_a_save_round_trip_with_its_offers_stock_and_takings() {
+        let ctx = a_stall();
+        let _owner = stocked(&ctx, 3);
+        let (buyer, _rx) = a_player(&ctx, 2);
+        buyer.state.lock().unwrap().inventory.add(BLOCK_HIDE, 1);
+        open_chest(&ctx, &buyer, STALL);
+        stall_buy(&ctx, &buyer, 0, FLINT_FOR_HIDE);
+
+        let dir = std::env::temp_dir().join(format!("primitive_stall_save_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        save_chests(&ctx, &dir);
+        save_stalls(&ctx, &dir);
+
+        let mut chests = containers::Chests::new();
+        let mut stalls = stalls::Stalls::new();
+        chests.load(&dir).expect("chests");
+        stalls.load(&dir).expect("stalls");
+        let store = chests.contents(STALL);
+        assert_eq!(store.count_within(STOCK, BLOCK_FLINT), 8, "the counter came back wrong");
+        assert_eq!(store.count_within(TAKINGS, BLOCK_HIDE), 1, "the till came back wrong");
+        let stall = stalls.get(STALL).expect("the stall's record did not come back");
+        assert_eq!(stall.owner, "player1");
+        assert_eq!(stall.offer(0), Some(FLINT_FOR_HIDE));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

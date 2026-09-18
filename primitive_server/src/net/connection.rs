@@ -987,6 +987,11 @@ async fn read_loop(
                 if block_id != BLOCK_AIR && primitive_shared::types::opens_as_vessel(written) {
                     crate::set_down_vessel(&ctx, (global_x, global_y, global_z), spent_damage);
                 }
+                // A stall put down is the placer's. After the write, for the
+                // jug's reason: a refused placement owns nothing.
+                if block_id != BLOCK_AIR && crate::is_stall(written) {
+                    crate::stall_placed(&ctx, &handle, (global_x, global_y, global_z));
+                }
                 // Noted for hunger: an accepted edit is what the server
                 // counts as this player working. See `last_edit`.
                 {
@@ -1047,6 +1052,12 @@ async fn read_loop(
                         // `tip_out_water`.
                         if primitive_shared::types::is_set_down(broken) {
                             crate::tip_out_water(&ctx, broken, (global_x, global_y, global_z));
+                        }
+                        // A stall taken down by its owner goes into their
+                        // pack first, so the spill below finds nothing; one
+                        // broken by anybody else spills. See `stall_broken`.
+                        if crate::is_stall(broken) {
+                            crate::stall_broken(&ctx, &handle, (global_x, global_y, global_z));
                         }
                         if primitive_shared::types::is_container(broken)
                             && !primitive_shared::types::opens_as_vessel(broken)
@@ -1736,6 +1747,14 @@ async fn read_loop(
 
             ClientMessage::TendAnimal { animal } => {
                 crate::tend_animal(&ctx, &handle, animal);
+            }
+
+            ClientMessage::StallOffer { row, offer } => {
+                crate::stall_offer(&ctx, &handle, row, offer);
+            }
+
+            ClientMessage::StallBuy { row, offer } => {
+                crate::stall_buy(&ctx, &handle, row, offer);
             }
 
             ClientMessage::Disconnect => return Ok(()),

@@ -82,6 +82,7 @@ pub mod rack;
 pub mod raft;
 pub mod season;
 pub mod shelter;
+pub mod stall;
 pub mod showcase;
 pub mod tools;
 pub mod types;

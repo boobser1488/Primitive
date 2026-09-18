@@ -772,6 +772,30 @@ pub enum Msg {
     ShelterHoleTakesHeat,
     ShelterWallsWarm,
     ShelterWallsThin,
+    // ---- the barter stall ----
+    //
+    // Its heading, the three places on its screen, its two verbs, the two
+    // footer lines -- one for the owner and one for everybody else, because
+    // the two are doing different things at the same counter -- and a line
+    // for each of the server's refusals (`stall::Refusal`).
+    Stall,
+    StallPrices,
+    StallYourPrices,
+    StallStock,
+    StallTakings,
+    StallTrade,
+    StallClear,
+    StallLeft,
+    StallHintOwner,
+    StallHintBuyer,
+    StallNotYours,
+    StallNoOffer,
+    StallOfferChanged,
+    StallSoldOut,
+    StallCannotPay,
+    StallNoRoom,
+    StallTillFull,
+    StallBadOffer,
 }
 
 /// One line of interface text, in every language at once.
@@ -1255,6 +1279,25 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::ShelterHoleTakesHeat, en: "the smoke hole lets heat out too", simple: "heat goes out of the roof hole too", ru: "дыра в крыше выпускает и тепло", pl: "otwór w dachu wypuszcza też ciepło" },
     Line { msg: Msg::ShelterWallsWarm, en: "these walls keep the night out", simple: "warm walls", ru: "стены хорошо держат тепло", pl: "te ściany dobrze trzymają ciepło" },
     Line { msg: Msg::ShelterWallsThin, en: "these walls let the night in", simple: "cold walls", ru: "стены плохо держат тепло", pl: "te ściany słabo trzymają ciepło" },
+
+    Line { msg: Msg::Stall,        en: "STALL",        simple: "TRADING TABLE", ru: "ПРИЛАВОК", pl: "STRAGAN" },
+    Line { msg: Msg::StallPrices,  en: "PRICES",       simple: "SWAPS",      ru: "ЦЕНЫ", pl: "CENY" },
+    Line { msg: Msg::StallYourPrices, en: "YOUR PRICES", simple: "YOUR SWAPS", ru: "ВАШИ ЦЕНЫ", pl: "TWOJE CENY" },
+    Line { msg: Msg::StallStock,   en: "ON THE COUNTER", simple: "TO SWAP AWAY", ru: "НА ПРИЛАВКЕ", pl: "NA LADZIE" },
+    Line { msg: Msg::StallTakings, en: "TAKINGS",      simple: "PAID TO YOU", ru: "ВЫРУЧКА", pl: "UTARG" },
+    Line { msg: Msg::StallTrade,   en: "TRADE",        simple: "SWAP",       ru: "ОБМЕН", pl: "WYMIEŃ" },
+    Line { msg: Msg::StallClear,   en: "REMOVE",       simple: "REMOVE",     ru: "УБРАТЬ", pl: "USUŃ" },
+    Line { msg: Msg::StallLeft,    en: "left",         simple: "left",       ru: "в наличии", pl: "zostało" },
+    Line { msg: Msg::StallHintOwner, en: "hold a thing, tap a square to price it", simple: "pick up a thing, tap a square to ask for it", ru: "возьмите вещь и нажмите клетку цены", pl: "weź rzecz i stuknij pole ceny" },
+    Line { msg: Msg::StallHintBuyer, en: "TRADE gives the price for the goods", simple: "SWAP gives what is asked for what is shown", ru: "ОБМЕН отдаёт цену за товар", pl: "WYMIEŃ oddaje cenę za towar" },
+    Line { msg: Msg::StallNotYours, en: "this stall is not yours", simple: "this is somebody else's table", ru: "это чужой прилавок", pl: "to nie twój stragan" },
+    Line { msg: Msg::StallNoOffer, en: "nothing is offered there", simple: "nothing to swap there", ru: "там ничего не предлагают", pl: "nic tam nie ma w ofercie" },
+    Line { msg: Msg::StallOfferChanged, en: "the price has just changed - look again", simple: "the swap just changed - look again", ru: "цена только что изменилась - посмотрите снова", pl: "cena właśnie się zmieniła - spójrz jeszcze raz" },
+    Line { msg: Msg::StallSoldOut, en: "sold out", simple: "none left", ru: "всё разобрали", pl: "wyprzedane" },
+    Line { msg: Msg::StallCannotPay, en: "you do not carry the price", simple: "you do not have what is asked", ru: "у вас нет того, что просят", pl: "nie masz tego, o co proszą" },
+    Line { msg: Msg::StallNoRoom,  en: "no room in your pack", simple: "your bag is full", ru: "нет места в рюкзаке", pl: "brak miejsca w plecaku" },
+    Line { msg: Msg::StallTillFull, en: "the takings are full - the owner must empty them", simple: "the table is full of payments - the owner must take them", ru: "выручке нет места - хозяину пора её забрать", pl: "utarg pełny - właściciel musi go zabrać" },
+    Line { msg: Msg::StallBadOffer, en: "that is not a price", simple: "that swap cannot be", ru: "такой цены быть не может", pl: "to nie jest cena" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as

@@ -543,6 +543,10 @@ pub type PlayerId = u64;
 /// both are carried by 57 for the reason the rest of 57 is.
 /// ...and keeping animals: `TendAnimal` out, appended, and a bowl of milk at
 /// id 694 (`types::BLOCK_BOWL_MILK`). 57 still, which no release speaks.
+/// ...and the barter stall: `StallOffer` and `StallBuy` out, `StallOffers`
+/// and `StallRefused` back, `ContainerKind::Stall`, all appended, a block at
+/// id 665 (`types::BLOCK_STALL`) and a recipe at the end of `RECIPES`. 57
+/// still, for the same reason.
 pub const PROTOCOL_VERSION: u32 = 57;
 
 /// What kind of container a screen is showing.
@@ -560,6 +564,10 @@ pub enum ContainerKind {
     /// A jug set down on something: one slot of loose goods, up to
     /// `inventory::JUG_UNITS`. See `types::opens_as_vessel`.
     Vessel,
+    /// A barter stall: a counter and a till (`stall::STOCK`,
+    /// `stall::TAKINGS`) under the offers `ServerMessage::StallOffers`
+    /// carries. Appended, so every earlier kind keeps its tag.
+    Stall,
 }
 
 /// What a hearth is doing, for the screen that is watching it.
@@ -1889,6 +1897,24 @@ pub enum ClientMessage {
     TendAnimal {
         animal: EntityId,
     },
+    /// **The owner of the open stall setting row `row`'s price**, or taking
+    /// it down with `None`. Against the stall the player has open, like every
+    /// container gesture, so it carries no position; refused for anybody but
+    /// the owner (`stall::Refusal::NotYours`).
+    StallOffer {
+        row: u8,
+        offer: Option<crate::stall::Offer>,
+    },
+    /// **One lot of row `row` of the open stall, at the price `offer`.**
+    ///
+    /// The offer the buyer *saw* rides along, and one that differs from the
+    /// stall's is refused (`stall::Refusal::OfferChanged`): a row number
+    /// alone would be taken at whatever the row says when the message
+    /// arrives, and the owner may have changed it under the buyer's hand.
+    StallBuy {
+        row: u8,
+        offer: crate::stall::Offer,
+    },
 }
 
 /// Messages the server sends to the client.
@@ -2537,6 +2563,27 @@ pub enum ServerMessage {
     /// fifty-seven's bump.
     Shelter {
         reading: crate::shelter::Reading,
+    },
+    /// **Whose stall this is and what it asks**, sent just before every
+    /// `ChestState` of a stall, to each player at it.
+    ///
+    /// Its own message rather than more fields on `ChestState`, which every
+    /// container sends and all but one would carry as nothing. `yours` is
+    /// said per player, because it is the answer to "may I change this" and
+    /// the client cannot work it out from a name: two players may share
+    /// one. Appended, so it rides fifty-seven's bump.
+    StallOffers {
+        global_x: i32,
+        global_y: i32,
+        global_z: i32,
+        owner: String,
+        yours: bool,
+        offers: Vec<Option<crate::stall::Offer>>,
+    },
+    /// A stall said no, and why (`stall::Refusal`). The reason rather than
+    /// a sentence, for `RackRefused`'s reason. Appended.
+    StallRefused {
+        why: crate::stall::Refusal,
     },
 }
 

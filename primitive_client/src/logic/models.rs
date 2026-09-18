@@ -140,10 +140,12 @@ pub(crate) enum Prop {
     StakeWall,
     /// A skin laced into a standing frame of poles (`types::BLOCK_HIDE_FRAME`).
     HideFrame,
+    /// A counter under a cloth awning (`types::BLOCK_STALL`).
+    Stall,
 }
 
 impl Prop {
-    pub(crate) const ALL: [Prop; 18] = [
+    pub(crate) const ALL: [Prop; 19] = [
         Prop::BedHead,
         Prop::BedFoot,
         Prop::StrawBedHead,
@@ -162,6 +164,7 @@ impl Prop {
         Prop::Stake,
         Prop::StakeWall,
         Prop::HideFrame,
+        Prop::Stall,
     ];
 
     /// Its file under `assets/models`.
@@ -185,6 +188,7 @@ impl Prop {
             Prop::Stake => "misc/stake.bbmodel",
             Prop::StakeWall => "misc/stake_wall.bbmodel",
             Prop::HideFrame => "misc/hide_frame.bbmodel",
+            Prop::Stall => "furniture/stall.bbmodel",
         }
     }
 }

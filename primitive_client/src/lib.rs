@@ -2705,7 +2705,6 @@ fn run(
                                 return;
                             }
                             if let (Some(intent), Some(net)) = (intent, net.as_ref()) {
-                                use chest_screen::Intent;
                                 // **A jug in the hand is not a container
                                 // the server has open**, so none of the
                                 // container messages below mean anything
@@ -2724,32 +2723,12 @@ fn run(
                                     return;
                                 }
                                 audio.play(audio::Sfx::Click);
-                                net.send(match intent {
-                                    Intent::Move { from, to, half } => ClientMessage::ChestMove {
-                                        from: (from.0, from.1 as u8),
-                                        to: (to.0, to.1 as u8),
-                                        half,
-                                    },
-                                    Intent::QuickMove(side, slot) => {
-                                        ClientMessage::ChestQuickMove {
-                                            side,
-                                            slot: slot as u8,
-                                        }
-                                    }
-                                    Intent::BulkMove { to_chest } => {
-                                        ClientMessage::ChestBulkMove { to_chest }
-                                    }
-                                    Intent::MoveKind(side, slot) => ClientMessage::ChestMoveKind {
-                                        side,
-                                        slot: slot as u8,
-                                    },
-                                    Intent::Sort => ClientMessage::SortChest,
-                                    // Dealt with above, before the
-                                    // connection was unwrapped.
-                                    Intent::Close => unreachable!(
-                                        "closing a container is handled before the server is asked"
-                                    ),
-                                });
+                                // `Close` was dealt with above, before the
+                                // connection was unwrapped, and is the one
+                                // intent with no message.
+                                if let Some(message) = chest_intent_message(intent) {
+                                    net.send(message);
+                                }
                                 debug_stats.network_messages_out_this_second += 1;
                             }
                         }
@@ -7357,6 +7336,48 @@ fn release_cursor(window: &dyn platform::Window, input: &mut input::InputState) 
 /// `close_chest`'s shape, for `close_chest`'s reason: a screen that traps the
 /// player when the connection drops traps them at the worst moment, so the
 /// local close happens whether or not there is anybody to tell.
+/// The line a stall's refusal is said in.
+fn stall_refusal(why: primitive_shared::stall::Refusal) -> ui::lang::Msg {
+    use primitive_shared::stall::Refusal;
+    use ui::lang::Msg;
+    match why {
+        Refusal::NotYours => Msg::StallNotYours,
+        Refusal::NoOffer => Msg::StallNoOffer,
+        Refusal::OfferChanged => Msg::StallOfferChanged,
+        Refusal::SoldOut => Msg::StallSoldOut,
+        Refusal::CannotPay => Msg::StallCannotPay,
+        Refusal::NoRoom => Msg::StallNoRoom,
+        Refusal::TillFull => Msg::StallTillFull,
+        Refusal::BadOffer => Msg::StallBadOffer,
+    }
+}
+
+/// What a click on a container screen asks the server, or `None` for the
+/// one intent that asks nothing (`Close`, which `close_chest` handles).
+///
+/// **One function, for the frame and the scenarios both.** It was a `match`
+/// written inline in the frame, and the scenario harness plays the same
+/// clicks: two copies of it would be two answers to "what does a click on
+/// TRADE send", and a scenario passing on the one the game does not use.
+fn chest_intent_message(intent: chest_screen::Intent) -> Option<ClientMessage> {
+    use chest_screen::Intent;
+    let byte = |n: usize| n.min(u8::MAX as usize) as u8;
+    Some(match intent {
+        Intent::Move { from, to, half } => ClientMessage::ChestMove {
+            from: (from.0, byte(from.1)),
+            to: (to.0, byte(to.1)),
+            half,
+        },
+        Intent::QuickMove(side, slot) => ClientMessage::ChestQuickMove { side, slot: byte(slot) },
+        Intent::BulkMove { to_chest } => ClientMessage::ChestBulkMove { to_chest },
+        Intent::MoveKind(side, slot) => ClientMessage::ChestMoveKind { side, slot: byte(slot) },
+        Intent::Sort => ClientMessage::SortChest,
+        Intent::SetOffer { row, offer } => ClientMessage::StallOffer { row: byte(row), offer },
+        Intent::Buy { row, offer } => ClientMessage::StallBuy { row: byte(row), offer },
+        Intent::Close => return None,
+    })
+}
+
 fn close_station(
     screen: &mut station_screen::StationScreen,
     net: Option<&network::NetworkHandle>,
@@ -8414,6 +8435,22 @@ fn drain_network(
                 // Broken, or walked away from. Either way there is
                 // nothing to look at any more.
                 chest_screen.close();
+            }
+
+            // Whose stall this is and what it asks, just before its
+            // `ChestState`. See `ChestScreen::show_stall`.
+            ServerMessage::StallOffers { global_x, global_y, global_z, owner, yours, offers } => {
+                chest_screen.show_stall(chest_screen::StallView {
+                    at: (global_x, global_y, global_z),
+                    owner: primitive_shared::protocol::sanitize_username(&owner),
+                    yours,
+                    offers,
+                });
+            }
+
+            // A stall said no. In words, where every refusal lands.
+            ServerMessage::StallRefused { why } => {
+                *notice = Some((language.text(stall_refusal(why)).to_string(), Instant::now()));
             }
 
             ServerMessage::Breath { fraction } => {
