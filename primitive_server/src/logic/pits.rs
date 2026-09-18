@@ -253,12 +253,14 @@ impl Pits {
                     }
                     let kiln = self.kilns.entry(at).or_default();
                     *kiln = Kiln::default();
-                    kiln.pottery.push(block_kind(piece));
+                    // **The piece as it is, dryness and all** (`clay`): how wet
+                    // it went in is what the fire judges it by at the end.
+                    kiln.pottery.push(piece);
                     self.dirty = true;
                     let wrote = Stage::Pottery { pieces: 1, fired: false }.block();
                     world.set(at.0, at.1, at.2, wrote);
                     Outcome {
-                        spent: Some(block_kind(piece)),
+                        spent: Some(piece),
                         wrote: vec![(at, wrote)],
                         ..Outcome::default()
                     }
@@ -285,11 +287,11 @@ impl Pits {
                     if kiln.pottery.len() >= POTTERY_MAX as usize {
                         return Outcome::say("a pit kiln holds four pieces of pottery");
                     }
-                    kiln.pottery.push(block_kind(piece));
+                    kiln.pottery.push(piece);
                     let count = kiln.pottery.len() as u8;
                     let wrote = write(self, Stage::Pottery { pieces: count, fired: false });
                     return Outcome {
-                        spent: Some(block_kind(piece)),
+                        spent: Some(piece),
                         wrote: vec![wrote],
                         ..Outcome::default()
                     };
@@ -350,10 +352,12 @@ impl Pits {
                             "the pit needs {FIBRE_NEEDED} fibre before the logs go on ({fibre} now)"
                         ));
                     }
-                    self.kilns.entry(at).or_default().logs = vec![block_kind(log)];
+                    // Green or seasoned, as it is: a pit laid with green wood
+                    // does not get hot enough (see the end of the burn).
+                    self.kilns.entry(at).or_default().logs = vec![log];
                     let wrote = write(self, Stage::Logs(1));
                     return Outcome {
-                        spent: Some(block_kind(log)),
+                        spent: Some(log),
                         wrote: vec![wrote],
                         ..Outcome::default()
                     };
@@ -370,10 +374,10 @@ impl Pits {
                     if logs >= LOGS_NEEDED {
                         return Outcome::say("the pit kiln is full: strike it with flint to light it");
                     }
-                    self.kilns.entry(at).or_default().logs.push(block_kind(log));
+                    self.kilns.entry(at).or_default().logs.push(log);
                     let wrote = write(self, Stage::Logs(logs + 1));
                     return Outcome {
-                        spent: Some(block_kind(log)),
+                        spent: Some(log),
                         wrote: vec![wrote],
                         ..Outcome::default()
                     };
@@ -445,18 +449,21 @@ impl Pits {
         if !pit::pile_fits(|x, y, z| world.block(x, y, z), at) {
             return Outcome::say("a log pile needs an empty cell with a floor under it");
         }
+        // The log as it is, green or seasoned: a pile is where green wood
+        // seasons (`season_piles`), and what it gives back is what it made
+        // of the logs.
         self.piles.insert(
             at,
             Pile {
-                logs: vec![block_kind(log)],
+                logs: vec![log],
                 burn: None,
             },
         );
-        let block = pile_in_wood(1, &[block_kind(log)]);
+        let block = pile_in_wood(1, &[log]);
         world.set(at.0, at.1, at.2, block);
         self.dirty = true;
         Outcome {
-            spent: Some(block_kind(log)),
+            spent: Some(log),
             wrote: vec![(at, block)],
             ..Outcome::default()
         }
@@ -490,12 +497,12 @@ impl Pits {
             if pile.logs.is_empty() {
                 pile.logs = vec![BLOCK_LOG; logs as usize];
             }
-            pile.logs.push(block_kind(log));
+            pile.logs.push(log);
             let wrote = pile_in_wood(logs + 1, &pile.logs);
             world.set(at.0, at.1, at.2, wrote);
             self.dirty = true;
             return Outcome {
-                spent: Some(block_kind(log)),
+                spent: Some(log),
                 wrote: vec![(at, wrote)],
                 ..Outcome::default()
             };
@@ -549,6 +556,52 @@ impl Pits {
         }
         self.dirty = true;
         wrote
+    }
+
+    // ---- seasoning ----
+
+    /// Every unlit pile with a green log in it, for the slow clock to look
+    /// at the weather over: `logic::rot` asks this, samples the sky over
+    /// each with no lock held, and hands the answers to [`Self::season_piles`].
+    pub fn green_piles(&self) -> Vec<PitPos> {
+        self.piles
+            .iter()
+            .filter(|(_, pile)| pile.burn.is_none() && pile.logs.iter().any(|&log| primitive_shared::wood::is_green(log)))
+            .map(|(&at, _)| at)
+            .collect()
+    }
+
+    /// One step of the world's slow clock over the piles in `dry`: each green
+    /// log in them one stage further seasoned, on the steps
+    /// `wood::SEASONS_EVERY_IN_A_PILE` says. `dry` is the piles the rain is
+    /// not falling on this step and whose chunk somebody has; a pile being
+    /// rained on waits, and one nobody has loaded is where it was.
+    ///
+    /// **The logs are in the pile's own list** (`Pile::logs`), which is
+    /// already saved in `pits.bin` and already what breaking a pile gives
+    /// back -- so a pile's seasoning costs no new file, no new field and no
+    /// new message: the block is the same pile, the logs in it are drier.
+    pub fn season_piles(&mut self, step: u64, dry: &[PitPos]) -> usize {
+        if !step.is_multiple_of(u64::from(primitive_shared::wood::SEASONS_EVERY_IN_A_PILE)) {
+            return 0;
+        }
+        let mut seasoned = 0;
+        for at in dry {
+            let Some(pile) = self.piles.get_mut(at).filter(|pile| pile.burn.is_none()) else {
+                continue;
+            };
+            for log in pile.logs.iter_mut() {
+                let next = primitive_shared::wood::season_a_stage(*log);
+                if next != *log {
+                    *log = next;
+                    seasoned += 1;
+                }
+            }
+        }
+        if seasoned > 0 {
+            self.dirty = true;
+        }
+        seasoned
     }
 
     // ---- breaking ----
@@ -683,8 +736,40 @@ impl Pits {
                 continue;
             };
             kiln.burn = None;
+            // **Green wood never gets the pit hot enough**, the hearth's
+            // rule (`hearth::GREEN_HEAT`) for the fire in the ground: more
+            // than half the logs green and the hour was a smoky one that
+            // fired nothing. Half and not any, so one green log in eight is
+            // a mistake the rest of the wood covers -- "on its own" is the
+            // rule, not "in any amount".
+            let green = kiln.logs.iter().filter(|&&log| primitive_shared::wood::is_green(log)).count();
+            let too_green = fired && green * 2 > kiln.logs.len();
+            let fired = fired && !too_green;
+            let mut news = if too_green {
+                "the pit kiln has burnt down, but the wood was green: it never got hot enough, and the pottery is not fired"
+            } else {
+                news
+            };
             kiln.logs.clear();
             if fired {
+                // **A wet piece may crack in the fire** (`clay::crack_chance`),
+                // each on its own roll. The roll is a hash of the pit and the
+                // piece's place in it rather than the server's generator, for
+                // `rot::Rot::kept`'s reason: the same pit asked twice answers
+                // the same, and a test can say which.
+                let before = kiln.pottery.len();
+                let mut index = 0u32;
+                kiln.pottery.retain(|&piece| {
+                    index += 1;
+                    !primitive_shared::clay::cracks(piece, pit_roll(at, index))
+                });
+                if kiln.pottery.len() < before {
+                    news = if kiln.pottery.is_empty() {
+                        "the pit kiln has burnt down, and every piece went in wet and cracked in the fire"
+                    } else {
+                        "the pit kiln has burnt down: the pottery is fired, but what went in wet cracked"
+                    };
+                }
                 for piece in kiln.pottery.iter_mut() {
                     if let Some(hard) = fires_into(*piece) {
                         *piece = hard;
@@ -862,6 +947,21 @@ impl Pits {
     }
 }
 
+/// A roll in 0..1 for the `index`th piece in the pit at `at`: one round of
+/// the integer hash `rot::Rot::kept` and `minigame::target` use.
+fn pit_roll(at: PitPos, index: u32) -> f32 {
+    let mut h = (at.0 as u32).wrapping_mul(0x9E37_79B9)
+        ^ (at.1 as u32).wrapping_mul(0x85EB_CA6B)
+        ^ (at.2 as u32).wrapping_mul(0xC2B2_AE35)
+        ^ index.wrapping_mul(0x27D4_EB2F);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7FEB_352D);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846C_A68B);
+    h ^= h >> 16;
+    (h % 1000) as f32 / 1000.0
+}
+
 /// The six face neighbours.
 const NEIGHBOURS: [(i32, i32, i32); 6] = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)];
 
@@ -885,6 +985,11 @@ mod tests {
     };
 
     const AT: PitPos = (3, 20, -4);
+
+    /// A piece laid out until it is bone-dry: what fires whole.
+    fn dry(raw: BlockId) -> BlockId {
+        primitive_shared::clay::with_dryness(raw, primitive_shared::clay::Dryness::BoneDry)
+    }
 
     /// A field of dirt with a one-deep hole at `AT`.
     fn pit_world() -> TestWorld {
@@ -920,7 +1025,7 @@ mod tests {
     fn a_pit_kiln_with_pottery_eight_hay_and_eight_logs_fires_its_pottery_after_an_hour_and_not_a_minute_before() {
         let world = pit_world();
         let mut pits = Pits::new();
-        build(&mut pits, &world, &[BLOCK_VESSEL_RAW, BLOCK_JUG_RAW], 8, 8);
+        build(&mut pits, &world, &[dry(BLOCK_VESSEL_RAW), dry(BLOCK_JUG_RAW)], 8, 8);
         assert_eq!(Stage::of(world.get(AT.0, AT.1, AT.2)), Some(Stage::Logs(8)));
 
         let lit = pits.use_kiln(&world, AT, Some(BLOCK_FLINT));
@@ -934,7 +1039,7 @@ mod tests {
         }
         pits.step(&world, PIT_KILN_SECONDS - 60.0 - 30.0, 64);
         assert_eq!(Stage::of(world.get(AT.0, AT.1, AT.2)), Some(Stage::Burning), "it finished a minute early");
-        assert_eq!(pits.pottery(AT), [BLOCK_VESSEL_RAW, BLOCK_JUG_RAW]);
+        assert_eq!(pits.pottery(AT), [dry(BLOCK_VESSEL_RAW), dry(BLOCK_JUG_RAW)]);
 
         let stepped = pits.step(&world, 60.0, 64);
         assert_eq!(
@@ -951,6 +1056,80 @@ mod tests {
         let second = pits.use_kiln(&world, AT, None);
         assert_eq!(second.returned, Some(BLOCK_VESSEL));
         assert_eq!(world.get(AT.0, AT.1, AT.2), BLOCK_AIR, "the empty pit is not a hole again");
+    }
+
+    /// Builds a full kiln of `pottery` and `logs`, lights it and lets it
+    /// burn its hour; answers the news it ended with.
+    fn fire(pits: &mut Pits, world: &TestWorld, pottery: &[BlockId], logs: BlockId) -> &'static str {
+        for &piece in pottery {
+            pits.use_kiln(world, AT, Some(piece));
+        }
+        for _ in 0..FIBRE_NEEDED {
+            pits.use_kiln(world, AT, Some(BLOCK_FIBER));
+        }
+        for _ in 0..LOGS_NEEDED {
+            let laid = pits.use_kiln(world, AT, Some(logs));
+            assert_eq!(laid.spent, Some(logs), "{:?}", laid.said);
+        }
+        pits.use_kiln(world, AT, Some(BLOCK_FLINT));
+        let stepped = pits.step(world, PIT_KILN_SECONDS + 1.0, 64);
+        stepped.news.last().map(|&(_, news)| news).expect("the kiln said nothing when it finished")
+    }
+
+    #[test]
+    fn four_wet_pots_in_a_pit_kiln_come_out_with_some_cracked_and_four_dry_ones_all_whole() {
+        // The player's words: fire it wet and "some of it" cracks -- not
+        // none and not all. The rolls are a hash of the pit, so this pit
+        // always answers the same, and the count is checked against what
+        // the same rolls say of each piece.
+        let world = pit_world();
+        let mut pits = Pits::new();
+        let wet = [BLOCK_VESSEL_RAW; 4];
+        let news = fire(&mut pits, &world, &wet, BLOCK_LOG);
+        let whole = (1..=4).filter(|&i| !primitive_shared::clay::cracks(BLOCK_VESSEL_RAW, pit_roll(AT, i))).count();
+        assert!(whole > 0 && whole < 4, "this pit's dice crack {} of 4: pick another AT for the test", 4 - whole);
+        assert_eq!(pits.pottery(AT), vec![BLOCK_VESSEL; whole].as_slice(), "the cracked pots were not the ones the dice said");
+        assert!(news.contains("cracked"), "nobody was told the pots cracked: {news}");
+
+        let world = pit_world();
+        let mut pits = Pits::new();
+        let news = fire(&mut pits, &world, &[dry(BLOCK_VESSEL_RAW); 4], BLOCK_LOG);
+        assert_eq!(pits.pottery(AT), [BLOCK_VESSEL; 4], "a bone-dry pot cracked");
+        assert!(!news.contains("cracked"), "{news}");
+    }
+
+    #[test]
+    fn a_pit_kiln_laid_with_green_logs_burns_its_hour_and_fires_nothing() {
+        let world = pit_world();
+        let mut pits = Pits::new();
+        let green = primitive_shared::wood::green(BLOCK_LOG);
+        let news = fire(&mut pits, &world, &[dry(BLOCK_VESSEL_RAW)], green);
+        assert_eq!(pits.pottery(AT), [dry(BLOCK_VESSEL_RAW)], "green wood fired a pot");
+        assert_eq!(Stage::of(world.get(AT.0, AT.1, AT.2)), Some(Stage::Pottery { pieces: 1, fired: false }));
+        assert!(news.contains("green"), "the player was not told why: {news}");
+    }
+
+    #[test]
+    fn green_logs_in_a_pile_season_in_dry_weather_and_wait_in_the_rain() {
+        let mut pits = Pits::new();
+        let at = (0, 20, 0);
+        let green = primitive_shared::wood::green(BLOCK_LOG);
+        pits.piles.insert(at, Pile { logs: vec![green, green], burn: None });
+        assert_eq!(pits.green_piles(), vec![at]);
+        let every = u64::from(primitive_shared::wood::SEASONS_EVERY_IN_A_PILE);
+        // Raining: the caller leaves it out of `dry`, and nothing moves.
+        for step in 1..=every * 4 {
+            pits.season_piles(step, &[]);
+        }
+        assert_eq!(pits.piles[&at].logs, vec![green, green], "the rain seasoned the pile");
+        // Dry: a stage on each step the clock says, three to seasoned.
+        for step in 1..=every * u64::from(primitive_shared::wood::GREENEST) {
+            pits.season_piles(step, &[at]);
+        }
+        assert_eq!(pits.piles[&at].logs, vec![BLOCK_LOG, BLOCK_LOG], "three days in a pile did not season it");
+        assert!(pits.green_piles().is_empty());
+        // ...and what the pile gives back is the seasoned wood.
+        assert_eq!(pits.broken(at, log_pile(2)), vec![(BLOCK_LOG, 1), (BLOCK_LOG, 1)]);
     }
 
     #[test]
@@ -1037,7 +1216,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let world = pit_world();
         let mut pits = Pits::new();
-        build(&mut pits, &world, &[BLOCK_VESSEL_RAW, BLOCK_JUG_RAW], 8, 8);
+        build(&mut pits, &world, &[dry(BLOCK_VESSEL_RAW), dry(BLOCK_JUG_RAW)], 8, 8);
         pits.use_kiln(&world, AT, Some(BLOCK_FLINT));
         pits.step(&world, 1234.5, 64);
         let left = pits.kiln_seconds_left(AT).expect("burning");
@@ -1047,7 +1226,7 @@ mod tests {
         let mut restored = Pits::new();
         assert_eq!(restored.load(&dir).expect("load"), 1);
         assert_eq!(restored.kiln_seconds_left(AT), Some(left), "the kiln came back with another hour");
-        assert_eq!(restored.pottery(AT), [BLOCK_VESSEL_RAW, BLOCK_JUG_RAW]);
+        assert_eq!(restored.pottery(AT), [dry(BLOCK_VESSEL_RAW), dry(BLOCK_JUG_RAW)], "the pottery forgot how dry it was");
         restored.step(&world, left + 0.1, 64);
         assert_eq!(restored.pottery(AT), [BLOCK_VESSEL, BLOCK_JUG], "the restored kiln never finished");
         let _ = std::fs::remove_dir_all(&dir);

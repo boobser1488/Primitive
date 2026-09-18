@@ -766,7 +766,9 @@ impl Server {
     /// is set; the *stage* still turns on the ordinary step, in whatever
     /// sky there is -- so a scenario that sets a sod a breath short of dry
     /// and sees it turn has seen the sun do it, and one that set it in the
-    /// rain would see it go back.
+    /// rain would see it go back. A piece of raw pottery set down is on the
+    /// same list (`peat`, "raw pottery dries here too") and is pushed the
+    /// same way.
     pub fn set_peat_progress(&self, at: (i32, i32, i32), progress: f32) {
         self.ctx.peat.lock().unwrap_or_else(|e| e.into_inner()).set_progress(at, progress);
     }
@@ -9850,7 +9852,8 @@ pub(crate) fn fell_tree(
         let mut items = ctx.items.lock().unwrap_or_else(|e| e.into_inner());
         if plan.spare > 0 {
             items.spawn(
-                plan.wood,
+                // Off a standing tree, so green (`wood`, "seasoning").
+                primitive_shared::wood::green(plan.wood),
                 plan.spare,
                 primitive_shared::geometry::wide(at),
                 (0.0, 0.0, 0.0),

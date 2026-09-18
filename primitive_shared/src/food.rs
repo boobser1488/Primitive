@@ -350,8 +350,9 @@ pub fn nutrition(block: BlockId) -> Option<f32> {
         BLOCK_BREAD => Some(8.0),
         // **Porridge is under bread and over a roasted root**: a pot of grain
         // boiled whole feeds less than a loaf, and it is one step at a fire
-        // where the loaf is four. And it goes off, where bread keeps
-        // (`rot_per_step`) -- the quicker meal is the one eaten the same day.
+        // where the loaf is four. And it goes off in two days where a loaf
+        // lasts four (`rot_every`) -- the quicker meal is the one eaten the
+        // same day.
         // See `types::BLOCK_WILD_MILLET` for the crop the choice is between.
         crate::types::BLOCK_MILLET_PORRIDGE => Some(6.0),
         // **Two bowls at twelve out of a haunch and a root**, which roasted
@@ -469,8 +470,14 @@ pub const STALE_WORTH: f32 = 0.7;
 /// on it would only make foraging a chore.
 ///
 /// What does **not** go off is what a process was applied to for the
-/// purpose: bread out of the oven, grain in the sack, a brick of peat.
-/// Baking *is* the preservation. **Dried and salted meat and fish are
+/// purpose, or what was dry to begin with: grain in the sack, flour, a
+/// brick of peat. **Bread is not on that list any more.** It used to be --
+/// "baking *is* the preservation" -- and that made the oven a bank: bake a
+/// stack in the autumn and the winter is solved, and the grain the loaves
+/// came from was never worth keeping as grain. A loaf goes stale and then
+/// mouldy in a few days, as a loaf does, and the grain beside it keeps for
+/// ever; so the larder of a farmer is a sack and a quern, and bread is
+/// baked as it is eaten (see [`rot_every`] for how slowly). **Dried and salted meat and fish are
 /// the exception, and a slow one**: they age a stage at a time on steps
 /// far apart ([`rot_every`]), because a larder in which dried meat kept
 /// for ever left the salt nothing to buy. The rack is still the larder --
@@ -522,7 +529,9 @@ pub fn rot_per_step(block: BlockId) -> u8 {
         // fruit does. Dried kelp is not here: the rack is the preservation,
         // exactly as it is for the meat.
         | crate::types::BLOCK_COOKED_FISH
-        | crate::types::BLOCK_KELP_FROND => 1,
+        | crate::types::BLOCK_KELP_FROND
+        // Bread, a stage every second step: see `rot_every`.
+        | BLOCK_BREAD => 1,
         // **The larder, slowest last**: salted, dried, and salted then dried
         // all go off, a stage at a time, on steps far apart -- see
         // [`rot_every`], which is where they differ.
@@ -567,6 +576,14 @@ pub fn rot_every(block: BlockId) -> u32 {
         // `rot::the_racks_dried_meat_outlasts_the_hunt` walks a month with a
         // pack of it and it is still dried meat at the end.
         crate::types::BLOCK_SALTED_MEAT | crate::types::BLOCK_SALTED_FISH => 4,
+        // **A loaf keeps four days**, twice a roast and half the salt: the
+        // crust is a preservation of sorts, and what goes wrong with bread
+        // is staleness and then mould, not the day-old stink of meat. Four
+        // days is long enough to bake for the week's walking and short
+        // enough that a winter's bread is a sack of grain, not a chest of
+        // loaves -- which is the decision the grain was always meant to be.
+        // A cellar doubles it, as it doubles everything (`rot::Keeping`).
+        BLOCK_BREAD => 2,
         BLOCK_DRIED_MEAT | crate::types::BLOCK_DRIED_FISH => 24,
         crate::types::BLOCK_DRIED_SALTED_MEAT | crate::types::BLOCK_DRIED_SALTED_FISH => 72,
         _ => 1,
@@ -996,7 +1013,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_meat_goes_off_in_a_day_and_bread_never_does() {
+    fn raw_meat_goes_off_in_a_day_bread_in_four_and_grain_never_does() {
         // The two lifetimes `ROT_STEPS_PER_DAY` is derived from, and the
         // claim the rack's whole existence rests on.
         assert_eq!(steps_until_rot(BLOCK_RAW_MEAT), ROT_STEPS_PER_DAY, "raw meat is not a day");
@@ -1008,11 +1025,17 @@ mod tests {
         // ...and the fire buys real time: cooked outlasts raw.
         assert!(steps_until_rot(BLOCK_COOKED_MEAT) > steps_until_rot(BLOCK_RAW_MEAT));
 
-        // What a process was applied to keeps for ever. Dried meat left
-        // this loop for `the_larder_keeps_longer_the_more_was_done_to_it`.
+        // A loaf goes stale in four days: the decision is to keep the
+        // grain and bake as it is eaten, not to bake the winter in autumn.
+        assert_eq!(steps_until_rot(BLOCK_BREAD), ROT_STEPS_PER_DAY * 4, "bread is not four days");
+        assert!(steps_until_rot(BLOCK_BREAD) > steps_until_rot(BLOCK_COOKED_MEAT), "bread went off as fast as a roast");
+
+        // What is dry, or was dried for the purpose, keeps for ever --
+        // the grain and the flour the loaf came from above all. Dried meat
+        // left this loop for `the_larder_keeps_longer_the_more_was_done_to_it`.
         for keeps in [
-            BLOCK_BREAD,
             crate::types::BLOCK_GRAIN,
+            crate::types::BLOCK_FLOUR,
             crate::types::BLOCK_DRIED_PEAT,
             BLOCK_TOADSTOOL,
             BLOCK_ROTTEN,
@@ -1201,12 +1224,14 @@ mod tests {
                 );
             }
         }
-        // ...and the bits mean nothing on what keeps: a stage on a loaf
-        // is junk off a socket, and is refused like any other junk.
-        assert!(!crate::types::is_known_block(BLOCK_BREAD | (3 << VARIANT_SHIFT)));
-        // (Dried meat is not here any more: it goes off too, a stage at a
-        // time and slowly, since the larder learned salting -- see `rot_every`.)
-        assert_eq!(with_rot_stage(BLOCK_BREAD, 4), BLOCK_BREAD, "bread was given an age");
+        // ...and the bits mean nothing on what keeps: a stage on a sack of
+        // grain is junk off a socket, and is refused like any other junk.
+        // (Bread and dried meat are not here any more: both go off, since
+        // the larder learned salting and the loaf learned to go stale --
+        // see `rot_every`.)
+        assert!(!crate::types::is_known_block(crate::types::BLOCK_GRAIN | (3 << VARIANT_SHIFT)));
+        assert_eq!(with_rot_stage(crate::types::BLOCK_GRAIN, 4), crate::types::BLOCK_GRAIN, "grain was given an age");
+        assert!(crate::types::is_known_block(with_rot_stage(BLOCK_BREAD, 4)), "a stale loaf is an invented id");
     }
 
     #[test]

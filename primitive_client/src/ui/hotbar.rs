@@ -300,6 +300,20 @@ pub fn icon_tint(block: primitive_shared::types::BlockId, slot: [f32; 4]) -> [f3
     if primitive_shared::tools::is_hardened(block) {
         return [slot[0] * 0.80, slot[1] * 0.87, slot[2] * 1.0, slot[3]];
     }
+    // **Raw clay is darker the wetter it is** (`clay::shade`): wet off the
+    // hands, leather-hard, then the pale picture itself when it is dry
+    // enough to fire -- the one way to see across a pack which pots are
+    // ready for the kiln without hovering each.
+    if primitive_shared::clay::is_raw_pottery(block) {
+        let shade = primitive_shared::clay::shade(block);
+        return [slot[0] * shade[0], slot[1] * shade[1], slot[2] * shade[2], slot[3]];
+    }
+    // **A green log is a shade greener and darker than a seasoned one**
+    // (`wood::is_green`): sap under the bark. Faint, as the steel is,
+    // because the whole picture takes it.
+    if primitive_shared::wood::is_green(block) {
+        return [slot[0] * 0.82, slot[1] * 0.92, slot[2] * 0.78, slot[3]];
+    }
     if let Some(head) = primitive_shared::types::spear_tint(block) {
         return [
             slot[0] * head[0],

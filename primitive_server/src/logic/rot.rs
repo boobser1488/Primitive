@@ -7,8 +7,9 @@
 //! the first good evening: one boar is eight cuts, eight cuts cooked is
 //! eighty points of bar, and eighty points in a chest is the end of ever
 //! having to hunt again. The rules for *what* keeps and for how long are
-//! in [`primitive_shared::food`] -- raw meat a day, cooked meat two,
-//! dried meat and bread for ever, which is the reason to build a rack.
+//! in [`primitive_shared::food`] -- raw meat a day, cooked meat two, a
+//! loaf four, dried meat a season and grain for ever, which is the reason
+//! to build a rack and to keep the harvest as grain.
 //! This module is only the clock that applies them, and the walk over
 //! everywhere a stack can be.
 //!
@@ -55,6 +56,24 @@
 //! hasten rot, but a player has no way to keep a *drop* out of the rain
 //! and a mechanic that punishes what cannot be answered is a chore.
 //!
+//! ## What else it steps: clay drying and wood seasoning
+//!
+//! Two things change on their own the way food does, slowly and a stage at
+//! a time, and both ride this clock rather than one of their own: **raw
+//! pottery dries** (`clay`, a stage a day in a pack or a chest, stopped by
+//! frost and rain, halved by damp air) and **a green log seasons** (`wood`,
+//! a stage every two days in a chest or a pack under a roof, a stage a day
+//! in a log pile, stopped by rain). Their stages live in the stack's own id,
+//! as a haunch's age does, so this walk over every pack, chest and drop is
+//! already the walk they need -- a second clock would be a second walk over
+//! the same slots. The look-before-you-sample rule covers them too
+//! ([`Rot::holds_changing`]): a chest of seasoned wood and fired pots costs
+//! no weather.
+//!
+//! **Neither is the food's cellar rule.** Cold keeps meat; it does not keep
+//! a pot wet or a log green, so [`Rot::cured`] is handed the world's own
+//! step, not the one [`Keeping::clock`] slowed.
+//!
 //! ## What it does not do
 //!
 //! - **A chest in a chunk nobody has loaded is not aged.** The same
@@ -73,6 +92,7 @@
 use std::sync::Arc;
 
 use primitive_shared::food::{self, ROT_STEPS_PER_DAY};
+use primitive_shared::{clay, wood};
 use primitive_shared::inventory::{Inventory, Stack};
 use primitive_shared::types::BLOCK_AIR;
 
@@ -218,6 +238,76 @@ impl Rot {
             .any(|stack| food::is_perishable(stack.block))
     }
 
+    /// Is there anything in here that dries or seasons: raw pottery that is
+    /// not bone-dry, a log that is not seasoned?
+    pub fn holds_curing(inventory: &Inventory) -> bool {
+        inventory.slots().iter().flatten().any(|stack| Self::cures(stack.block))
+    }
+
+    /// Anything a step of this clock could change: food, clay, green wood.
+    pub fn holds_changing(inventory: &Inventory) -> bool {
+        Self::holds_perishables(inventory) || Self::holds_curing(inventory)
+    }
+
+    fn cures(block: primitive_shared::types::BlockId) -> bool {
+        clay::is_drying(block) || wood::is_green(block)
+    }
+
+    /// What one step of the world's clock, number `step`, makes of a stack
+    /// that dries rather than rots, where the weather is `ambient`.
+    ///
+    /// - **Rain on it stops both.** A pot in a pack in a downpour is not
+    ///   drying, and a log in one is not seasoning.
+    /// - **Clay dries anywhere above freezing**, a stage every
+    ///   [`clay::DRIES_EVERY`] steps, and every twice that in damp country
+    ///   (`drying::damp_share` under three quarters -- the swamp's end of
+    ///   the map): a swamp camp's pots want a day in the sun.
+    /// - **A log seasons only under a roof** (`Ambient::sheltered`), a stage
+    ///   every [`wood::SEASONS_EVERY_UNDER_A_ROOF`] steps. A log carried
+    ///   about in the open, or lying in the grass, lies in the dew; the log
+    ///   pile, which is stepped on its own and faster, is how firewood is
+    ///   seasoned outdoors (`pits::Pits::season_piles`).
+    pub fn cured(block: primitive_shared::types::BlockId, step: u64, ambient: &Ambient) -> primitive_shared::types::BlockId {
+        if ambient.getting_wet {
+            return block;
+        }
+        if clay::is_drying(block) {
+            if ambient.temperature_c <= KEEPS_BELOW_C {
+                return block;
+            }
+            let damp = crate::logic::drying::damp_share(ambient.humidity) < 0.75;
+            let every = u64::from(clay::DRIES_EVERY) * if damp { 2 } else { 1 };
+            return if step.is_multiple_of(every) { clay::drier(block) } else { block };
+        }
+        if wood::is_green(block) && ambient.sheltered && step.is_multiple_of(u64::from(wood::SEASONS_EVERY_UNDER_A_ROOF)) {
+            return wood::season_a_stage(block);
+        }
+        block
+    }
+
+    /// One step of the drying and the seasoning over one container: every
+    /// stack that changed rewritten in its own slot at its own count, and
+    /// its wear word kept -- a bowl off the wheel carries its maker's grade
+    /// there (`quality`). Answers whether anything changed.
+    pub fn cure_inventory(inventory: &mut Inventory, step: u64, ambient: &Ambient) -> bool {
+        let mut changed = false;
+        for slot in 0..inventory.slots().len() {
+            let Some(stack) = inventory.slots()[slot] else {
+                continue;
+            };
+            let next = Self::cured(stack.block, step, ambient);
+            if next == stack.block {
+                continue;
+            }
+            inventory.take_slot(slot);
+            if let Some(left) = inventory.put_in_slot(slot, Stack::worn(next, stack.count, stack.damage)) {
+                inventory.add_worn(left.block, left.count, left.damage);
+            }
+            changed = true;
+        }
+        changed
+    }
+
     /// One step of the clock over one container. Answers whether
     /// anything in it changed.
     ///
@@ -303,17 +393,22 @@ impl Rot {
         let mut changed = Vec::new();
         for at in chests.positions() {
             // `contents` clones forty slots; done once, and only the
-            // perishable ones go on to pay for a climate sample.
-            if !Self::holds_perishables(&chests.contents(at)) {
+            // ones with something that can change go on to pay for a
+            // climate sample.
+            if !Self::holds_changing(&chests.contents(at)) {
                 continue;
             }
             let Some(ambient) = ambient_at(at) else {
                 continue;
             };
-            let Some(step) = Keeping::of(&ambient).clock(step) else {
-                continue;
+            let aged = match Keeping::of(&ambient).clock(step) {
+                Some(own) => chests.edit(at, |contents| Self::age_inventory(contents, own)),
+                None => false,
             };
-            if chests.edit(at, |contents| Self::age_inventory(contents, step)) {
+            // The world's step, not the cellar's: cold keeps meat, not a
+            // wet pot or a green log (see the note at the top).
+            let cured = chests.edit(at, |contents| Self::cure_inventory(contents, step, &ambient));
+            if aged || cured {
                 changed.push(at);
             }
         }
@@ -332,12 +427,16 @@ impl Rot {
         mut ambient_at: impl FnMut((f32, f32, f32)) -> Ambient,
     ) -> usize {
         items.rewrite_stacks(|item: &Item| {
-            if !food::is_perishable(item.block) {
-                return None;
+            if food::is_perishable(item.block) {
+                let ambient = ambient_at(primitive_shared::geometry::narrow(item.position));
+                let step = Keeping::of(&ambient).clock(step)?;
+                return Some(food::aged_on(item.block, step));
             }
-            let ambient = ambient_at(primitive_shared::geometry::narrow(item.position));
-            let step = Keeping::of(&ambient).clock(step)?;
-            Some(food::aged_on(item.block, step))
+            if Self::cures(item.block) {
+                let ambient = ambient_at(primitive_shared::geometry::narrow(item.position));
+                return Some(Self::cured(item.block, step, &ambient));
+            }
+            None
         })
     }
 
@@ -367,15 +466,17 @@ impl Rot {
         for handle in ctx.registry.handles() {
             let changed = {
                 let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(step) = Keeping::of(&state.ambient).clock(self.step) {
-                    let changed = Self::age_inventory(&mut state.inventory, step);
-                    if changed {
-                        state.inventory_dirty = true;
-                    }
-                    changed
-                } else {
-                    false
+                let state = &mut *state;
+                let aged = match Keeping::of(&state.ambient).clock(self.step) {
+                    Some(step) => Self::age_inventory(&mut state.inventory, step),
+                    None => false,
+                };
+                let cured = Self::cure_inventory(&mut state.inventory, self.step, &state.ambient);
+                let changed = aged || cured;
+                if changed {
+                    state.inventory_dirty = true;
                 }
+                changed
             };
             if changed {
                 crate::send_inventory(&handle);
@@ -407,6 +508,38 @@ impl Rot {
                 ))
             })
         };
+
+        // ---- the log piles ----
+        //
+        // Green wood stacked in a pile seasons on this clock (`wood`), unless
+        // the rain is falling on it this step. The piles are listed with the
+        // pits' lock alone, the weather is sampled with the fires' alone, and
+        // the pits taken again to write -- never two of them at once.
+        if self.step.is_multiple_of(u64::from(wood::SEASONS_EVERY_IN_A_PILE)) {
+            let piles = ctx.pits.lock().unwrap_or_else(|e| e.into_inner()).green_piles();
+            if !piles.is_empty() {
+                let dry: Vec<_> = {
+                    let fires = ctx.fires.lock().unwrap_or_else(|e| e.into_inner());
+                    piles
+                        .into_iter()
+                        .filter(|&at| {
+                            // Cache only, as the chests: a pile nobody has
+                            // loaded waits where it is.
+                            ctx.world.cached_block(at.0, at.1, at.2).is_some()
+                                && !Ambient::of(
+                                    &ctx.world,
+                                    &fires,
+                                    (at.0 as f32 + 0.5, at.1 as f32 + 1.0, at.2 as f32 + 0.5),
+                                    time_of_day,
+                                    weather,
+                                )
+                                .getting_wet
+                        })
+                        .collect()
+                };
+                ctx.pits.lock().unwrap_or_else(|e| e.into_inner()).season_piles(self.step, &dry);
+            }
+        }
 
         // ---- the ground ----
         //
@@ -513,7 +646,7 @@ mod tests {
     use super::*;
     use primitive_shared::food::{rot_stage, ROT_STEPS_PER_DAY};
     use primitive_shared::types::{
-        block_kind, BLOCK_BREAD, BLOCK_COOKED_MEAT, BLOCK_DRIED_MEAT, BLOCK_RAW_MEAT,
+        block_kind, BLOCK_BREAD, BLOCK_COOKED_MEAT, BLOCK_DRIED_MEAT, BLOCK_GRAIN, BLOCK_RAW_MEAT,
         BLOCK_ROTTEN, BLOCK_STONE,
     };
     use std::time::Instant;
@@ -631,10 +764,11 @@ mod tests {
         let mut chests = Chests::new();
         chests.edit(AT, |contents| {
             contents.put_in_slot(0, Stack::new(BLOCK_STONE, 30));
-            // Bread, not dried meat: since the larder learned salting, dried
-            // meat goes off too -- slowly (`food::rot_every`) -- and a chest
-            // with it in is a chest the weather is asked about.
-            contents.put_in_slot(1, Stack::new(BLOCK_BREAD, 6));
+            // Grain, not dried meat and not bread: since the larder learned
+            // salting and the loaf learned to go stale, both go off
+            // (`food::rot_every`), and a chest with either in it is a chest
+            // the weather is asked about. Grain is what keeps.
+            contents.put_in_slot(1, Stack::new(BLOCK_GRAIN, 6));
         });
         let mut samples = 0;
         let changed = Rot::age_chests(&mut chests, 0, |_| {
@@ -649,12 +783,14 @@ mod tests {
     fn the_racks_dried_meat_outlasts_the_hunt() {
         let mut step = 0u64;
         // The whole argument for building a rack: what came off it
-        // keeps. A pack of dried meat, bread and a cooked haunch is
-        // stepped for a month, and only the haunch is gone.
+        // keeps. A pack of dried meat, grain, bread and a cooked haunch is
+        // stepped for a month, and the haunch and the loaf are gone --
+        // the loaf in four days, which is why the harvest is kept as grain.
         let mut pack = Inventory::new();
         pack.put_in_slot(0, Stack::new(BLOCK_DRIED_MEAT, 8));
-        pack.put_in_slot(1, Stack::new(BLOCK_BREAD, 3));
+        pack.put_in_slot(1, Stack::new(BLOCK_GRAIN, 3));
         pack.put_in_slot(2, Stack::new(BLOCK_COOKED_MEAT, 2));
+        pack.put_in_slot(3, Stack::new(BLOCK_BREAD, 2));
         for _ in 0..30 {
             a_day_of_steps_from(&mut pack, &mut step);
         }
@@ -668,8 +804,11 @@ mod tests {
             "the rack's meat went off"
         );
         assert_eq!(pack.count_in(0), 8);
-        assert_eq!(pack.block_in(1), Some(BLOCK_BREAD), "the bread went off");
+        assert_eq!(pack.block_in(1), Some(BLOCK_GRAIN), "the grain went off");
         assert_eq!(pack.block_in(2), Some(BLOCK_ROTTEN), "a cooked haunch kept for a month");
+        assert_eq!(pack.block_in(3), Some(BLOCK_ROTTEN), "a loaf kept for a month");
+        pack.take_slot(2);
+        pack.take_slot(3);
         // ...and once everything left is what keeps, the pass has
         // nothing to say -- which is what stops it marking every chest
         // dirty and resending every pack four times a day for ever. The
@@ -749,6 +888,50 @@ mod tests {
             assert_eq!(Rot::age_items(&mut frozen, 0, |_| freezing()), 0);
         }
         assert_eq!(frozen.iter().next().expect("meat").block, BLOCK_RAW_MEAT);
+    }
+
+    #[test]
+    fn a_wet_pot_in_a_chest_is_bone_dry_in_two_days_and_frost_and_rain_hold_it() {
+        use primitive_shared::types::BLOCK_VESSEL_RAW;
+        let dried_after = |ambient: Ambient, days: u32| {
+            let mut chest = Inventory::new();
+            chest.put_in_slot(4, Stack::new(BLOCK_VESSEL_RAW, 3));
+            for step in 1..=u64::from(ROT_STEPS_PER_DAY * days) {
+                Rot::cure_inventory(&mut chest, step, &ambient);
+            }
+            assert_eq!(chest.count_in(4), 3, "drying moved the pots or lost some");
+            clay::dryness(chest.block_in(4).expect("the pots"))
+        };
+        assert_eq!(dried_after(mild(), 1), clay::Dryness::LeatherHard);
+        assert_eq!(dried_after(mild(), 2), clay::Dryness::BoneDry, "two days in a chest and still not dry");
+        assert_eq!(dried_after(freezing(), 5), clay::Dryness::Wet, "a pot dried in the frost");
+        let rained_on = Ambient { getting_wet: true, ..mild() };
+        assert_eq!(dried_after(rained_on, 5), clay::Dryness::Wet, "a pot dried in the rain");
+        let swamp = Ambient { humidity: 1.0, ..mild() };
+        assert_eq!(dried_after(swamp, 2), clay::Dryness::LeatherHard, "damp air did not slow it");
+    }
+
+    #[test]
+    fn a_green_log_seasons_under_a_roof_and_not_out_in_the_open() {
+        let green = wood::green(primitive_shared::types::BLOCK_LOG);
+        let after = |ambient: Ambient, days: u32| {
+            let mut chest = Inventory::new();
+            chest.put_in_slot(0, Stack::new(green, 5));
+            for step in 1..=u64::from(ROT_STEPS_PER_DAY * days) {
+                Rot::cure_inventory(&mut chest, step, &ambient);
+            }
+            chest.block_in(0).expect("the logs")
+        };
+        let roofed = Ambient { sheltered: true, ..mild() };
+        assert_eq!(after(roofed, 6), primitive_shared::types::BLOCK_LOG, "six days under a roof did not season it");
+        assert!(wood::is_green(after(roofed, 5)), "it seasoned faster in a chest than in a pile");
+        assert_eq!(after(mild(), 30), green, "a log out in the open seasoned");
+        // A chest of dry wood and stone asks the sky nothing.
+        let mut chests = Chests::new();
+        chests.edit(AT, |c| {
+            c.put_in_slot(0, Stack::new(primitive_shared::types::BLOCK_LOG, 8));
+        });
+        assert!(Rot::age_chests(&mut chests, 8, |_| panic!("the weather was sampled over seasoned wood")).is_empty());
     }
 
     #[test]

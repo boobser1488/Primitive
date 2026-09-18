@@ -191,11 +191,22 @@ fn starts_a_word(text: &str, query: &str) -> bool {
 /// `every_condition_the_rules_can_print_is_translated` is what stops
 /// that happening.
 pub fn condition(block: BlockId, language: Language) -> Option<Cow<'static, str>> {
-    let label = primitive_shared::types::water_label(block).or_else(|| primitive_shared::tools::label(block))?;
+    let label = rules_label(block)?;
     Some(match CONDITIONS.iter().find(|row| row.id == label) {
         Some(row) => Cow::Borrowed(row.in_language(language)),
         None => Cow::Borrowed(label),
     })
+}
+
+/// Every rule that has a word for the state of a stack, asked in turn:
+/// which water, how blunt, how dry the clay (`clay::label`), how green the
+/// wood (`wood::seasoning_label`). At most one of them answers for any
+/// block, since no block is two of those things.
+fn rules_label(block: BlockId) -> Option<&'static str> {
+    primitive_shared::types::water_label(block)
+        .or_else(|| primitive_shared::tools::label(block))
+        .or_else(|| primitive_shared::clay::label(block))
+        .or_else(|| primitive_shared::wood::seasoning_label(block))
 }
 
 /// The tooltip's first line for a stack: name, condition, count, weight.
@@ -319,6 +330,11 @@ const CONDITIONS: &[Name] = &[
     Name { id: "steeled, dulled", en: "steeled, dulled", simple: "hardened, a little blunt", ru: "закалён, чуть затуплен", pl: "hartowany, lekko stępiony" },
     Name { id: "steeled, dull", en: "steeled, dull", simple: "hardened, blunt", ru: "закалён, затуплен", pl: "hartowany, stępiony" },
     Name { id: "steeled, blunt", en: "steeled, blunt", simple: "hardened, very blunt", ru: "закалён, тупой", pl: "hartowany, tępy" },
+    Name { id: "wet", en: "wet", simple: "still wet", ru: "сырая", pl: "mokra" },
+    Name { id: "leather-hard", en: "leather-hard", simple: "half dry", ru: "подсохшая", pl: "podeschnięta" },
+    Name { id: "bone-dry", en: "bone-dry", simple: "dry, ready to fire", ru: "сухая", pl: "sucha" },
+    Name { id: "green", en: "green", simple: "fresh cut, wet", ru: "сырое", pl: "surowe" },
+    Name { id: "seasoning", en: "seasoning", simple: "drying out", ru: "подсыхает", pl: "schnie" },
 ];
 
 /// Every block and item, in `ALL_BLOCK_IDS`'s order so a new row has an
@@ -1163,6 +1179,19 @@ mod tests {
             stacks.push(barrel_of(water, 1));
         }
         for &(block, _) in ALL_BLOCK_IDS {
+            // Clay at every stage of drying, and wood at every stage of
+            // seasoning.
+            if primitive_shared::clay::is_raw_pottery(block) {
+                use primitive_shared::clay::{with_dryness, Dryness};
+                stacks.extend([Dryness::Wet, Dryness::LeatherHard, Dryness::BoneDry].map(|d| with_dryness(block, d)));
+            }
+            if primitive_shared::wood::is_log(block) {
+                let mut log = primitive_shared::wood::green(block);
+                for _ in 0..primitive_shared::wood::GREENEST {
+                    stacks.push(log);
+                    log = primitive_shared::wood::season_a_stage(log);
+                }
+            }
             if !tools::takes_an_edge(block) {
                 continue;
             }
@@ -1175,7 +1204,7 @@ mod tests {
         }
         let mut seen = 0;
         for block in stacks {
-            let Some(label) = primitive_shared::types::water_label(block).or_else(|| tools::label(block)) else {
+            let Some(label) = rules_label(block) else {
                 continue;
             };
             seen += 1;

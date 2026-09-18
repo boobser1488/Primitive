@@ -183,6 +183,36 @@ pub fn accepts(slot: usize, block: BlockId) -> bool {
 /// the client has to know what the fuel slot will accept before it lets
 /// a player drag something into it.
 pub fn fuel_seconds(block: BlockId) -> Option<f32> {
+    // A green log is gone sooner, for the heat's reason (`GREEN_HEAT`).
+    let green = if crate::wood::is_green(block) { GREEN_BURN } else { 1.0 };
+    fuel_seconds_seasoned(block).map(|seconds| seconds * green)
+}
+
+/// How much of a seasoned log's burn a green one gives: seven tenths.
+///
+/// **Shorter, not longer**, though a wet log smoulders for ever on a grate:
+/// what a hearth is fed for is heat, and the part of a green log's life
+/// spent boiling its sap is time the fire is not doing anything a player
+/// asked of it. Counted as burn, it would make green wood the *long* fuel
+/// and a reason to prefer it.
+pub const GREEN_BURN: f32 = 0.7;
+
+/// How much of a seasoned log's heat a green one reaches: a little over
+/// half.
+///
+/// **Chosen by the line it must not cross**: no green wood, in any hearth,
+/// reaches [`FIRING_C`] (`green_wood_cooks_supper_and_fires_no_pot`). The
+/// hottest wood is saxaul at 800 and the best draught the bloomery's 250;
+/// at 0.55 that is 690, ten degrees short, and a green oak in a kiln is
+/// 550 -- a fire that cooks, boils and dries a rack and never fires a pot
+/// or pours a metal. Seasoned, the same oak is 878 and fires. That gap is
+/// the decision: the wood cut today is supper's, and the kiln's was cut a
+/// week ago.
+pub const GREEN_HEAT: f32 = 0.55;
+
+/// [`fuel_seconds`] for the fuel dry, which is what every fuel but a green
+/// log already is.
+fn fuel_seconds_seasoned(block: BlockId) -> Option<f32> {
     match block_kind(block) {
         crate::types::BLOCK_COAL => Some(300.0),
         crate::types::BLOCK_LOG
@@ -287,6 +317,12 @@ pub fn is_fuel(block: BlockId) -> bool {
 /// and a hundred degrees short of the line with the hottest shaft there
 /// is (`molten_metal_wants_charcoal_whatever_the_hearth`).
 pub fn fuel_degrees(block: BlockId) -> Option<f32> {
+    let green = if crate::wood::is_green(block) { GREEN_HEAT } else { 1.0 };
+    fuel_degrees_seasoned(block).map(|degrees| degrees * green)
+}
+
+/// [`fuel_degrees`] for the fuel dry.
+fn fuel_degrees_seasoned(block: BlockId) -> Option<f32> {
     match block_kind(block) {
         // TerraFirmaCraft's charcoal. Coal here *is* charcoal (see the
         // "charcoal" row in `crafting`), so it takes charcoal's number
@@ -964,6 +1000,65 @@ pub fn complete_made(contents: &mut Inventory, recipe: &Recipe, quality: Option<
     true
 }
 
+/// The raw pottery a batch of `recipe` would take out of the input slots,
+/// piece by piece, in the order `Inventory::take_within` takes it -- so the
+/// wetness judged is the wetness of the pieces that actually go into the
+/// fire, not of whatever else is lying in the slot beside them.
+fn pieces_to_fire(contents: &Inventory, recipe: &Recipe) -> Vec<BlockId> {
+    let mut pieces = Vec::new();
+    for &(block, count) in recipe.inputs {
+        if !crate::clay::is_raw_pottery(block) {
+            continue;
+        }
+        let mut left = count;
+        for stack in INPUT_SLOTS.filter_map(|slot| contents.slots().get(slot).copied().flatten()) {
+            if left == 0 {
+                break;
+            }
+            if crate::types::block_kind(stack.block) != crate::types::block_kind(block) {
+                continue;
+            }
+            let taken = stack.count.min(left);
+            pieces.extend(std::iter::repeat_n(stack.block, taken as usize));
+            left -= taken;
+        }
+    }
+    pieces
+}
+
+/// [`complete_made`], for a batch that fires raw pottery: each piece that
+/// went in wet is rolled against `clay::crack_chance`, and a piece that
+/// cracks comes out as nothing. Answers how many cracked, or `None` if the
+/// batch did not run at all.
+///
+/// **One roll a piece, and the batch still runs.** Four wet bricks are four
+/// chances, so a batch comes out with some of its bricks and not none or all
+/// -- the player's "cracks some of it". The rolls are the caller's, for
+/// `crafting::Attempt`'s reason: the shared crate holds no dice.
+///
+/// A cracked piece takes its share of the result out of the tray and nothing
+/// else: the clay and the three hours of fuel are what it cost.
+pub fn complete_fired(
+    contents: &mut Inventory,
+    recipe: &Recipe,
+    quality: Option<crate::quality::Quality>,
+    mut roll: impl FnMut() -> f32,
+) -> Option<u32> {
+    let pieces = pieces_to_fire(contents, recipe);
+    if !complete_made(contents, recipe, quality) {
+        return None;
+    }
+    let cracked = pieces.iter().filter(|&&piece| crate::clay::cracks(piece, roll())).count() as u32;
+    if cracked > 0 && !pieces.is_empty() {
+        // One piece in is one piece out for every firing row (a brick is a
+        // brick), and the share is worked out rather than assumed so a row
+        // that ever fires four into two stays honest.
+        let lost = recipe.output.1 * cracked / pieces.len() as u32;
+        contents.take_within(OUTPUT_SLOTS, recipe.output.0, lost);
+    }
+    Some(cracked)
+}
+
 /// Whether this block is a hearth that is currently alight.
 #[inline]
 pub fn is_lit(block: BlockId) -> bool {
@@ -1370,6 +1465,52 @@ mod tests {
                 "block {block} burns for a time or at a heat, and not both"
             );
         }
+    }
+
+    #[test]
+    fn a_wet_pot_in_the_kiln_can_crack_and_a_dry_one_never_does() {
+        use crate::types::{BLOCK_BRICK, BLOCK_BRICK_RAW};
+        let row = RECIPES.iter().find(|r| r.inputs == [(BLOCK_BRICK_RAW, 4)]).expect("the brick row");
+        let batch = |raw: BlockId, rolls: &[f32]| {
+            let mut kiln = Inventory::new();
+            kiln.put_in_slot(0, Stack::new(raw, 4));
+            let mut rolls = rolls.iter().copied();
+            let cracked = complete_fired(&mut kiln, row, None, || rolls.next().unwrap_or(0.99)).expect("the batch ran");
+            (cracked, kiln.count_within(OUTPUT_SLOTS, BLOCK_BRICK))
+        };
+        // Wet: two of the four rolls land under a half, and two bricks come out.
+        assert_eq!(batch(BLOCK_BRICK_RAW, &[0.1, 0.9, 0.3, 0.7]), (2, 2));
+        // Bone-dry: the same dice crack nothing.
+        let dry = crate::clay::with_dryness(BLOCK_BRICK_RAW, crate::clay::Dryness::BoneDry);
+        assert_eq!(batch(dry, &[0.1, 0.9, 0.3, 0.7]), (0, 4));
+        // ...and the rolls a wet batch needs are not all bad luck: a batch
+        // whose dice all land high comes out whole, wet or not.
+        assert_eq!(batch(BLOCK_BRICK_RAW, &[0.9; 4]), (0, 4));
+    }
+
+    #[test]
+    fn green_wood_cooks_supper_and_fires_no_pot() {
+        // The seasoning decision, in the hearth's numbers: a log off the
+        // stump is fuel for supper and not for the kiln, in any hearth, and
+        // the same log seasoned fires a pot in a kiln.
+        for wood in crate::wood::WOODS {
+            let green = crate::wood::green(wood.log);
+            for kind in HEARTHS {
+                let heat = kind.reaches(green).expect("a green log is still fuel");
+                assert!(heat >= COOKING_C, "green {} cannot cook in a {kind:?}", crate::types::block_name(wood.log));
+                assert!(
+                    heat < FIRING_C,
+                    "green {} reaches {heat} in a {kind:?}, enough to fire a pot",
+                    crate::types::block_name(wood.log)
+                );
+            }
+            assert!(
+                fuel_seconds(green) < fuel_seconds(wood.log),
+                "green {} burns as long as seasoned",
+                crate::types::block_name(wood.log)
+            );
+        }
+        assert!(Kind::Kiln.reaches(BLOCK_LOG).is_some_and(|heat| heat >= FIRING_C), "seasoned oak no longer fires a pot");
     }
 
     #[test]

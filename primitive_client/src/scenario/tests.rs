@@ -465,6 +465,37 @@ fn peat_set_down_with_shift_lies_on_the_grass_and_dries_in_the_sun() {
 }
 
 #[test]
+fn a_wet_pot_set_down_in_the_sun_is_drawn_wet_then_leather_hard_then_bone_dry() {
+    use primitive_shared::clay::{dryness, Dryness};
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.server().console_command("/weather clear");
+    s.stand_at(feet_on(x0, z));
+    // Off the hands: the plain id is a wet pot.
+    s.give(t::BLOCK_JUG_RAW, 1);
+    s.select(t::BLOCK_JUG_RAW);
+    let ground = (x0 + 2, GROUND, z);
+    let lying = (x0 + 2, GROUND + 1, z);
+    s.look_at_face(ground, (0, 1, 0));
+    s.hold(Action::Sprint);
+    s.use_aimed();
+    s.release(Action::Sprint);
+    let pot_is = |s: &Scenario, stage: Dryness| {
+        s.chunks
+            .set_down_items()
+            .any(|(cell, _, item)| cell == lying && t::block_kind(item) == t::BLOCK_JUG_RAW && dryness(item) == stage)
+    };
+    assert!(s.until(3.0, |s| pot_is(s, Dryness::Wet)), "the wet jug was not set down: {:?}", s.block(lying).map(t::block_name));
+    // A breath short of each stage; the noon sun does the rest on the
+    // ordinary step, and every client near is told what is lying there.
+    s.server().set_peat_progress(lying, 0.499);
+    assert!(s.until(8.0, |s| pot_is(s, Dryness::LeatherHard)), "the jug never turned leather-hard in the sun");
+    s.server().set_peat_progress(lying, 0.999);
+    assert!(s.until(8.0, |s| pot_is(s, Dryness::BoneDry)), "the jug never dried through in the sun");
+    no_corrections(&s);
+}
+
+#[test]
 fn a_player_who_dies_in_a_rucksack_finds_everything_in_the_corpse() {
     use primitive_shared::inventory::SLOTS;
     let mut s = Scenario::new();
