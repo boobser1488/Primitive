@@ -1700,6 +1700,8 @@ pub(crate) fn drawn_as_model(id: BlockId) -> bool {
         // A wild hive is a comb against a trunk (`hive_block`), half a cell
         // deep: the cells beside it show past it, so it covers nothing.
         || primitive_shared::bees::is_hive(id)
+        // A window lattice is a panel across the middle of its cell.
+        || primitive_shared::types::is_lattice(id)
         // ...and a pit prop is a post in the middle of its cell.
         || primitive_shared::types::is_prop(id)
         // A door is a slab of boards along one side of its cell
@@ -3015,6 +3017,28 @@ pub fn build_mesh(
 
                 // **A pit prop is a post**, drawn where it is collided
                 // (`geometry::block_box`, `types::BLOCK_PROP`).
+                // **A window lattice is a panel of slats** across the middle
+                // of its cell (`types::lattice_box`), into the sprites'
+                // range: its picture is mostly holes, and the solid pass
+                // fills a hole with shade rather than letting it through.
+                if primitive_shared::types::is_lattice(id) {
+                    let light = model_light(cache, cell, y, cover_table);
+                    let (min, max) = primitive_shared::types::lattice_box(id);
+                    push_box(
+                        [x as f32, y as f32, z as f32],
+                        min.map(|v| v * 16.0),
+                        max.map(|v| v * 16.0),
+                        0,
+                        textures.layer_for_face(id, 2),
+                        true,
+                        light & 0x0F,
+                        (light >> 4) & 0x0F,
+                        vertices,
+                        sprites,
+                    );
+                    continue;
+                }
+
                 if primitive_shared::types::is_prop(id) {
                     let light = model_light(cache, cell, y, cover_table);
                     // In the bark of the wood it was cut from (`types::carries_wood`):

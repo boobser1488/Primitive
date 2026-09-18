@@ -11864,6 +11864,8 @@ pub const BLOCKS: &[BlockDef] = &[
         tool: None,
         drop: Some(BLOCK_WINDOW_LATTICE),
         weight: 0.8,
+        // A panel, so it turns to face whoever sets it (`types::lattice_box`).
+        faces: true,
         placeable: true,
         ..STAKE_ROW
     },

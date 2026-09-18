@@ -90,6 +90,13 @@ pub fn for_each_block_box(
     }
     // **A pit prop is a post**, half a cell across: in the middle of its cell
     // or against the wall it faces (`types::PROP_CENTRED`).
+    // ...and a window lattice is its panel (`types::lattice_box`).
+    if crate::types::is_lattice(block) {
+        let (x, y, z) = (bx as f32, by as f32, bz as f32);
+        let (min, max) = crate::types::lattice_box(block);
+        visit([x + min[0], y + min[1], z + min[2]], [x + max[0], y + max[1], z + max[2]]);
+        return;
+    }
     if crate::types::is_prop(block) {
         let (x, y, z) = (bx as f32, by as f32, bz as f32);
         let (min, max) = crate::types::prop_box(block);
@@ -359,6 +366,11 @@ pub fn block_box(block: BlockId, bx: i32, by: i32, bz: i32) -> Option<([f32; 3],
     // measured up from the floor cannot describe. See `dripstone::body`.
     // A pit prop is its post, for the aim and the placement beside a body
     // as much as for the collider (`types::prop_box`).
+    if crate::types::is_lattice(block) {
+        let (min, max) = crate::types::lattice_box(block);
+        let (x, y, z) = (bx as f32, by as f32, bz as f32);
+        return Some(([x + min[0], y + min[1], z + min[2]], [x + max[0], y + max[1], z + max[2]]));
+    }
     if crate::types::is_prop(block) {
         let (min, max) = crate::types::prop_box(block);
         let (x, y, z) = (bx as f32, by as f32, bz as f32);
@@ -520,6 +532,11 @@ pub fn block_box_for_aim(
     // A pit prop is aimed at where its post is, so a second prop clicked
     // onto the side of the first lands beside the post it was aimed at
     // (`types::prop_box`).
+    if crate::types::is_lattice(block) {
+        let (min, max) = crate::types::lattice_box(block);
+        let (x, y, z) = (bx as f32, by as f32, bz as f32);
+        return Some(([x + min[0], y + min[1], z + min[2]], [x + max[0], y + max[1], z + max[2]]));
+    }
     if crate::types::is_prop(block) {
         let (min, max) = crate::types::prop_box(block);
         let (x, y, z) = (bx as f32, by as f32, bz as f32);
@@ -879,6 +896,23 @@ pub fn narrow(p: (f64, f64, f64)) -> (f32, f32, f32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_window_lattice_is_a_thin_panel_across_the_middle_of_its_cell_and_is_collided_where_it_is() {
+        use crate::types::{lattice_box, placed, BLOCK_WINDOW_LATTICE};
+        for yaw in [0.0f32, 1.6, 3.1, -1.6] {
+            let lattice = placed(BLOCK_WINDOW_LATTICE, yaw, (0, 1, 0));
+            let (min, max) = lattice_box(lattice);
+            let thin: Vec<usize> = (0..3).filter(|&a| max[a] - min[a] < 0.2).collect();
+            assert_eq!(thin.len(), 1, "a lattice at yaw {yaw} is not a panel: {min:?}..{max:?}");
+            let a = thin[0];
+            assert!((min[a] + max[a] - 1.0).abs() < 1e-6, "a lattice at yaw {yaw} is not across the middle of its cell");
+            let mut collided = Vec::new();
+            for_each_block_box(lattice, 0, 0, 0, |_, _, _| crate::types::BLOCK_AIR, |a, b| collided.push((a, b)));
+            assert_eq!(collided, vec![(min, max)]);
+            assert_eq!(block_box_for_aim(lattice, 0, 0, 0, false), Some((min, max)));
+        }
+    }
+
     #[test]
     fn a_prop_set_against_a_wall_leans_on_that_wall_and_is_collided_and_aimed_where_it_stands() {
         use crate::types::{placed, prop_box, BLOCK_PROP};

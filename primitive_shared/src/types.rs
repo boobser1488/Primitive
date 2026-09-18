@@ -2456,6 +2456,29 @@ pub const BLOCK_STAKE: BlockId = 646;
 /// Slats crossed in a window: light and air through, and nothing bigger.
 pub const BLOCK_WINDOW_LATTICE: BlockId = 647;
 
+/// Is this a window lattice?
+#[inline]
+pub fn is_lattice(id: BlockId) -> bool {
+    block_kind(id) == BLOCK_WINDOW_LATTICE
+}
+
+/// The panel of a window lattice, as a box in cell units: two sixteenths
+/// thick, across the middle of its cell, turned to face whoever set it.
+///
+/// **It was the whole cell**, a cube wearing a picture of slats -- a lattice
+/// a metre thick, which a player could stand on, and which filled a window
+/// from the inside face of the wall to the outside one ("решётка ставилась
+/// по середине блока и не была полным блоком"). One answer for the collider,
+/// the aim and the mesher, as `prop_box` is for a pit prop.
+pub fn lattice_box(id: BlockId) -> ([f32; 3], [f32; 3]) {
+    const LO: f32 = 7.0 / 16.0;
+    const HI: f32 = 9.0 / 16.0;
+    match block_facing(id) {
+        Facing::East | Facing::West => ([LO, 0.0, 0.0], [HI, 1.0, 1.0]),
+        _ => ([0.0, 0.0, LO], [1.0, 1.0, HI]),
+    }
+}
+
 /// A pit prop: a post of timber that holds a roof or a gallery up.
 ///
 /// **Half a cell across and a whole one tall**, stood in the middle of its
