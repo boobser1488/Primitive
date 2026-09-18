@@ -54,6 +54,9 @@ mod ui;
 mod crash;
 mod embedded;
 mod settings;
+// The real game played by a script -- see the module note.
+#[cfg(test)]
+mod scenario;
 
 // Every layer meets here, and only here -- so the modules are pulled in
 // by name and the file below reads the way it did before the split. The

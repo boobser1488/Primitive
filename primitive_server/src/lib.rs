@@ -624,6 +624,21 @@ impl Server {
         left
     }
 
+    /// Moves the one connected player, the way `/tp` does.
+    ///
+    /// A door for the scenario runner (`primitive_client`'s `scenario`),
+    /// which plays the real client against this server with the movement
+    /// validator *on* and needs to stand a player beside the thing under
+    /// test. `/tp` cannot be driven from the console -- it has nobody to
+    /// move -- and a client that simply walked there would be a walk the
+    /// test did not ask about. Through `teleport`, so the anti-cheat and
+    /// the fall tracker are told exactly as they are for a real `/tp`.
+    pub fn teleport_player(&self, x: f32, y: f32, z: f32) {
+        if let Some(handle) = self.ctx.registry.handles().into_iter().next() {
+            teleport(&handle, x, y, z, "scenario");
+        }
+    }
+
     /// What the world is doing to the one connected player.
     ///
     /// `None` for a server nobody is on. The *first* player, because
@@ -742,6 +757,18 @@ impl Server {
             }
         }
         broadcast_chest_state(&self.ctx, at);
+    }
+
+    /// Pushes a sod of peat lying at `at` to `progress` of its drying.
+    ///
+    /// The rack's door (`finish_drying`) for the peat's reason: a sod takes
+    /// a quarter of an hour of sun, which is not a test. Only the progress
+    /// is set; the *stage* still turns on the ordinary step, in whatever
+    /// sky there is -- so a scenario that sets a sod a breath short of dry
+    /// and sees it turn has seen the sun do it, and one that set it in the
+    /// rain would see it go back.
+    pub fn set_peat_progress(&self, at: (i32, i32, i32), progress: f32) {
+        self.ctx.peat.lock().unwrap_or_else(|e| e.into_inner()).set_progress(at, progress);
     }
 
     /// Runs until something stops it (`/stop`, or `request_shutdown`),

@@ -1306,7 +1306,14 @@ impl Player {
     /// charge through one is a charge that stops. The server reads the
     /// speed it measures, and a slower body is never one it doubts.
     fn stake_drag(&self, chunks: &impl Solids) -> f32 {
-        let p = self.position;
+        // **`self.at`, not `self.position`**: `chunks` here is the move's own
+        // frame (`Local`), which answers in blocks from the corner the feet
+        // are in. The world position read through it looked a whole world
+        // position further on -- at x 200 it asked about x 400 -- so stakes
+        // slowed nobody anywhere but within a block of the origin, where
+        // every unit test stood. The scenario runner found it by walking
+        // through a real stand of them (`scenario::tests`).
+        let p = self.at.as_dvec3();
         let half = f64::from(primitive_shared::geometry::PLAYER_HALF_WIDTH);
         let among = primitive_shared::spikes::touches(
             [p.x - half, p.y, p.z - half],
