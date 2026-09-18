@@ -763,6 +763,15 @@ pub enum Msg {
     /// is meant to *talk* about, and the manual and the debug line both
     /// want it in the language they are reading.
     AnimalRat,
+    /// The place, on the health page under the wounds: the air the skin is
+    /// drifting towards, and what about the room is making it so. See
+    /// `inventory_screen::shelter_lines`.
+    ShelterAir,
+    ShelterSmoky,
+    ShelterDraughty,
+    ShelterHoleTakesHeat,
+    ShelterWallsWarm,
+    ShelterWallsThin,
 }
 
 /// One line of interface text, in every language at once.
@@ -1239,6 +1248,13 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::RunFine,      en: "struck true - more out of the same", simple: "well struck - you got more", ru: "точно - вышло больше", pl: "celnie - wyszło więcej" },
     Line { msg: Msg::RunFair,      en: "serviceable",  simple: "good enough", ru: "сойдёт", pl: "ujdzie" },
     Line { msg: Msg::RunRuined,    en: "spoiled - the piece is lost", simple: "ruined - you lost it", ru: "испорчено - заготовка пропала", pl: "zepsute - sztuka stracona" },
+
+    Line { msg: Msg::ShelterAir,   en: "air here",     simple: "air around you", ru: "воздух здесь", pl: "powietrze tutaj" },
+    Line { msg: Msg::ShelterSmoky, en: "smoky: the fire needs a way out, a hole in the roof", simple: "smoky: cut a hole in the roof over the fire", ru: "дымно: дыму нужен выход, дыра в крыше", pl: "dym: ogień potrzebuje ujścia, otworu w dachu" },
+    Line { msg: Msg::ShelterDraughty, en: "draughty: the wind blows in through an opening", simple: "the wind comes in: shut the door or move it", ru: "сквозняк: ветер дует в проём", pl: "przeciąg: wiatr wieje przez otwór" },
+    Line { msg: Msg::ShelterHoleTakesHeat, en: "the smoke hole lets heat out too", simple: "heat goes out of the roof hole too", ru: "дыра в крыше выпускает и тепло", pl: "otwór w dachu wypuszcza też ciepło" },
+    Line { msg: Msg::ShelterWallsWarm, en: "these walls keep the night out", simple: "warm walls", ru: "стены хорошо держат тепло", pl: "te ściany dobrze trzymają ciepło" },
+    Line { msg: Msg::ShelterWallsThin, en: "these walls let the night in", simple: "cold walls", ru: "стены плохо держат тепло", pl: "te ściany słabo trzymają ciepło" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as

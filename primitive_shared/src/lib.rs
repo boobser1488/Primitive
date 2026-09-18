@@ -80,6 +80,7 @@ pub mod quality;
 pub mod rack;
 pub mod raft;
 pub mod season;
+pub mod shelter;
 pub mod showcase;
 pub mod tools;
 pub mod types;

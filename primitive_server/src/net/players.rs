@@ -123,6 +123,9 @@ pub struct PlayerRuntime {
     /// reason: a fog of smoke that was never told it had lifted would hang
     /// over the player for the rest of the session.
     pub smoke_reported: f32,
+    /// The last `shelter::Reading` this player was sent, for the same
+    /// reason; `None` until the first, so a new player is always told.
+    pub shelter_reported: Option<primitive_shared::shelter::Reading>,
     /// When this player last threw a punch that the server accepted.
     ///
     /// `None` until they throw one. Server-side because the cooldown is
@@ -354,6 +357,7 @@ impl PlayerHandle {
                 station: None,
                 breath_reported: 1.0,
                 smoke_reported: 0.0,
+                shelter_reported: None,
                 last_swing: None,
                 last_edit: None,
                 field_note: None,

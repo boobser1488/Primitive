@@ -147,7 +147,29 @@ pub struct World {
     /// matters -- one read per chunk, against a writer that runs once at
     /// startup.
     decorator: RwLock<Option<Decorator>>,
+    /// How many edits there have ever been, and where the last
+    /// [`RECENT_EDITS`] of them were: what a cache of something worked out
+    /// *from* the blocks asks to find out whether it is stale
+    /// ([`World::edited_since`]).
+    ///
+    /// **Here, at the one door every edit comes through**, and not a
+    /// notification each mechanic that edits has to remember to send. The
+    /// rooms (`logic::shelters`) were the first such cache, and the edits
+    /// that change a room come from a player, a fire burning a wall
+    /// through, a door swung, sand falling -- a cache invalidated by the
+    /// paths that remember to invalidate it is a hut that stays sealed
+    /// after the fire has eaten its wall.
+    edit_serial: AtomicU64,
+    recent_edits: std::sync::Mutex<std::collections::VecDeque<Edit>>,
 }
+
+/// How many edits [`World::edited_since`] can look back over. Past it, a
+/// cache older than the oldest is told it is stale, which is always safe:
+/// the cost of a wrong "stale" is one recomputation.
+pub const RECENT_EDITS: usize = 1024;
+
+/// One entry of the journal: the edit's serial and its cell.
+type Edit = (u64, (i32, i32, i32));
 
 #[derive(Debug, Clone, Copy)]
 pub struct WorldStats {
@@ -218,7 +240,35 @@ impl World {
             epoch: Instant::now(),
             coarse_now: AtomicU64::new(0),
             decorator: RwLock::new(None),
+            edit_serial: AtomicU64::new(0),
+            recent_edits: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(RECENT_EDITS)),
         }
+    }
+
+    /// The count of every edit so far: take it with a computed answer, and
+    /// hand it back to [`World::edited_since`] to ask whether the answer
+    /// still holds.
+    pub fn edit_serial(&self) -> u64 {
+        self.edit_serial.load(Ordering::Acquire)
+    }
+
+    /// Has any cell from `low` to `high` (corners inclusive) been written
+    /// since `serial`? `true` too when the answer is no longer known -- the
+    /// edits since then have run off the end of [`RECENT_EDITS`].
+    ///
+    /// Nothing but an atomic load when nothing has been written, which on
+    /// a quiet server is almost every time it is asked.
+    pub fn edited_since(&self, serial: u64, low: (i32, i32, i32), high: (i32, i32, i32)) -> bool {
+        if self.edit_serial() == serial {
+            return false;
+        }
+        let recent = self.recent_edits.lock().unwrap_or_else(|e| e.into_inner());
+        if recent.front().is_none_or(|&(oldest, _)| oldest > serial + 1) {
+            return true;
+        }
+        recent.iter().rev().take_while(|&&(at, _)| at > serial).any(|&(_, (x, y, z))| {
+            (low.0..=high.0).contains(&x) && (low.1..=high.1).contains(&y) && (low.2..=high.2).contains(&z)
+        })
     }
 
     /// Hands terrain to something else before the edits go back on.
@@ -610,6 +660,16 @@ impl World {
             edits.entry(pos).or_default().insert(index, block);
         }
         self.dirty.fetch_add(1, Ordering::Relaxed);
+        {
+            // Under the journal's lock, so a serial and the entry that
+            // carries it are never seen apart.
+            let mut recent = self.recent_edits.lock().unwrap_or_else(|e| e.into_inner());
+            let serial = self.edit_serial.fetch_add(1, Ordering::AcqRel) + 1;
+            if recent.len() == RECENT_EDITS {
+                recent.pop_front();
+            }
+            recent.push_back((serial, (gx, gy, gz)));
+        }
 
         // Update the cached copy if we have one. `Arc::make_mut` clones
         // only when another task is mid-send with the old version, which

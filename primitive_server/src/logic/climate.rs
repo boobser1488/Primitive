@@ -58,11 +58,28 @@
 //! night wants walls, a winter night wants a fire behind them, and the
 //! player who has all three has *built* their way out of the cold.
 //! That is the progression the mechanic exists to create.
+//!
+//! ## ...and what kind of room
+//!
+//! For a player, "walls" is more than a count now. The sampler hands in
+//! the room they stand in ([`Indoors`], found by `logic::shelters`), and a
+//! room's material decides how much of the night it keeps out, a doorway
+//! into the wind lets the night back in and blows the fire out of the
+//! air, a smoke hole lets part of the hearth's warmth go with the smoke,
+//! and the walls hold a dead fire's heat for as long as their mass lets
+//! them. See `primitive_shared::shelter` for the rules and the decisions
+//! each is for. Everything else that asks about warmth -- a rack, a lake,
+//! a larder -- is asked without a room ([`Ambient::of`]) and gets the old
+//! count, which is right for them: a hide on a rack does not care which
+//! way the door faces, and a walk per rack would be a flood fill per
+//! item in every cellar.
 
 use std::sync::Arc;
 
 use primitive_shared::body;
+use primitive_shared::raft::Wind;
 use primitive_shared::season;
+use primitive_shared::shelter::{Reading, Room};
 use primitive_shared::types::{blocks_the_sky, CHUNK_SIZE_Y};
 use primitive_shared::weather::Weather;
 
@@ -411,6 +428,19 @@ impl Shelter {
     }
 }
 
+/// The room a player stands in, as the sampler hands it to
+/// [`Ambient::of_player`].
+#[derive(Debug, Clone, Copy)]
+pub struct Indoors<'a> {
+    /// What `Shelters::room_at` found.
+    pub room: &'a Room,
+    /// The wind now (`raft::wind`): which gaps it blows into.
+    pub wind: Wind,
+    /// The share of a hearth's warmth the walls are still holding
+    /// (`Shelters::warmth`): nought in a room nobody has warmed.
+    pub afterglow: f32,
+}
+
 /// What the world is doing to one player right now.
 ///
 /// Carried on the player's own state and refreshed on the interval; the
@@ -503,7 +533,25 @@ impl Ambient {
         world_time: f32,
         weather: Weather,
     ) -> Ambient {
-        Self::of_in(world, fires, position, world_time, weather, |x, y, z| {
+        Self::of_in(world, fires, position, world_time, weather, None, |x, y, z| {
+            world.climate_at(x, y, z)
+        })
+        .0
+    }
+
+    /// [`Ambient::of`] for a player, in the room they are in: the sample,
+    /// what the health page is told about the place, and the share of a
+    /// hearth's warmth the room was given this sample -- for
+    /// `Shelters::warmed` to remember once the fire is out.
+    pub fn of_player(
+        world: &Arc<World>,
+        fires: &Fires,
+        position: (f32, f32, f32),
+        world_time: f32,
+        weather: Weather,
+        indoors: Option<Indoors<'_>>,
+    ) -> (Ambient, Reading, f32) {
+        Self::of_in(world, fires, position, world_time, weather, indoors, |x, y, z| {
             world.climate_at(x, y, z)
         })
     }
@@ -521,10 +569,15 @@ impl Ambient {
         position: (f32, f32, f32),
         world_time: f32,
         weather: Weather,
+        indoors: Option<Indoors<'_>>,
         climate: impl Fn(i32, i32, i32) -> (f32, f32),
-    ) -> Ambient {
+    ) -> (Ambient, Reading, f32) {
+        let neutral = || {
+            let ambient = Ambient::default();
+            (ambient, Reading { air_c: ambient.temperature_c, ..Reading::default() }, 0.0)
+        };
         if !position.0.is_finite() || !position.1.is_finite() || !position.2.is_finite() {
-            return Ambient::default();
+            return neutral();
         }
         let (fx, fy, fz) = (
             position.0.floor() as i32,
@@ -532,7 +585,7 @@ impl Ambient {
             position.2.floor() as i32,
         );
         let Some(_here) = world.cached_block(fx, fy.clamp(0, CHUNK_SIZE_Y as i32 - 1), fz) else {
-            return Ambient::default();
+            return neutral();
         };
         // A nonsense clock is noon on the day the world opened, and it
         // is decided once so the hour and the season below agree.
@@ -562,7 +615,20 @@ impl Ambient {
         // in it, which made a hole in a hillside no warmer in winter and no
         // cooler in summer than the meadow over it -- the opposite of every
         // cave anyone has stood in, and a cellar worth nothing as a larder.
-        let shelter = shelter_at(world, fx, fy, fz);
+        //
+        // **A room found by the walk is a room**, even where the count of
+        // walls within three cells is not -- a hall five across is a house
+        // to anybody in it, and the count called its middle a lean-to. It
+        // upgrades a roof and never makes one: a player under their own
+        // smoke hole has the sky over them, and the rain with it.
+        let room = indoors.filter(|i| i.room.is_enclosed());
+        let shelter = match shelter_at(world, fx, fy, fz) {
+            Shelter::Roofed if room.is_some() => Shelter::Enclosed,
+            Shelter::Open => Shelter::Open,
+            counted => counted,
+        };
+        let room = room.filter(|_| shelter == Shelter::Enclosed);
+        let evens_out = room.map_or(shelter.evens_out(), |i| i.room.evens_out(i.wind));
         let (earth_daily, earth_annual) = if shelter.has_roof() {
             earth_shares(cover_over(world, fx, fy, fz))
         } else {
@@ -591,7 +657,7 @@ impl Ambient {
         // as every noon, and a cave at the day's *warmest* would be a
         // cave warmer than the meadow averages, which no cave is.
         let night_mean = NIGHT_DROP_C * humid * 0.5 + PRE_DAWN_CHILL_C * MEAN_PRE_DAWN_CHILL;
-        let night_here = night * (1.0 - shelter.evens_out());
+        let night_here = night * (1.0 - evens_out);
         degrees -= night_here + (night_mean - night_here) * earth_daily;
 
         // ---- the sun ----
@@ -650,6 +716,13 @@ impl Ambient {
         // player standing *in* one is not near a fire, they are in it --
         // which the burn damage in the tick loop already has an opinion
         // about.
+        //
+        // In a room found by the walk, the room's share of the fire is
+        // what the draught and the smoke hole leave of it
+        // (`shelter::Room::heat_kept`), and a fire that has gone out is
+        // still worth what the walls are holding of it
+        // (`Indoors::afterglow`).
+        let hearth_floor = room.map_or(HEARTH_ROOM_SHARE, |i| HEARTH_ROOM_SHARE * i.room.heat_kept(i.wind));
         let mut near_fire = false;
         let feet = (position.0, position.1, position.2);
         let mut fire_share = 0.0f32;
@@ -667,11 +740,17 @@ impl Ambient {
             // reads as a fire that does not work.
             let mut share = (1.0 - distance / FIRE_RANGE).clamp(0.0, 1.0);
             if shelter == Shelter::Enclosed {
-                share = share.max(HEARTH_ROOM_SHARE);
+                share = share.max(hearth_floor);
             }
             fire_share = fire_share.max(share);
         }
-        if near_fire && degrees < FIRE_C {
+        let hearth_given = if near_fire && room.is_some() { hearth_floor } else { 0.0 };
+        if let Some(i) = room {
+            if i.afterglow.is_finite() {
+                fire_share = fire_share.max(i.afterglow.clamp(0.0, 1.0));
+            }
+        }
+        if fire_share > 0.0 && degrees < FIRE_C {
             // The fire pulls toward its own temperature rather than
             // adding to whatever was there: a bonfire in a blizzard is
             // warm, not "blizzard plus forty". And it pulls *from where
@@ -695,7 +774,7 @@ impl Ambient {
             overhead_sun
         };
 
-        Ambient {
+        let ambient = Ambient {
             temperature_c: degrees,
             getting_wet: raining_on_me || in_water,
             near_fire,
@@ -707,7 +786,15 @@ impl Ambient {
             // says a fire is worth doing for.
             drying_per_second: drying_rate(degrees + sun_c, humidity),
             humidity: humidity.clamp(0.0, 1.0),
-        }
+        };
+        let reading = Reading {
+            air_c: degrees,
+            indoors: room.is_some(),
+            draught: room.map_or(0.0, |i| i.room.draught(i.wind)),
+            keeps_out: room.map_or(0.0, |i| i.room.keeps_out),
+            roof_open: near_fire && room.is_some_and(|i| i.room.roof > 0),
+        };
+        (ambient, reading, hearth_given)
     }
 
     /// How wet the player should be after `dt` seconds of this.
@@ -1501,6 +1588,153 @@ mod tests {
         assert!(!wooded.sheltered, "a single leaf counted as a house");
     }
 
+    /// A real house: inside x and z 2..=5, air three high, walls and a flat
+    /// roof of `wall` all round. Returns the cell a player stands in, in
+    /// its far corner from the hearth's (2, 2).
+    fn build_house(world: &Arc<World>, wall: primitive_shared::types::BlockId) -> (i32, i32, i32) {
+        let y = ground(world) as i32;
+        for x in 1..=6 {
+            for z in 1..=6 {
+                world.set_block(x, y + 3, z, wall);
+                if x == 1 || x == 6 || z == 1 || z == 6 {
+                    for dy in 0..3 {
+                        world.set_block(x, y + dy, z, wall);
+                    }
+                }
+            }
+        }
+        (5, y, 5)
+    }
+
+    /// A player's sample in the room they stand in, the way the tick loop
+    /// takes it.
+    fn in_room(
+        world: &Arc<World>,
+        fires: &Fires,
+        shelters: &mut crate::logic::shelters::Shelters,
+        feet: (i32, i32, i32),
+        t: f32,
+        wind: Wind,
+    ) -> (Ambient, Reading) {
+        let room = shelters.room_at(world, feet);
+        let indoors = room.as_deref().map(|room| Indoors {
+            room,
+            wind,
+            afterglow: shelters.warmth(room, f64::from(t)),
+        });
+        let at = (feet.0 as f32 + 0.5, feet.1 as f32, feet.2 as f32 + 0.5);
+        let (ambient, reading, hearth) = Ambient::of_player(world, fires, at, t, Weather::Clear, indoors);
+        if let Some(room) = &room {
+            shelters.warmed(room, wind, hearth, f64::from(t));
+        }
+        (ambient, reading)
+    }
+
+    #[test]
+    fn the_roof_alone_is_one_number_on_both_sides() {
+        assert_eq!(primitive_shared::shelter::ROOF_ALONE, ROOF_EVENS_OUT);
+    }
+
+    #[test]
+    fn a_smoke_hole_over_the_hearth_makes_the_hut_cooler() {
+        let world = flat_world();
+        let feet = build_house(&world, BLOCK_STONE);
+        let mut fires = Fires::new();
+        let hearth = (2, feet.1, 2);
+        world.set_block(hearth.0, hearth.1, hearth.2, BLOCK_CAMPFIRE_LIT);
+        fires.light(hearth);
+        let night = midwinter() + 0.0;
+        let mut shelters = crate::logic::shelters::Shelters::new();
+        let (shut, said) = in_room(&world, &fires, &mut shelters, feet, night, Wind::CALM);
+        assert!(said.indoors, "a stone house was not a room");
+        assert!(!said.roof_open);
+
+        world.set_block(hearth.0, feet.1 + 3, hearth.2, BLOCK_AIR);
+        let mut fresh = crate::logic::shelters::Shelters::new();
+        let (holed, said) = in_room(&world, &fires, &mut fresh, feet, night, Wind::CALM);
+        assert!(said.indoors, "a smoke hole unmade the house");
+        assert!(said.roof_open, "the page was not told the heat is going up the hole");
+        assert!(
+            holed.temperature_c < shut.temperature_c - 3.0,
+            "a smoke hole cost nothing: {} with it, {} without",
+            holed.temperature_c,
+            shut.temperature_c
+        );
+        assert!(holed.temperature_c > body::COMFORT_LOW - 10.0, "a holed hut with a fire was a field: {}", holed.temperature_c);
+    }
+
+    #[test]
+    fn a_door_into_the_wind_lets_the_night_in_and_the_same_door_in_the_lee_does_not() {
+        let world = flat_world();
+        let feet = build_house(&world, BLOCK_STONE);
+        let y = feet.1;
+        // A doorway in the east wall.
+        world.set_block(6, y, 3, BLOCK_AIR);
+        world.set_block(6, y + 1, 3, BLOCK_AIR);
+        let fires = Fires::new();
+        let night = no_offset_day() + 0.2;
+        // `toward` is where the wind goes: PI blows from the east, into the door.
+        let into = Wind { toward: std::f32::consts::PI, strength: 1.0 };
+        let lee = Wind { toward: 0.0, strength: 1.0 };
+        let mut shelters = crate::logic::shelters::Shelters::new();
+        let (windward, said) = in_room(&world, &fires, &mut shelters, feet, night, into);
+        assert!(said.draught > 0.4, "a storm into the door was a draught of {}", said.draught);
+        let (sheltered, said) = in_room(&world, &fires, &mut shelters, feet, night, lee);
+        assert!(said.draught < 0.25, "the lee door was a draught of {}", said.draught);
+        assert!(
+            sheltered.temperature_c > windward.temperature_c + 1.0,
+            "the door's side of the wind made no difference: {} in the lee, {} into it",
+            sheltered.temperature_c,
+            windward.temperature_c
+        );
+    }
+
+    #[test]
+    fn a_log_house_keeps_more_of_the_night_out_than_a_plank_one() {
+        use primitive_shared::types::{BLOCK_LOG, BLOCK_PLANKS};
+        let night = no_offset_day() + 0.2;
+        let mut air = Vec::new();
+        for wall in [BLOCK_PLANKS, BLOCK_LOG] {
+            let world = flat_world();
+            let feet = build_house(&world, wall);
+            let mut shelters = crate::logic::shelters::Shelters::new();
+            air.push(in_room(&world, &Fires::new(), &mut shelters, feet, night, Wind::CALM).0.temperature_c);
+        }
+        assert!(air[1] > air[0] + 0.5, "logs ({}) were no warmer than boards ({})", air[1], air[0]);
+    }
+
+    #[test]
+    fn a_stone_house_is_still_warm_after_its_fire_dies_and_a_plank_one_is_not() {
+        use primitive_shared::types::BLOCK_PLANKS;
+        let night = midwinter() + 0.0;
+        let mut after = Vec::new();
+        for wall in [BLOCK_STONE, BLOCK_PLANKS] {
+            let world = flat_world();
+            let feet = build_house(&world, wall);
+            let mut fires = Fires::new();
+            let hearth = (2, feet.1, 2);
+            world.set_block(hearth.0, hearth.1, hearth.2, BLOCK_CAMPFIRE_LIT);
+            fires.light(hearth);
+            let mut shelters = crate::logic::shelters::Shelters::new();
+            let (lit, _) = in_room(&world, &fires, &mut shelters, feet, night, Wind::CALM);
+            // Out, and two hours on.
+            world.set_block(hearth.0, hearth.1, hearth.2, primitive_shared::types::BLOCK_CAMPFIRE);
+            let (cold, _) = in_room(&world, &Fires::new(), &mut shelters, feet, night + 2.0 / 24.0, Wind::CALM);
+            let (unwarmed, _) = in_room(
+                &world,
+                &Fires::new(),
+                &mut crate::logic::shelters::Shelters::new(),
+                feet,
+                night + 2.0 / 24.0,
+                Wind::CALM,
+            );
+            assert!(lit.temperature_c > cold.temperature_c);
+            after.push(cold.temperature_c - unwarmed.temperature_c);
+        }
+        assert!(after[0] > 5.0, "a stone house two hours after its fire held {} degrees of it", after[0]);
+        assert!(after[1] < 1.0, "a plank house two hours after its fire held {} degrees of it", after[1]);
+    }
+
     #[test]
     fn a_fire_is_the_answer_to_a_cold_night() {
         // The claim the whole mechanic rests on: when a player gets cold
@@ -1625,7 +1859,7 @@ mod tests {
     const DESERT: (f32, f32) = (0.9, 0.1);
 
     fn in_the_desert(world: &Arc<World>, fires: &Fires, at: (f32, f32, f32), t: f32, w: Weather) -> Ambient {
-        Ambient::of_in(world, fires, at, t, w, |_, _, _| DESERT)
+        Ambient::of_in(world, fires, at, t, w, None, |_, _, _| DESERT).0
     }
 
     /// What a clear desert day does to a body that stands in one place
@@ -1662,7 +1896,7 @@ mod tests {
         for tick in 0..ticks {
             let hour = 0.25 + tick as f32 * TICK / DAY_SECONDS;
             if tick % ticks_per_sample == 0 {
-                ambient = Ambient::of_in(world, &fires, at, day + hour, Weather::Clear, |_, _, _| climate);
+                ambient = Ambient::of_in(world, &fires, at, day + hour, Weather::Clear, None, |_, _, _| climate).0;
             }
             vitals.warm(ambient.exposure(), insulation, shade, 0.0, TICK);
             let skin = vitals.temperature();

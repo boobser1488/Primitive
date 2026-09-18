@@ -2523,6 +2523,21 @@ pub enum ServerMessage {
     RackRefused {
         rack: crate::rack::Trade,
     },
+    /// **What the place a player stands in is doing to their warmth**: the
+    /// air, whether it is a room, how draughty, what the walls are worth,
+    /// and whether a smoke hole is letting the fire's heat out
+    /// (`shelter::Reading`).
+    ///
+    /// For the health page, which showed the skin's temperature and not the
+    /// reason for it -- and a room that is cold because its door faces the
+    /// wind is a room the player can fix only once they are told. Its own
+    /// message and not more fields on `Body`, because it changes on a
+    /// different clock: `Body` crawls with the skin, and this jumps when a
+    /// door opens. Sent on `Reading::differs`. Appended, so it rides
+    /// fifty-seven's bump.
+    Shelter {
+        reading: crate::shelter::Reading,
+    },
 }
 
 /// Trims/sanitises a username before it's shown to other players or
