@@ -2643,6 +2643,87 @@ impl Neighbourhood {
 /// Takes no world or GPU handles -- only plain data -- so it can run on
 /// a worker thread. The main thread fills the `Neighbourhood` (cheap:
 /// 324 column lookups) and this does the expensive part off-thread.
+/// **Which ids go through every model in `build_mesh` to the cube**,
+/// learned as the mesher meets them.
+///
+/// Between the water hand-overs and the cube loop, `build_mesh` asks each
+/// cell some thirty questions -- loose item? hive? prop? stake? door? step?
+/// dripstone? rack? set-down thing? kiln? pile? carcass? body? palm? branch?
+/// barrel? bones? furniture? plant? -- and every one that says yes draws its
+/// model and takes the next cell. Nearly every cell of a world is stone,
+/// soil or sand, which says no to all thirty and goes on to be a cube, and
+/// 1.5 made the list longer by a model at a time (racks, piles, stakes,
+/// frames, set-down things, carcasses, bones). Measured on the benchmark's
+/// own ground (`arena::what_the_benchmark_scene_is_made_of`, world `night`,
+/// 441 fine chunks, release): skipping the list for stone, dirt, grass and
+/// sand alone took 12.20 → 11.04 ms a chunk, and this table, for every id
+/// the list turns down, **6.05 → 5.02 ms** (the shipped release profile,
+/// the two alternated in one binary, best of three; the same A/B is the
+/// last line of that tool). The synthetic chunk of `bench_meshing` barely
+/// moves (5.15 → 5.10): its time is faces, not cells, and faces are what
+/// this does not touch.
+///
+/// **The answer is a property of the id, so it is kept.** Every question
+/// is about the id alone -- `is_door(id)`, `Species::of_carcass(id)`, the
+/// kind in a `matches!` -- and every yes ends in `continue`. So a cell that
+/// comes out of the bottom of the list has an id that says no to all of
+/// it, and so will every other cell of that id, in any chunk, on any
+/// thread. The two flames that draw *and* fall through (a lit campfire, a
+/// burning block) sit outside the skipped part for that reason.
+///
+/// Considered:
+///
+/// * **A table written by hand** -- "stone, dirt, grass, sand are cubes".
+///   The fastest and the one that rots: the next model added to the list
+///   for an id in that table would be drawn as a cube, silently. Rejected.
+/// * **A table computed from the same predicates at startup.** The list
+///   written twice; the same rot, a line further away. Rejected.
+/// * **Learned from the list itself (chosen).** The list stays the only
+///   place the question is asked; the table can only ever hold what it
+///   answered. A new model in the list is a new `continue`, and an id it
+///   takes never reaches the line that learns. The one rule this puts on
+///   the list: **a question in it must be about the id alone and end in
+///   `continue`** -- a model that falls through, or asks the neighbours
+///   whether to draw, belongs with the flames above it.
+///
+/// Sixty-five thousand ids a bit each, eight kilobytes, shared by every
+/// mesher thread: a bit only ever goes from 0 to 1, and a thread that has
+/// not seen another's write yet just asks the thirty questions once more.
+pub(crate) mod plain_cube {
+    use primitive_shared::types::BlockId;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static KNOWN: [AtomicU64; 1 << 10] = [const { AtomicU64::new(0) }; 1 << 10];
+
+    #[inline]
+    pub fn known(id: BlockId) -> bool {
+        #[cfg(test)]
+        if ASK_EVERYTHING.with(std::cell::Cell::get) {
+            return false;
+        }
+        KNOWN[usize::from(id) >> 6].load(Ordering::Relaxed) & (1 << (id & 63)) != 0
+    }
+
+    #[inline]
+    pub fn learn(id: BlockId) {
+        let word = &KNOWN[usize::from(id) >> 6];
+        let bit = 1 << (id & 63);
+        // A load first: nearly every call is for a bit already set, and a
+        // read-modify-write on a word every thread reads would bounce the
+        // cache line between them.
+        if word.load(Ordering::Relaxed) & bit == 0 {
+            word.fetch_or(bit, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        /// Set by a test to mesh on this thread as if nothing were known,
+        /// whatever the other tests have taught the table meanwhile.
+        pub static ASK_EVERYTHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+}
+
 pub fn build_mesh(
     pos: ChunkPos,
     cache: &Neighbourhood,
@@ -2903,7 +2984,14 @@ pub fn build_mesh(
                     id
                 };
 
-                if is_flat(id) {
+                // **Every model this id could be, asked once per id rather
+                // than once per cell.** A cell of stone went through thirty
+                // questions below before reaching the cube it always is; see
+                // `plain_cube` for what that cost and why the answer can be
+                // kept. The two flames between the parts stay unasked-for
+                // by it -- they draw *and* fall through to the cube.
+                let plain = plain_cube::known(id);
+                if !plain && is_flat(id) {
                     flat_block(
                         [gx, y, gz],
                         [x as f32, y as f32, z as f32],
@@ -2968,481 +3056,486 @@ pub fn build_mesh(
                     );
                 }
 
-                // **A standing torch is a pole**, drawn as one and instead of
-                // the cube, with its flame on the top cell. See
-                // `standing_torch_block`.
-                if primitive_shared::wildfire::is_standing_torch(id) {
-                    standing_torch_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        textures,
-                        model_light(cache, cell, y, cover_table),
-                        vertices,
-                        indices,
-                    );
-                    if primitive_shared::types::block_kind(id) == primitive_shared::types::BLOCK_STANDING_TORCH_LIT {
-                        flame_block(
-                            [gx, y, gz],
-                            [x as f32, y as f32 + TORCH_FLAME_RISE, z as f32],
+                if !plain {
+                    // **A standing torch is a pole**, drawn as one and instead of
+                    // the cube, with its flame on the top cell. See
+                    // `standing_torch_block`.
+                    if primitive_shared::wildfire::is_standing_torch(id) {
+                        standing_torch_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
                             textures,
-                            cache.light_near(cell, y, 0, 0, 0),
+                            model_light(cache, cell, y, cover_table),
                             vertices,
-                            sprites,
+                            indices,
                         );
-                    }
-                    continue;
-                }
-
-                // **A wild hive is a comb on a trunk**, drawn against the
-                // wall its bits name and not as a cube of its cell. See
-                // `types::hive_side`.
-                if primitive_shared::bees::is_hive(id) {
-                    let light = model_light(cache, cell, y, cover_table);
-                    let quarters = turned_from_north(primitive_shared::types::hive_side(id));
-                    push_box_faces(
-                        [x as f32, y as f32, z as f32],
-                        [2.0, 0.0, 7.0],
-                        [14.0, 16.0, 16.0],
-                        quarters,
-                        std::array::from_fn(|face| textures.layer_for_face(id, face)),
-                        true,
-                        light & 0x0F,
-                        (light >> 4) & 0x0F,
-                        0,
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
-
-                // **A pit prop is a post**, drawn where it is collided
-                // (`geometry::block_box`, `types::BLOCK_PROP`).
-                // **A window lattice is a panel of slats** across the middle
-                // of its cell (`types::lattice_box`), into the sprites'
-                // range: its picture is mostly holes, and the solid pass
-                // fills a hole with shade rather than letting it through.
-                if primitive_shared::types::is_lattice(id) {
-                    let light = model_light(cache, cell, y, cover_table);
-                    let (min, max) = primitive_shared::types::lattice_box(id);
-                    push_box(
-                        [x as f32, y as f32, z as f32],
-                        min.map(|v| v * 16.0),
-                        max.map(|v| v * 16.0),
-                        0,
-                        textures.layer_for_face(id, 2),
-                        true,
-                        light & 0x0F,
-                        (light >> 4) & 0x0F,
-                        vertices,
-                        sprites,
-                    );
-                    continue;
-                }
-
-                if primitive_shared::types::is_prop(id) {
-                    let light = model_light(cache, cell, y, cover_table);
-                    // In the bark of the wood it was cut from (`types::carries_wood`):
-                    // one picture for every prop was an oak post in a birch
-                    // mine.
-                    let layer = textures.layer_for_face(
-                        primitive_shared::wood::WOODS[primitive_shared::types::furniture_wood(id)].log,
-                        2,
-                    );
-                    // The post is where the collider has it, by the one
-                    // function both ask (`types::prop_box`); unturned,
-                    // because the box is already where it stands.
-                    let (min, max) = primitive_shared::types::prop_box(id);
-                    push_box(
-                        [x as f32, y as f32, z as f32],
-                        min.map(|v| v * 16.0),
-                        max.map(|v| v * 16.0),
-                        0,
-                        layer,
-                        true,
-                        light & 0x0F,
-                        (light >> 4) & 0x0F,
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
-
-                // **A stake is a pole**, stood up or driven into the wall it
-                // is turned toward. See `stake_block`.
-                if primitive_shared::types::is_stake(id) {
-                    stake_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        textures,
-                        model_light(cache, cell, y, cover_table),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
-
-                // **A door is its slab of boards**, instead of the cube its
-                // row describes. See `door_block`.
-                if primitive_shared::types::is_door(id) {
-                    // Each broad face lit from the room it faces: see
-                    // `door_block`. A side that looks into a wall falls back
-                    // to the brighter of the neighbours, as the edges do.
-                    let edges = model_light(cache, cell, y, cover_table);
-                    let facing_room = |toward_back: bool| {
-                        let (dx, dz) = door_face_offset(id, toward_back);
-                        if cover_table[cache.block_near(cell, y, dx, 0, dz) as usize] == FULL_COVER {
-                            edges
-                        } else {
-                            cache.light_near(cell, y, dx, 0, dz)
+                        if primitive_shared::types::block_kind(id) == primitive_shared::types::BLOCK_STANDING_TORCH_LIT {
+                            flame_block(
+                                [gx, y, gz],
+                                [x as f32, y as f32 + TORCH_FLAME_RISE, z as f32],
+                                textures,
+                                cache.light_near(cell, y, 0, 0, 0),
+                                vertices,
+                                sprites,
+                            );
                         }
-                    };
-                    door_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        textures,
-                        [edges, facing_room(false), facing_room(true)],
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
+                        continue;
+                    }
 
-                // **A step is its two boxes**, instead of the cube its row
-                // describes. See `step_block`.
-                if primitive_shared::types::is_step(id) {
-                    step_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        textures,
-                        model_light(cache, cell, y, cover_table),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
+                    // **A wild hive is a comb on a trunk**, drawn against the
+                    // wall its bits name and not as a cube of its cell. See
+                    // `types::hive_side`.
+                    if primitive_shared::bees::is_hive(id) {
+                        let light = model_light(cache, cell, y, cover_table);
+                        let quarters = turned_from_north(primitive_shared::types::hive_side(id));
+                        push_box_faces(
+                            [x as f32, y as f32, z as f32],
+                            [2.0, 0.0, 7.0],
+                            [14.0, 16.0, 16.0],
+                            quarters,
+                            std::array::from_fn(|face| textures.layer_for_face(id, face)),
+                            true,
+                            light & 0x0F,
+                            (light >> 4) & 0x0F,
+                            0,
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
 
-                // **A spike of dripstone is its tiers**, instead of the cube
-                // its row describes. See `dripstone_block`.
-                if primitive_shared::dripstone::is_dripstone(id) {
-                    dripstone_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        textures,
-                        model_light(cache, cell, y, cover_table),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
-
-                // A rack is a frame of poles with a skin in it, which
-                // is not a cube however it is textured. Drawn here and
-                // *instead of* the cube, unlike the flame above it. The hide
-                // frame is never whole, so always `RackColumns::Lone`, and
-                // `rack_block` draws it as the laced frame it is.
-                if primitive_shared::rack::is_rack(id) {
-                    let columns = rack_columns(cache, cell, y, id);
-                    rack_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        columns,
-                        textures,
-                        // Not its own cell's: see `model_light`.
-                        model_light(cache, cell, y, cover_table),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
-
-                // **A thing set down is not drawn here at all**: it is an
-                // item model, lying, and the frame draws it with the dropped
-                // stacks (`entities::build_set_down_into`). A cube an eighth
-                // tall under it would be a paving slab under every knife.
-                if primitive_shared::types::is_set_down(id) {
-                    continue;
-                }
-
-                // A pit kiln is pots, fibre and logs stacked in a hole -- see
-                // `pit_kiln_block` -- and drawn instead of the cube, like the
-                // rack. Alight, it wears the hearth's flame, stood on the
-                // logs rather than buried in them.
-                if primitive_shared::pit::is_pit_kiln(id) {
-                    pit_kiln_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        cache.pottery_at((gx, y, gz)),
-                        textures,
-                        model_light(cache, cell, y, cover_table),
-                        vertices,
-                        indices,
-                    );
-                    if primitive_shared::types::block_kind(id) == primitive_shared::types::BLOCK_PIT_KILN_LIT {
-                        flame_block(
-                            [gx, y, gz],
-                            [x as f32, y as f32 + PIT_FLAME_RISE, z as f32],
-                            textures,
-                            cache.light_near(cell, y, 0, 0, 0),
+                    // **A pit prop is a post**, drawn where it is collided
+                    // (`geometry::block_box`, `types::BLOCK_PROP`).
+                    // **A window lattice is a panel of slats** across the middle
+                    // of its cell (`types::lattice_box`), into the sprites'
+                    // range: its picture is mostly holes, and the solid pass
+                    // fills a hole with shade rather than letting it through.
+                    if primitive_shared::types::is_lattice(id) {
+                        let light = model_light(cache, cell, y, cover_table);
+                        let (min, max) = primitive_shared::types::lattice_box(id);
+                        push_box(
+                            [x as f32, y as f32, z as f32],
+                            min.map(|v| v * 16.0),
+                            max.map(|v| v * 16.0),
+                            0,
+                            textures.layer_for_face(id, 2),
+                            true,
+                            light & 0x0F,
+                            (light >> 4) & 0x0F,
                             vertices,
                             sprites,
                         );
+                        continue;
                     }
-                    continue;
-                }
 
-                // An unlit pile of logs is the logs, lying -- see
-                // `log_pile_block`. Alight it stays the cube of fire its
-                // row describes, and goes down the path below.
-                if primitive_shared::pit::pile_extent(id).is_some() {
-                    log_pile_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        textures,
-                        model_light(cache, cell, y, cover_table),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
+                    if primitive_shared::types::is_prop(id) {
+                        let light = model_light(cache, cell, y, cover_table);
+                        // In the bark of the wood it was cut from (`types::carries_wood`):
+                        // one picture for every prop was an oak post in a birch
+                        // mine.
+                        let layer = textures.layer_for_face(
+                            primitive_shared::wood::WOODS[primitive_shared::types::furniture_wood(id)].log,
+                            2,
+                        );
+                        // The post is where the collider has it, by the one
+                        // function both ask (`types::prop_box`); unturned,
+                        // because the box is already where it stands.
+                        let (min, max) = primitive_shared::types::prop_box(id);
+                        push_box(
+                            [x as f32, y as f32, z as f32],
+                            min.map(|v| v * 16.0),
+                            max.map(|v| v * 16.0),
+                            0,
+                            layer,
+                            true,
+                            light & 0x0F,
+                            (light >> 4) & 0x0F,
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
 
-                // A carcass is the animal lying where it fell -- the
-                // animal's own model, rolled on its side and baked into
-                // the chunk -- and not the low cube its table row
-                // collides as. See `animal_model::build_fallen`. The yaw
-                // is hashed from the world cell so that two kills in one
-                // meadow do not lie parallel, and so the same carcass
-                // faces the same way after every remesh.
-                if let Some(species) = primitive_shared::animals::Species::of_carcass(id) {
-                    let packed = model_light(cache, cell, y, cover_table);
-                    let yaw =
-                        crate::logic::animal_model::carcass_yaw(origin_x + x, y, origin_z + z);
-                    crate::logic::animal_model::build_fallen(
-                        species,
-                        glam::Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5),
-                        yaw,
-                        primitive_shared::animals::butchering_stage(id),
-                        textures,
-                        (packed & 15, (packed >> 4) & 15),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
+                    // **A stake is a pole**, stood up or driven into the wall it
+                    // is turned toward. See `stake_block`.
+                    if primitive_shared::types::is_stake(id) {
+                        stake_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            textures,
+                            model_light(cache, cell, y, cover_table),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
 
-                // A dead player is the player, lying down -- the figure
-                // everybody else walks around in, rolled onto its side
-                // and baked into the chunk exactly as a carcass is (see
-                // `player_model::build_fallen`, which argues the whole of
-                // it). Same yaw hash as a carcass, for the same three
-                // reasons: two bodies in one clearing do not lie
-                // parallel, a body faces the same way after every remesh,
-                // and the mining cracks land on it rather than beside it.
-                //
-                // **Only the bones are baked now.** A body wears the player's
-                // own skin and clothes, which the terrain vertex cannot reach,
-                // and is drawn with the other figures
-                // (`player_model::append_lying`); `build_fallen` emits nothing
-                // for one, and the cell keeps its floor (`drawn_as_model`).
-                if let Some(stage) = crate::logic::player_model::Dead::of(id) {
-                    let packed = model_light(cache, cell, y, cover_table);
-                    let yaw =
-                        crate::logic::animal_model::carcass_yaw(origin_x + x, y, origin_z + z);
-                    crate::logic::player_model::build_fallen(
-                        stage,
-                        glam::Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5),
-                        yaw,
-                        textures,
-                        (packed & 15, (packed >> 4) & 15),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
+                    // **A door is its slab of boards**, instead of the cube its
+                    // row describes. See `door_block`.
+                    if primitive_shared::types::is_door(id) {
+                        // Each broad face lit from the room it faces: see
+                        // `door_block`. A side that looks into a wall falls back
+                        // to the brighter of the neighbours, as the edges do.
+                        let edges = model_light(cache, cell, y, cover_table);
+                        let facing_room = |toward_back: bool| {
+                            let (dx, dz) = door_face_offset(id, toward_back);
+                            if cover_table[cache.block_near(cell, y, dx, 0, dz) as usize] == FULL_COVER {
+                                edges
+                            } else {
+                                cache.light_near(cell, y, dx, 0, dz)
+                            }
+                        };
+                        door_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            textures,
+                            [edges, facing_room(false), facing_room(true)],
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
 
-                // A jug is a vessel, not a cube of clay: see `jug_block`.
-                if primitive_shared::types::block_kind(id)
-                    == primitive_shared::types::BLOCK_JUG
-                {
-                    jug_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        textures,
-                        model_light(cache, cell, y, cover_table),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
+                    // **A step is its two boxes**, instead of the cube its row
+                    // describes. See `step_block`.
+                    if primitive_shared::types::is_step(id) {
+                        step_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            textures,
+                            model_light(cache, cell, y, cover_table),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
 
-                // **A palm's crown is fronds and fruit, not cubes of leaf.**
-                // What each cell is -- the heart, a length of a frond, a bunch
-                // of coconuts -- is read off the cells round it: see
-                // `CrownPart`.
-                if matches!(
-                    primitive_shared::types::block_kind(id),
-                    primitive_shared::types::BLOCK_PALM_FRONDS | primitive_shared::types::BLOCK_PALM_COCONUTS
-                ) {
-                    let near = |dx: i32, dy: i32, dz: i32| cache.block_near(cell, y, dx, dy, dz);
-                    palm_crown_block(
-                        [gx, y, gz],
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        (crown_part(near), near),
-                        textures,
-                        (cache.light_near(cell, y, 0, 0, 0), model_light(cache, cell, y, cover_table)),
-                        tint,
-                        vertices,
-                        indices,
-                        sprites,
-                    );
-                    continue;
-                }
-                // A piece of an experimental tree is a post of bark joined
-                // to the pieces beside it: see `branch_block` and
-                // `branch_joins`. A palm is one leaning curve rather than
-                // posts with arms: see `palm::PalmCourse`. Asked before the
-                // branch path below, which would draw the palm's steps as
-                // right angles.
-                if primitive_shared::types::block_kind(id) == primitive_shared::types::BLOCK_PALM_TRUNK {
-                    palm_trunk_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        |dx, dy, dz| cache.block_near(cell, y, dx, dy, dz),
-                        textures,
-                        cache.light_near(cell, y, 0, 0, 0),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
-                if primitive_shared::types::is_branch(id) {
-                    let joins = branch_joins(cache, cell, y);
-                    branch_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        joins,
-                        textures,
-                        cache.light_near(cell, y, 0, 0, 0),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
+                    // **A spike of dripstone is its tiers**, instead of the cube
+                    // its row describes. See `dripstone_block`.
+                    if primitive_shared::dripstone::is_dripstone(id) {
+                        dripstone_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            textures,
+                            model_light(cache, cell, y, cover_table),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
 
-                // A barrel is staves round water, not a cube of wood:
-                // see `barrel_block`.
-                if primitive_shared::types::is_barrel(id) {
-                    barrel_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        textures,
-                        model_light(cache, cell, y, cover_table),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
+                    // A rack is a frame of poles with a skin in it, which
+                    // is not a cube however it is textured. Drawn here and
+                    // *instead of* the cube, unlike the flame above it. The hide
+                    // frame is never whole, so always `RackColumns::Lone`, and
+                    // `rack_block` draws it as the laced frame it is.
+                    if primitive_shared::rack::is_rack(id) {
+                        let columns = rack_columns(cache, cell, y, id);
+                        rack_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            columns,
+                            textures,
+                            // Not its own cell's: see `model_light`.
+                            model_light(cache, cell, y, cover_table),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
 
-                // A bracket fungus is a shelf on the side of the cell,
-                // not a cross standing in it: see `bracket_block`.
-                if primitive_shared::types::block_kind(id)
-                    == primitive_shared::types::BLOCK_BRACKET_FUNGUS
-                {
-                    bracket_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        textures,
-                        model_light(cache, cell, y, cover_table),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
+                    // **A thing set down is not drawn here at all**: it is an
+                    // item model, lying, and the frame draws it with the dropped
+                    // stacks (`entities::build_set_down_into`). A cube an eighth
+                    // tall under it would be a paving slab under every knife.
+                    if primitive_shared::types::is_set_down(id) {
+                        continue;
+                    }
 
-                // A nest is a bowl of twigs with eggs in it, and both
-                // halves are model rather than tile: see `nest_block`.
-                if matches!(
-                    primitive_shared::types::block_kind(id),
-                    primitive_shared::types::BLOCK_NEST
-                        | primitive_shared::types::BLOCK_NEST_EGGS
-                ) {
-                    nest_block(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        textures,
-                        model_light(cache, cell, y, cover_table),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
+                    // A pit kiln is pots, fibre and logs stacked in a hole -- see
+                    // `pit_kiln_block` -- and drawn instead of the cube, like the
+                    // rack. Alight, it wears the hearth's flame, stood on the
+                    // logs rather than buried in them.
+                    if primitive_shared::pit::is_pit_kiln(id) {
+                        pit_kiln_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            cache.pottery_at((gx, y, gz)),
+                            textures,
+                            model_light(cache, cell, y, cover_table),
+                            vertices,
+                            indices,
+                        );
+                        if primitive_shared::types::block_kind(id) == primitive_shared::types::BLOCK_PIT_KILN_LIT {
+                            flame_block(
+                                [gx, y, gz],
+                                [x as f32, y as f32 + PIT_FLAME_RISE, z as f32],
+                                textures,
+                                cache.light_near(cell, y, 0, 0, 0),
+                                vertices,
+                                sprites,
+                            );
+                        }
+                        continue;
+                    }
 
-                // ...and a skeleton is what is left of a carcass nobody
-                // came back for: not the animal's model in bone but its
-                // bones, built from that model's proportions (see
-                // `animal_model::skeleton_parts`). Same yaw hash, so the
-                // skull lies at the end the head did rather than the
-                // whole thing turning as it rots.
-                if let Some(species) = primitive_shared::types::species_in_bones(id) {
-                    let packed = model_light(cache, cell, y, cover_table);
-                    let yaw =
-                        crate::logic::animal_model::carcass_yaw(origin_x + x, y, origin_z + z);
-                    crate::logic::animal_model::build_bones(
-                        species,
-                        glam::Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5),
-                        yaw,
-                        textures,
-                        (packed & 15, (packed >> 4) & 15),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
+                    // An unlit pile of logs is the logs, lying -- see
+                    // `log_pile_block`. Alight it stays the cube of fire its
+                    // row describes, and goes down the path below.
+                    if primitive_shared::pit::pile_extent(id).is_some() {
+                        log_pile_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            textures,
+                            model_light(cache, cell, y, cover_table),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
 
-                // Furniture is boxes -- boards, poles, straw, a blanket --
-                // and not the part-height cube its row collides as: see
-                // `furniture_block`. The other half of a bed is looked for
-                // here because only here are the neighbours in reach, and
-                // the seam between the two is only left open where it is.
-                if is_furniture(id) {
-                    let partnered = primitive_shared::types::bed_partner((gx, y, gz), id)
-                        .is_some_and(|(other, expected)| {
-                            cache.block_near(cell, y, other.0 - gx, 0, other.2 - gz) == expected
-                        });
-                    // **A chest somebody has open leaves its lid out**: the
-                    // frame is swinging that lid this very frame
-                    // (`chest_lid_block`), and a lid drawn here as well would
-                    // be a second one lying shut through it.
-                    let hinged = if cache.lid_swings_at((gx, y, gz)) {
-                        Hinged::Bodied
-                    } else {
-                        Hinged::Whole
-                    };
-                    furniture_block_hinged(
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        partnered,
-                        hinged,
-                        textures,
-                        model_light(cache, cell, y, cover_table),
-                        vertices,
-                        indices,
-                    );
-                    continue;
-                }
+                    // A carcass is the animal lying where it fell -- the
+                    // animal's own model, rolled on its side and baked into
+                    // the chunk -- and not the low cube its table row
+                    // collides as. See `animal_model::build_fallen`. The yaw
+                    // is hashed from the world cell so that two kills in one
+                    // meadow do not lie parallel, and so the same carcass
+                    // faces the same way after every remesh.
+                    if let Some(species) = primitive_shared::animals::Species::of_carcass(id) {
+                        let packed = model_light(cache, cell, y, cover_table);
+                        let yaw =
+                            crate::logic::animal_model::carcass_yaw(origin_x + x, y, origin_z + z);
+                        crate::logic::animal_model::build_fallen(
+                            species,
+                            glam::Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5),
+                            yaw,
+                            primitive_shared::animals::butchering_stage(id),
+                            textures,
+                            (packed & 15, (packed >> 4) & 15),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
 
-                if is_cross(id) {
-                    cross_block(
-                        [gx, y, gz],
-                        [x as f32, y as f32, z as f32],
-                        id,
-                        textures.layer_for_face(id, cross_face(id)),
-                        cache.light_near(cell, y, 0, 0, 0),
-                        tint,
-                        vertices,
-                        sprites,
-                    );
-                    continue;
+                    // A dead player is the player, lying down -- the figure
+                    // everybody else walks around in, rolled onto its side
+                    // and baked into the chunk exactly as a carcass is (see
+                    // `player_model::build_fallen`, which argues the whole of
+                    // it). Same yaw hash as a carcass, for the same three
+                    // reasons: two bodies in one clearing do not lie
+                    // parallel, a body faces the same way after every remesh,
+                    // and the mining cracks land on it rather than beside it.
+                    //
+                    // **Only the bones are baked now.** A body wears the player's
+                    // own skin and clothes, which the terrain vertex cannot reach,
+                    // and is drawn with the other figures
+                    // (`player_model::append_lying`); `build_fallen` emits nothing
+                    // for one, and the cell keeps its floor (`drawn_as_model`).
+                    if let Some(stage) = crate::logic::player_model::Dead::of(id) {
+                        let packed = model_light(cache, cell, y, cover_table);
+                        let yaw =
+                            crate::logic::animal_model::carcass_yaw(origin_x + x, y, origin_z + z);
+                        crate::logic::player_model::build_fallen(
+                            stage,
+                            glam::Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5),
+                            yaw,
+                            textures,
+                            (packed & 15, (packed >> 4) & 15),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
+
+                    // A jug is a vessel, not a cube of clay: see `jug_block`.
+                    if primitive_shared::types::block_kind(id)
+                        == primitive_shared::types::BLOCK_JUG
+                    {
+                        jug_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            textures,
+                            model_light(cache, cell, y, cover_table),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
+
+                    // **A palm's crown is fronds and fruit, not cubes of leaf.**
+                    // What each cell is -- the heart, a length of a frond, a bunch
+                    // of coconuts -- is read off the cells round it: see
+                    // `CrownPart`.
+                    if matches!(
+                        primitive_shared::types::block_kind(id),
+                        primitive_shared::types::BLOCK_PALM_FRONDS | primitive_shared::types::BLOCK_PALM_COCONUTS
+                    ) {
+                        let near = |dx: i32, dy: i32, dz: i32| cache.block_near(cell, y, dx, dy, dz);
+                        palm_crown_block(
+                            [gx, y, gz],
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            (crown_part(near), near),
+                            textures,
+                            (cache.light_near(cell, y, 0, 0, 0), model_light(cache, cell, y, cover_table)),
+                            tint,
+                            vertices,
+                            indices,
+                            sprites,
+                        );
+                        continue;
+                    }
+                    // A piece of an experimental tree is a post of bark joined
+                    // to the pieces beside it: see `branch_block` and
+                    // `branch_joins`. A palm is one leaning curve rather than
+                    // posts with arms: see `palm::PalmCourse`. Asked before the
+                    // branch path below, which would draw the palm's steps as
+                    // right angles.
+                    if primitive_shared::types::block_kind(id) == primitive_shared::types::BLOCK_PALM_TRUNK {
+                        palm_trunk_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            |dx, dy, dz| cache.block_near(cell, y, dx, dy, dz),
+                            textures,
+                            cache.light_near(cell, y, 0, 0, 0),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
+                    if primitive_shared::types::is_branch(id) {
+                        let joins = branch_joins(cache, cell, y);
+                        branch_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            joins,
+                            textures,
+                            cache.light_near(cell, y, 0, 0, 0),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
+
+                    // A barrel is staves round water, not a cube of wood:
+                    // see `barrel_block`.
+                    if primitive_shared::types::is_barrel(id) {
+                        barrel_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            textures,
+                            model_light(cache, cell, y, cover_table),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
+
+                    // A bracket fungus is a shelf on the side of the cell,
+                    // not a cross standing in it: see `bracket_block`.
+                    if primitive_shared::types::block_kind(id)
+                        == primitive_shared::types::BLOCK_BRACKET_FUNGUS
+                    {
+                        bracket_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            textures,
+                            model_light(cache, cell, y, cover_table),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
+
+                    // A nest is a bowl of twigs with eggs in it, and both
+                    // halves are model rather than tile: see `nest_block`.
+                    if matches!(
+                        primitive_shared::types::block_kind(id),
+                        primitive_shared::types::BLOCK_NEST
+                            | primitive_shared::types::BLOCK_NEST_EGGS
+                    ) {
+                        nest_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            textures,
+                            model_light(cache, cell, y, cover_table),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
+
+                    // ...and a skeleton is what is left of a carcass nobody
+                    // came back for: not the animal's model in bone but its
+                    // bones, built from that model's proportions (see
+                    // `animal_model::skeleton_parts`). Same yaw hash, so the
+                    // skull lies at the end the head did rather than the
+                    // whole thing turning as it rots.
+                    if let Some(species) = primitive_shared::types::species_in_bones(id) {
+                        let packed = model_light(cache, cell, y, cover_table);
+                        let yaw =
+                            crate::logic::animal_model::carcass_yaw(origin_x + x, y, origin_z + z);
+                        crate::logic::animal_model::build_bones(
+                            species,
+                            glam::Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5),
+                            yaw,
+                            textures,
+                            (packed & 15, (packed >> 4) & 15),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
+
+                    // Furniture is boxes -- boards, poles, straw, a blanket --
+                    // and not the part-height cube its row collides as: see
+                    // `furniture_block`. The other half of a bed is looked for
+                    // here because only here are the neighbours in reach, and
+                    // the seam between the two is only left open where it is.
+                    if is_furniture(id) {
+                        let partnered = primitive_shared::types::bed_partner((gx, y, gz), id)
+                            .is_some_and(|(other, expected)| {
+                                cache.block_near(cell, y, other.0 - gx, 0, other.2 - gz) == expected
+                            });
+                        // **A chest somebody has open leaves its lid out**: the
+                        // frame is swinging that lid this very frame
+                        // (`chest_lid_block`), and a lid drawn here as well would
+                        // be a second one lying shut through it.
+                        let hinged = if cache.lid_swings_at((gx, y, gz)) {
+                            Hinged::Bodied
+                        } else {
+                            Hinged::Whole
+                        };
+                        furniture_block_hinged(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            partnered,
+                            hinged,
+                            textures,
+                            model_light(cache, cell, y, cover_table),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
+
+                    if is_cross(id) {
+                        cross_block(
+                            [gx, y, gz],
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            textures.layer_for_face(id, cross_face(id)),
+                            cache.light_near(cell, y, 0, 0, 0),
+                            tint,
+                            vertices,
+                            sprites,
+                        );
+                        continue;
+                    }
+                    // Through every model above without one taking the cell:
+                    // nothing there will take this id either. See `plain_cube`.
+                    plain_cube::learn(id);
                 }
 
                 // Everything about this block that does not depend on
@@ -12996,6 +13089,133 @@ mod bench {
         // loaded world does and would flatter the numbers.
         fn chunk_data(&self, _pos: ChunkPos) -> Option<&[BlockId]> {
             Some(&self.0)
+        }
+    }
+
+    /// **Every id meshes the same whether the mesher asked about it or
+    /// remembered** (`plain_cube`): every kind, with each of its variant
+    /// bits and the furniture's wood bits, standing on stone with air
+    /// round it, meshed once asking every question and once from what
+    /// that taught the table -- byte for byte the same. A model added to
+    /// the list that asks the neighbours, or falls through after drawing,
+    /// would be learned as a cube by the first cell and drawn as one by the
+    /// next, and this is where it shows.
+    #[test]
+    fn every_id_meshes_the_same_whether_the_mesher_asked_or_remembered() {
+        let ids: Vec<BlockId> = (1..=primitive_shared::types::KIND_MASK)
+            .flat_map(|kind| (0u16..64).map(move |high| kind | (high << 10)))
+            // Only woods there are: the bits past the last one name
+            // nothing, and a pile of logs of no wood has no bark to draw.
+            .filter(|&id| primitive_shared::types::furniture_wood(id) < primitive_shared::wood::WOODS.len())
+            .collect();
+        // Two cells apart on every axis, so no model leans on another;
+        // eight by eight a layer, one layer every other block of height.
+        let per_chunk = 8 * 8 * ((CHUNK_SIZE_Y - 2) / 2);
+        let layers = FaceLayers::by_kind_for_test();
+        let generator = primitive_shared::worldgen::WorldGen::new(0);
+        let mut differing = Vec::new();
+        for batch in ids.chunks(per_chunk) {
+            let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+            for (i, id) in batch.iter().enumerate() {
+                let (x, z, y) = ((i % 8) * 2, (i / 8 % 8) * 2, 1 + (i / 64) * 2);
+                blocks[Chunk::index(x, y - 1, z)] = BLOCK_STONE;
+                blocks[Chunk::index(x, y, z)] = *id;
+            }
+            let world = World(blocks);
+            let pos = ChunkPos::new(0, 0);
+            let mut light = LightMap::new();
+            light.load_chunk(&world, pos);
+            let mut cache = Neighbourhood::default();
+            cache.fill(pos, &world, &light);
+            let mesh = |ask: bool| {
+                plain_cube::ASK_EVERYTHING.with(|flag| flag.set(ask));
+                let mut out = MeshBuffers::default();
+                build_mesh(pos, &cache, &layers, &generator, &mut out);
+                plain_cube::ASK_EVERYTHING.with(|flag| flag.set(false));
+                (bytemuck::cast_slice::<Vertex, u8>(&out.vertices).to_vec(), out.indices)
+            };
+            let asked = mesh(true);
+            // Teach the table everything this batch can teach it...
+            let _ = mesh(false);
+            // ...and draw from it.
+            if mesh(false) != asked {
+                differing.push(batch[0]);
+            }
+        }
+        assert!(differing.is_empty(), "batches starting at these ids mesh differently from the table: {differing:?}");
+    }
+
+    /// **What every block kind costs when it is built**, one kind at a
+    /// time: sixty-four of it on a stone floor, two cells apart, and the
+    /// triangles and mesher time that are more than the bare floor's,
+    /// per placed cell.
+    ///
+    /// ```text
+    /// cargo test --release -p primitive_client --lib what_each_kind_costs_where_it_stands \
+    ///     -- --ignored --nocapture
+    /// ```
+    ///
+    /// The generated world holds none of the geometry 1.5 added -- racks,
+    /// log piles, stake bundles, hide frames, chests -- because players
+    /// build it, so the benchmark scene cannot say what it costs. This
+    /// can. The top of the table is where a base gets dear.
+    #[test]
+    #[ignore = "a measurement, not an assertion -- run it explicitly"]
+    fn what_each_kind_costs_where_it_stands() {
+        const FLOOR: usize = 10;
+        let floor = || {
+            let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+            for z in 0..CHUNK_SIZE_Z {
+                for x in 0..CHUNK_SIZE_X {
+                    for y in 0..=FLOOR {
+                        blocks[Chunk::index(x, y, z)] = BLOCK_STONE;
+                    }
+                }
+            }
+            blocks
+        };
+        let layers = FaceLayers::by_kind_for_test();
+        let generator = primitive_shared::worldgen::WorldGen::new(0);
+        let mut out = MeshBuffers::default();
+        let mut mesh = |blocks: Vec<BlockId>, rounds: usize| -> (usize, f64) {
+            let world = World(blocks);
+            let pos = ChunkPos::new(0, 0);
+            let mut light = LightMap::new();
+            light.load_chunk(&world, pos);
+            let mut cache = Neighbourhood::default();
+            cache.fill(pos, &world, &light);
+            build_mesh(pos, &cache, &layers, &generator, &mut out);
+            let mut best = f64::MAX;
+            for _ in 0..rounds {
+                let started = Instant::now();
+                build_mesh(pos, &cache, &layers, &generator, &mut out);
+                best = best.min(started.elapsed().as_secs_f64());
+            }
+            (out.indices.len() / 3, best)
+        };
+        let (bare_tris, bare_time) = mesh(floor(), 5);
+        let mut rows = Vec::new();
+        for kind in 1..=primitive_shared::types::KIND_MASK {
+            let name = primitive_shared::types::block_name(kind);
+            if name == primitive_shared::types::block_name(BlockId::MAX & primitive_shared::types::KIND_MASK) || kind == BLOCK_STONE {
+                continue;
+            }
+            let mut blocks = floor();
+            for i in 0..64 {
+                let (x, z) = ((i % 8) * 2, (i / 8) * 2);
+                blocks[Chunk::index(x, FLOOR + 1, z)] = kind;
+            }
+            let (tris, time) = mesh(blocks, 3);
+            rows.push((name, tris.saturating_sub(bare_tris) as f64 / 64.0, (time - bare_time).max(0.0) * 1e6 / 64.0));
+        }
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+        println!("[kind] bare floor: {bare_tris} triangles, {:.3} ms", bare_time * 1e3);
+        for (name, tris, us) in rows.iter().take(45) {
+            println!("[kind] {name:28} {tris:7.1} triangles a cell  {us:6.2} us a cell");
+        }
+        rows.sort_by(|a, b| b.2.total_cmp(&a.2));
+        for (name, tris, us) in rows.iter().take(25) {
+            println!("[kind-time] {name:28} {tris:7.1} triangles a cell  {us:6.2} us a cell");
         }
     }
 

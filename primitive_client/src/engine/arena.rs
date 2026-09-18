@@ -1065,6 +1065,115 @@ mod world_cost {
         }
     }
 
+    /// **Whose triangles the benchmark scene is made of**, by block kind and
+    /// by pass: the fine-meshed ring (`lod_distance_chunks`, ten) of world
+    /// `night` round the pinned benchmark spawn.
+    ///
+    /// ```text
+    /// cargo test --release -p primitive_client --lib what_the_benchmark_scene_is_made_of \
+    ///     -- --ignored --nocapture
+    /// ```
+    ///
+    /// The frame is bound by the solid pass and the solid pass by
+    /// triangles (CHANGELOG, "Кадр легче для процессора"), so "what got
+    /// dearer" is first "whose triangles are these" -- and the F3 line only
+    /// says how many. `FaceLayers::by_kind_for_test` makes every face's
+    /// layer its block kind, so a mesh reads back as a census. Pieces of
+    /// models drawn in another block's picture (a pole in the log's) count
+    /// as that block: the table is of pictures, which is close enough to
+    /// point at a culprit and is said here so nobody reads it as exact.
+    #[test]
+    #[ignore = "a measurement, not an assertion -- run it explicitly, in release"]
+    fn what_the_benchmark_scene_is_made_of() {
+        use primitive_shared::worldgen::{Preset, Scale, Zone};
+        // `saves/night/world.toml`: seed 4242, normal, temperate,
+        // regional; spawn pinned at -16,24 by the benchmark
+        // (`PRIMITIVE_TEST_SPAWN`).
+        let generator = WorldGen::with_scale(4242, Preset::Normal, Zone::Temperate, Scale::Regional);
+        let centre = ChunkPos::from_global(-16, 24).0;
+        const FINE: i32 = 10;
+        let around: Vec<ChunkPos> = (-(FINE + 1)..=FINE + 1)
+            .flat_map(|dz| (-(FINE + 1)..=FINE + 1).map(move |dx| ChunkPos::new(centre.x + dx, centre.z + dz)))
+            .collect();
+        let generated: Vec<Chunk> = around.iter().map(|&pos| generator.generate_chunk(pos)).collect();
+        let isolated: Vec<Vec<u8>> = generated.iter().map(|chunk| compute_isolated(&chunk.blocks)).collect();
+        let mut chunks = ChunkManager::new(FINE + 2);
+        for chunk in generated {
+            chunks.insert(chunk);
+        }
+        let mut light = LightMap::new();
+        for (pos, data) in around.iter().zip(isolated) {
+            light.insert_precomputed(&chunks, *pos, data);
+        }
+        let layers = crate::engine::texture::FaceLayers::by_kind_for_test();
+        let mut cache = Box::<Neighbourhood>::default();
+        let mut out = Box::<MeshBuffers>::default();
+        // [solid, the rest] triangles by layer.
+        let mut census = vec![[0usize; 2]; crate::engine::mesh::MAX_TEXTURE_LAYERS as usize];
+        let (mut meshing, mut meshed) = (0.0f64, 0usize);
+        for pos in around.iter().filter(|p| (p.x - centre.x).abs() <= FINE && (p.z - centre.z).abs() <= FINE) {
+            cache.fill(*pos, &chunks, &light);
+            // As the game lays them out with the benchmark's settings
+            // (`relief_chunks = 4`, `transparent_leaves_chunks = 6`), or
+            // the census counts stones in relief nine chunks out that the
+            // game lays flat past four.
+            let distance = (((pos.x - centre.x).pow(2) + (pos.z - centre.z).pow(2)) as f32).sqrt();
+            cache.lay_stones_flat(!crate::engine::lod::relief_at(distance, 4, true));
+            cache.draw_leaves_solid(!crate::engine::lod::leaves_see_through_at(distance, 6, true));
+            out.clear();
+            let started = std::time::Instant::now();
+            build_mesh(*pos, &cache, &layers, &generator, &mut out);
+            meshing += started.elapsed().as_secs_f64();
+            meshed += 1;
+            for (i, tri) in out.indices.chunks_exact(3).enumerate() {
+                let pass = usize::from(i * 3 >= out.solid_index_count as usize);
+                census[out.vertices[tri[0] as usize].tex_layer() as usize][pass] += 1;
+            }
+        }
+        // **The same ring meshed asking every model question per cell and
+        // from `mesh::plain_cube`**, alternated and best of three each, so
+        // the table's saving is measured on this ground rather than
+        // assumed from a synthetic chunk.
+        let inner: Vec<ChunkPos> = around.iter().copied().filter(|p| (p.x - centre.x).abs() <= FINE && (p.z - centre.z).abs() <= FINE).collect();
+        let mut best = [f64::MAX; 2];
+        for round in 0..6 {
+            for flag in [round % 2 == 0, round % 2 != 0] {
+                crate::engine::mesh::plain_cube::ASK_EVERYTHING.with(|ask| ask.set(!flag));
+                let mut spent = 0.0;
+                for pos in &inner {
+                    cache.fill(*pos, &chunks, &light);
+                    let distance = (((pos.x - centre.x).pow(2) + (pos.z - centre.z).pow(2)) as f32).sqrt();
+                    cache.lay_stones_flat(!crate::engine::lod::relief_at(distance, 4, true));
+                    cache.draw_leaves_solid(!crate::engine::lod::leaves_see_through_at(distance, 6, true));
+                    let started = std::time::Instant::now();
+                    build_mesh(*pos, &cache, &layers, &generator, &mut out);
+                    spent += started.elapsed().as_secs_f64();
+                }
+                let slot = usize::from(flag);
+                best[slot] = best[slot].min(spent * 1e3 / inner.len() as f64);
+            }
+        }
+        crate::engine::mesh::plain_cube::ASK_EVERYTHING.with(|ask| ask.set(false));
+        println!("[scene] build_mesh asking every question {:.3} ms a chunk, from the table {:.3}", best[0], best[1]);
+        let total: [usize; 2] = census.iter().fold([0, 0], |a, c| [a[0] + c[0], a[1] + c[1]]);
+        println!(
+            "[scene] {meshed} chunks, {:.3} ms a chunk: {}k solid + {}k other triangles",
+            meshing * 1e3 / meshed as f64,
+            total[0] / 1000,
+            total[1] / 1000
+        );
+        let mut rows: Vec<(usize, [usize; 2])> = census.into_iter().enumerate().filter(|(_, c)| c[0] + c[1] > 0).collect();
+        rows.sort_by_key(|(_, c)| std::cmp::Reverse(c[0] + c[1]));
+        for (layer, [solid, other]) in rows.into_iter().take(40) {
+            let name = if (1..=1024).contains(&layer) {
+                primitive_shared::types::block_name((layer - 1) as BlockId).to_string()
+            } else {
+                format!("extra/animal layer {layer}")
+            };
+            println!("[scene] {name:32} solid {:7} other {:7} ({:.1}%)", solid, other, (solid + other) as f64 * 100.0 / (total[0] + total[1]) as f64);
+        }
+    }
+
     /// What every coarse cell would cost on the same streamed world, split
     /// by LOD band and by how tall the chunk stands.
     ///

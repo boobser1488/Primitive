@@ -787,6 +787,30 @@ impl FaceLayers {
         }
     }
 
+    /// A table whose every face layer *is* its block kind plus one, and
+    /// whose extras and animal sheets sit above all of them -- so a mesh
+    /// can be read back as "whose triangles are these". `numbered_for_test`
+    /// wraps ids into seven slots each and cannot answer that; the scene
+    /// census in `arena` needs it answered.
+    #[cfg(test)]
+    pub fn by_kind_for_test() -> Self {
+        const IDS: usize = 1024;
+        const EXTRA_BASE: u32 = IDS as u32 + 1;
+        Self {
+            layers: std::sync::Arc::from((0..(IDS * SLOTS) as u32).map(|i| i / SLOTS as u32 + 1).collect::<Vec<_>>()),
+            max_block_id: IDS as BlockId - 1,
+            extra: std::sync::Arc::from(extra_layers_for_test(EXTRA_BASE)),
+            animals: std::sync::Arc::from(
+                (0..(ANIMAL_SHEETS.len() * SHEET_SLOTS) as u32)
+                    .map(|i| EXTRA_BASE + EXTRA_LAYERS_FOR_TEST + 1 + i.min(64))
+                    .collect::<Vec<_>>(),
+            ),
+            reliefs: embedded_reliefs(),
+            hung: embedded_hung(),
+            mossy: std::sync::Arc::from(Vec::new()),
+        }
+    }
+
     /// An all-placeholder table, for tests that exercise the meshing
     /// pipeline without a GPU -- and for `ui::snapshot`, which draws the
     /// interface without one.
