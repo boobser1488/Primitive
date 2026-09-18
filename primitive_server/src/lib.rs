@@ -14525,7 +14525,10 @@ mod dying_tests {
         // the container, and a test that called the parts would have
         // passed while the game did nothing.
         let day = ctx.clock.day_length_seconds();
-        let steps_wanted = crate::logic::carrion::CORPSE_STEPS_TO_ROT as f32;
+        // Twice the steps: the meadow's nights are cellar-cool, and a body
+        // in cool air ages on every other step (`rot::Keeping::Cool`) as the
+        // meat in a pack does. Four days covers any mix of warm and cool.
+        let steps_wanted = crate::logic::carrion::CORPSE_STEPS_TO_ROT as f32 * 2.0;
         let seconds = logic::rot::Rot::step_seconds(day) * (steps_wanted + 1.0);
         let mut rot = logic::rot::Rot::new();
         // A second at a time: `due` clamps `dt` to one, so a single huge
@@ -14537,7 +14540,7 @@ mod dying_tests {
         assert_eq!(
             ctx.world.cached_block(at.0, at.1, at.2),
             Some(BLOCK_REMAINS),
-            "two days passed and the body is still fresh -- is the spot below freezing?"
+            "four days passed and the body is still fresh -- is the spot below freezing?"
         );
         let inside = ctx.chests.lock().unwrap().contents(at);
         // The half a week of ore is still there. This is the promise the
