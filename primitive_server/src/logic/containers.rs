@@ -39,7 +39,14 @@ use serde::{Deserialize, Serialize};
 use primitive_shared::inventory::Inventory;
 
 /// Its own version, independent of the world's. See the note above.
-const SAVE_FORMAT_VERSION: u32 = 1;
+///
+/// **v2 is the wear on a tool.** A slot went from two numbers to three
+/// (see `inventory::Stack::damage`), and bincode writes fields by
+/// position with no names and no defaults -- so a v1 file read as a v2
+/// one is not a file with a missing field, it is a file that decodes
+/// into nonsense. Hence the version, and hence `ChestsV1` below, which
+/// is what the old shape looked like.
+const SAVE_FORMAT_VERSION: u32 = 2;
 
 /// Where a chest is, in global block coordinates.
 pub type ChestPos = (i32, i32, i32);
@@ -48,6 +55,52 @@ pub type ChestPos = (i32, i32, i32);
 struct SaveFile {
     version: u32,
     chests: Vec<(ChestPos, Inventory)>,
+}
+
+// ---- what a chest file written before tools wore out looks like ----
+//
+// A minimal copy of the old shape, kept here rather than anywhere more
+// general because this is the only thing that reads it. It exists for
+// one reason: **losing a chest is losing everything a player owns**, so
+// a world saved by the last build has to open in this one.
+
+#[derive(Deserialize)]
+struct StackV1 {
+    block: primitive_shared::types::BlockId,
+    count: u32,
+}
+
+#[derive(Deserialize)]
+struct InventoryV1 {
+    slots: Vec<Option<StackV1>>,
+}
+
+#[derive(Deserialize)]
+struct SaveFileV1 {
+    /// Read past rather than used: the version has already been decoded
+    /// on its own to decide which shape to read, and bincode has to be
+    /// told about every field in the order they were written.
+    #[allow(dead_code)]
+    version: u32,
+    chests: Vec<(ChestPos, InventoryV1)>,
+}
+
+impl From<InventoryV1> for Inventory {
+    fn from(old: InventoryV1) -> Self {
+        let mut inventory = Inventory::chest();
+        for (slot, held) in old.slots.into_iter().enumerate() {
+            if let Some(stack) = held {
+                // Unworn: a tool out of an older save has had a hard
+                // life and no record of it, and a fresh one is the
+                // generous reading.
+                inventory.put_in_slot(
+                    slot,
+                    primitive_shared::inventory::Stack::new(stack.block, stack.count),
+                );
+            }
+        }
+        inventory
+    }
 }
 
 #[derive(Default)]
@@ -81,7 +134,31 @@ impl Chests {
     /// this answers with an empty inventory rather than `None` -- the
     /// caller wants something to show the player either way.
     pub fn contents(&self, at: ChestPos) -> Inventory {
-        self.contents.get(&at).cloned().unwrap_or_default()
+        // `Inventory::chest`, not `default`: a box in the world is
+        // `CHEST_SLOTS` long and a player's pack is not, and an empty
+        // chest that answered with a pack-sized one would be a chest
+        // that shrank the first time somebody opened it.
+        self.contents.get(&at).cloned().unwrap_or_else(Inventory::chest)
+    }
+
+    /// Is there anything at all in the container at `at`?
+    ///
+    /// Cheaper than `contents`, which clones forty slots, and the
+    /// question a periodic pass actually asks -- see `drying`, which
+    /// uses it to notice that a frame has been emptied.
+    pub fn holds_anything(&self, at: ChestPos) -> bool {
+        self.contents.contains_key(&at)
+    }
+
+    /// Where every container holding something is.
+    ///
+    /// A `Vec` rather than an iterator because every caller is a pass
+    /// that *changes* what it is walking -- a rack that finishes a skin
+    /// edits the store it was listed from -- and the borrow checker is
+    /// right about that. There are tens of these, not thousands: an
+    /// empty container has no entry at all (see the note at the top).
+    pub fn positions(&self) -> Vec<ChestPos> {
+        self.contents.keys().copied().collect()
     }
 
     /// Runs `edit` against the chest's contents and keeps whatever comes
@@ -91,7 +168,7 @@ impl Chests {
     /// makes "an empty chest is not stored" a property of the type
     /// rather than a rule every caller has to remember.
     pub fn edit<T>(&mut self, at: ChestPos, edit: impl FnOnce(&mut Inventory) -> T) -> T {
-        let mut inventory = self.contents.remove(&at).unwrap_or_default();
+        let mut inventory = self.contents.remove(&at).unwrap_or_else(Inventory::chest);
         let result = edit(&mut inventory);
         if !inventory.is_empty() {
             self.contents.insert(at, inventory);
@@ -154,17 +231,34 @@ impl Chests {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(e),
         };
-        let save: SaveFile = bincode::deserialize(&bytes)
+        // The version is the first field of both shapes, so it can be
+        // read before deciding which shape this is.
+        let version: u32 = bincode::deserialize(&bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if save.version != SAVE_FORMAT_VERSION {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "chest save is format v{}, this server speaks v{}",
-                    save.version, SAVE_FORMAT_VERSION
-                ),
-            ));
-        }
+        let save: SaveFile = match version {
+            SAVE_FORMAT_VERSION => bincode::deserialize(&bytes)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+            1 => {
+                let old: SaveFileV1 = bincode::deserialize(&bytes)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                SaveFile {
+                    version: SAVE_FORMAT_VERSION,
+                    chests: old
+                        .chests
+                        .into_iter()
+                        .map(|(at, inventory)| (at, inventory.into()))
+                        .collect(),
+                }
+            }
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "chest save is format v{other}, this server speaks v{SAVE_FORMAT_VERSION}"
+                    ),
+                ))
+            }
+        };
         self.contents.clear();
         for (at, mut inventory) in save.chests {
             // The file is on a disk an operator can edit, and slot
@@ -227,6 +321,45 @@ mod tests {
     }
 
     #[test]
+    fn a_chest_that_saved_a_filled_jug_loads_one_back() {
+        use primitive_shared::inventory::{filled_jug, jug_contents};
+        use primitive_shared::types::BLOCK_GRAIN;
+        // **The format did not have to change for this, and the test is
+        // here to say so.** What is in a jug rides in
+        // `inventory::Stack::damage` (see `inventory::jug_contents`),
+        // which is precisely what `SAVE_FORMAT_VERSION` 2 was bumped
+        // for -- so a chest file already carries it and a v2 file
+        // written before jugs held anything reads back as jugs holding
+        // nothing, which is what it is. Had the contents needed a
+        // fourth field on `Stack`, this file would be v3 and every v2
+        // chest in the world would decode into nonsense.
+        assert_eq!(SAVE_FORMAT_VERSION, 2, "the chest format moved under a jug");
+
+        let dir = std::env::temp_dir().join(format!(
+            "primitive_chests_{}_{}",
+            std::process::id(),
+            "jug"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut chests = Chests::new();
+        chests.edit(AT, |inventory| {
+            inventory.put_in_slot(0, filled_jug(BLOCK_GRAIN, 12));
+        });
+        assert_eq!(chests.save(&dir).expect("save"), 1);
+
+        let mut read_back = Chests::new();
+        assert_eq!(read_back.load(&dir).expect("load"), 1);
+        assert_eq!(
+            jug_contents(&read_back.contents(AT).slots()[0].unwrap()),
+            Some((BLOCK_GRAIN, 12)),
+            "the grain did not survive the disk"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn chests_survive_a_round_trip_through_a_file() {
         let dir = std::env::temp_dir().join(format!(
             "primitive_chests_{}_{}",
@@ -246,6 +379,34 @@ mod tests {
         assert_eq!(read_back.load(&dir).expect("load"), 2);
         assert_eq!(read_back.contents(AT).count(BLOCK_STONE), 77);
         assert_eq!(read_back.contents((0, 0, 0)).count(BLOCK_DIRT), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The compartment is squares of the one container, so the format
+    /// did not change for it** -- and what could still lose it is a load
+    /// that clamps the length (`Inventory::sanitize`, which runs over every
+    /// entry here) or an empty-box default that is a chest's forty. A body
+    /// that went to disk with its rucksack must come back with it, on the
+    /// same square.
+    #[test]
+    fn a_saved_corpse_loads_with_its_rucksack_compartment() {
+        use primitive_shared::inventory::{Stack, CORPSE_COMPARTMENT, CORPSE_SLOTS};
+        let dir = std::env::temp_dir().join(format!("primitive_chests_{}_corpse", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut chests = Chests::new();
+        chests.edit(AT, |inventory| {
+            *inventory = Inventory::body(true);
+            inventory.put_in_slot(CORPSE_COMPARTMENT.end - 1, Stack::new(BLOCK_STONE, 6));
+        });
+        chests.save(&dir).expect("save");
+
+        let mut read_back = Chests::new();
+        assert_eq!(read_back.load(&dir).expect("load"), 1);
+        let body = read_back.contents(AT);
+        assert_eq!(body.slots().len(), CORPSE_SLOTS, "the body came back without its rucksack");
+        assert_eq!(body.block_in(CORPSE_COMPARTMENT.end - 1), Some(BLOCK_STONE));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

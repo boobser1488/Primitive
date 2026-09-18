@@ -68,7 +68,7 @@ pub enum Verdict {
     /// back there.
     Reject {
         reason: String,
-        correction: Option<(f32, f32, f32)>,
+        correction: Option<(f64, f64, f64)>,
     },
     /// Enough accumulated violations; close the connection.
     Kick(String),
@@ -124,7 +124,7 @@ pub struct AntiCheat {
     cfg: AntiCheatSettings,
     view_distance_chunks: i32,
 
-    last_pos: Option<(f32, f32, f32)>,
+    last_pos: Option<(f64, f64, f64)>,
     last_update: Instant,
     last_sequence: Option<u32>,
 
@@ -134,6 +134,23 @@ pub struct AntiCheat {
     /// descended.
     ascent_run: f32,
     airborne_since: Option<Instant>,
+
+    /// This player has been *granted* flight, so the checks that measure
+    /// motion against what a body on the ground can do do not apply.
+    ///
+    /// **Not the same thing as turning the anti-cheat off, and the
+    /// difference is the whole point.** Sanity, the rate limits, the
+    /// replay check, reach on block edits and the block table are all
+    /// still enforced -- a flying player who starts editing cells six
+    /// hundred metres away is caught by exactly the code that would
+    /// catch a walking one. What is suspended is the ascent run, the
+    /// hover timer and the two speed limits, because those measure
+    /// motion against a set of rules this player has been told not to
+    /// follow.
+    ///
+    /// Set only by the server, from `set_flight`. Nothing a client
+    /// sends can reach it.
+    flying: bool,
 
     msg_bucket: TokenBucket,
     edit_bucket: TokenBucket,
@@ -147,10 +164,71 @@ pub struct AntiCheat {
     pub last_reason: Option<String>,
 }
 
+/// Is there anything solid under the player's *feet*, as opposed to
+/// under the single point at the middle of them?
+///
+/// `None` when the chunk is not cached: the caller gives the player the
+/// benefit of the doubt rather than generating terrain to prove a point.
+///
+/// **The footprint rather than the centre, and that is a 1.5 fix.** The
+/// probe used to be one sample under the middle of the player, which was
+/// exactly right while every solid block in the world filled its cell:
+/// there was nothing short enough to stand on the edge of. Half-height
+/// blocks -- a campfire, a dropped pack -- changed that, and they broke
+/// it in the most visible way possible.
+///
+/// Stepping onto one, the client raises the player before it moves them
+/// horizontally into the block's own column. For a frame or two they are
+/// therefore *above* the ground they are leaving, rising, and honestly
+/// reporting that they are standing on something -- which is the exact
+/// signature of the flight cheat this check exists to catch. Every
+/// player who tried to stand on a campfire was kicked.
+///
+/// Four corners of the collider, so what counts as ground is what the
+/// collider actually rests on.
+fn ground_under(world: &crate::logic::world::World, x: f64, y: f64, z: f64) -> Option<bool> {
+    use primitive_shared::geometry::PLAYER_HALF_WIDTH;
+
+    let foot = (y - 0.1).floor() as i32;
+    let mut known = false;
+    for (dx, dz) in [
+        (-PLAYER_HALF_WIDTH, -PLAYER_HALF_WIDTH),
+        (PLAYER_HALF_WIDTH, -PLAYER_HALF_WIDTH),
+        (-PLAYER_HALF_WIDTH, PLAYER_HALF_WIDTH),
+        (PLAYER_HALF_WIDTH, PLAYER_HALF_WIDTH),
+    ] {
+        match world.cached_block((x + f64::from(dx)).floor() as i32, foot, (z + f64::from(dz)).floor() as i32) {
+            // Anything solid under any corner is ground. A player with
+            // one foot on a ledge is standing on it.
+            //
+            // **...and any piece of a tree.** A twig's row is not
+            // collidable (that line is about the cell, `types::is_collidable`)
+            // and its wood is stood on since branches were given their
+            // shape (`branch`): a player on a sapling's limb, told there was
+            // air under them, would be a hover cheat for standing still.
+            // ...and the point of a stalagmite, which is stood on for the
+            // same reason (`dripstone::body`). Not a stalactite: its box is at
+            // the top of its cell, and a player whose feet are level with one
+            // is beside it in the air.
+            Some(block)
+                if is_collidable(block)
+                    || primitive_shared::types::is_branch(block)
+                    || primitive_shared::types::block_kind(block) == primitive_shared::types::BLOCK_STALAGMITE =>
+            {
+                return Some(true)
+            }
+            Some(_) => known = true,
+            None => {}
+        }
+    }
+    known.then_some(false)
+}
+
 impl AntiCheat {
-    pub fn new(cfg: AntiCheatSettings, view_distance_chunks: i32, spawn: (f32, f32, f32)) -> Self {
+    pub fn new(cfg: AntiCheatSettings, view_distance_chunks: i32, spawn: (f64, f64, f64)) -> Self {
         let now = Instant::now();
         Self {
+            flying: false,
             move_budget: TokenBucket::new(cfg.max_horizontal_speed, 1.5, now),
             msg_bucket: TokenBucket::new(cfg.max_messages_per_sec, 2.0, now),
             edit_bucket: TokenBucket::new(cfg.max_block_edits_per_sec, 2.0, now),
@@ -175,7 +253,7 @@ impl AntiCheat {
         self.score
     }
 
-    pub fn known_position(&self) -> Option<(f32, f32, f32)> {
+    pub fn known_position(&self) -> Option<(f64, f64, f64)> {
         self.last_pos
     }
 
@@ -219,9 +297,9 @@ impl AntiCheat {
 
     pub fn check_transform(
         &mut self,
-        x: f32,
-        y: f32,
-        z: f32,
+        x: f64,
+        y: f64,
+        z: f64,
         on_ground: bool,
         sequence: u32,
         world: &World,
@@ -239,7 +317,7 @@ impl AntiCheat {
             return Verdict::Kick("non-finite position".to_string());
         }
         let border = self.cfg.world_border;
-        if x.abs() > border || z.abs() > border || y < -256.0 || y > (CHUNK_SIZE_Y as f32 + 256.0) {
+        if x.abs() > f64::from(border) || z.abs() > f64::from(border) || y < -256.0 || y > (CHUNK_SIZE_Y as f64 + 256.0) {
             return Verdict::Kick(format!("position outside world bounds ({x:.0},{y:.0},{z:.0})"));
         }
 
@@ -262,14 +340,29 @@ impl AntiCheat {
             .clamp(0.0, 1.0);
         self.last_update = now;
 
+        // Granted flight: everything from here down measures movement
+        // against what a body on the ground can do, and this player has
+        // been told they are not one. See the `flying` field for what is
+        // *still* checked.
+        if self.flying {
+            self.move_budget.refill(now);
+            self.ascent_run = 0.0;
+            self.airborne_since = None;
+            self.last_pos = Some((x, y, z));
+            return Verdict::Allow;
+        }
+
         let Some((px, py, pz)) = self.last_pos else {
             self.last_pos = Some((x, y, z));
             return Verdict::Allow;
         };
 
-        let dx = x - px;
-        let dy = y - py;
-        let dz = z - pz;
+        // The move in `f64` and only then narrowed: two positions a million
+        // blocks out differ by a stride, and each alone has sixteenths
+        // between its neighbours in `f32`.
+        let dx = (x - px) as f32;
+        let dy = (y - py) as f32;
+        let dz = (z - pz) as f32;
         let horizontal = (dx * dx + dz * dz).sqrt();
 
         // --- teleport ---
@@ -320,7 +413,7 @@ impl AntiCheat {
         let in_water = [0.0f32, PLAYER_HEIGHT * 0.5, PLAYER_HEIGHT * 0.9]
             .iter()
             .any(|offset| {
-                let height = y + offset;
+                let height = y + f64::from(*offset);
                 let (cx, cy, cz) = (x.floor() as i32, height.floor() as i32, z.floor() as i32);
                 world.cached_block(cx, cy, cz).is_some_and(|id| {
                     let above = world
@@ -329,7 +422,7 @@ impl AntiCheat {
                     primitive_shared::fluid::covers_with_above(
                         id,
                         above,
-                        height - height.floor(),
+                        (height - height.floor()) as f32,
                     )
                 })
             });
@@ -338,9 +431,7 @@ impl AntiCheat {
         // `below` is None when we simply don't have that chunk cached; in
         // that case we give the player the benefit of the doubt rather
         // than generating terrain to prove a point.
-        let below = world
-            .cached_block(x.floor() as i32, (y - 0.1).floor() as i32, z.floor() as i32)
-            .map(is_collidable);
+        let below = ground_under(world, x, y, z);
 
         if in_water {
             // Buoyancy legitimately holds a player up and lets them
@@ -361,6 +452,16 @@ impl AntiCheat {
         } else {
             if dy < -0.05 {
                 self.ascent_run = 0.0; // any real fall resets the run
+                // ...and the hover clock with it. **A player holding jump
+                // touches the ground for one frame a hop**, and the client
+                // sends a transform every few frames, so the landing is
+                // seldom the frame that is sent: the clock ran on from the
+                // first hop, and a few seconds into a run of hops any
+                // sample taken at the top of one -- where a jump stops
+                // rising and has not begun to fall -- read as "hovering in
+                // mid-air" and put the player back. A body that has just
+                // dropped is not hovering, whatever it claimed about ground.
+                self.airborne_since = None;
             } else {
                 self.ascent_run += dy.max(0.0);
             }
@@ -418,17 +519,54 @@ impl AntiCheat {
         // be checked separately: an axis of 3 means nothing, and a
         // rotated cobblestone would be a second id for a block that has
         // only one.
-        if block != BLOCK_AIR && (!is_placeable(block) || !is_known_block(block)) {
+        // **A slice off a block is neither a break nor a placement**, and
+        // `is_placeable` is the wrong question to ask about one: it says
+        // whether a player may *put this down*, and nobody puts down three
+        // quarters of a granite block -- an ore that cannot be placed at
+        // all would have made every swing at a vein an anti-cheat flag.
+        // What still has to hold is that the id is a real one, which is
+        // where an invented face or a bite on something nobody quarries is
+        // refused (`is_known_block`); the reach and the rate above are
+        // asked of a dig exactly as of any other edit, which is the whole
+        // reason a dig comes through here at all.
+        if primitive_shared::dig::is_dug(block) {
+            if !is_known_block(block) {
+                return self.flag(W_BAD_BLOCK, format!("block id {block} is not a dig"));
+            }
+        } else if block != BLOCK_AIR && (!is_placeable(block) || !is_known_block(block)) {
             return self.flag(W_BAD_BLOCK, format!("block id {block} is not placeable"));
+        }
+
+        // ...and one variant bit that is legal on a block the *server*
+        // writes and never on one a client asks for. A rack carries
+        // "there is a skin on me" in the spare bit of the same field its
+        // facing lives in (`types::RACK_LOADED`), and what is actually
+        // on a rack is server state keyed by position -- so a placement
+        // claiming a hide would draw one the player never had.
+        if primitive_shared::types::rack_is_loaded(block) {
+            // The condition above is true exactly when the client's
+            // placement *claims a hide*, so the reason has to say that --
+            // this string reaches the player verbatim (`edit refused:
+            // {reason}` in `net::connection`) and used to claim the
+            // opposite of what was refused, which told whoever read it
+            // the wrong story about their own rejected edit.
+            return self.flag(W_BAD_BLOCK, "a rack is placed already loaded".to_string());
+        }
+        // ...and the same bit on a bed means "the head half", which the
+        // server writes behind the foot a client asks for. A client that
+        // placed a head itself would be placing half a bed, or a second
+        // one on top of the half the server is about to write.
+        if primitive_shared::types::is_bed_head(block) {
+            return self.flag(W_BAD_BLOCK, "a bed is placed by its foot".to_string());
         }
 
         if let Some((px, py, pz)) = self.last_pos {
             let ex = px;
-            let ey = py + EYE_HEIGHT;
+            let ey = py + f64::from(EYE_HEIGHT);
             let ez = pz;
-            let dx = (gx as f32 + 0.5) - ex;
-            let dy = (gy as f32 + 0.5) - ey;
-            let dz = (gz as f32 + 0.5) - ez;
+            let dx = (f64::from(gx) + 0.5 - ex) as f32;
+            let dy = (f64::from(gy) + 0.5 - ey) as f32;
+            let dz = (f64::from(gz) + 0.5 - ez) as f32;
             let distance = (dx * dx + dy * dy + dz * dz).sqrt();
             if distance > self.cfg.max_reach {
                 return self.flag(W_REACH, format!("reach of {distance:.1} blocks"));
@@ -477,7 +615,27 @@ impl AntiCheat {
 
     /// Called after a correction is sent, so the next update is measured
     /// against where we put the player rather than where they claimed.
-    pub fn reset_to(&mut self, pos: (f32, f32, f32)) {
+    /// Grants or withdraws the exemption. See the [`flying`](Self::flying)
+    /// field.
+    ///
+    /// Withdrawing resets the budgets rather than leaving them as flight
+    /// left them: a player who has just been dropped out of the air is
+    /// falling fast and through no fault of their own, and a stale
+    /// ascent run or a spent movement budget would flag them for it.
+    pub fn set_flying(&mut self, flying: bool) {
+        self.flying = flying;
+        self.ascent_run = 0.0;
+        self.airborne_since = None;
+        if !flying {
+            self.move_budget.refill(Instant::now());
+        }
+    }
+
+    pub fn is_flying(&self) -> bool {
+        self.flying
+    }
+
+    pub fn reset_to(&mut self, pos: (f64, f64, f64)) {
         self.last_pos = Some(pos);
         self.ascent_run = 0.0;
         self.airborne_since = None;
@@ -503,6 +661,62 @@ mod tests {
         World::new(1, 64)
     }
 
+    /// A world with a floor of cobble at y = 19 and one half-height
+    /// block -- a campfire -- standing on it at x = 1.
+    fn world_with_a_campfire() -> World {
+        use primitive_shared::types::{Chunk, ChunkPos, BLOCK_AIR, BLOCK_CAMPFIRE, CHUNK_VOLUME};
+        let world = World::new(1, 64);
+        let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+        for z in 0..16 {
+            for x in 0..16 {
+                blocks[Chunk::index(x, 19, z)] = BLOCK_COBBLESTONE;
+            }
+        }
+        blocks[Chunk::index(1, 20, 1)] = BLOCK_CAMPFIRE;
+        world.insert(Chunk {
+            pos: ChunkPos::new(0, 0),
+            blocks,
+        });
+        world
+    }
+
+    #[test]
+    fn stepping_onto_a_campfire_is_not_a_flight_cheat() {
+        // **The bug this test exists for.** Half-height blocks arrived in
+        // 1.5 and with them, for the first time, something a player can
+        // step *onto*. The client raises the player before it moves them
+        // horizontally into the block's column -- so for a frame they are
+        // above the ground they are leaving, rising, and honestly
+        // reporting that they are standing on something. That is the
+        // exact signature of the flight cheat this check hunts, and
+        // every player who tried to stand on their own campfire was
+        // kicked for it.
+        //
+        // The player's centre is deliberately still over the *empty*
+        // column here: that is the frame that did it.
+        let world = world_with_a_campfire();
+        let mut ac = AntiCheat::new(cfg(), 8, (1.45, 20.0, 1.5));
+        std::thread::sleep(Duration::from_millis(20));
+        let verdict = ac.check_transform(1.45, 20.5, 1.5, true, 1, &world);
+        assert!(
+            verdict.is_allowed(),
+            "stepping onto a campfire was refused: {verdict:?}"
+        );
+        assert_eq!(ac.total_violations, 0);
+    }
+
+    #[test]
+    fn hovering_over_nothing_at_all_is_still_caught() {
+        // The other half: widening the probe to the whole footprint must
+        // not blind it. A player rising with air under every corner is
+        // the cheat, and is still flagged.
+        let world = world_with_a_campfire();
+        let mut ac = AntiCheat::new(cfg(), 8, (8.5, 24.0, 8.5));
+        std::thread::sleep(Duration::from_millis(20));
+        let verdict = ac.check_transform(8.5, 24.4, 8.5, true, 1, &world);
+        assert!(!verdict.is_allowed(), "a flight cheat was allowed");
+    }
+
     #[test]
     fn normal_walking_is_never_flagged() {
         let world = empty_world();
@@ -511,10 +725,75 @@ mod tests {
         for seq in 1..40u32 {
             std::thread::sleep(Duration::from_millis(20));
             x += 0.11; // ~5.5 b/s at 50 ms per update
-            let verdict = ac.check_transform(x, 30.0, 0.0, true, seq, &world);
+            let verdict = ac.check_transform(f64::from(x), 30.0, 0.0, true, seq, &world);
             assert!(verdict.is_allowed(), "walking flagged: {verdict:?}");
         }
         assert_eq!(ac.total_violations, 0);
+    }
+
+    /// A granted flyer climbing steadily is doing what they were told
+    /// they may. Without the exemption this is the exact signature of
+    /// the cheat the module exists to catch, so the first thing a
+    /// flight mod would do is get its own players kicked.
+    #[test]
+    fn a_granted_flyer_is_not_flagged_for_flying() {
+        let world = empty_world();
+        let mut ac = AntiCheat::new(cfg(), 8, (0.0, 64.0, 0.0));
+        ac.set_flying(true);
+        let mut y = 64.0;
+        for sequence in 1..60 {
+            y += 0.5;
+            let verdict = ac.check_transform(0.0, y, 0.0, false, sequence, &world);
+            assert!(
+                verdict.is_allowed(),
+                "flagged at y={y}: {verdict:?}"
+            );
+        }
+        assert_eq!(ac.score(), 0.0, "a granted flyer collected violations");
+    }
+
+    /// ...and the exemption is withdrawn with the grant, rather than
+    /// leaving the player permanently unwatched.
+    #[test]
+    fn withdrawing_flight_puts_the_checks_back() {
+        let world = empty_world();
+        let mut ac = AntiCheat::new(cfg(), 8, (0.0, 64.0, 0.0));
+        ac.set_flying(true);
+        let mut y = 64.0;
+        for sequence in 1..20 {
+            y += 0.5;
+            ac.check_transform(0.0, y, 0.0, false, sequence, &world);
+        }
+        ac.set_flying(false);
+        assert!(!ac.is_flying());
+
+        // Now climb far enough to trip the ascent run.
+        let mut flagged = false;
+        for sequence in 20..200 {
+            y += 0.5;
+            if !ac.check_transform(0.0, y, 0.0, false, sequence, &world).is_allowed() {
+                flagged = true;
+                break;
+            }
+        }
+        assert!(flagged, "climbing was still unwatched after flight ended");
+    }
+
+    /// The exemption is not "the anti-cheat off". A position that is not
+    /// a number is a kick whoever sent it.
+    #[test]
+    fn a_flyer_is_still_held_to_the_things_that_are_never_negotiable() {
+        let world = empty_world();
+        let mut ac = AntiCheat::new(cfg(), 8, (0.0, 64.0, 0.0));
+        ac.set_flying(true);
+        assert!(matches!(
+            ac.check_transform(f64::from(f32::NAN), 64.0, 0.0, false, 1, &world),
+            Verdict::Kick(_)
+        ));
+        assert!(matches!(
+            ac.check_transform(0.0, 1.0e9, 0.0, false, 2, &world),
+            Verdict::Kick(_)
+        ));
     }
 
     #[test]
@@ -537,10 +816,23 @@ mod tests {
         let mut ac = AntiCheat::new(cfg(), 8, (0.0, 30.0, 0.0));
         let mut x = 0.0f32;
         let mut rejected = false;
-        for seq in 1..40u32 {
+        // **Paced on the clock rather than on the sleep.** This moved two
+        // blocks per twenty-millisecond sleep and called that 100 b/s --
+        // which it is only while the sleep is twenty milliseconds. On a
+        // machine busy compiling, each sleep stretched towards 150 ms,
+        // the real speed fell to thirteen blocks a second against a
+        // legal twelve, the budget took fourteen seconds to drain and
+        // thirty-nine updates were six: the test went red with the rule
+        // working. Each step is now what 100 b/s covers in the time that
+        // actually passed, kept under the teleport distance so a long
+        // stall is still measured as speed and not flagged as a jump.
+        let mut last = std::time::Instant::now();
+        for seq in 1..400u32 {
             std::thread::sleep(Duration::from_millis(20));
-            x += 2.0; // 100 b/s -- ~18x the legal walk speed
-            if !ac.check_transform(x, 30.0, 0.0, true, seq, &world).is_allowed() {
+            let now = std::time::Instant::now();
+            x += (100.0 * now.duration_since(last).as_secs_f32()).min(20.0);
+            last = now;
+            if !ac.check_transform(f64::from(x), 30.0, 0.0, true, seq, &world).is_allowed() {
                 rejected = true;
                 break;
             }
@@ -560,7 +852,7 @@ mod tests {
         for seq in 1..5u32 {
             x += 0.5;
             assert!(
-                ac.check_transform(x, 30.0, 0.0, true, seq, &world).is_allowed(),
+                ac.check_transform(f64::from(x), 30.0, 0.0, true, seq, &world).is_allowed(),
                 "honest player punished for a lag burst"
             );
         }
@@ -575,7 +867,7 @@ mod tests {
         for seq in 1..30u32 {
             std::thread::sleep(Duration::from_millis(10));
             y += 0.4;
-            if !ac.check_transform(0.0, y, 0.0, false, seq, &world).is_allowed() {
+            if !ac.check_transform(0.0, f64::from(y), 0.0, false, seq, &world).is_allowed() {
                 flagged = true;
                 break;
             }
@@ -610,7 +902,7 @@ mod tests {
         for seq in 1..40u32 {
             std::thread::sleep(Duration::from_millis(10));
             y += 0.15; // steady swim upward
-            let verdict = ac.check_transform(0.5, y, 0.5, false, seq, &world);
+            let verdict = ac.check_transform(0.5, f64::from(y), 0.5, false, seq, &world);
             assert!(verdict.is_allowed(), "swimming flagged at y={y}: {verdict:?}");
         }
         assert_eq!(ac.total_violations, 0);
@@ -627,7 +919,7 @@ mod tests {
         for seq in 1..40u32 {
             std::thread::sleep(Duration::from_millis(10));
             y += 0.15;
-            if !ac.check_transform(60.0, y, 60.0, false, seq, &world).is_allowed() {
+            if !ac.check_transform(60.0, f64::from(y), 60.0, false, seq, &world).is_allowed() {
                 flagged = true;
                 break;
             }
@@ -645,7 +937,7 @@ mod tests {
         for (i, dy) in arc.iter().enumerate() {
             std::thread::sleep(Duration::from_millis(10));
             y += dy;
-            let verdict = ac.check_transform(0.0, y, 0.0, false, i as u32 + 1, &world);
+            let verdict = ac.check_transform(0.0, f64::from(y), 0.0, false, i as u32 + 1, &world);
             assert!(verdict.is_allowed(), "a normal jump was flagged: {verdict:?}");
         }
     }
@@ -665,6 +957,83 @@ mod tests {
         assert!(!ac.check_block_edit(1, 30, 0, BLOCK_WATER).is_allowed(), "water");
         // Breaking (placing air) stays legal.
         assert!(ac.check_block_edit(1, 30, 0, BLOCK_AIR).is_allowed());
+    }
+
+    #[test]
+    fn a_chest_may_be_put_down_facing_any_of_the_four_ways() {
+        // The client turns a chest toward whoever placed it, so the id
+        // that arrives carries a facing three times out of four. This
+        // refused all three of those, and each refusal was a quarter of
+        // a kick.
+        use primitive_shared::types::{faced, Facing, BLOCK_CHEST, BLOCK_KILN};
+        let mut ac = AntiCheat::new(cfg(), 8, (0.0, 30.0, 0.0));
+        for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+            for kind in [BLOCK_CHEST, BLOCK_KILN] {
+                let verdict = ac.check_block_edit(1, 30, 0, faced(kind, facing));
+                assert!(
+                    verdict.is_allowed(),
+                    "a {kind} facing {facing:?} was refused: {verdict:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_rack_cannot_be_placed_with_a_hide_already_on_it() {
+        // What is on a rack is server state keyed by position; the bit
+        // in the id only says how to draw it. A client that set it would
+        // be drawing a skin it never had.
+        use primitive_shared::types::{faced, rack_with_hide, Facing, BLOCK_DRYING_RACK};
+        let mut ac = AntiCheat::new(cfg(), 8, (0.0, 30.0, 0.0));
+        let empty = faced(BLOCK_DRYING_RACK, Facing::South);
+        assert!(ac.check_block_edit(1, 30, 0, empty).is_allowed());
+        let loaded = rack_with_hide(empty, true);
+        assert!(!ac.check_block_edit(1, 30, 0, loaded).is_allowed());
+    }
+
+    #[test]
+    fn the_rack_refusal_names_the_fault_that_actually_happened() {
+        // `edit refused: {reason}` is what a player and an operator both
+        // read (see `net::connection`, which sends this string straight
+        // back over the wire). The check fires when the placed rack
+        // *claims a hide*, so a reason claiming the opposite -- "placed
+        // empty" -- tells whoever reads it the wrong story: it says the
+        // rack is missing something the client actually over-claimed.
+        use primitive_shared::types::{faced, rack_with_hide, Facing, BLOCK_DRYING_RACK};
+        let mut ac = AntiCheat::new(cfg(), 8, (0.0, 30.0, 0.0));
+        let loaded = rack_with_hide(faced(BLOCK_DRYING_RACK, Facing::South), true);
+        let Verdict::Reject { reason, .. } = ac.check_block_edit(1, 30, 0, loaded) else {
+            panic!("a loaded rack placement was not refused at all");
+        };
+        assert!(
+            !reason.contains("empty"),
+            "the rack was refused for claiming a hide, not for being empty: {reason:?}"
+        );
+    }
+
+    #[test]
+    fn a_slice_off_a_rock_is_let_through_and_an_invented_bite_is_not() {
+        // A dig writes a block id into the world on every swing, so it
+        // comes through the same door every other edit does -- and the
+        // question asked of it cannot be `is_placeable`: nobody puts down
+        // three quarters of a granite block, and an ore that cannot be
+        // placed at all would have made every swing at a vein a violation.
+        // What still has to hold is that the id names a real bite, which
+        // is what stops a client claiming the last quarter on the first
+        // swing or a bite on a block nobody quarries.
+        use primitive_shared::dig;
+        let mut ac = AntiCheat::new(cfg(), 8, (0.0, 30.0, 0.0));
+        let slice = dig::next_bite(primitive_shared::types::BLOCK_STONE, dig::Side::PosX).unwrap();
+        assert!(ac.check_block_edit(1, 30, 0, slice).is_allowed(), "an honest swing was refused");
+        // A face of six that names nothing, and a bite on a log.
+        assert!(!ac
+            .check_block_edit(1, 30, 0, primitive_shared::types::BLOCK_STONE | dig::DUG | (7 << primitive_shared::types::VARIANT_SHIFT))
+            .is_allowed());
+        assert!(!ac
+            .check_block_edit(1, 30, 0, primitive_shared::types::BLOCK_LOG | dig::DUG)
+            .is_allowed());
+        // ...and a dig across the valley is still a dig across the valley.
+        assert!(!ac.check_block_edit(400, 30, 400, slice).is_allowed(), "reach is not asked of a dig");
     }
 
     #[test]

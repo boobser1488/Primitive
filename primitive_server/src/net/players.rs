@@ -31,6 +31,13 @@ use primitive_shared::protocol::{
 use primitive_shared::types::{BlockId, ChunkPos};
 
 use crate::logic::anticheat::AntiCheat;
+
+/// What a player flies at unless whatever granted it says otherwise.
+///
+/// Twice a walk and a little under a sprint-and-a-half: fast enough that
+/// flying somewhere is quicker than walking, slow enough that the chunk
+/// streamer keeps up. A grant that names its own speed overrides it.
+pub const DEFAULT_FLY_SPEED: f32 = 12.0;
 use crate::logic::survival::Vitals;
 use primitive_shared::inventory::Inventory;
 
@@ -68,7 +75,7 @@ pub fn frame(msg: &ServerMessage) -> Option<Arc<[u8]>> {
 /// Mutable per-player state. Guarded by a short-lived std mutex; nothing
 /// in here is ever held across an `.await`.
 pub struct PlayerRuntime {
-    pub position: (f32, f32, f32),
+    pub position: (f64, f64, f64),
     pub yaw: f32,
     pub pitch: f32,
     pub on_ground: bool,
@@ -96,6 +103,13 @@ pub struct PlayerRuntime {
     /// server watched it open. It is also who to send an update to when
     /// somebody else changes that chest.
     pub open_chest: Option<crate::logic::containers::ChestPos>,
+    /// The anvil or potter's wheel this player has open, and the run on it.
+    ///
+    /// Server-side for the chest's reason and one more: the *moment* the run
+    /// was allowed to begin lives in here, and it is what the client's claimed
+    /// timings are checked against (`minigame`, rule 4). A clock a client
+    /// could name would be a clock a client could stop.
+    pub station: Option<crate::StationSeat>,
     /// The last air reading this player was sent.
     ///
     /// Kept so the meter can be told when it goes *back to full*. It was
@@ -105,13 +119,175 @@ pub struct PlayerRuntime {
     /// it drew that bar for the rest of the session, including after
     /// drowning and respawning.
     pub breath_reported: f32,
+    /// The last smoke thickness this player was sent, for `breath_reported`'s
+    /// reason: a fog of smoke that was never told it had lifted would hang
+    /// over the player for the rest of the session.
+    pub smoke_reported: f32,
     /// When this player last threw a punch that the server accepted.
     ///
     /// `None` until they throw one. Server-side because the cooldown is
     /// a rule rather than a courtesy: a client that removed its own
     /// would otherwise hit as fast as it could send.
     pub last_swing: Option<Instant>,
+    /// When this player last broke or placed a block that the server
+    /// accepted.
+    ///
+    /// What "was this player working" means for hunger. Measured from
+    /// edits rather than from a "digging" flag the client would have to
+    /// send, for the reason every other survival number is measured
+    /// server-side: a flag a client sets is a flag a client can leave
+    /// unset, and a player who never gets hungry is the easiest cheat in
+    /// the game to write.
+    ///
+    /// It undercounts, and deliberately so. A swing at a block of iron
+    /// ore is thirteen seconds of work and one edit at the end of it, so
+    /// a miner is billed for the moments they finish something rather
+    /// than for the whole of the effort. The error is in the player's
+    /// favour, which is the right direction for it -- see the same
+    /// argument about fall distance in `survival`.
+    pub last_edit: Option<Instant>,
+    /// What turning earth last told this player, and when -- so the same
+    /// news about the same field is said once rather than once a
+    /// spadeful. See `field_note` in `lib.rs`.
+    pub field_note: Option<(&'static str, Instant)>,
+    /// What the player has on. Server-owned for the reason the pack is:
+    /// it decides what a blow costs, how cold they get and how fast they
+    /// move, and a client that owned it would be a client in
+    /// indestructible armour.
+    pub equipment: primitive_shared::inventory::Equipment,
+    /// Set whenever the worn set changes, cleared once the client has
+    /// been told. Same contract as `inventory_dirty`.
+    pub equipment_dirty: bool,
+    /// What the world around them is doing, resampled on an interval
+    /// rather than every tick. See `logic::climate`.
+    pub ambient: crate::logic::climate::Ambient,
+    /// Seconds since that sample. When it passes
+    /// `climate::SAMPLE_INTERVAL_SECS` the world is looked at again.
+    pub since_ambient: f32,
+    /// Whether this player has been granted flight, and how fast.
+    ///
+    /// Server-owned like everything else about a body. The client is
+    /// *told* -- see `protocol::ServerMessage::Flight` -- and told
+    /// again whenever it changes; it never decides. Cleared by dying,
+    /// because coming back at the spawn point still in the air is a
+    /// state nobody asked for and one that outlives whatever granted
+    /// it.
+    pub flying: bool,
+    pub fly_speed: f32,
+
+    /// The last warmth-and-water reading this player was sent.
+    ///
+    /// Kept for the reason `breath_reported` is: both numbers move
+    /// continuously, so the only way to send them on change rather than
+    /// every tick is to remember what was said last.
+    pub body_reported: (f32, f32, f32),
+    /// ...and the stamina multiplier comfort is worth, on the same contract.
+    /// Its own field rather than a fourth in that tuple, which half the tick
+    /// loop and its tests already destructure. See `ServerMessage::Body`.
+    pub recovery_reported: f32,
+    /// What the last look at this player's surroundings found, and how long
+    /// ago. Kept between looks for the reason `ambient` is: a room does not
+    /// change in a tick, and comfort settles over tens of seconds anyway.
+    /// See `primitive_shared::comfort::SURVEY_SECONDS`.
+    pub surroundings: primitive_shared::comfort::Surroundings,
+    pub since_survey: f32,
+    /// ...and the wounds this player was last shown, on the same contract.
+    /// A whole `Injuries` rather than a fingerprint, because what decides
+    /// whether a new one is worth a message is a comparison against it --
+    /// see `Injuries::worth_reporting`.
+    pub injuries_reported: primitive_shared::injury::Injuries,
+
+    /// The bed this player is asleep in, if they are.
+    ///
+    /// **The cell rather than a bare flag**, because a sleeper has to be
+    /// woken by the world as well as by themselves: the bed being broken
+    /// out from under them is the case that made this a coordinate. The
+    /// server checks it each tick -- a player whose bed is no longer a
+    /// bed is a player lying in a hole, and they wake.
+    ///
+    /// While it is set the server ignores this player's transforms. See
+    /// `ServerMessage::Asleep` for why the client is told rather than
+    /// simply corrected.
+    ///
+    /// **In bed, not necessarily asleep.** Morning leaves a sleeper lying
+    /// here awake until they choose to get up; whether their eyes are
+    /// closed is `asleep_since`.
+    pub sleeping_in: Option<(i32, i32, i32)>,
+    /// When this player fell asleep, while they are; `None` awake, and
+    /// `None` again for a sleeper the morning has woken in their bed.
+    ///
+    /// **A moment rather than a flag, because the night waits on it.** The
+    /// clock is not wound to dawn until everybody has been asleep for
+    /// `body::NIGHT_PASSES_AFTER_SECONDS` -- the time their screens take to
+    /// go dark -- and a flag cannot say how long. Kept apart from
+    /// `sleeping_in` so that a player lying in bed at dawn does not sleep
+    /// the next day through as well on the following tick.
+    pub asleep_since: Option<std::time::Instant>,
+    /// What was last said about that, so the message is sent on change
+    /// only -- the same contract as `body_reported`.
+    pub asleep_reported: bool,
+    /// The stool this player sat down on, if they are still on it.
+    ///
+    /// **Sitting is not a lock and never became one.** It is a claim
+    /// the server checks each tick -- are they still within a step of
+    /// that stool -- and drops the moment they walk away. That is why
+    /// it needs no protocol message and no client support: nothing is
+    /// taken away from the player, so there is nothing for their client
+    /// to be told about. See `body::SITTING_RECOVERY_PER_SECOND`.
+    pub sitting_on: Option<(i32, i32, i32)>,
+    /// The way the chair under a sitter faces, or `None` on a stool.
+    ///
+    /// **Read only while `sitting_on` is set, and written every time it
+    /// is**, so a stale turn can never reach a snapshot. It exists because
+    /// a sitter's transforms are still taken (sitting is not a lock) and
+    /// carry the camera's yaw: without it the snapshot of a player in a
+    /// chair would turn with their mouse, and everyone else would see a
+    /// figure spinning on a seat that has a back. See `sit_down`.
+    pub seat_facing: Option<f32>,
+    /// Every kind of block this player has held. What the recipe book is
+    /// drawn from; see `primitive_shared::discovery`. Noted in
+    /// `send_inventory`, the one path every change to the pack leaves by.
+    pub discovered: primitive_shared::discovery::Discovered,
+    /// The bags this player died away from and has not emptied, oldest
+    /// first. See `remember_bag` in `lib.rs` for why there is more than
+    /// one and why there are at most four.
+    pub bags: Vec<(i32, i32, i32)>,
+    /// The raft this player is standing on, and where on its deck, in the
+    /// deck's own frame (`raft::Body::local_of`).
+    ///
+    /// **The place on the deck is the truth and the world position is worked
+    /// out from it every tick** (`carry_riders` in `lib.rs`). The other way
+    /// round -- keep the world position and nudge it by however far the raft
+    /// moved -- is the same arithmetic until the raft turns, and then a rider
+    /// at the bow is swung through an arc the nudge does not know about and
+    /// ends up in the water beside the deck they were standing on.
+    ///
+    /// Set by `ClientMessage::Deck` and cleared by any `UpdateTransform`,
+    /// which is a client saying its feet are on something else.
+    pub aboard: Option<(primitive_shared::protocol::EntityId, [f32; 3])>,
+    /// The raft whose oars this player has, if any. Always a raft they are
+    /// `aboard`, on its seat (`raft::SEAT`).
+    pub rowing: Option<primitive_shared::protocol::EntityId>,
+    /// In water past the waist, as the server's world has it this tick. Only
+    /// for everybody else's picture of this player: see `Posture::Swimming`.
+    pub swimming: bool,
+    /// What this player's hands last did that happens once, and how many
+    /// times, for the snapshot (`protocol::Gesture`). Its `digging` is not
+    /// kept here: that is `digging_until`, read when a snapshot is taken.
+    pub gesture: primitive_shared::protocol::Gesture,
+    /// Until when this player is swinging at a block, as their client last
+    /// said. A moment rather than a flag, so it lapses on its own -- see
+    /// `DIGGING_LAPSES_AFTER`.
+    pub digging_until: Option<Instant>,
 }
+
+/// How long a `ClientMessage::Digging` holds without being said again.
+///
+/// Three times the half second a client repeats it at, so one lost message is
+/// not a swing that stops and starts on everybody else's screen -- and short
+/// enough that a client that dropped mid-swing does not leave a figure
+/// hammering at nothing for longer than a breath.
+pub const DIGGING_LAPSES_AFTER: std::time::Duration = std::time::Duration::from_millis(1500);
 
 pub struct PlayerHandle {
     pub id: PlayerId,
@@ -151,7 +327,7 @@ impl PlayerHandle {
         tx: mpsc::Sender<Outgoing>,
         chunk_tx: mpsc::Sender<ChunkPos>,
         drop_threshold: u64,
-        spawn: (f32, f32, f32),
+        spawn: (f64, f64, f64),
         anticheat: AntiCheat,
     ) -> Self {
         Self {
@@ -175,8 +351,58 @@ impl PlayerHandle {
                 selected_slot: 0,
                 inventory_dirty: true,
                 open_chest: None,
+                station: None,
                 breath_reported: 1.0,
+                smoke_reported: 0.0,
                 last_swing: None,
+                last_edit: None,
+                field_note: None,
+                equipment: primitive_shared::inventory::Equipment::new(),
+                // True, so a fresh join is told what it is wearing --
+                // which for a restored profile is not nothing.
+                equipment_dirty: true,
+                ambient: crate::logic::climate::Ambient::default(),
+                // Past the interval, so the very first tick samples the
+                // world rather than believing the neutral default for
+                // half a second. That half second is invisible in play
+                // and is exactly the sort of thing that makes a test of
+                // "does standing in a fire warm you" flaky.
+                since_ambient: crate::logic::climate::SAMPLE_INTERVAL_SECS,
+                flying: false,
+                fly_speed: DEFAULT_FLY_SPEED,
+                body_reported: (
+                    primitive_shared::body::NEUTRAL_C,
+                    1.0,
+                    0.0,
+                ),
+                recovery_reported: 1.0,
+                surroundings: primitive_shared::comfort::Surroundings::default(),
+                // Due at once, on `since_ambient`'s argument.
+                since_survey: primitive_shared::comfort::SURVEY_SECONDS,
+                // Whole, which is what a fresh client assumes. A restored
+                // profile with a wound on it is sent its set on join
+                // regardless -- see the connection's handshake.
+                injuries_reported: primitive_shared::injury::Injuries::default(),
+                // Awake. A player joins standing up, whatever they were
+                // doing when they left: a sleeper who logged out and came
+                // back still asleep would be a player who cannot move and
+                // does not know why.
+                sleeping_in: None,
+                asleep_since: None,
+                asleep_reported: false,
+                sitting_on: None,
+                seat_facing: None,
+                discovered: primitive_shared::discovery::Discovered::new(),
+                bags: Vec::new(),
+                // On their feet on the ground: nobody joins aboard a raft,
+                // because the raft they left from may have been broken up
+                // since, and a body placed on a deck that is not there is a
+                // body in the lake.
+                aboard: None,
+                rowing: None,
+                swimming: false,
+                gesture: primitive_shared::protocol::Gesture::default(),
+                digging_until: None,
             }),
             sent: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
@@ -268,9 +494,44 @@ impl PlayerHandle {
             x: state.position.0,
             y: state.position.1,
             z: state.position.2,
-            yaw: state.yaw,
+            // A sitter in a chair faces the chair, whatever their camera is
+            // doing -- see `PlayerRuntime::seat_facing`.
+            yaw: state
+                .seat_facing
+                .filter(|_| state.sitting_on.is_some())
+                .unwrap_or(state.yaw),
             pitch: state.pitch,
             on_ground: state.on_ground,
+            outfit: outfit_of(&state),
+            // Dead before everything: a death clears the seat and the bed,
+            // and a body is not standing in either. See `Posture::Fallen`
+            // for the statue this replaced.
+            //
+            // Sleeping before sitting: `lie_down` clears the seat, but a
+            // tick that saw both would rather draw the bed.
+            posture: if state.vitals.is_dead() {
+                primitive_shared::protocol::Posture::Fallen
+            } else if state.sleeping_in.is_some() {
+                primitive_shared::protocol::Posture::Lying
+            } else if state.sitting_on.is_some() || state.rowing.is_some() {
+                // A rower sits on the stern to pull, and is drawn so.
+                primitive_shared::protocol::Posture::Sitting
+            } else if state.swimming {
+                primitive_shared::protocol::Posture::Swimming
+            } else {
+                primitive_shared::protocol::Posture::Standing
+            },
+            gesture: primitive_shared::protocol::Gesture {
+                digging: state.digging_until.is_some_and(|until| until > Instant::now()),
+                ..state.gesture
+            },
+            // A byte, quantised here rather than sent as a float, because
+            // nothing downstream can use more than a byte of it: it ends as
+            // a fraction of a radian on somebody else's hip. See
+            // `survival::Vitals::limp`.
+            limp: (state.vitals.limp().clamp(0.0, 1.0) * 255.0) as u8,
+            // ...and which leg, so the figure favours the one that is broken.
+            limp_left: state.vitals.limp_left(),
         }
     }
 
@@ -289,6 +550,43 @@ impl PlayerHandle {
             .last_activity;
         Instant::now().saturating_duration_since(last)
     }
+}
+
+/// What this player looks like to everybody else, read off the state the
+/// server already owns.
+///
+/// **Nothing here is a second copy of anything.** The worn set is
+/// `PlayerRuntime::equipment`, which is the same set combat subtracts
+/// from and the body reads its insulation off; the held block is the
+/// selected hotbar slot, which is the same slot a placement spends and
+/// the same one mining asks about. So a helmet that is protecting
+/// somebody is a helmet other people can see, always, with no flag to
+/// set and nothing to forget to set -- which is the whole reason this is
+/// derived here rather than tracked as appearance state of its own.
+///
+/// It runs once per player per tick, inside the lock `player_state`
+/// already holds, and reads five slots. That is why it is not cached:
+/// a cache would need invalidating from every gesture that moves an
+/// item, and the thing it would save is five array reads.
+fn outfit_of(state: &PlayerRuntime) -> primitive_shared::protocol::Outfit {
+    let mut outfit = primitive_shared::protocol::Outfit::BARE;
+    for (index, slot) in state.equipment.slots().iter().enumerate() {
+        // Guarded rather than trusted: `Equipment::sanitize` keeps the
+        // set four long, and a set restored from an older profile has
+        // been through it -- but the wire's array is a fixed four and
+        // writing past it would be a panic in the tick loop.
+        let Some(out) = outfit.worn.get_mut(index) else {
+            break;
+        };
+        if let Some(stack) = slot {
+            *out = stack.block;
+        }
+    }
+    outfit.holding = state
+        .inventory
+        .block_in(state.selected_slot)
+        .unwrap_or(primitive_shared::types::BLOCK_AIR);
+    outfit
 }
 
 #[derive(Debug)]
@@ -552,7 +850,7 @@ impl Registry {
 /// actually see rather than all 499.
 pub fn nearby_states(
     states: &[(PlayerId, PlayerState)],
-    origin: (f32, f32, f32),
+    origin: (f64, f64, f64),
     radius: f32,
     exclude: PlayerId,
 ) -> Vec<PlayerState> {
@@ -570,10 +868,12 @@ pub fn nearby_states(
 }
 
 #[inline]
-fn distance_sq(state: &PlayerState, origin: (f32, f32, f32)) -> f32 {
-    let dx = state.x - origin.0;
-    let dy = state.y - origin.1;
-    let dz = state.z - origin.2;
+fn distance_sq(state: &PlayerState, origin: (f64, f64, f64)) -> f32 {
+    // The difference first, in `f64`, and only then narrowed: see
+    // `PROTOCOL_VERSION`'s fifty-seven.
+    let dx = (state.x - origin.0) as f32;
+    let dy = (state.y - origin.1) as f32;
+    let dz = (state.z - origin.2) as f32;
     dx * dx + dy * dy + dz * dz
 }
 
@@ -645,7 +945,7 @@ impl InterestGrid {
     /// the only one left in the loop.
     pub fn nearby(
         &self,
-        origin: (f32, f32, f32),
+        origin: (f64, f64, f64),
         radius: f32,
         exclude: PlayerId,
         out: &mut Vec<PlayerState>,
@@ -717,7 +1017,7 @@ impl EntityGrid {
 
     /// Every entity within `radius` of `origin`, into a reused buffer --
     /// same allocation-free contract as `InterestGrid::nearby`.
-    pub fn nearby(&self, origin: (f32, f32, f32), radius: f32, out: &mut Vec<EntityState>) {
+    pub fn nearby(&self, origin: (f64, f64, f64), radius: f32, out: &mut Vec<EntityState>) {
         out.clear();
         let radius_sq = radius * radius;
         let (cx, cz) = cell_of(origin.0, origin.2, self.cell_size);
@@ -729,9 +1029,9 @@ impl EntityGrid {
                 for index in bucket {
                     let state = &self.states[*index as usize];
                     let (dx, dy, dz) = (
-                        state.x - origin.0,
-                        state.y - origin.1,
-                        state.z - origin.2,
+                        (state.x - origin.0) as f32,
+                        (state.y - origin.1) as f32,
+                        (state.z - origin.2) as f32,
                     );
                     if dx * dx + dy * dy + dz * dz <= radius_sq {
                         out.push(*state);
@@ -743,10 +1043,10 @@ impl EntityGrid {
 }
 
 #[inline]
-fn cell_of(x: f32, z: f32, cell_size: f32) -> (i32, i32) {
+fn cell_of(x: f64, z: f64, cell_size: f32) -> (i32, i32) {
     (
-        (x / cell_size).floor() as i32,
-        (z / cell_size).floor() as i32,
+        (x / f64::from(cell_size)).floor() as i32,
+        (z / f64::from(cell_size)).floor() as i32,
     )
 }
 
@@ -759,12 +1059,17 @@ mod interest_grid_tests {
             id,
             PlayerState {
                 id,
-                x,
+                x: f64::from(x),
                 y: 30.0,
-                z,
+                z: f64::from(z),
                 yaw: 0.0,
                 pitch: 0.0,
                 on_ground: true,
+                outfit: primitive_shared::protocol::Outfit::BARE,
+                posture: primitive_shared::protocol::Posture::Standing,
+                gesture: primitive_shared::protocol::Gesture::default(),
+                limp: 0,
+                limp_left: false,
             },
         )
     }
@@ -772,7 +1077,7 @@ mod interest_grid_tests {
     /// The grid must answer exactly what the flat scan answered. This is
     /// the property that matters: it is an optimisation, so any
     /// disagreement is a bug in the optimisation.
-    fn agrees(states: &[(PlayerId, PlayerState)], origin: (f32, f32, f32), radius: f32, exclude: PlayerId) {
+    fn agrees(states: &[(PlayerId, PlayerState)], origin: (f64, f64, f64), radius: f32, exclude: PlayerId) {
         let expected = nearby_states(states, origin, radius, exclude);
         let grid = InterestGrid::build(states.to_vec(), radius);
         let mut got = Vec::new();
@@ -912,9 +1217,9 @@ mod entity_grid_tests {
         EntityState {
             id,
             kind: EntityKind::Item { block: 1, count: 1 },
-            x,
-            y,
-            z,
+            x: f64::from(x),
+            y: f64::from(y),
+            z: f64::from(z),
         }
     }
 
@@ -948,7 +1253,7 @@ mod entity_grid_tests {
                 .iter()
                 .filter(|s| {
                     let (dx, dy, dz) = (s.x - origin.0, s.y - origin.1, s.z - origin.2);
-                    dx * dx + dy * dy + dz * dz <= radius_sq
+                    dx * dx + dy * dy + dz * dz <= f64::from(radius_sq)
                 })
                 .map(|s| s.id)
                 .collect();
@@ -989,12 +1294,17 @@ mod tests {
             id,
             PlayerState {
                 id,
-                x,
+                x: f64::from(x),
                 y: 30.0,
-                z,
+                z: f64::from(z),
                 yaw: 0.0,
                 pitch: 0.0,
                 on_ground: true,
+                outfit: primitive_shared::protocol::Outfit::BARE,
+                posture: primitive_shared::protocol::Posture::Standing,
+                gesture: primitive_shared::protocol::Gesture::default(),
+                limp: 0,
+                limp_left: false,
             },
         )
     }
@@ -1063,6 +1373,123 @@ mod tests {
         // being allowed to grow the server's memory forever.
         let reason = handle.kicked().await;
         assert!(matches!(reason, DisconnectReason::Other(_)));
+    }
+
+    /// A connected player with an empty pack, nothing on, and a queue
+    /// nobody reads -- everything the outfit tests below need and
+    /// nothing else.
+    fn dressed_up() -> Arc<PlayerHandle> {
+        let (tx, _rx) = mpsc::channel::<Outgoing>(64);
+        let (chunk_tx, _crx) = mpsc::channel::<ChunkPos>(64);
+        Arc::new(PlayerHandle::new(
+            1,
+            "wearer".to_string(),
+            "127.0.0.1:1".parse().unwrap(),
+            tx,
+            chunk_tx,
+            1000,
+            (0.0, 40.0, 0.0),
+            AntiCheat::new(
+                crate::settings::AntiCheatSettings::default(),
+                8,
+                (0.0, 40.0, 0.0),
+            ),
+        ))
+    }
+
+    #[test]
+    fn a_helmet_is_in_the_very_next_snapshot_the_wearer_appears_in() {
+        // **The property the whole feature rests on.** Everything else
+        // the server owns about a body is sent on change; this is read
+        // fresh out of the authoritative state every time a snapshot is
+        // sampled, so there is no "dirty" flag to forget and no window
+        // in which somebody is wearing something nobody can see. See
+        // `protocol::Outfit` for why that is worth ten bytes a tick.
+        use primitive_shared::equipment::Slot;
+        use primitive_shared::inventory::Stack;
+        use primitive_shared::types::{BLOCK_AIR, BLOCK_IRON_HELM, BLOCK_STONE_PICKAXE};
+
+        let handle = dressed_up();
+        assert!(handle.player_state().outfit.is_bare());
+
+        {
+            let mut state = handle.state.lock().unwrap();
+            state.equipment.wear(Stack::new(BLOCK_IRON_HELM, 1));
+            state.inventory.put_in_slot(0, Stack::new(BLOCK_STONE_PICKAXE, 1));
+            state.selected_slot = 0;
+        }
+        let outfit = handle.player_state().outfit;
+        assert_eq!(outfit.worn_in(Slot::Head), BLOCK_IRON_HELM);
+        assert_eq!(outfit.holding, BLOCK_STONE_PICKAXE);
+        // ...and the slots nobody filled stay empty rather than
+        // repeating the helmet down the body.
+        assert_eq!(outfit.worn_in(Slot::Chest), BLOCK_AIR);
+        assert_eq!(outfit.worn_in(Slot::Legs), BLOCK_AIR);
+        assert_eq!(outfit.worn_in(Slot::Feet), BLOCK_AIR);
+
+        // Taking it off is seen just as promptly. A snapshot that only
+        // ever *added* garments would leave a player who unequipped in
+        // a fight visibly armoured to everyone but themselves.
+        {
+            let mut state = handle.state.lock().unwrap();
+            state.equipment.take(Slot::Head);
+        }
+        let outfit = handle.player_state().outfit;
+        assert_eq!(outfit.worn_in(Slot::Head), BLOCK_AIR);
+        assert_eq!(outfit.holding, BLOCK_STONE_PICKAXE, "the hand emptied too");
+    }
+
+    /// **A dead player is seen lying down until they come back**, and on
+    /// their feet again the moment they do. Nothing in the snapshot used to
+    /// say so, and the figure stood over its own body on every other screen.
+    /// Dead outranks the bed and the seat, which a death does not always
+    /// clear before the next snapshot is sampled.
+    #[test]
+    fn a_dead_player_is_seen_fallen_and_a_respawned_one_standing() {
+        use primitive_shared::protocol::Posture;
+        let handle = dressed_up();
+        assert_eq!(handle.player_state().posture, Posture::Standing);
+        {
+            let mut state = handle.state.lock().unwrap();
+            state.sleeping_in = Some((0, 0, 0));
+            state.vitals.hurt(1.0e6, "a test");
+        }
+        assert_eq!(handle.player_state().posture, Posture::Fallen);
+        {
+            let mut state = handle.state.lock().unwrap();
+            state.sleeping_in = None;
+            state.vitals.set_health(50.0);
+        }
+        assert_eq!(handle.player_state().posture, Posture::Standing);
+    }
+
+    #[test]
+    fn what_a_player_is_holding_follows_the_hotbar_slot_they_selected() {
+        // The held block is the *selected* slot rather than slot zero,
+        // and it is the same slot a placement spends and mining asks
+        // about -- so a player who switches from a pick to a torch is
+        // seen to switch. Reading a fixed slot would have been a model
+        // that quietly holds whatever is first in the pack.
+        use primitive_shared::inventory::Stack;
+        use primitive_shared::types::{BLOCK_AIR, BLOCK_STONE_PICKAXE, BLOCK_TORCH};
+
+        let handle = dressed_up();
+        {
+            let mut state = handle.state.lock().unwrap();
+            state.inventory.put_in_slot(0, Stack::new(BLOCK_STONE_PICKAXE, 1));
+            state.inventory.put_in_slot(1, Stack::new(BLOCK_TORCH, 4));
+            state.selected_slot = 1;
+        }
+        assert_eq!(handle.player_state().outfit.holding, BLOCK_TORCH);
+        {
+            handle.state.lock().unwrap().selected_slot = 0;
+        }
+        assert_eq!(handle.player_state().outfit.holding, BLOCK_STONE_PICKAXE);
+        // An empty slot is an empty hand, not the last thing held.
+        {
+            handle.state.lock().unwrap().selected_slot = 5;
+        }
+        assert_eq!(handle.player_state().outfit.holding, BLOCK_AIR);
     }
 
     #[test]

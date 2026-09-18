@@ -18,11 +18,15 @@
 //! | `renderer` | the device, the pipelines, one frame                   |
 //! | `texture`  | the block/glyph texture array and the face lookup      |
 //! | `mesh`     | the vertex format, and turning a chunk into triangles   |
+//! | `lod`      | the same chunk out of bigger blocks, when it is far away |
 //! | `mesher`   | doing that on worker threads                            |
 //! | `camera`   | view and projection                                     |
 //! | `frustum`  | which chunks the camera can actually see                |
 //! | `sky`      | the time of day, and the colours that follow from it    |
+//! | `shadow`   | the sun's shadow map, when the player has asked for one |
+//! | `lighting` | how much colour the light carries, step by step          |
 //! | `font`     | the bitmap glyphs the UI layer draws with               |
+//! | `capture`  | one frame of it, written to a PNG                        |
 //!
 //! ## The three seams that go the other way
 //!
@@ -36,14 +40,84 @@
 //! only upward references in this layer, and they carry no behaviour.
 
 pub mod arena;
+pub mod breeze;
+pub mod capture;
 pub mod camera;
+pub mod critters;
+pub mod pebble_art;
 pub mod font;
 pub mod fog;
 pub mod frustum;
 pub mod gpu_timing;
 pub mod item_model;
+pub mod lamp_shadow;
+pub mod lighting;
+pub mod lod;
 pub mod mesh;
 pub mod mesher;
+pub mod particles;
+pub mod relief;
 pub mod renderer;
+pub mod shadow;
 pub mod sky;
 pub mod texture;
+
+/// One graphics device, shared by every test that needs one.
+///
+/// ## Why one, and why it is not a tidy-up
+///
+/// Because the suite was crashing. Each GPU test used to build its own
+/// `Instance`, adapter and `Device` -- two copies of the same twenty
+/// lines, in `arena` and in `renderer` -- and cargo runs tests on
+/// several threads at once. Creating and dropping graphics devices
+/// concurrently is the thing drivers are worst at: the run died with
+/// `STATUS_ACCESS_VIOLATION` about one time in three, somewhere inside
+/// the driver and never in the same test twice.
+///
+/// A suite that fails a third of the time is worse than a suite that
+/// fails: "the tests are green" stops being a fact and becomes a thing
+/// you re-run until it is true, and a real failure hides in the noise.
+/// This project's standard is that the tests pass, so the flake had to
+/// go.
+///
+/// One device, made once, handed out by reference. It is never dropped
+/// -- the process ends holding it, which is the one time letting a
+/// resource leak is right: there is no thread left to race with.
+///
+/// `None` on a machine with no GPU at all, which is a CI runner. The
+/// tests that need one say so and pass, because a suite that cannot be
+/// run where it is most wanted is a suite nobody runs.
+#[cfg(test)]
+pub fn test_gpu() -> Option<&'static (wgpu::Device, wgpu::Queue)> {
+    static DEVICE: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue)>> =
+        std::sync::OnceLock::new();
+    DEVICE
+        .get_or_init(|| {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::all(),
+                ..Default::default()
+            });
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                }))?;
+            // **The limits the game asks for, not wgpu's defaults.**
+            // A test device made with the defaults is capped at 256
+            // texture array layers while the real one is not (see
+            // `renderer::terrain_limits`), and the difference is not
+            // academic: the atlas is larger than that, so every GPU test
+            // would fail to load the textures the game loads fine.
+            pollster::block_on(adapter.request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("the test device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: crate::engine::renderer::terrain_limits(&adapter),
+                },
+                None,
+            ))
+            .ok()
+        })
+        .as_ref()
+}

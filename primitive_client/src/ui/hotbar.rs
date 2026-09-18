@@ -45,6 +45,33 @@ pub const MAX_HOTBAR_VERTICES: usize = MAX_SLOTS * 8 * 6 + 64;
 pub const SLOT: f32 = 0.080;
 const GAP: f32 = 0.012;
 pub const BOTTOM: f32 = -0.94;
+/// How far the backdrop reaches past the slots on every side.
+///
+/// **Public because it is the bar's real edge.** The slots stop at
+/// `BOTTOM + SLOT`; the thing a player sees stops a bit further out, and
+/// anything laid out against the smaller number is laid out against a
+/// line that is not on the screen. That is exactly how the hunger strip
+/// ended up drawn on top of the bar -- see `hud::BAR_Y`.
+pub const PAD: f32 = 0.014;
+/// The top of the hotbar as it is actually drawn, backdrop included.
+pub const TOP: f32 = BOTTOM + SLOT + PAD;
+
+/// The left edge of the hotbar as it is actually drawn, backdrop
+/// included.
+///
+/// **Public for the same reason [`PAD`] is, and it was missing for the
+/// same reason it was.** The HUD hangs its gauges over this bar, and it
+/// used to place them at a chosen number -- `-0.60` -- against a bar
+/// whose real edge is here. The two disagreed by thirteen hundredths of
+/// the screen, which is a sixth of a slot short of two slots: the health
+/// gauge stuck out past the left end of the bar and the whole cluster
+/// read as belonging to something else.
+///
+/// Derived from the same three constants the bar is drawn from, so it
+/// cannot drift from it again.
+pub const LEFT: f32 = -(SLOT * MAX_SLOTS as f32 + GAP * (MAX_SLOTS as f32 - 1.0)) / 2.0 - PAD;
+/// ...and the right edge, which is the same distance the other way.
+pub const RIGHT: f32 = -LEFT;
 
 /// The bar has to be on screen, and the pack has to be at least as long
 /// as the bar. Both are relations between constants, so the build is
@@ -137,6 +164,30 @@ pub fn slot_centre(index: usize, count: usize) -> f32 {
     left + pitch * index as f32 + SLOT / 2.0
 }
 
+/// Which slot a point in interface space is on, if any.
+///
+/// **The exact inverse of `slot_centre`**, which is the whole reason it
+/// lives beside it rather than wherever it is called from. There is a
+/// test that walks every slot's own middle back through this, because a
+/// hit-test that has drifted from the drawing is a bar that looks right
+/// and selects the wrong thing -- the kind of fault a player reports as
+/// "it picks the one next to what I tapped".
+///
+/// Tested against the drawn cell and no larger. The bar is drawn low
+/// and wide and there is nothing else down there to steal a tap from,
+/// but a slot that reached past its neighbour would make the gap
+/// between two of them belong to both, and then which one you get
+/// depends on the order they happen to be checked in.
+pub fn slot_at(x: f32, y: f32, count: usize) -> Option<usize> {
+    if count == 0 || !(BOTTOM..=BOTTOM + SLOT).contains(&y) {
+        return None;
+    }
+    (0..count).find(|index| {
+        let centre = slot_centre(*index, count);
+        (x - centre).abs() <= SLOT / 2.0
+    })
+}
+
 /// Which texture to show for a block in the pack.
 ///
 /// A block that has asked for a picture of its own gets it -- see
@@ -173,13 +224,12 @@ pub fn build_into(
 
     let pitch = SLOT + GAP;
     let total = pitch * count as f32 - GAP;
-    let pad = 0.014;
     push_quad(
         out,
-        -total / 2.0 - pad,
-        BOTTOM - pad,
-        total / 2.0 + pad,
-        BOTTOM + SLOT + pad,
+        -total / 2.0 - PAD,
+        BOTTOM - PAD,
+        total / 2.0 + PAD,
+        TOP,
         UNTEXTURED,
         BACKDROP,
     );
@@ -216,12 +266,434 @@ pub fn build_into(
         };
         let layer = icon_layer(textures, block);
         let tint = if is_selected { ICON_TINT } else { ICON_TINT_DIM };
-        push_quad(out, x0, y0, x1, y1, layer, tint);
+        push_quad(out, x0, y0, x1, y1, layer, icon_tint(block, tint));
+    }
+}
+
+/// The colour one item's icon is drawn in.
+///
+/// The slot's own shade -- bright for the selected slot, dimmer for the
+/// rest -- multiplied by whatever the *block* says about itself. Nothing
+/// says anything, except the garments: twelve of them share four
+/// greyscale pictures and are told apart by this. See
+/// `types::garment_tint` for why.
+pub fn icon_tint(block: primitive_shared::types::BlockId, slot: [f32; 4]) -> [f32; 4] {
+    // ...and the spears, which share one picture for the same reason
+    // and are told apart by the colour of the head
+    // (`types::spear_tint`). Asked first only because it is the shorter
+    // list; the two can never both answer, since a spear is not a
+    // garment.
+    //
+    // **A poisoned one is green**, and that is the only way a player
+    // can see that the paste is on: the fly agaric lives in a bit of
+    // the block's variant field (`types::POISONED`), so without this
+    // the pack would show a spear that is somehow worth two toadstools
+    // and look exactly like the one that is not.
+    if primitive_shared::types::is_poisoned(block) {
+        return [slot[0] * 0.55, slot[1] * 0.95, slot[2] * 0.45, slot[3]];
+    }
+    // **A steeled iron tool is faintly blue**, the colour a quenched edge
+    // takes in the fire -- and the only way to tell it from a wrought one of
+    // the same shape at a glance. The hardening lives in a variant bit
+    // (`tools::HARDENED`), exactly as the poison does. Faint, because the
+    // whole picture takes the tint, haft and all.
+    if primitive_shared::tools::is_hardened(block) {
+        return [slot[0] * 0.80, slot[1] * 0.87, slot[2] * 1.0, slot[3]];
+    }
+    if let Some(head) = primitive_shared::types::spear_tint(block) {
+        return [
+            slot[0] * head[0],
+            slot[1] * head[1],
+            slot[2] * head[2],
+            slot[3],
+        ];
+    }
+    match primitive_shared::types::garment_tint(block) {
+        Some(material) => [
+            slot[0] * material[0],
+            slot[1] * material[1],
+            slot[2] * material[2],
+            slot[3],
+        ],
+        None => slot,
+    }
+}
+
+// ---- what a finger on the bar means ----
+//
+// **Four gestures on one strip, and none of them is a button.** A phone
+// has no number row, no wheel, and no room for a button per key: `1`
+// through `0`, the wheel, `E` and `Q` are seven controls that all point
+// at the same ten squares, and the squares are already on screen.
+//
+// So the bar reads its own finger. The four answers are told apart by
+// what the finger *does*, not by where it starts -- every one of them
+// starts on a slot:
+//
+// * lifts where it landed  -> choose that slot   (`1`..`0`)
+// * slides along the bar   -> step the choice    (the wheel)
+// * slides up off the bar  -> throw one out      (`Q`)
+// * stays put              -> eat what is held   (`E`)
+//
+// Sliding wins over resting, and the direction decides which slide it
+// was, so a finger that wanders while resting does not eat by accident.
+
+/// How far a finger must travel before it is a slide rather than a tap,
+/// as a fraction of a slot's width.
+///
+/// Measured against the *slot* rather than the screen because that is
+/// what the finger is aiming at: the gesture is "I have left the square
+/// I started on", and a fraction of the screen means something
+/// different on every phone. Two thirds, so a thumb rolling on one
+/// square is still on it.
+const SLIDE: f32 = SLOT * 0.66;
+
+/// How long a finger must rest on its slot before it is eating.
+///
+/// Longer than the hold that starts mining (see
+/// `platform::touch::is_mining`), and deliberately: mining is what a
+/// player does constantly and eating is what they do a few times an
+/// hour, so the cheap gesture goes to the common one. Long enough,
+/// too, that a slow tap is a tap.
+const HOLD_TO_EAT: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// What the bar decided a finger meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Touched {
+    /// Nothing yet, or nothing at all.
+    Nothing,
+    /// Choose this slot: the number keys.
+    Pick(usize),
+    /// Step the choice by one, in the direction of the slide: the
+    /// wheel. **One step per slide, never a run of them** -- the spec
+    /// this was built to calls it "no inertia", and a bar that keeps
+    /// stepping while the finger moves is a bar nobody can land on.
+    Step(i32),
+    /// Throw one out of this slot: `Q`.
+    Throw(usize),
+    /// Eat what is in the slot being held: `E`.
+    Eat(usize),
+}
+
+/// The finger currently on the bar, and what it has done so far.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Gestures {
+    finger: Option<OnTheBar>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OnTheBar {
+    id: crate::platform::TouchId,
+    slot: usize,
+    origin: (f32, f32),
+    down_at: std::time::Instant,
+    /// Set once the finger has committed to a slide or to eating, so
+    /// that one gesture cannot also be another on the way up.
+    spent: bool,
+}
+
+impl Gestures {
+    /// A touch that landed on, or is moving over, the bar.
+    ///
+    /// `slot` is where the finger *started*, worked out by the caller
+    /// with [`slot_at`] -- the bar cannot do that itself because the
+    /// conversion from pixels depends on the interface scale, which
+    /// lives with the window. Everything after that is here.
+    pub fn handle(
+        &mut self,
+        phase: crate::platform::TouchPhase,
+        id: crate::platform::TouchId,
+        slot: Option<usize>,
+        at: (f32, f32),
+        now: std::time::Instant,
+    ) -> Touched {
+        use crate::platform::TouchPhase;
+        match phase {
+            TouchPhase::Started => {
+                // One finger at a time. A second on the bar while the
+                // first is working is a palm, not a second choice.
+                if self.finger.is_none() {
+                    if let Some(slot) = slot {
+                        self.finger = Some(OnTheBar {
+                            id,
+                            slot,
+                            origin: at,
+                            down_at: now,
+                            spent: false,
+                        });
+                    }
+                }
+                Touched::Nothing
+            }
+            TouchPhase::Moved => {
+                let Some(finger) = self.finger.as_mut().filter(|f| f.id == id && !f.spent) else {
+                    return Touched::Nothing;
+                };
+                let (dx, dy) = (at.0 - finger.origin.0, at.1 - finger.origin.1);
+                // Up first: a throw is a deliberate flick and a slide
+                // along is what a wandering thumb does, so the rarer
+                // gesture gets the stricter test by being asked about
+                // first rather than by being given a wider threshold.
+                //
+                // The interface's y runs *up*, so leaving the bar
+                // upward is an increasing y.
+                if dy > SLIDE && dy.abs() > dx.abs() {
+                    finger.spent = true;
+                    return Touched::Throw(finger.slot);
+                }
+                if dx.abs() > SLIDE {
+                    finger.spent = true;
+                    return Touched::Step(if dx > 0.0 { 1 } else { -1 });
+                }
+                Touched::Nothing
+            }
+            TouchPhase::Ended => {
+                let Some(finger) = self.finger.filter(|f| f.id == id) else {
+                    return Touched::Nothing;
+                };
+                self.finger = None;
+                if finger.spent {
+                    return Touched::Nothing;
+                }
+                Touched::Pick(finger.slot)
+            }
+            TouchPhase::Cancelled => {
+                // The system taking a finger away is not a choice. See
+                // the same argument in `platform::touch`.
+                if self.finger.is_some_and(|f| f.id == id) {
+                    self.finger = None;
+                }
+                Touched::Nothing
+            }
+        }
+    }
+
+    /// Whether the finger has now rested long enough to be eating.
+    ///
+    /// Polled, for the reason a resting finger always has to be: it
+    /// produces no events while it sits still, so the moment it stops
+    /// being a tap arrives when the platform has nothing to say.
+    pub fn resting(&mut self, now: std::time::Instant) -> Touched {
+        let Some(finger) = self.finger.as_mut().filter(|f| !f.spent) else {
+            return Touched::Nothing;
+        };
+        if now.duration_since(finger.down_at) < HOLD_TO_EAT {
+            return Touched::Nothing;
+        }
+        // Spent, so the lift that follows does not also choose the slot
+        // -- eating and choosing at once is the player watching their
+        // selection jump as they eat.
+        finger.spent = true;
+        Touched::Eat(finger.slot)
+    }
+
+    /// Whether this finger is the one the bar is following.
+    ///
+    /// Asked by the caller *before* handing an event over, because a
+    /// lift is what ends the bar's claim: asking afterwards would let
+    /// the lift fall through to whatever is drawn underneath, and press
+    /// a thumb control the player never aimed at.
+    pub fn owns(&self, id: crate::platform::TouchId) -> bool {
+        self.finger.is_some_and(|f| f.id == id)
+    }
+
+    /// Every finger forgotten, for when the bar stops being touchable.
+    pub fn release_all(&mut self) {
+        self.finger = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::platform::{TouchPhase, TouchId};
+
+    fn moment(ms: u64) -> std::time::Instant {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        *START.get_or_init(std::time::Instant::now) + std::time::Duration::from_millis(ms)
+    }
+
+    /// The middle of a slot, in the space the bar is authored in.
+    fn on_slot(index: usize) -> (f32, f32) {
+        (slot_centre(index, MAX_SLOTS), BOTTOM + SLOT / 2.0)
+    }
+
+    const FINGER: TouchId = 1;
+
+    /// A tap on a slot chooses it.
+    #[test]
+    fn a_tap_on_the_bar_chooses_that_slot() {
+        let mut bar = Gestures::default();
+        let at = on_slot(3);
+        assert_eq!(
+            bar.handle(TouchPhase::Started, FINGER, Some(3), at, moment(0)),
+            Touched::Nothing,
+        );
+        assert_eq!(
+            bar.handle(TouchPhase::Ended, FINGER, Some(3), at, moment(80)),
+            Touched::Pick(3),
+        );
+    }
+
+    /// A slide along the bar steps the choice once, and only once.
+    ///
+    /// "One swipe, one step" is the rule this is built to: a bar that
+    /// keeps stepping while the finger travels is a bar nobody can land
+    /// on. The second and third moves of the same finger say nothing.
+    #[test]
+    fn a_slide_along_the_bar_steps_once_per_slide() {
+        for (direction, expected) in [(1.0f32, 1), (-1.0, -1)] {
+            let mut bar = Gestures::default();
+            let at = on_slot(4);
+            bar.handle(TouchPhase::Started, FINGER, Some(4), at, moment(0));
+            let far = (at.0 + direction * SLIDE * 1.5, at.1);
+            assert_eq!(
+                bar.handle(TouchPhase::Moved, FINGER, Some(4), far, moment(40)),
+                Touched::Step(expected),
+            );
+            let further = (at.0 + direction * SLIDE * 4.0, at.1);
+            assert_eq!(
+                bar.handle(TouchPhase::Moved, FINGER, Some(4), further, moment(80)),
+                Touched::Nothing,
+                "the same slide stepped twice",
+            );
+            // ...and the lift is not also a choice.
+            assert_eq!(
+                bar.handle(TouchPhase::Ended, FINGER, Some(4), further, moment(120)),
+                Touched::Nothing,
+                "a slide also chose a slot when it ended",
+            );
+        }
+    }
+
+    /// A flick up off the bar throws one out of that slot.
+    #[test]
+    fn a_flick_up_off_the_bar_throws_from_that_slot() {
+        let mut bar = Gestures::default();
+        let at = on_slot(2);
+        bar.handle(TouchPhase::Started, FINGER, Some(2), at, moment(0));
+        // The interface's y runs up the screen.
+        let up = (at.0, at.1 + SLIDE * 1.5);
+        assert_eq!(
+            bar.handle(TouchPhase::Moved, FINGER, Some(2), up, moment(40)),
+            Touched::Throw(2),
+        );
+        assert_eq!(
+            bar.handle(TouchPhase::Ended, FINGER, Some(2), up, moment(90)),
+            Touched::Nothing,
+            "a throw also chose the slot it came from",
+        );
+    }
+
+    /// A finger that rests on a slot eats what is in it.
+    ///
+    /// And having eaten, the lift does not also choose the slot: a
+    /// player watching their selection jump as they eat is watching a
+    /// second gesture they did not make.
+    #[test]
+    fn a_finger_resting_on_a_slot_eats_and_does_not_also_choose_it() {
+        let mut bar = Gestures::default();
+        let at = on_slot(1);
+        bar.handle(TouchPhase::Started, FINGER, Some(1), at, moment(0));
+        assert_eq!(bar.resting(moment(200)), Touched::Nothing, "ate before the hold was up");
+        assert_eq!(bar.resting(moment(500)), Touched::Eat(1));
+        assert_eq!(bar.resting(moment(700)), Touched::Nothing, "ate twice on one hold");
+        assert_eq!(
+            bar.handle(TouchPhase::Ended, FINGER, Some(1), at, moment(900)),
+            Touched::Nothing,
+        );
+    }
+
+    /// A slide beats a rest, however long the finger has been down.
+    ///
+    /// The failure this stops: a thumb that travels slowly along the bar
+    /// crosses the eating threshold on the way and eats instead of
+    /// stepping. Direction is what tells the gestures apart, and it is
+    /// tested before the clock is.
+    #[test]
+    fn a_slow_slide_steps_rather_than_eating() {
+        let mut bar = Gestures::default();
+        let at = on_slot(5);
+        bar.handle(TouchPhase::Started, FINGER, Some(5), at, moment(0));
+        let far = (at.0 + SLIDE * 1.5, at.1);
+        assert_eq!(
+            bar.handle(TouchPhase::Moved, FINGER, Some(5), far, moment(100)),
+            Touched::Step(1),
+        );
+        assert_eq!(
+            bar.resting(moment(9_000)),
+            Touched::Nothing,
+            "a finger that had already stepped went on to eat",
+        );
+    }
+
+    /// A touch that starts off the bar is not the bar's business.
+    #[test]
+    fn a_finger_that_lands_beside_the_bar_is_ignored() {
+        let mut bar = Gestures::default();
+        let beside = (0.0, BOTTOM + SLOT * 4.0);
+        bar.handle(TouchPhase::Started, FINGER, None, beside, moment(0));
+        assert_eq!(bar.resting(moment(900)), Touched::Nothing);
+        assert_eq!(
+            bar.handle(TouchPhase::Ended, FINGER, None, beside, moment(950)),
+            Touched::Nothing,
+        );
+    }
+
+    /// The system taking the finger away decides nothing.
+    #[test]
+    fn a_cancelled_touch_on_the_bar_chooses_nothing() {
+        let mut bar = Gestures::default();
+        let at = on_slot(7);
+        bar.handle(TouchPhase::Started, FINGER, Some(7), at, moment(0));
+        assert_eq!(
+            bar.handle(TouchPhase::Cancelled, FINGER, Some(7), at, moment(50)),
+            Touched::Nothing,
+        );
+        assert_eq!(bar.resting(moment(900)), Touched::Nothing);
+    }
+
+    /// Every slot is selected by tapping the middle of where it is
+    /// drawn.
+    ///
+    /// The one property that matters: `slot_at` has to be the exact
+    /// inverse of `slot_centre`. They are two expressions of one
+    /// layout, and when they disagree the bar selects the slot beside
+    /// the one under the finger -- which reads as the game ignoring
+    /// half the taps rather than as an arithmetic slip.
+    #[test]
+    fn a_slot_is_selected_where_it_is_drawn() {
+        for count in 1..=MAX_SLOTS {
+            for index in 0..count {
+                let x = slot_centre(index, count);
+                let y = BOTTOM + SLOT / 2.0;
+                assert_eq!(
+                    slot_at(x, y, count),
+                    Some(index),
+                    "slot {index} of {count} was not found at its own middle"
+                );
+            }
+        }
+    }
+
+    /// A tap that is not on the bar selects nothing.
+    ///
+    /// Not a formality: the bar sits over the world, and a tap above it
+    /// is a tap meant for the world. A `slot_at` that answered for the
+    /// whole screen would swallow every dig.
+    #[test]
+    fn a_tap_away_from_the_bar_selects_nothing() {
+        assert_eq!(slot_at(0.0, 0.5, MAX_SLOTS), None, "the middle of the screen");
+        assert_eq!(slot_at(0.0, -0.999, MAX_SLOTS), None, "below the bar");
+        assert_eq!(
+            slot_at(LEFT - 0.1, BOTTOM + SLOT / 2.0, MAX_SLOTS),
+            None,
+            "left of the bar"
+        );
+        // ...and the gap between two slots belongs to neither.
+        let gap = (slot_centre(0, MAX_SLOTS) + slot_centre(1, MAX_SLOTS)) / 2.0;
+        assert_eq!(slot_at(gap, BOTTOM + SLOT / 2.0, MAX_SLOTS), None);
+    }
+
     use super::*;
 
     #[test]

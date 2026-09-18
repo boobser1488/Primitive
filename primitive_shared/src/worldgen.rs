@@ -65,9 +65,12 @@
 //! Real country is full of abrupt -- a harder bed of rock holds up a
 //! flat shelf and the softer ground under it goes, so a hillside is a
 //! stack of steps with a face between each rather than a ramp. Pulling
-//! the height toward a multiple of four blocks, in proportion to how
+//! the height toward a multiple of `BENCH` blocks, in proportion to how
 //! young the ground is, produces exactly that and is the only thing in
-//! the field that can make a vertical face.
+//! the field that can make a vertical face. The number is three, and it
+//! is written down in one place because it was *measured*: four made
+//! one seam in ninety a four-block wall, which with every solid filling
+//! its cell is a cliff nobody can step over. See `height_at`.
 //!
 //! ## What the ground is made of
 //!
@@ -86,6 +89,26 @@
 //!
 //! `surface_for` is all of it, and the slope it reads is a proper
 //! gradient so the thresholds are angles rather than tuning constants.
+//!
+//! **Under the soil the rock has a kind**, and the kind says where you
+//! are: sandstone under sand, limestone under the lowlands, granite in
+//! the mountains and above the granite line, stone below all of it.
+//! `stratum` lays it, one noise sample per column so the beds wander,
+//! and `flint_spacing` is what it is *for* -- flint forms in limestone,
+//! so the pale rock is where a knapper goes. A bog's soil is peat, and
+//! what a slope sheds -- boulders, scree -- lies at its foot
+//! (`place_boulders`, `build_column_tile`).
+//!
+//! ## Lakes
+//!
+//! Standing water above the sea, and the one feature here that has to
+//! be *proved* rather than drawn: water is conserved and flows, so a
+//! lake is either a closed basin or a puddle a tick later. A lake is
+//! therefore one thing with an identity -- a jittered grid cell -- whose
+//! rim is read before its bowl is dug, and whose water is set to the
+//! lowest column of that rim. Carving only ever goes down, so the rim
+//! stays above the water by construction. See `lake_site`; the cave
+//! carver's seal (`Column::seal`) is the other half of the promise.
 //!
 //! ## Biomes
 //!
@@ -110,16 +133,30 @@
 use noise::{NoiseFn, Perlin};
 
 use crate::types::{
-    block_kind, BlockId, Chunk, ChunkPos, BLOCK_AIR, BLOCK_ASH, BLOCK_BIRCH_LEAVES,
+    block_kind, BlockId, Chunk, ChunkPos, BLOCK_AIR, BLOCK_APPLE_LEAVES, BLOCK_APPLE_LEAVES_FRUIT, BLOCK_ASH,
+    BLOCK_BASALT,
+    // ---- savanna ---- the acacia's canopy and the termite mound.
+    BLOCK_ACACIA_LEAVES, BLOCK_TERMITE_MOUND,
+    // The forest's maple. See `place_trees`.
+    BLOCK_MAPLE_LEAVES,
+    BLOCK_BIRCH_LEAVES,
     BLOCK_BIRCH_LOG, BLOCK_CLAY,
     BLOCK_COAL_ORE, BLOCK_COPPER_ORE, BLOCK_IRON_ORE, BLOCK_TIN_ORE,
     BLOCK_GRAVEL, BLOCK_CACTUS, BLOCK_COBBLESTONE, BLOCK_DIRT, BLOCK_FLINT,
-    BLOCK_GLOWSTONE, BLOCK_GRASS, BLOCK_LEAVES, BLOCK_LOG, BLOCK_PEBBLE, BLOCK_SAND, BLOCK_SNOW,
+    BLOCK_GRASS, BLOCK_LEAVES, BLOCK_LOG, BLOCK_NATIVE_COPPER, BLOCK_PEBBLE,
+    BLOCK_ICE, BLOCK_RUSTY_STONE, BLOCK_SAND, BLOCK_SNOW,
     BLOCK_STICK, BLOCK_STONE, BLOCK_TALL_GRASS,
+    // The rock under the soil, in three kinds, and the bog's soil. See
+    // `stratum` for where each is laid and `types::BLOCK_SANDSTONE` for
+    // why there are three.
+    BLOCK_GRANITE, BLOCK_LIMESTONE, BLOCK_PEAT, BLOCK_SANDSTONE,
+    // What grows, added in 1.5: three plants a player can eat from or
+    // cut, and one that is only there so a meadow reads as a place.
+    BLOCK_BERRY_BUSH, BLOCK_FLOWER, BLOCK_MUSHROOM, BLOCK_REEDS, BLOCK_ROOTS, BLOCK_TOADSTOOL,
     BLOCK_WATER, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z, CHUNK_VOLUME,
 };
 
-pub const SEA_LEVEL: i32 = 20;
+pub const SEA_LEVEL: i32 = 64;
 
 /// Continent field to base height, as a piecewise-linear curve.
 ///
@@ -149,16 +186,16 @@ pub const SEA_LEVEL: i32 = 20;
 /// so the extra height is gained inland rather than at the waterline,
 /// where it would only make cliffs at the beach.
 const CONTINENT_SPLINE: &[(f64, f64)] = &[
-    (-1.00, 4.0),
-    (-0.55, 5.0),
-    (-0.42, 8.0),
-    (-0.26, 15.0),
-    (-0.10, 17.5),
-    (-0.01, 19.0),
-    (0.05, 23.0),
-    (0.30, 29.0),
-    (0.62, 34.0),
-    (1.00, 37.0),
+    (-1.00, 48.0),
+    (-0.55, 49.0),
+    (-0.42, 52.0),
+    (-0.26, 59.0),
+    (-0.10, 61.5),
+    (-0.01, 63.0),
+    (0.05, 67.0),
+    (0.30, 73.0),
+    (0.62, 78.0),
+    (1.00, 81.0),
 ];
 
 /// How much colder one block of altitude makes a place.
@@ -180,14 +217,57 @@ const LAPSE_PER_BLOCK: f64 = 0.013;
 /// with it.
 pub const CLIMATE_LAPSE_PER_BLOCK: f32 = (LAPSE_PER_BLOCK * 0.5) as f32;
 
+/// Where the cold begins, in the 0..1 units `climate_at` reports.
+///
+/// The same line `FREEZING` is, in the other of the two scales this
+/// module speaks. The generator works in -1..1 and hands the client
+/// 0..1, and every threshold that matters to both sides therefore has to
+/// exist twice -- so it is *derived* here rather than written out again.
+///
+/// It was written out again, once, and the number missed: `weather`
+/// carried a hand-picked `0.25` where this is `0.29`, and the band
+/// between them is ground the generator paints white and the sky rains
+/// on. Over a sample of a real world that band was **more than a quarter
+/// of every snowfield in it**.
+pub const CLIMATE_FREEZING: f32 = ((FREEZING + 1.0) * 0.5) as f32;
+
 /// Applies the lapse rate to a 0..1 temperature at a given height.
 ///
 /// Public so the client can take the four noise samples once per column
 /// and still get the same answer per cell that `climate_at` would give.
 #[inline]
 pub fn cooled_by_altitude(temperature: f32, gy: i32) -> f32 {
-    let altitude = (gy - SEA_LEVEL).max(0) as f32;
+    let altitude = felt_altitude(gy - SEA_LEVEL) as f32;
     (temperature - altitude * CLIMATE_LAPSE_PER_BLOCK).clamp(0.0, 1.0)
+}
+
+/// How high a column counts as, for cooling, in blocks above the sea.
+///
+/// **The first twenty-two blocks at full rate, the rest at half.** The
+/// relief was made two and a half times taller when the world went to
+/// 256 blocks, and one lapse rate cannot serve both ends of that:
+///
+/// * Kept at full rate everywhere, a hillside forty blocks up was as cold
+///   as a peak used to be. Measured: snowy peaks went from four or five
+///   per cent of the land to ten or fifteen, and tundra crept down every
+///   slope.
+/// * Halved everywhere, the lowlands warmed by a hair -- a degree at five
+///   blocks above the sea -- and that was enough to make a bare midwinter
+///   night in the open survivable, which is the one claim the whole
+///   climate model rests on (`climate::tests`, the midwinter night).
+///
+/// So the lowland keeps the rate every lowland rule was tuned against,
+/// and the new height above it cools over the new height. One function,
+/// read by both `cooled_by_altitude` (the air a player feels and the
+/// colour of the leaves) and `surface_temperature` (which biome it is),
+/// because the two disagreeing is how a snowy peak grows green leaves.
+#[inline]
+pub fn felt_altitude(above_sea: i32) -> f64 {
+    const LOWLAND: i32 = 22;
+    let above = above_sea.max(0);
+    let low = above.min(LOWLAND) as f64;
+    let high = (above - LOWLAND).max(0) as f64;
+    low + high * 0.5
 }
 
 /// One loose stone per this many columns, everywhere.
@@ -198,6 +278,56 @@ pub fn cooled_by_altitude(temperature: f32, gy: i32) -> f32 {
 /// you cannot see it is worse than a bare one.
 const PEBBLE_SPACING: u32 = 26;
 
+/// One rusty stone per this many columns of riverbank, and per this
+/// many of bog. Nowhere else.
+///
+/// **Bog iron is where the water is**, and that is the whole of why it
+/// is worth having: iron dissolved out of the uplands comes down the
+/// rivers and drops out of the water where it slows or stands -- on the
+/// bank, and in the peat -- so a people without a mine found their iron
+/// by walking the margins of water and turning over stones. Twelve of
+/// them make a bloom (see `crafting`, "iron dust" and "bog iron bloom"),
+/// and at twenty columns apart a bloom is a few hundred metres of bank;
+/// a bog is thicker with it, and wetter to walk. That distance is the
+/// price the player asked for, and a spacing that made it a stroll would
+/// make the ore vein under the hills pointless. See
+/// `types::BLOCK_RUSTY_STONE`.
+const RUSTY_STONE_SPACING_ON_A_BANK: u32 = 20;
+const RUSTY_STONE_SPACING_IN_A_BOG: u32 = 12;
+
+/// One pebble of stream tin to this many dry bank columns, inside tin
+/// country and nowhere else.
+///
+/// Thicker than bog iron on the same bank, and still a walk: tin country is
+/// a sixth of the map and its rivers a sliver of that, so a find is a
+/// district found and a river followed, not a pebble noticed. A pour of
+/// bronze wants one tin ingot, which is two of these (`crafting`, "tin
+/// ingot") -- enough that an afternoon on a tin river is a season of bronze,
+/// which is what a rare metal a little of goes a long way with should feel
+/// like.
+const STREAM_TIN_SPACING: u32 = 16;
+
+/// How far from the water's edge a riverbank reaches, in columns.
+///
+/// Two, because the strip of dry ground beside a channel is what a
+/// stone washes up on and one column of it is a line, not a bank: at
+/// twenty columns apart a one-wide strip round a chunk of river held two
+/// stones, and a player walking that bank would not have believed the
+/// iron was there at all.
+const BANK_WIDTH: i32 = 2;
+
+// The two claims the bog iron rests on, checked when the crate is
+// built rather than by a test, because both are about constants and a
+// test of a constant is a test that can only ever fail once: the bog is
+// the richer ground (twelve against twenty), and a bank is a strip and
+// not a line -- one column wide it held two stones a chunk, and a player
+// walking that bank would not have believed the iron was there at all.
+const _: () = {
+    assert!(RUSTY_STONE_SPACING_IN_A_BOG < RUSTY_STONE_SPACING_ON_A_BANK);
+    assert!(BANK_WIDTH >= 2);
+};
+
+
 /// How far below sea level a river cuts its bed.
 const RIVER_DEPTH: i32 = 2;
 /// Half-width of a river channel, in blocks, banks included.
@@ -207,8 +337,521 @@ const RIVER_HALF_WIDTH: f64 = 7.0;
 /// still be local.
 const RIVER_GRADIENT_STEP: f64 = 12.0;
 
+/// Side of the square each lake site is drawn in, in blocks.
+///
+/// Lakes are placed on a jittered grid rather than found with a noise
+/// field, and the reason is the water: a lake has to be a *closed
+/// basin* -- see `Lake` -- and proving a basin closed means knowing the
+/// height of every column on its rim. That is a question about one
+/// whole lake, so a lake has to *be* one thing with an identity, and a
+/// grid cell is the cheapest identity there is. A noise threshold gives
+/// blobs of arbitrary shape and size with no centre to ask about.
+///
+/// Forty-eight rather than sixty-four because most cells are refused
+/// (see `lake_site`): the sea, the hills, a river through the rim, and
+/// the ground too steep to hold water all say no, and at sixty-four a
+/// lake was something a player heard about rather than walked past.
+const LAKE_CELL: i32 = 48;
+/// The widest a lake bed reaches from its centre, and the most it is
+/// dug below its rim. Both bound the jitter: a lake and the ring of
+/// rim around it must fit inside its own cell so that no column ever
+/// has to ask two cells which lake it belongs to.
+const LAKE_MAX_RADIUS: i32 = 6;
+const LAKE_MAX_DEPTH: i32 = 4;
+/// The lowest a lake's surface may lie. Five over the sea rather than
+/// three so the bed of the deepest lake is still a block above the
+/// waterline -- a bed at sea level would be classified as a shore by
+/// `biome_from`, and a lake floor of beach sand in a wood is exactly
+/// the kind of seam a player notices.
+const LAKE_MIN_WATER: i32 = SEA_LEVEL + 5;
+/// How much the rim of a lake may vary in height and still hold one.
+/// The rim's lowest column sets the water; the highest is a bank this
+/// many blocks over it. Past that the ground is a slope, and a slope
+/// does not hold a lake -- it holds a stream, which this is not.
+const LAKE_MAX_RIM_SPREAD: i32 = 3;
+
+/// How far a lake's shore wanders in and out of its nominal radius, in
+/// blocks. See `WorldGen::lake_reach2`.
+const LAKE_WOBBLE: f64 = 1.8;
+
+/// One boulder cluster per this many columns that qualify for one.
+///
+/// Sparse: a boulder is a *solid block* on the surface, which is what
+/// separates it from a pebble, and a hillside paved with them is a
+/// hillside nobody can walk up. See `place_boulders`.
+const BOULDER_SPACING: u32 = 34;
+/// How far from its root a boulder cluster reaches. Bounded by
+/// `FEATURE_MARGIN` like everything else that writes over a border.
+const BOULDER_REACH: i32 = 1;
+/// How much higher than a column its neighbour two blocks over has to
+/// be for the column to count as the foot of a cliff. Three is the
+/// bench height (see `height_at`), so this is "a bench face stands
+/// over this ground" and not "the ground is a bit uneven".
+const CLIFF_STEP: i32 = 3;
+/// Threshold on the deposit field below which the foot of a cliff is
+/// scree rather than soil. Well above `GRAVEL_DEPOSIT`, because a
+/// cliff foot is *where* rubble collects and most of them should have
+/// some; still below `CLAY_DEPOSIT`, so scree and clay never meet.
+const SCREE_DEPOSIT: f64 = -0.02;
+
 /// Solid rock nobody can fall through, and the floor caves may not reach.
 const BEDROCK_TOP: i32 = 2;
+
+/// How many blocks make one degree of latitude: a block is a metre, and a
+/// degree along a meridian is a hundred and eleven kilometres.
+///
+/// **The planet is life-sized, and that is a decision about where a
+/// player lives rather than about how far they walk.** The climate used to
+/// be a sine twenty thousand blocks long -- ten kilometres from the equator
+/// to the pole, a compromise stated as one: long enough that a band was a
+/// region, short enough that "go north until it is cold" was an evening's
+/// plan. The player asked for the equator at the scale of the real world,
+/// and three ways of having it were weighed:
+///
+/// * *The same world with every distance multiplied, and the player put
+///   down wherever their climate is.* **Rejected on a number nothing in the
+///   game can move**: a player's position is an `f32`, and five million
+///   blocks from the origin an `f32` steps in half-blocks. The physics would
+///   walk on a grid, the camera would shake, and a temperate country five
+///   thousand kilometres out would be a place nobody can stand in.
+/// * *No latitude at all*, the temperature one noise field again. Rejected
+///   for what latitude was put in for: a desert beside a tundra, and a
+///   world with no answer to "where is it warm".
+/// * **A real-sized globe, with each world laid on it (chosen).** A world
+///   is a patch of the planet a few hundred kilometres across -- more than
+///   anybody walks -- and *where* on the planet that patch lies is chosen
+///   when the world is made (`Zone`). The origin is at that latitude, so the
+///   player stands where an `f32` is exact and on the climate they asked for.
+///
+/// What it costs, said plainly: **nobody walks from one climate zone into
+/// another any more.** A degree is a hundred and eleven kilometres; at
+/// forty-five north the latitude term moves by about a fiftieth of its range
+/// per degree, and a day's walk changes nothing a thermometer could read.
+/// Two things carry what the long walk used to. The weather half of the
+/// temperature and the rainfall still turn a temperate country into oak,
+/// birch, meadow, marsh, lake and the odd warm dry pocket every few
+/// kilometres (`one_temperate_country_still_holds_several_kinds_of_ground`).
+/// And the zone is now the first question a world asks, because it is the
+/// one question nobody can answer later with their feet.
+///
+/// The degrees on the panel stay honest all the same: +z is still north, a
+/// hundred and eleven thousand blocks of it is a degree, and the globe folds
+/// over the poles (`WorldGen::degrees_north`).
+///
+/// ## What the first version of this got wrong, and how it was fixed
+///
+/// The list above laid *a world of its own* at each latitude, and the noise
+/// fields were read at the world's own z. So two worlds of one seed in two
+/// zones were the same hills and the same coastline with a different climate
+/// painted over them -- the player's words were "the choice changes the
+/// world, not where I wake up". A seed has to be one planet.
+///
+/// It is one now, and nothing about the paragraphs above changed: the fix is
+/// that a world's own z is measured **from where the world sits on the
+/// planet** (`PLANET_ORIGIN_DEGREES`, `WorldGen::on_planet`). The generator
+/// reads the planet's fields at the planet's coordinates; the player's
+/// coordinates stay near zero, which is the whole reason the first item on
+/// the list was rejected.
+pub const BLOCKS_PER_DEGREE: f64 = 111_320.0;
+
+/// The latitude of the planet's own row zero, degrees north: where a world
+/// whose origin sits at the planet's origin stands.
+///
+/// **Forty-five, and not the equator, for two reasons that happen to agree.**
+///
+/// The first is arithmetic. A world's own coordinates are measured from where
+/// it sits on the planet precisely so an `f32` stays exact, and the planet's
+/// origin is the one place where a world's z and the planet's z are the same
+/// number. Put it on the equator and the temperate zone -- the one every
+/// threshold in this file was tuned in, and the one a test world is -- would
+/// be laid five million blocks out in planet coordinates, which is a number
+/// the generator can carry but the *diagnostics* cannot read at a glance.
+///
+/// The second is history, and it is the one that matters to a save. Forty-
+/// five is where every world made before the zones existed was laid, and
+/// where every temperate world is laid now. At forty-five the offset is
+/// exactly zero, so a temperate world's columns are read at exactly the
+/// coordinates they were read at before any of this -- **every world already
+/// on a disk is the same world, block for block**, and there is no recorded
+/// flag to get wrong, because zero is not a special case of anything.
+///
+/// See `the_planets_origin_is_where_every_old_world_was_laid`.
+pub const PLANET_ORIGIN_DEGREES: i32 = 45;
+
+/// Where a world laid at `degrees` north has its row zero, in blocks north
+/// of the planet's row zero.
+///
+/// **Rounded to a whole chunk**, and that is not tidiness. A world is only
+/// ever compared with the planet a chunk at a time -- the test that says two
+/// zones of one seed are two places on one globe generates a chunk in each
+/// and holds them up against each other -- and a whole-chunk offset is what
+/// makes that comparison exact rather than approximate. The price is up to
+/// eight blocks of latitude, which is seven hundred-thousandths of a degree:
+/// nothing any field in this file can resolve.
+///
+/// `f64` throughout and `i32` at the end: thirty-seven degrees is four
+/// million blocks, which is a sixth of what an `i32` holds, and the product
+/// is formed before anything rounds.
+pub fn planet_origin_z(degrees: i32) -> i32 {
+    let blocks = planet_row(f64::from(degrees)) as f64;
+    (blocks / crate::types::CHUNK_SIZE_Z as f64).round() as i32 * crate::types::CHUNK_SIZE_Z as i32
+}
+
+/// Which row of the planet a latitude is, in blocks north of the planet's
+/// own row zero.
+///
+/// The same arithmetic as `planet_origin_z` without the rounding, because
+/// *a world* has to begin on a chunk boundary and *a row* does not. Asked
+/// by the tests that walk the globe: rounding a row would make forty-five
+/// degrees north and forty-five south a few blocks unequal, and the tests
+/// that hold the two sides of the equator together are exact ones.
+pub fn planet_row(degrees: f64) -> i32 {
+    ((degrees - f64::from(PLANET_ORIGIN_DEGREES)) * BLOCKS_PER_DEGREE) as i32
+}
+
+/// How warm each latitude is: the latitude half of the temperature, +1 on
+/// the equator and -1 on a pole, at anchors in degrees with straight lines
+/// between them. See `WorldGen::latitude`.
+///
+/// **Read off the Earth's bands rather than off a formula**, because what a
+/// player expects of a latitude is the Earth's. Two anchors carry the
+/// weight, and both are where one of the two climate lines `land_biome`
+/// splits on is crossed by the latitude alone:
+///
+/// * **`HOT` at about thirty-five degrees**: south of it savanna and
+///   desert, north of it temperate country -- the edge of the Sahara against
+///   the Mediterranean.
+/// * **`FREEZING` at about fifty-eight**: north of it the taiga -- the
+///   southern edge of the boreal forest.
+///
+/// Forty-five, the temperate zone's origin, sits at -0.10 of temperature:
+/// inside the band with room either side for the few hundredths a hill takes
+/// off a spawn column (measured -0.02 to -0.18 below the base over three
+/// hundred seeds), so a temperate world wakes its player in temperate country.
+///
+/// Rejected: `cos(2 * latitude)`, which is the old sine with degrees for its
+/// argument. It puts the hot line at forty-two degrees and the freezing line
+/// at sixty-five -- a savanna at Rome and oak woods at Arkhangelsk.
+const WARMTH_BY_LATITUDE: [(f64, f64); 10] = [
+    (0.0, 0.95),
+    (12.0, 0.92),
+    (22.0, 0.75),
+    (30.0, 0.40),
+    (36.0, 0.05),
+    (45.0, -0.15),
+    (52.0, -0.40),
+    (58.0, -0.66),
+    (66.0, -0.85),
+    (90.0, -1.0),
+];
+
+/// How much wetter or drier each latitude is than the rainfall noise says,
+/// added to the humidity. See `WorldGen::humidity`.
+///
+/// **The planet's three rain belts**, because that is where the Earth's
+/// deserts are and a latitude without them puts the Sahara in the Congo: wet
+/// on the equator, where the trade winds meet and rise; dry at twenty to
+/// thirty degrees, where the same air comes down again -- the belt every
+/// great hot desert lies in; wet again in the westerlies of the middle
+/// latitudes; and dry over the poles, which are deserts under the ice.
+///
+/// **Zero at forty-five**, deliberately: every temperate threshold in
+/// `land_biome` -- forest, meadow, marsh, dead wood -- was measured with no
+/// such term, and the temperate zone keeps the rainfall they were tuned on.
+const RAIN_BY_LATITUDE: [(f64, f64); 11] = [
+    (0.0, 0.25),
+    (8.0, 0.18),
+    (15.0, 0.0),
+    (22.0, -0.25),
+    (28.0, -0.30),
+    (35.0, -0.10),
+    (45.0, 0.0),
+    (55.0, 0.06),
+    (65.0, 0.0),
+    (75.0, -0.15),
+    (90.0, -0.25),
+];
+
+/// A profile read at a latitude: straight lines between the anchors, and the
+/// end values past either end.
+fn along_latitude(profile: &[(f64, f64)], degrees: f64) -> f64 {
+    let degrees = degrees.abs();
+    for pair in profile.windows(2) {
+        let ((from, a), (to, b)) = (pair[0], pair[1]);
+        if degrees <= to {
+            let t = ((degrees - from) / (to - from)).clamp(0.0, 1.0);
+            return a + (b - a) * t;
+        }
+    }
+    profile.last().map_or(0.0, |&(_, value)| value)
+}
+
+/// How warm a coast or a sea has to be to be tropical: palms on its beaches,
+/// and a reef in its shallows. On `WorldGen::warmth`'s scale.
+///
+/// **0.3, which the latitude alone reaches at about twenty-nine degrees** --
+/// where coconut palms stop on the Earth -- so the tropics and the dry belt
+/// have tropical coasts, and a temperate world has one only in a warm pocket
+/// the weather made, which is rare enough to be a find. Shared, so a reef and
+/// the palm on the beach above it cannot disagree about which sea is warm.
+pub const TROPICAL: f64 = 0.3;
+
+// ---- palms ----
+
+/// How far a palm's fronds run out from the top of its trunk, in columns.
+///
+/// **Public because felling has to clear what the generator planted**:
+/// `felling::fell_branches` looks this far round every falling piece of a
+/// palm for its crown, and a number kept in two places is two numbers.
+pub const PALM_FROND_REACH: i32 = 3;
+
+/// How far a palm reaches from the column it is rooted in: a trunk that
+/// steps sideways twice on its way up, and a crown `PALM_FROND_REACH` round
+/// the top of it. Inside `OLD_TREE_REACH`, which the assertion under it
+/// holds, for `ACACIA_REACH`'s reason: a palm clipped at a chunk seam is a
+/// crown with one straight side on an open beach, where nothing hides it.
+const PALM_REACH: i32 = 2 + PALM_FROND_REACH;
+const _: () = assert!(PALM_REACH <= OLD_TREE_REACH);
+
+/// The shortest and tallest palm trunk, in pieces.
+const PALM_SHORTEST: i32 = 6;
+const PALM_TALLEST: i32 = 9;
+
+/// One beach column in this many roots a palm, and one column of warm low
+/// country by the sea in the other.
+///
+/// **A beach is where the palms are, and a palm is a thing you can see.**
+/// Thirty-seven is a palm every few blocks along a wide beach and a handful
+/// along a narrow one: a grove of separate trees, each crown a star of fronds
+/// against the sky. The savanna and the desert behind the beach get a palm
+/// every hundred and sixty columns of their low coastal ground, so the grove
+/// thins out inland instead of stopping at a line.
+///
+/// Eleven and sixty were tried first and `what_the_climate_looks_like` showed
+/// what the arithmetic hid: on a beach thirty wide the crowns ran together
+/// into one flat roof of leaves over a colonnade of trunks -- a palm forest,
+/// in which not one palm could be seen.
+///
+/// **Twenty-four and a hundred and four since palms keep a column between
+/// them** (`WorldGen::palm_stands`). The roll no longer decides how close
+/// crowns come -- nothing the rule lets stand can run together -- only how
+/// many palms ask; and at thirty-seven the rule left about a third of what was
+/// rolled, a palm a chunk of beach, `palm_neighbours_census` counted.
+const PALM_BEACH_SPACING: u32 = 24;
+const PALM_COAST_SPACING: u32 = 104;
+
+/// How many rounds a palm asks whether the palms that outrank it stand. See
+/// `WorldGen::palm_stands`, which is why it must be odd: after an even number
+/// two palms that touch can both be let stand.
+const PALM_ROUNDS: u32 = 3;
+const _: () = assert!(PALM_ROUNDS % 2 == 1);
+
+// ---- swamps ----
+
+/// The field a swamp's pools are drawn from: how fast it turns over, and
+/// where above it a hollow holds water, and holds it deep.
+///
+/// **Pools between hummocks, not a flooded plain.** A swamp was a meadow
+/// with low trees and reeds at the edge of whatever sea was near, and a
+/// player walked across one without noticing it. What makes a swamp a
+/// swamp is standing water *in* it: small pools and sloughs, ground a boot
+/// sinks into round them, and here and there a hole deeper than a man. The
+/// field turns over every ten or eleven blocks so the pools are the size of
+/// a room and the hummocks between them the size of a hut. Measured by
+/// `rare_places_share` on seeds 1, 7, 1234 and 99 999: pools are 29 to 34 per
+/// cent of a temperate world's swamp and 29 to 33 of a tropical one's -- the
+/// rest is flat hollow ground the rule refused or hummock. Where the field
+/// peaks past `SWAMP_HOLE_THRESHOLD` the pool is two deep. See
+/// `WorldGen::swamp_pool` for which ground can hold one.
+const SWAMP_POOL_FREQUENCY: f64 = 0.09;
+const SWAMP_POOL_THRESHOLD: f64 = 0.08;
+const SWAMP_HOLE_THRESHOLD: f64 = 0.42;
+
+/// One flooded swamp column in this many holds a drowned tree: a bare snag
+/// standing in the water, grey and branchless.
+const SNAG_SPACING: u32 = 23;
+
+/// One still pool cell in a swamp in this many carries a lily pad.
+const LILY_SPACING: u32 = 5;
+
+/// How big a burnt wood is: the frequency of the field `WorldGen::burnt`
+/// reads. One turn of it is about two hundred and fifty blocks, so a scar is
+/// a clearing a player crosses in a minute or two -- a place, and never a
+/// region.
+const DEAD_WOOD_FREQUENCY: f64 = 0.004;
+
+/// ...and how much of the dry band burned: the field above this is a burnt
+/// wood. See `a_dead_forest_is_a_rare_patch_and_not_a_region` for the shares
+/// it was measured to.
+const DEAD_WOOD_THRESHOLD: f64 = 0.60;
+
+/// How much of the temperature is latitude and how much is weather.
+///
+/// Two thirds. At real scale the latitude term is one number across a
+/// whole world (see `BLOCKS_PER_DEGREE`), so this is how much of a world's
+/// temperature its zone decides, and the other third is how far the weather
+/// may move a country away from it: far enough that a temperate world has
+/// cool birch hollows and the odd warm dry pocket, never so far that a
+/// temperate world grows a taiga in its lowlands.
+const LATITUDE_WEIGHT: f64 = 0.66;
+
+/// How much drier the deep interior of a continent is than its shore.
+///
+/// A third of the humidity range. That is enough to put the deserts
+/// inland and keep the forests near the water without making every
+/// coast a rainforest: a shore in the cold band is still taiga, because
+/// temperature decides *which* wet biome and this only decides how wet.
+const CONTINENTALITY: f64 = 0.45;
+
+/// How fast the *weather* half of the temperature field turns over --
+/// the part latitude does not decide.
+///
+/// **This is the number "the taiga is five hundred metres from the
+/// desert" was about.** Latitude was already right: two thirds of the
+/// temperature is a cosine twenty thousand blocks long, and no amount
+/// of it puts a pole beside an equator. The other third was fractal
+/// noise at 0.0014, whose first octave turns over every seven hundred
+/// blocks -- so a third of the whole temperature range could be spent
+/// and recovered inside a morning's walk, and that third is more than
+/// the gap between a taiga and a savanna.
+///
+/// ## How it was measured
+///
+/// `how_big_a_climate_zone_is` walks twelve straight lines of twelve
+/// kilometres in each direction, samples every fourth block, and
+/// classifies each sample twice: once by *band* -- cold, temperate,
+/// hot, the three `land_biome` splits temperature into -- and once by
+/// the biome a flat lowland column would be. Both are asked at one
+/// fixed height eight above the sea, over the four the marsh rules
+/// want and under the twenty-two the mountain rules want, so what
+/// comes back is the climate and not the relief. The reported size is
+/// the mean length of an unbroken run, taken in the *worse* of the two
+/// directions; the approach distance is the shortest gap along any one
+/// line between a sample of one biome and a sample of the other, which
+/// is the player's complaint stated as a number.
+///
+/// Three seeds (1337, 7, 99), before and after:
+///
+/// ```text
+///                         band       climate biome   country   taiga->desert
+/// 0.0014/0.0019, 2 oct    1800..1846   293..318      94..98      856..1348
+/// 0.00013/0.0004, 3 oct   4000         649..716     101..107     1796..2588
+/// ```
+///
+/// So a climate band went from under two kilometres to four, and the
+/// nearest a taiga now comes to a desert is one and eight tenths of a
+/// kilometre where it used to be eight hundred and fifty blocks. The
+/// `country` column is the check on the other half of the ask -- see
+/// `country_size` -- and it barely moved: the ground under a walking
+/// player still changes every hundred blocks, because rivers, lakes,
+/// shorelines and hills were never what was too small.
+///
+/// ## Why three octaves and not one
+///
+/// The first octave is seven and a half thousand blocks across and
+/// carries four sevenths of the field: that is the *province*, and it
+/// is what makes a band kilometres wide. The third is nineteen hundred
+/// blocks across and carries one seventh, which after the 0.34 weather
+/// weight is five hundredths of the temperature range -- enough to bend
+/// a boundary and put a cool hollow in a warm country, nowhere near
+/// enough to move a column across a band. One octave would draw every
+/// climate boundary as a smooth circle, which is the shape a single
+/// Perlin lobe has and nothing on a map does.
+const CLIMATE_NOISE_FREQUENCY: f64 = 0.00013;
+
+/// The same for rainfall, and three times finer on purpose: rain is
+/// the more local of the two on a real map, and inside one climate it
+/// is the whole of what tells a forest from a meadow.
+///
+/// **It is deliberately the one climate field left with a fast term in
+/// it**, because something has to carry the variety the temperature
+/// field no longer can. Two things do. Its own third octave is sixteen
+/// hundred blocks across; and `CONTINENTALITY` mixes in the continent
+/// field, which turns over every six hundred blocks because it *is*
+/// the coastline. Neither can move a column between climate bands --
+/// only temperature does that, and temperature is now smooth over
+/// kilometres -- so a wet coast a few hundred blocks from a dry
+/// interior is allowed, and a taiga a few hundred blocks from a desert
+/// is not. Distance from the sea is a reason for dry ground the way
+/// altitude is a reason for cold ground, and a boundary the player can
+/// see the cause of was never the complaint.
+const RAINFALL_NOISE_FREQUENCY: f64 = 0.00040;
+
+/// How many octaves both climate fields are summed over. See
+/// `CLIMATE_NOISE_FREQUENCY` for why it is three rather than one or
+/// two.
+const CLIMATE_NOISE_OCTAVES: u32 = 3;
+
+/// How cold the climate has to be for standing water to freeze.
+///
+/// The same number the biome classifier calls cold -- see `land_biome`,
+/// where it is the line between temperate country and tundra or taiga.
+/// One threshold rather than two, so a frozen surface and the snow on
+/// the bank beside it always arrive together.
+///
+/// `land_biome` used to spell it out as a literal instead of reading it
+/// from here, which is the shape of bug this crate exists to prevent:
+/// two copies of one line, agreeing right up until somebody retunes one.
+/// See `CLIMATE_FREEZING` for the third place the same line is needed
+/// and the one place it went wrong.
+const FREEZING: f64 = -0.42;
+
+/// How warm the climate has to be for the country to be hot: savanna,
+/// or desert where it is dry. See `land_biome` for why 0.07.
+///
+/// Named for the reason `FREEZING` is. The climate tests classify their
+/// transects into cold, temperate and hot with the same two lines
+/// `land_biome` draws, and that classifier carried its own literal hot
+/// line, 0.14, under a comment saying it read the number from
+/// `land_biome` -- which had since moved it to 0.07 when the savanna was
+/// widened. The band tests went on measuring a hot band the map no
+/// longer had.
+const HOT: f64 = 0.07;
+
+// ---- the sea floor ----
+//
+// What grows under the sea is decided by the two things a diver can feel:
+// how warm the water is and how deep. Both thresholds are written against
+// the land's (`HOT`, `FREEZING`) rather than as numbers of their own, so a
+// reef lies off a savanna coast and kelp off a birch wood without a second
+// climate to keep in step with the first. See `WorldGen::place_seabed`.
+
+/// Warm enough for a reef: a tenth past the line where the land beside it
+/// turns to savanna. On `HOT` itself a reef would reach up every temperate
+/// coast that happened to have a warm year in its noise.
+const REEF_WARMTH: f64 = HOT + 0.1;
+/// How deep a reef grows: from the first water a coral can stand under
+/// without drying at low tide, to the depth past which the light it lives
+/// on is gone.
+///
+/// **Six, and the light model is the reason, not a guess about corals.**
+/// It was twelve, and photographed through the real shader
+/// (`renderer::what_the_sea_floor_looks_like`) every coral in the picture
+/// was a black cut-out: the colour a reef exists to show was down where
+/// nothing could see it. A real reef is a shallows thing too. Skylight
+/// falls two levels per block of water now (`light_opacity` of water is
+/// one, and a step costs one more -- it was three a block, and a reef at
+/// six was lit by the ambient floor alone even here), so the floor under
+/// six blocks of sea keeps three and a coral standing on it more.
+const REEF_DEPTHS: std::ops::RangeInclusive<i32> = 3..=6;
+/// Kelp grows in cool and temperate seas: up to the line the land turns hot,
+/// and down under the ice -- a kelp forest is a cold-water thing, and the
+/// arctic has them.
+const KELP_WARMEST: f64 = HOT;
+const KELP_COLDEST: f64 = FREEZING - 0.25;
+/// From five blocks, so a stem is at least two tall with water over it, to
+/// the open ocean floor.
+const KELP_DEPTHS: std::ops::RangeInclusive<i32> = 5..=30;
+/// The tallest stem, in blocks. A forest in forty metres of water reaching
+/// thirty-nine of them to the surface is a wall; one that stops twenty up
+/// leaves the upper sea for the fish.
+const KELP_TALLEST: i32 = 20;
+/// Seagrass wants light and warmth: the shallows, anywhere not cold.
+const SEAGRASS_COLDEST: f64 = FREEZING + 0.2;
+const SEAGRASS_DEPTHS: std::ops::RangeInclusive<i32> = 2..=6;
+/// One boulder in the cell of this many blocks a side, at most -- see
+/// `WorldGen::sea_boulder`.
+const SEA_BOULDER_GRID: i32 = 9;
 /// How much soil sits over the stone on a normal surface.
 const DIRT_DEPTH: i32 = 4;
 /// The highest a column is allowed to reach. Two below the ceiling, so a
@@ -222,18 +865,393 @@ const MAX_CANOPY_RADIUS: i32 = 3;
 /// The longest a fallen trunk can be.
 const MAX_DEADFALL: i32 = 6;
 
+/// The furthest an old tree reaches from the column it is rooted in --
+/// see `place_old_tree`, which is the only thing in the world wider
+/// than a canopy.
+///
+/// Five, and every block of it is accounted for: the trunk is two
+/// columns wide, a branch runs three more out from its far side, and
+/// the clump of leaves on the end of that branch is one wider again.
+/// `no_part_of_an_old_tree_lands_further_than_the_generator_looks`
+/// checks the arithmetic against the code rather than against this
+/// comment, because a branch that reaches six is not a bug you can see
+/// -- it is a leaf missing from one side of one tree, on the chunk
+/// border, where nobody is looking.
+///
+/// `pub` for felling, which clears an old tree's crown out to it: a crown
+/// felled through the ordinary canopy's box left its far side in the air.
+pub const OLD_TREE_REACH: i32 = 5;
+
+// ---- savanna ----
+
+/// The furthest an acacia reaches from the column it is rooted in, on
+/// either axis: a lean of one column and a plate of radius four round
+/// the top of it. See `place_acacia`.
+///
+/// **Public because felling has to follow the tree the generator
+/// planted.** An acacia's crown is not over its root, so the server's
+/// `felling` clears a box this wide rather than its own canopy radius,
+/// and a number kept in two places is two numbers.
+///
+/// **No wider than an old tree**, which the assertion under it holds.
+/// `place_trees` walks a border `OLD_TREE_REACH` wide and
+/// `FEATURE_MARGIN` sizes the column cache from the same number, so an
+/// acacia that reached further would be clipped at every chunk seam: a
+/// plate with one straight side, in a savanna, where nothing else stands
+/// to hide it. Widening the border instead was rejected -- sixteen per
+/// cent more columns in every chunk's cache, in every biome, to buy one
+/// column of lean in one.
+pub const ACACIA_REACH: i32 = 5;
+
+/// One forest tree in this many is a maple. See `place_trees`.
+///
+/// Five, so a wood of oaks has red crowns standing in it wherever you
+/// look and is still, unmistakably, an oak wood: fewer and a maple is an
+/// oddity nobody sees, more and it is a second wood the climate never
+/// asked for.
+const MAPLE_SHARE: u32 = 5;
+
+/// An apple tree's trunk, before a tree of branches' own height is added to
+/// it (`branches::BRANCH_TALLER`): five blocks of trunk and a leader to six,
+/// under a crown three columns wide each way from the top. An orchard tree:
+/// its lowest fruit hangs where a player standing under it reaches, and the
+/// rest a short climb up. See `place_trees` for why it is its own size.
+const APPLE_TRUNK: i32 = 2;
+
+/// One savanna column in this many roots a tree inside a grove, and one in
+/// the other outside one. See `WorldGen::tree_at`.
+///
+/// Set so the plain as a whole has fewer trees than the even scatter it
+/// replaces (one per two hundred and forty columns): about a fifth of the
+/// savanna is grove at one tree per seventy columns, and the rest is open
+/// grass with a lone tree every two thousand -- one per three hundred and
+/// something over the whole, nearly all of them in the stands.
+const SAVANNA_GROVE_SPACING: u32 = 70;
+const SAVANNA_OPEN_SPACING: u32 = 2000;
+/// The deposit field above this is grove. See `WorldGen::savanna_grove`.
+const SAVANNA_GROVE_THRESHOLD: f64 = 0.28;
+/// One lone savanna tree in this many is a baobab. See `WorldGen::old_tree_at`.
+const SAVANNA_LONE_BAOBAB_SHARE: u32 = 4;
+
+/// One savanna column of dry ground in this many grows a tuft of dry
+/// grass. Sparser than the turf's tall grass (one in three there): a dry
+/// patch is where the grass thins out, and one as thick as the green
+/// round it would not read as a patch at all.
+const DRY_GRASS_SPACING: u32 = 4;
+
+/// **The ground's work, switched off for a measurement** (`ground`'s rock
+/// countries, soils, grasses, pinewoods, moss and rubble). A test-only switch
+/// so `what_the_ground_costs_a_chunk` compares the generator with and without
+/// it in one binary and one sitting, which is the only comparison worth
+/// having; outside tests it is a constant `true` and compiles away.
+#[cfg(test)]
+static GROUND_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[inline(always)]
+fn ground_on() -> bool {
+    #[cfg(test)]
+    {
+        !GROUND_OFF.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+/// One column in this many carries its country's own grass (`ground::GRASSES`)
+/// where the ground takes it. Sparse beside the tuft on purpose: a grass that
+/// says which country this is has to be found, not waded through.
+const COUNTRY_GRASS_SPACING: u32 = 9;
+const _: () = assert!(ACACIA_REACH <= OLD_TREE_REACH);
+
 /// How far outside the chunk a feature may be rooted and still reach
 /// into it. Everything that writes blocks is considered over the chunk
 /// plus this margin, and whatever lands outside the array is dropped --
 /// see `place_trees` for why that is the whole cross-chunk story.
-const FEATURE_MARGIN: i32 = if MAX_CANOPY_RADIUS > MAX_DEADFALL {
-    MAX_CANOPY_RADIUS
-} else {
-    MAX_DEADFALL
+///
+/// The largest of the three reaches rather than a number of its own:
+/// this is what sizes the column cache, and a margin that stopped
+/// tracking the widest feature would clip that feature at every chunk
+/// border. `ColumnCache::at` clamps out-of-range lookups, so the
+/// symptom would not be a panic -- it would be a tree built out of the
+/// wrong ground.
+const FEATURE_MARGIN: i32 = {
+    let widest = if MAX_CANOPY_RADIUS > MAX_DEADFALL {
+        MAX_CANOPY_RADIUS
+    } else {
+        MAX_DEADFALL
+    };
+    if widest > OLD_TREE_REACH {
+        widest
+    } else {
+        OLD_TREE_REACH
+    }
 };
+
+/// Which world a seed makes.
+///
+/// **A world is a generator plus a seed, not a seed alone.** The seed
+/// answers "which of these", and this answers "of what". It is carried
+/// beside the seed everywhere the seed is -- in the world's metadata
+/// file, in the server's settings, and in the handshake -- for exactly
+/// the reason the seed is: change it and the same saved edits land on
+/// completely different terrain.
+///
+/// Serialised by name rather than by number, because it is written into
+/// a `world.toml` a player can read and edit, and `preset = "test"` says
+/// what it is where `preset = 1` does not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Preset {
+    /// The world the game is about: oceans, mountains, rivers, caves -- and
+    /// trees built of branches (see `branches`).
+    ///
+    /// **There was a third preset, `branches`, and it is this one now.** The
+    /// branching trees were an experiment behind a world type of their own;
+    /// the player asked for them to be the world ("сделай мир с ветками
+    /// обычным"), so the ordinary world grows them and the type is gone from
+    /// the form. The name stays readable -- a `world.toml` or `settings.toml`
+    /// written with `branches` opens as the world it already was -- and an
+    /// ordinary world's untouched chunks grow the new trees, which is what a
+    /// change to the generator has always done to them.
+    #[default]
+    #[serde(alias = "branches")]
+    Normal,
+    /// The flat field with one of everything built on it. See the
+    /// `showcase` module for what is in it and why it exists.
+    Test,
+}
+
+impl Preset {
+    /// Every preset, in the order the new-world screen offers them.
+    pub const ALL: &'static [Preset] = &[Preset::Normal, Preset::Test];
+
+    /// What `world.toml` and `settings.toml` call it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Preset::Normal => "normal",
+            Preset::Test => "test",
+        }
+    }
+
+    /// Whether trees here are built of branches: every world but the test
+    /// field, which builds its own. See `Preset::Normal`.
+    pub fn grows_branches(self) -> bool {
+        self == Preset::Normal
+    }
+
+    /// The preset a configuration file names, or `None` if it names
+    /// nothing this build has.
+    ///
+    /// Case-insensitive: a file is typed by a person.
+    pub fn parse(name: &str) -> Option<Preset> {
+        // The branching trees' old world type is the ordinary world now.
+        if name.eq_ignore_ascii_case("branches") {
+            return Some(Preset::Normal);
+        }
+        Preset::ALL
+            .iter()
+            .copied()
+            .find(|preset| name.eq_ignore_ascii_case(preset.name()))
+    }
+
+    /// The next one round, for a screen that steps through them.
+    pub fn step(self, delta: i32) -> Preset {
+        let count = Preset::ALL.len() as i32;
+        let at = Preset::ALL.iter().position(|p| *p == self).unwrap_or(0) as i32;
+        Preset::ALL[(((at + delta) % count + count) % count) as usize]
+    }
+}
+
+/// **Where on the planet a player wakes up**, and nothing else: the
+/// latitude of the patch of globe their world is cut from.
+///
+/// ## It chooses a place, not a world
+///
+/// A seed is one planet (`PLANET_ORIGIN_DEGREES`). Every zone of a seed is
+/// the same globe read somewhere else on it -- different coast, different
+/// hills, different country, because it *is* somewhere else -- and the zone
+/// says which somewhere. The player's words for what this used to be were
+/// "the choice changes the world rather than where I wake up", and they
+/// were exactly right about the old behaviour: the fields were all read at
+/// the world's own z, so two zones of a seed were one landscape with two
+/// climates painted over it.
+///
+/// **Chosen on the new-world form, because at real scale it is the one
+/// choice nobody can make later.** The globe is life-sized (see
+/// `BLOCKS_PER_DEGREE`): a world is a patch of it a few hundred kilometres
+/// across, and the walk from one zone to the next is thousands of
+/// kilometres -- further than any `f32` position can carry a player, let
+/// alone any player's patience. So it is written beside the seed and the
+/// preset everywhere those go -- the world's `world.toml`, the server's
+/// settings, the handshake -- for their reason: the same edits on a world
+/// cut from another part of the planet are the same buildings on ground
+/// that was never there.
+///
+/// **Four zones, and the player named three.** Tropics, temperate and north
+/// were asked for; the dry belt is the fourth because the Earth's great
+/// deserts are not in the tropics -- they lie twenty to thirty degrees out,
+/// under air that has already rained -- and at real scale a desert that is
+/// no zone's home is a desert no player ever sees.
+///
+/// **No polar zone**, and that was weighed. At seventy-five degrees nothing
+/// stands but snow: no tree, so no fire, so no night survived. A start with
+/// one correct answer -- to make another world -- is not a choice.
+///
+/// Serialised by name for `Preset`'s reason: a person reads `world.toml`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Zone {
+    /// Eight degrees: hot and wet. Savanna in groves, warm marshes in the
+    /// lowlands, palms on every beach -- and a winter that is barely one.
+    Tropics,
+    /// Twenty-five degrees: hot and dry. Desert inland, savanna along the
+    /// wetter coasts, palms at the shore -- and the coconut is the water.
+    DryBelt,
+    /// Forty-five degrees: the world the game was built in. Oak and birch,
+    /// meadow and marsh, and a winter to prepare for.
+    #[default]
+    Temperate,
+    /// Sixty degrees: the edge of the boreal forest. Firs and birches,
+    /// bogs, lakes that freeze, and wool that matters.
+    North,
+}
+
+impl Zone {
+    /// Every zone, equator first, which is the order the form steps through.
+    pub const ALL: &'static [Zone] = &[Zone::Tropics, Zone::DryBelt, Zone::Temperate, Zone::North];
+
+    /// What `world.toml` and `settings.toml` call it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Zone::Tropics => "tropics",
+            Zone::DryBelt => "dry_belt",
+            Zone::Temperate => "temperate",
+            Zone::North => "north",
+        }
+    }
+
+    /// The zone a configuration file names, or `None`. Case-insensitive.
+    pub fn parse(name: &str) -> Option<Zone> {
+        Zone::ALL.iter().copied().find(|zone| name.eq_ignore_ascii_case(zone.name()))
+    }
+
+    /// The next one round, for a screen that steps through them.
+    pub fn step(self, delta: i32) -> Zone {
+        let count = Zone::ALL.len() as i32;
+        let at = Zone::ALL.iter().position(|z| *z == self).unwrap_or(0) as i32;
+        Zone::ALL[(((at + delta) % count + count) % count) as usize]
+    }
+
+    /// The latitude of a world's origin in this zone, degrees north.
+    ///
+    /// Whole degrees, because the tile cache is keyed on it (`WorldKey`) and
+    /// a float is not a key. Each sits in the middle of what the zone is for
+    /// rather than at its edge, so the weather's third of the temperature
+    /// moves a country about inside the zone and seldom out of it.
+    pub fn degrees(self) -> i32 {
+        match self {
+            Zone::Tropics => 8,
+            Zone::DryBelt => 25,
+            Zone::Temperate => 45,
+            Zone::North => 60,
+        }
+    }
+
+    /// How far north of the planet's own row zero a world laid in this zone
+    /// wakes its player, in blocks. Negative is south.
+    ///
+    /// **This is the answer to "where on the planet am I".** It is not the
+    /// player's z -- their z is near zero wherever they are, which is the
+    /// whole of `PLANET_ORIGIN_DEGREES` -- it is where the patch of planet
+    /// they are standing on was cut from. The new-world form says it in
+    /// degrees, which is the unit a person has; this is the same fact in
+    /// blocks, for the tests and the diagnostics.
+    pub fn planet_z(self) -> i32 {
+        planet_origin_z(self.degrees())
+    }
+}
+
+/// The branching trees. A child of this module rather than a module of
+/// the crate, because a tree is written with this file's own private tools
+/// -- the root hash, the column cache, `put_block` -- and a sibling would
+/// have to be handed all of them. Every ordinary world grows them; see
+/// `Preset::grows_branches`.
+mod branches;
+// What the server needs to grow a young tree in a world of experimental
+// trees: the shapes it passes through, and which one stands at a column.
+// ...and how far one reaches from its root, which felling needs: a tree of
+// branches carries its crown out to `BRANCH_REACH`, further than the log
+// broadleaf's `MAX_CANOPY_RADIUS` it replaced, and a fall that cleared only
+// the narrower box left the rim of every crown hanging in the air. See
+// `primitive_server::logic::felling::fell_branches`.
+pub use branches::{
+    stem_of, tree_stage_cells, young_tree_variant, BRANCH_REACH, GROWN_FOOT, TREE_STAGES,
+};
+
+/// The ruins of the first settlers, wherever there is dry level ground.
+/// A child for `branches`' reason: it builds with this file's column
+/// tiles, root hash and `put_block`.
+mod ruins;
+pub use ruins::{ruin_chest_loot, ruins_in, Ruin, RuinKind};
+
+/// Finds that nobody built: rock shelters, fallen giants, berry thickets,
+/// knapping floors and rings of mushrooms. A child for the ruins' reason,
+/// and judged the ruins' way, from the column tiles -- see its module note.
+mod features;
+pub use features::{features_in, Feature, FeatureKind};
+
+/// The world at the scale of the Earth: oceans, climate provinces and
+/// mountain countries hundreds of kilometres across, laid over the landscape
+/// a player walks through. See its module note.
+mod scale;
+/// Which way a river's water runs and how fast: the fall of the country
+/// along its channel, worked out on both sides of the wire. See its module
+/// note.
+mod currents;
+pub use currents::RAPID_SPEED;
+/// The edges of rivers: a width that wanders, a cut bank on the outside of a
+/// bend and a bar on the inside, and what the margin is made of. See its
+/// module note.
+mod banks;
+/// Its tests, apart for `surface_metal_tests`' reason.
+#[cfg(test)]
+mod banks_tests;
+/// Underground lakes and flooded passages: a bounded fill from a seed per
+/// site, closed by construction so no chunk seam or open passage ever has a
+/// wall of water standing against it. See its module note.
+mod cave_water;
+/// Its tests, apart for `surface_metal_tests`' reason.
+#[cfg(test)]
+mod cave_water_tests;
+/// Where the first metals lie on the surface: native copper over the lodes,
+/// stream tin on the banks of tin country. A file of its own so the tests do
+/// not sit in the middle of a file several hands are editing at once.
+#[cfg(test)]
+mod surface_metal_tests;
+
+/// Where the wild hives are, in its own file for `surface_metal_tests`' reason.
+#[cfg(test)]
+mod hive_tests;
+pub use scale::Scale;
 
 pub struct WorldGen {
     seed: u32,
+    /// Which generator this is. See `Preset`.
+    preset: Preset,
+    /// Where on the planet this world is laid. See `Zone`.
+    zone: Zone,
+    /// The latitude of the origin, whole degrees north: the zone's own,
+    /// or whatever latitude a test lays a world at.
+    origin_degrees: i32,
+    /// Where this world's own origin lies on the planet, in blocks. The row
+    /// is the zone's latitude; the meridian is the nearest one to the
+    /// planet's own with dry land on it. See `on_planet` and
+    /// `meridian_with_land`.
+    planet_origin: (i32, i32),
+    /// Which scale the country is drawn at. See `Scale`.
+    scale: Scale,
     continent_noise: Perlin,
     erosion_noise: Perlin,
     ridge_noise: Perlin,
@@ -251,8 +1269,26 @@ pub struct WorldGen {
     /// The middle of the world's three scales. See `hills`.
     hill_noise: Perlin,
     /// Where the rock is mineralised at all. What is *in* a vein is a
-    /// second question, and a much cheaper one -- see `ore_at`.
+    /// second question, and one only asked of rock that passed this one
+    /// -- see `ore_at`.
     vein_noise: Perlin,
+    /// What makes a lake's shore a shore rather than a compass circle.
+    /// See `lake_reach`.
+    lake_noise: Perlin,
+    /// Which metal a district of the world holds. Low frequency and flat
+    /// (x and z only), because it answers a question about *country*
+    /// rather than about a cell: it is what makes tin somewhere you go
+    /// rather than something you eventually hit. See `ore_at`.
+    province_noise: Perlin,
+    /// How much of a body is metal rather than coal. Read only inside a
+    /// vein, so it costs a sample in about one cell of rock in two
+    /// hundred.
+    mineral_noise: Perlin,
+    /// How thick the upper rock is here, and where the granite line
+    /// runs. One flat field for both, read once per column, so a
+    /// stratum boundary wanders the way a real bed does instead of
+    /// lying at one depth across the whole world. See `stratum`.
+    strata_noise: Perlin,
 }
 
 /// What lives on top of a column, and what the soil under it is made of.
@@ -260,7 +1296,12 @@ pub struct WorldGen {
 struct Surface {
     top: crate::types::BlockId,
     filler: crate::types::BlockId,
-    /// How many cells of `filler` sit between `top` and the rock.
+    /// How many cells of soil there are over the rock, `top` included:
+    /// `fill_column` puts the first rock at `height - soil`, so a soil
+    /// of four is the turf and three of `filler` under it. Said
+    /// precisely because the bog's peat is written against it, and an
+    /// off-by-one here is a bog with one layer of peat where the manual
+    /// promises two.
     ///
     /// A number rather than the old fixed `DIRT_DEPTH` because soil
     /// depth is most of what tells a floodplain from a mountainside when
@@ -269,6 +1310,16 @@ struct Surface {
     /// rock and a valley floor is metres of it. See `surface_for`.
     soil: i32,
 }
+
+/// How much rarer every berry is than the numbers it was tuned at.
+///
+/// **Three**, because the player asked for exactly that, and applied to the
+/// bush, the bilberry and the strawberry together -- thinning one would only
+/// move the pickers to the other two. Written as a factor rather than folded
+/// into the spacings so the argument each spacing makes against its
+/// neighbours (the edge of a wood before its middle, the taiga before the
+/// tundra) is still readable in the numbers it started from.
+const BERRY_THINNING: u32 = 3;
 
 /// A named region of the world.
 ///
@@ -287,6 +1338,17 @@ pub enum Biome {
     Ocean,
     Beach,
     Desert,
+    /// Hot country that is not dry enough to be desert: straw grass to
+    /// the horizon, flat-topped acacias standing far apart, and the odd
+    /// termite mound.
+    ///
+    /// **One name for one place.** The enum called it savanna and the
+    /// tree table called it steppe, and what it grew was neither -- an
+    /// oak every two hundred columns, tinted the colour of the grass.
+    /// What makes a savanna read as one from a distance is the tree
+    /// rather than the grass: a wide, thin plate on a crooked stem (see
+    /// `place_acacia`). So that is what it grows now, and the name is
+    /// the same everywhere.
     Savanna,
     Plains,
     Forest,
@@ -304,6 +1366,24 @@ pub enum Biome {
     /// would be a texture change; a birch wood is a place.
     BirchForest,
     Swamp,
+    /// A cold bog: standing water on flat, sodden ground, with dead
+    /// wood in it and nothing living.
+    ///
+    /// **The swamp's cold twin, and the one hole left in the climate
+    /// grid.** Every other corner of it is somewhere: hot and dry is
+    /// desert, hot and not dry is savanna, temperate and wet is swamp,
+    /// cold and dry is tundra. Cold and *wet* was taiga, which is not
+    /// wet, it is merely not dry -- so the wettest cold country in the
+    /// world was a pine forest.
+    ///
+    /// It exists for what it does to a player rather than for the gap.
+    /// Cold and wet together are the two things clothing answers
+    /// separately, and the bog is the one place that asks both
+    /// questions at once: wool is the warmest thing there is and soaks
+    /// through (see `equipment::garment`), leather is half as warm and
+    /// sheds. Every other biome has a right answer. This one has a
+    /// trade.
+    Bog,
     Taiga,
     Tundra,
     Mountains,
@@ -337,6 +1417,7 @@ impl Biome {
             Biome::DeadForest => "dead forest",
             Biome::BirchForest => "birch forest",
             Biome::Swamp => "swamp",
+            Biome::Bog => "bog",
             Biome::Taiga => "taiga",
             Biome::Tundra => "tundra",
             Biome::Mountains => "mountains",
@@ -347,6 +1428,14 @@ impl Biome {
 
     /// Every biome, for tests and for anything that wants to enumerate
     /// them. Keeping this next to the enum is what stops it going stale.
+    ///
+    /// **The order is now an identity rather than a convenience.** A
+    /// position in this list is what a native mod is handed for a biome
+    /// (see `primitive_modapi::GenerationApi::biome_at`), because an
+    /// enum discriminant is not a stable thing to promise across a
+    /// compiler version and a position in a named list is. So a new
+    /// biome goes on the **end**: inserting one in the middle renames
+    /// every biome after it as far as every mod is concerned.
     pub const ALL: &'static [Biome] = &[
         Biome::Ocean,
         Biome::Beach,
@@ -357,6 +1446,7 @@ impl Biome {
         Biome::DeadForest,
         Biome::BirchForest,
         Biome::Swamp,
+        Biome::Bog,
         Biome::Taiga,
         Biome::Tundra,
         Biome::Mountains,
@@ -383,6 +1473,14 @@ impl Biome {
             // it is what makes a dead forest read as one from a
             // distance rather than as a forest that lost its leaves.
             Biome::DeadForest => (BLOCK_DIRT, BLOCK_DIRT),
+            // Turf over peat rather than over dirt. A bog is a place
+            // where dead plants did not rot because the water kept the
+            // air out, and that is what peat is -- so it is the
+            // *soil* of a bog, and dirt under a bog would be the one
+            // biome whose ground disagrees with what it is for. How
+            // deep it goes, and where the turf gives way to bare peat,
+            // is decided per column in `build_column_tile`.
+            Biome::Bog => (BLOCK_GRASS, BLOCK_PEAT),
             // **Not bare rock by default.** Soil does not stay on a
             // steep peak -- but `surface_for` already strips it from
             // anything steep, and saying it twice paved the flat parts
@@ -390,6 +1488,9 @@ impl Biome {
             // meadow; the faces around it are rock because they are
             // faces, not because they are high.
             Biome::Mountains => (BLOCK_GRASS, BLOCK_DIRT),
+            // Turf in the dry season. See `types::BLOCK_DRY_TURF` for why a
+            // savanna's floor is its own block rather than a tint.
+            Biome::Savanna => (crate::types::BLOCK_DRY_TURF, BLOCK_DIRT),
             _ => (BLOCK_GRASS, BLOCK_DIRT),
         };
         Surface {
@@ -402,29 +1503,65 @@ impl Biome {
     /// One tree per this many columns. `None` means nothing grows.
     fn tree_spacing(self) -> Option<u32> {
         match self {
-            Biome::Forest => Some(22),
+            // **Fourteen, and it was twenty-two: "сделай леса темнее".** A
+            // wood's floor is lit sideways through its trunks from the gaps,
+            // so what darkens it is how much of it is closed, not how thick a
+            // leaf is (see `types::BLOCK_LEAVES`' row). At twenty-two under
+            // half an oak wood's floor stood under a crown and the floor
+            // averaged fourteen of fifteen; see
+            // `the_floor_under_a_wood_is_darker_than_the_open_ground_beside_it`
+            // for what fourteen measures. What stands per tree -- old trees,
+            // apple trees -- is scaled to keep its distance
+            // (`old_tree_share`, `fruit_share`).
+            Biome::Forest => Some(14),
             // Thinner than an oak wood. Birch stands are open at the
             // floor -- that is what they look like -- and the pale
             // trunks only read as trunks if you can see between them.
             Biome::BirchForest => Some(30),
             Biome::Swamp => Some(30),
-            Biome::Taiga => Some(28),
+            // Sparser than the swamp it is the cold twin of, and what
+            // stands is dead -- see `dead_wood`. A bog kills trees; it
+            // does not grow them, and a stand of healthy conifers in
+            // one would say the opposite of everything else about the
+            // place.
+            Biome::Bog => Some(48),
+            // Eighteen, and it was twenty-eight, for the oak wood's reason: a
+            // taiga is the darkest wood there is under its firs.
+            Biome::Taiga => Some(18),
             // Dense, because a wood of bare trunks only reads as a wood
             // if there are enough of them to close the view.
             Biome::DeadForest => Some(26),
             Biome::Plains => Some(140),
-            // Steppe: grass to the horizon and the occasional tree, so
-            // the eye has something to measure the distance against.
-            Biome::Savanna => Some(210),
+            // Grass to the horizon and an acacia every so often, so the
+            // eye has something to measure the distance against.
+            //
+            // **Set from the picture from above, and further apart than
+            // the oaks were.** A plate nine across is about fifty cells
+            // from above, so one tree per N columns shades 50/N of the
+            // plain. A hundred and seventy was tried first -- under a
+            // third on paper -- and `what_a_savanna_looks_like` showed
+            // what the arithmetic hides: trees rooted by a hash clump,
+            // and in the middle of the square the plates ran together
+            // into one pale sheet. That is a wood with a lawn under it.
+            // Two hundred and forty is a fifth in shade before the
+            // ground refuses any, which leaves every plate standing on
+            // its own against the grass.
+            Biome::Savanna => Some(240),
             // The treeline, and the whole reason it reads as one: a
             // handful of firs standing a long way apart in the snow,
             // thinning to nothing as the ground rises. Sparse enough
             // that the tundra is still open country.
             Biome::Tundra => Some(90),
+            // **A saxaul every hundred and sixty columns**: a desert is sand
+            // to the horizon with a grey tree standing in it now and then,
+            // far enough apart that each is a thing to walk to -- the one
+            // fire and the one shade for a stretch of dunes. It grew nothing
+            // at all, and "в пустыне растёт то же дерево, что и в лесу" was
+            // the palms and acacias at its edges wearing the oak's timber.
+            Biome::Desert => Some(160),
             Biome::Ocean
             | Biome::River
             | Biome::Beach
-            | Biome::Desert
             | Biome::Mountains
             // Above the treeline nothing stands. A bare peak is what
             // makes the firs below it read as a treeline rather than as
@@ -435,15 +1572,26 @@ impl Biome {
 
     /// What shape the trees here are.
     ///
-    /// Two shapes, and the difference between them is most of what
-    /// tells a cold forest from a temperate one at any distance where
-    /// you cannot see a single leaf: a fir is a spire that starts near
-    /// the ground and narrows all the way up, and a broadleaf is a bare
-    /// trunk with a ball on top. Built from the same two blocks; only
-    /// the arrangement changes.
+    /// Four shapes, and the difference between them is most of what
+    /// tells one wood from another at any distance where you cannot see
+    /// a single leaf: a fir is a spire that starts near the ground and
+    /// narrows all the way up, a broadleaf is a bare trunk with a ball
+    /// on top, a birch is a mast that shows its own bark through a small
+    /// crown, and an acacia is a crooked stem holding up a flat plate.
+    /// Built from a log and a leaf every time; only the arrangement
+    /// changes.
+    ///
+    /// **The birch is a shape and not just a wood**, which is the one
+    /// place this table and `tree_wood` are allowed to agree. See
+    /// `place_birch`: an oak's outline drawn in white bark is an oak,
+    /// and the thing a player recognises a birch stand by from the far
+    /// side of a valley is the trunks standing clear of the leaves.
     fn tree_kind(self) -> TreeKind {
         match self {
             Biome::Taiga | Biome::Tundra => TreeKind::Conifer,
+            Biome::BirchForest => TreeKind::Birch,
+            Biome::Savanna => TreeKind::Acacia,
+            Biome::Desert => TreeKind::Saxaul,
             _ => TreeKind::Broadleaf,
         }
     }
@@ -454,10 +1602,136 @@ impl Biome {
     /// independently, and saying so is what keeps a third wood from
     /// needing a third shape or a fourth shape from needing a fourth
     /// wood.
+    /// **Is this country wet and shaded enough for moss?** The woods that
+    /// hold their rain -- the broadleaf, the birch wood, the taiga -- and the
+    /// swamp, the bog and the river country. Not the tundra, which is cold
+    /// and dry; not the mountains, whose stone is sun and wind. See
+    /// `ground::MOSSY`.
+    pub fn grows_moss(self) -> bool {
+        matches!(
+            self,
+            Biome::Forest | Biome::BirchForest | Biome::Taiga | Biome::Swamp | Biome::Bog | Biome::River
+        )
+    }
+
     fn tree_wood(self) -> (BlockId, BlockId) {
         match self {
             Biome::BirchForest => (BLOCK_BIRCH_LOG, BLOCK_BIRCH_LEAVES),
+            // An oak's timber under a leaf of its own. The leaf has to be
+            // its own -- see `types::BLOCK_ACACIA_LEAVES` -- and the
+            // timber does not: a third wood is a third plank and a third
+            // stack in every chest, for a tree nobody builds with
+            // differently.
+            Biome::Savanna => (BLOCK_LOG, BLOCK_ACACIA_LEAVES),
+            // **A fir is fir, bark and crown.** It was the oak's log under
+            // the oak's leaf in a cold tint, which made the taiga an oak wood
+            // drawn in spires: the same planks from the Arctic to the
+            // savanna. See `wood`.
+            Biome::Taiga | Biome::Tundra => (crate::types::BLOCK_FIR_LOG, crate::types::BLOCK_FIR_NEEDLES),
+            Biome::Desert => (crate::types::BLOCK_SAXAUL_LOG, crate::types::BLOCK_SAXAUL_LEAVES),
+            // **A swamp's trees are willows**: the tree that stands with its
+            // feet wet. Their shape is the broadleaf's, built of pieces, and
+            // the pieces are willow (`branches::bark_for`). The taiga's pines
+            // are a roll in `place_trees`, not a biome: see `pine_wood_at`.
+            Biome::Swamp => (crate::types::BLOCK_WILLOW_LOG, crate::types::BLOCK_WILLOW_LEAVES),
             _ => (BLOCK_LOG, BLOCK_LEAVES),
+        }
+    }
+
+    /// One tree in how many bears fruit here, or `None` where none does.
+    ///
+    /// **Rare on purpose, and rarest where the trees are thickest.** One
+    /// in fourteen across a forest is a tree every few minutes of
+    /// walking, which is what makes finding one worth remembering; one
+    /// in six on the plains is the same tree far more often, because a
+    /// plain has a tree every hundred and forty columns to begin with
+    /// (`tree_spacing`) and one apple tree per province is not a
+    /// mechanic, it is a rumour.
+    ///
+    /// Nothing fruits in the cold, the dead wood, the swamp or the
+    /// savanna: an orchard tree is a temperate broadleaf, and a bog is
+    /// where the peat is instead.
+    fn fruit_share(self) -> Option<u32> {
+        match self {
+            // Twenty-two since the oak wood closed up to a tree in fourteen
+            // columns (`tree_spacing`), which is the old one in fourteen
+            // trees at the old spacing: as many apple trees to the square
+            // kilometre as there were.
+            Biome::Forest => Some(22),
+            Biome::BirchForest => Some(18),
+            Biome::Plains => Some(6),
+            _ => None,
+        }
+    }
+
+    /// One tree in how many here is an old one, or `None` where none
+    /// is. See `place_old_tree` for what an old tree looks like.
+    ///
+    /// ## Why the number is this large
+    ///
+    /// **A landmark stops being one the moment there are two of them in
+    /// sight.** An old tree is four times the height of its neighbours
+    /// and eight blocks across the crown; the whole of what it is for
+    /// is being the thing you say "meet me at" about, and a wood with
+    /// one every fifty blocks has scenery instead of landmarks.
+    ///
+    /// So the share is set from the distance rather than from the odds.
+    /// A forest puts a tree on one column in twenty-two
+    /// (`tree_spacing`), so one old tree in four hundred trees is one
+    /// per eight or ten thousand columns. Measured by
+    /// `how_often_an_old_tree_stands` over a million columns at three
+    /// seeds: 45,511 trees of which 121 rolled old, one every 8,264
+    /// columns -- a square ninety-one blocks on a side; the other two
+    /// seeds gave 103.
+    ///
+    /// **And the ground then refuses about three in ten of them**,
+    /// because a bole two columns wide wants four columns of level
+    /// ground of the same material and a wood on a hillside has not
+    /// got them (see `place_trees`). Measured over nine million
+    /// columns of real world: 79 rolled and 58 stood, 40 rolled and 27
+    /// stood. So what a player actually walks past is an old tree
+    /// every hundred and fifteen to a hundred and twenty blocks of
+    /// closed wood -- near enough that you can usually see the last one
+    /// from the next, which is the property that makes one useful for
+    /// finding your way, and far enough that two are never in the same
+    /// clearing.
+    ///
+    /// The swamp's share is lower because its trees are already thinner
+    /// on the ground (one column in thirty), and the two numbers
+    /// multiply out to the same hundred-odd blocks: an old tree should
+    /// be the same *distance* apart in both, not the same fraction of a
+    /// wood that has fewer trees in it.
+    ///
+    /// Only in the two closed broadleaf woods, and that is a judgement
+    /// about legibility rather than about botany. In a forest or a
+    /// swamp an old tree stands out of a canopy that is already there,
+    /// and the silhouette reads instantly. On a plain or a steppe every
+    /// tree already stands alone against the sky, so a bigger one would
+    /// just be the same picture at a different size -- and in a taiga
+    /// or a birch wood the trees are tall and narrow by design, which
+    /// is the one silhouette a fat spreading crown would contradict.
+    ///
+    /// **The savanna is the exception, and its old tree is not an old
+    /// oak.** The argument above is that on open ground a bigger tree is
+    /// the same silhouette at a different size -- true of an oak, and not
+    /// of a baobab, which is the reverse of every acacia round it: all
+    /// trunk and hardly any crown (`place_baobab`). One savanna tree in
+    /// thirty, at a tree every two hundred and forty columns, is one per
+    /// seven thousand columns before the ground refuses its level square
+    /// -- a landmark every hundred-odd blocks of open grass, where you can
+    /// see one from the last.
+    fn old_tree_share(self) -> Option<u32> {
+        match self {
+            // **Six hundred and thirty, and it was four hundred** -- the
+            // numbers above were measured at a tree in twenty-two columns.
+            // The oak wood closed up to a tree in fourteen (`tree_spacing`),
+            // and an old tree is a landmark by its *distance*, so its share
+            // of the trees is scaled by the same twenty-two fourteenths: the
+            // same old tree every ninety-odd blocks of wood.
+            Biome::Forest => Some(630),
+            Biome::Swamp => Some(300),
+            Biome::Savanna => Some(30),
+            _ => None,
         }
     }
 
@@ -476,11 +1750,27 @@ impl Biome {
             // the same tree at the edge of where it can grow at all.
             Biome::Taiga => (7, 11, 2),
             Biome::Tundra => (5, 8, 2),
-            Biome::Swamp => (3, 5, 3),
-            Biome::Savanna => (4, 6, 3),
+            // **A swamp's crowns are broad, and they start overhead.** The
+            // canopy's two widest layers hang two and one below the top of
+            // the trunk (`place_tree`), so a trunk of three laid a slab of
+            // leaves seven across on the ground beside its root, and the
+            // first thing a player met walking into a swamp was a hedge at
+            // eye height. Five is the shortest trunk whose lowest leaves
+            // leave two cells of air over the ground, which a player fits
+            // under -- and the hanging moss has somewhere to hang. See
+            // `a_swamp_tree_holds_its_crown_over_a_standing_player`.
+            Biome::Swamp => (5, 7, 3),
+            // An acacia: a short stem and a wide plate. The radius is the
+            // plate's, round the top of a stem that leans -- see
+            // `place_acacia`, and `ACACIA_REACH` for what the two add up
+            // to.
+            Biome::Savanna => (4, 7, 4),
             // Tall and narrow for a broadleaf: a birch is a mast with a
             // small crown, which is the whole of its silhouette.
             Biome::BirchForest => (6, 10, 2),
+            // A saxaul: a trunk a little over a person's height and a thin
+            // crown. See `place_saxaul`.
+            Biome::Desert => (3, 5, 2),
             _ => (4, 7, 2),
         }
     }
@@ -494,17 +1784,31 @@ impl Biome {
     /// ground: plains are a field, a forest floor is patchier because
     /// the trees have it, steppe is grass and little else, and a dead
     /// forest is bare.
+    ///
+    /// **Thicker everywhere it grows, by about half** ("сделай растительность
+    /// гуще"): a meadow at one tuft in three was a lawn with tufts on it, and
+    /// a forest floor at one in seven was bare earth under the trees. The
+    /// cost is cutout geometry -- a tuft is two crossed quads -- and one in
+    /// two is where a field reads as grass without every column paying.
     fn grass_spacing(self) -> Option<u32> {
         match self {
-            Biome::Plains => Some(3),
-            Biome::Savanna => Some(4),
-            Biome::Forest => Some(7),
+            Biome::Plains => Some(2),
+            // As thick as a meadow's. A savanna *is* its grass -- with the
+            // trees far apart, it is the ground you are looking at -- and
+            // while it was thinner than a meadow's it read as a meadow in
+            // a drought.
+            Biome::Savanna => Some(2),
+            Biome::Forest => Some(4),
             // Sparser than an oak floor, which is what an open stand of
             // birch looks like underfoot: light gets in, but there is
             // not much soil to hold anything.
-            Biome::BirchForest => Some(9),
-            Biome::Swamp => Some(5),
-            Biome::Taiga => Some(14),
+            Biome::BirchForest => Some(5),
+            Biome::Swamp => Some(3),
+            // Sedge rather than meadow grass, and thin. Somewhere
+            // between the marsh and the taiga, which is where the bog
+            // is in every other column of these tables too.
+            Biome::Bog => Some(7),
+            Biome::Taiga => Some(8),
             Biome::DeadForest
             | Biome::Ocean
             | Biome::River
@@ -524,12 +1828,82 @@ impl Biome {
     /// nearly as thick with them, because an ordinary wood is where a
     /// player actually starts, and a forest floor with a stick every
     /// seventeen columns is one you can cross without finding any.
-    fn stick_spacing(self) -> Option<u32> {
+    ///
+    /// **`shaded` is the whole of "добавь в леса больше палок".** A stick
+    /// falls off a branch, so the place to look for one is under the
+    /// branch -- and until this took the shade into account the answer
+    /// for a wood was one number for the whole biome, which put exactly
+    /// as many sticks in a clearing as under a closed crown. A player
+    /// walking a wood therefore found them at the rate of a meadow's
+    /// litter: present, and never where they were looking.
+    ///
+    /// Under a crown they are two to three times thicker; in the gaps
+    /// the old number stands. That is the shape the player asked for --
+    /// "палки логично лежат под деревьями" -- and it is also the reason
+    /// the floor does not become a carpet: the shaded roll runs *after*
+    /// the ferns, the bilberry and the bracken have taken their cells,
+    /// so a closed wood spends most of its floor on the forest floor and
+    /// the sticks lie in what is left. See
+    /// `a_wood_is_thick_with_sticks_under_its_crowns_and_not_a_carpet_of_them`,
+    /// which counts both and fails either way round.
+    ///
+    /// **Measured, over twelve solid chunks of oak wood**: one in four
+    /// rolled under the crowns comes out as 16.8% of the shaded floor,
+    /// against 7.3% of the open floor at one in ten -- so the whole
+    /// change is that a shaded column is a shade over twice as likely to
+    /// have a stick on it. One in five was tried and is 12.9%, which is
+    /// under twice the open ground and not a difference a player walking
+    /// through notices; that is the number this exists to beat.
+    ///
+    /// `shaded` is only ever true in the four woods `has_forest_floor`
+    /// names, which is why every other row here ignores it: a bog and a
+    /// savanna have one number because neither has a canopy to stand
+    /// under.
+    ///
+    /// Rejected: *sticks only under crowns*. A wood's clearing is where
+    /// the deadfall and the fallen trees are, and a clearing swept bare
+    /// of sticks would read as tidied rather than open.
+    fn stick_spacing(self, shaded: bool) -> Option<u32> {
         match self {
             Biome::DeadForest => Some(9),
-            Biome::Forest => Some(10),
-            Biome::Taiga => Some(13),
-            Biome::Swamp => Some(16),
+            // One in three under the crowns, and it was one in four: when the
+            // ferns and bracken were thickened ("сделай растительность
+            // гуще") they took more of the shaded floor before the sticks are
+            // rolled, and one in four came out at 13.4% against 6.9% in the
+            // open -- under twice, which is the difference this row exists
+            // to make.
+            Biome::Forest => Some(if shaded { 3 } else { 10 }),
+            Biome::Taiga => Some(if shaded { 5 } else { 13 }),
+            Biome::Swamp => Some(if shaded { 7 } else { 16 }),
+            // **A birch wood had none at all**, which is the other half of
+            // the report: it is a wood, it is full of standing timber, and
+            // the row simply was not written when the biome was added. It
+            // gets the forest's numbers, a shade thinner in the open --
+            // birches stand further apart than oaks, so a birch clearing is
+            // a wider one.
+            Biome::BirchForest => Some(if shaded { 4 } else { 12 }),
+            // Thicker with fallen wood than a dead forest, and it is
+            // the one thing a bog is generous with: everything that
+            // ever stood here came down, and nothing carried it away.
+            // It is also the only reason to walk into one -- a player
+            // crossing a bog leaves with an armful of firewood, which
+            // is a small mercy in a place that has no food.
+            Biome::Bog => Some(7),
+            // **The savanna had none, and it is where they matter most.**
+            // "в саванне нету палок": a player who wakes in the dry belt
+            // has grass to the horizon, an acacia every couple of hundred
+            // columns and no branch within reach -- and every first tool
+            // wants a stick, so the opening was a walk to the nearest
+            // wood before anything could be made. Thornwood litters the
+            // ground under a savanna and nothing rots it, so the sticks
+            // are there -- thinner than a forest's (ten) and a taiga's
+            // (thirteen), because the trees they came from are far apart:
+            // one a couple of dozen columns is a stick in sight wherever
+            // you stand in the grass, and an armful is a walk, not a
+            // stroll. Rejected: sticks only under the acacias, which is
+            // one ring of ground cover per two hundred and forty columns
+            // -- the same empty plain with a few lucky circles in it.
+            Biome::Savanna => Some(24),
             _ => None,
         }
     }
@@ -543,15 +1917,530 @@ impl Biome {
         }
     }
 
+    /// One berry bush per this many columns.
+    ///
+    /// **The most consequential spacing table in the file**, because a
+    /// bush is the first food in a world and hunger is now a thing that
+    /// happens. The numbers say where a player can live off the land and
+    /// where they cannot, and they are deliberately uneven: temperate
+    /// country feeds you, the far north and the desert do not, and the
+    /// difference between the two is meant to be something a player
+    /// notices by walking rather than by reading.
+    ///
+    /// Rarer than grass everywhere it grows at all -- a meadow with a
+    /// bush every third column would be a meadow you never have to
+    /// leave.
+    ///
+    /// **Halved in 1.5, on purpose.** With a bush every thirty-eight
+    /// columns a player never had to solve food at all: walking in a
+    /// straight line fed them, and the fire, the rack, the field and the
+    /// hunt were all optional the whole game. Foraging is now what it
+    /// should have been -- something that keeps you going between meals
+    /// rather than the meal -- and the answer to hunger is meant to be a
+    /// thing you *built*. The animals were left alone: a nerf to both at
+    /// once is a starving world, and the one that had to give is the one
+    /// that costs nothing to gather.
+    /// **Thinned again, and this time only where it was generous.** The
+    /// halving above fixed the walk-in-a-straight-line diet; what it
+    /// left was a hedgerow economy in the four warm biomes, where a
+    /// player crossing a wood still passed enough bushes to top up
+    /// without ever stopping. These four are now half again what they
+    /// were and the cold ones are untouched, because the cold ones were
+    /// already the answer they should be: the difference between a
+    /// forest and a tundra has to stay something a player feels, and
+    /// thinning the tundra past *nothing* is not possible anyway.
+    ///
+    /// One bush per hundred and ten columns in a forest is a bush about
+    /// every ten paces of walking on a straight line -- close enough
+    /// that the wood is still the place with food in it, far enough
+    /// that a day's food is a detour rather than a by-product. The
+    /// hunt, the fire and the field are what feed a player; this is
+    /// what gets them to the fire.
+    fn berry_spacing(self) -> Option<u32> {
+        // **Every number here is three times what it was** ("сделай ягод
+        // в 3 раза меньше"). Berries were the food a player never had to
+        // think about: a walk through any wood filled the pack, and the
+        // hunt -- the food that costs a decision -- was optional. See
+        // `BERRY_THINNING`.
+        match self {
+            // The edge of a wood is where they actually grow: light and
+            // soil at once.
+            Biome::Forest => Some(110 * BERRY_THINNING),
+            Biome::BirchForest => Some(99 * BERRY_THINNING),
+            Biome::Plains => Some(132 * BERRY_THINNING),
+            Biome::Swamp => Some(144 * BERRY_THINNING),
+            // Sparse in the cold, and absent past it. A taiga will feed
+            // a patient player; a tundra will not feed anybody, which is
+            // what makes walking into one a decision.
+            Biome::Taiga => Some(150 * BERRY_THINNING),
+            Biome::Savanna => Some(180 * BERRY_THINNING),
+            Biome::DeadForest
+            | Biome::Tundra
+            // **Nothing to eat, on purpose.** The swamp feeds a player
+            // who is willing to be wet; the bog does not feed anybody.
+            // A place that is cold, sodden and has food in it is a
+            // place to camp, and this one is meant to be a place to get
+            // across.
+            | Biome::Bog
+            | Biome::Ocean
+            | Biome::River
+            | Biome::Beach
+            | Biome::Desert
+            | Biome::Mountains
+            | Biome::SnowyPeaks => None,
+        }
+    }
+
+    /// One bush per this many columns, or `None` where nothing bushy
+    /// grows.
+    ///
+    /// Thickest where a wood meets the open -- which is where scrub
+    /// actually is, and where it is worth having: the edge of a forest
+    /// should be something you push through rather than a line you step
+    /// over. Sparse inside a closed canopy (little light reaches the
+    /// floor), absent from the desert, the tundra, the peaks and the
+    /// water.
+    ///
+    /// The numbers are per *column*, so a spacing of 60 is a bush every
+    /// eight paces or so along a straight line -- thick enough to be
+    /// undergrowth and thin enough to walk through. See `place_bushes`
+    /// for why this costs nothing to draw.
+    fn bush_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Forest => Some(70),
+            Biome::BirchForest => Some(60),
+            Biome::Taiga => Some(90),
+            Biome::Plains => Some(120),
+            Biome::Savanna => Some(150),
+            Biome::Swamp => Some(80),
+            // A dead wood keeps its scrub: dead standing timber does not
+            // stop things growing under it, and the bog's few bushes are
+            // most of what stands up out of it at all.
+            Biome::DeadForest => Some(110),
+            Biome::Bog => Some(140),
+            _ => None,
+        }
+    }
+
+    /// One stand of wild wheat per this many columns, or `None` where
+    /// cereal does not grow.
+    ///
+    /// **The only source of seed in the world**, so this table decides
+    /// where farming is possible at all -- and it is deliberately not
+    /// everywhere. Wild einkorn is a plant of open, warm, dry country:
+    /// the savanna first, the meadow after it, the dry edge of a
+    /// woodland last. It is absent from every cold and every wet biome,
+    /// which means a player who starts in the north has to walk south
+    /// before they can plant anything, and that walk is the price of
+    /// the first field.
+    ///
+    /// Rarer than berries everywhere it grows, because it is a *thing
+    /// to find* rather than a thing to eat: one stand is a handful of
+    /// seed, and a handful of seed is a field. See
+    /// `types::BLOCK_WILD_WHEAT`.
+    fn wild_wheat_spacing(self) -> Option<u32> {
+        match self {
+            // The savanna is where it comes from, and it is still the
+            // richest -- but thinner than it was, because the savanna has
+            // cotton to find now too (`wild_cotton_spacing`), and a place
+            // with every wild crop at its thickest is a place a player
+            // never has to leave.
+            Biome::Savanna => Some(170),
+            Biome::Plains => Some(190),
+            // The dry edge of a wood, and nothing under a closed canopy.
+            Biome::Forest => Some(320),
+            _ => None,
+        }
+    }
+
+    // ---- savanna ----
+
+    /// One stand of wild cotton per this many columns, or `None` where it
+    /// does not grow.
+    ///
+    /// **The savanna and nowhere else**, and that is the whole of what
+    /// makes it a reason to go there: the plant cloth is spun from grows
+    /// wild in hot, open country, so a player who wants to grow it has to
+    /// walk to where it grows first -- the wheat's arrangement, one
+    /// climate further south. About as common as the wheat beside it,
+    /// because what a stand gives is seed and a field is made from a
+    /// handful. See `types::BLOCK_WILD_COTTON`.
+    fn wild_cotton_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Savanna => Some(160),
+            _ => None,
+        }
+    }
+
+    /// One termite mound per this many columns, or `None` where none
+    /// stands. See `place_termite_mounds` for what the ground refuses.
+    ///
+    /// Savanna only: the insect that builds them wants heat and a dry
+    /// season, and a mound anywhere else would be a savanna's landmark in
+    /// the wrong country.
+    ///
+    /// **Set from what stands, not from what is rolled.** The ground
+    /// refuses about half the rolls -- a slope, a pond, a cave, a bush in
+    /// the way -- so the number here is not the distance a player walks. Measured by `termite_mounds_stand_on_level_dry_turf_and_are_a_long_walk_apart`
+    /// at five hundred: 18.8 mounds in 20,480 columns, one per 1,092 --
+    /// a square thirty-three blocks on a side with a mound in it, which
+    /// on an open plain is out of sight of the next one more often than
+    /// not, and a landmark nobody can see from the last one is not
+    /// helping anybody find their way. At three hundred and forty the
+    /// same test measures 31 mounds in the same columns, one per 661:
+    /// usually one on the horizon, rarely two.
+    fn termite_mound_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Savanna => Some(340),
+            _ => None,
+        }
+    }
+
+    /// One flower per this many columns.
+    ///
+    /// Pure decoration, and the only block in the game that is. What it
+    /// buys is that a meadow stops reading as a texture: the eye needs
+    /// something with a colour that is not green to know it is looking
+    /// at ground rather than at a surface.
+    ///
+    /// **A third of what it was** ("слишком много цветов"): at one column in
+    /// nineteen a meadow was a flower bed, and a flower stopped being the
+    /// thing that catches the eye. Rarer flowers in thicker grass
+    /// (`grass_spacing`) is what a real meadow looks like from standing
+    /// height.
+    fn flower_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Plains => Some(57),
+            Biome::Forest | Biome::BirchForest => Some(93),
+            // Few. A flower is what makes open country read as a meadow,
+            // and dry grassland is the one open country that should not.
+            Biome::Savanna => Some(291),
+            Biome::Swamp => Some(111),
+            Biome::Taiga => Some(180),
+            _ => None,
+        }
+    }
+
+    // ---- the wild plants ----
+    //
+    // See `types::BLOCK_FIREWEED` for what each is for, and
+    // `place_ground_cover` for the order they are rolled in. Each table is
+    // where the plant grows in the real country the biome stands for, and
+    // how thick is set against the grass and the berries round it.
+
+    /// Whether this biome's woods have a floor: under their crowns the ground
+    /// cover is the forest's, not the meadow's. See `under_canopy`.
+    ///
+    /// The four living woods. Not the dead forest, whose snags have no crown
+    /// to shade anything, and not the savanna, whose acacias stand in their
+    /// own grass a couple of hundred columns apart.
+    /// One patch of fallen leaves per this many *shaded* columns of floor
+    /// that the ferns, berries and sticks left, or `None` where no broadleaf
+    /// stands. Thick: most of a broadleaf floor is leaves. A taiga's needles
+    /// are not litter anyone sweeps up, and a savanna's acacias stand too far
+    /// apart to shade a floor.
+    fn leaf_litter_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Forest | Biome::BirchForest => Some(2),
+            Biome::Swamp => Some(4),
+            _ => None,
+        }
+    }
+
+    fn has_forest_floor(self) -> bool {
+        matches!(self, Biome::Forest | Biome::BirchForest | Biome::Taiga | Biome::Swamp)
+    }
+
+    /// One fern per this many shaded columns: the forest floor's cover.
+    ///
+    /// **Thinner than the meadow's grass and about as thick as the wood's
+    /// grass was**, so a wood's floor is not suddenly barer than it looked --
+    /// it is a different green. A taiga's is thinnest: needles smother it.
+    fn fern_spacing(self) -> Option<u32> {
+        // Thicker with the grass, for the same request: the floor under a
+        // closed crown is ferns, and one in five was a floor with gaps.
+        match self {
+            Biome::Forest => Some(3),
+            Biome::BirchForest => Some(3),
+            Biome::Swamp => Some(4),
+            Biome::Taiga => Some(5),
+            _ => None,
+        }
+    }
+
+    /// One bilberry per this many shaded columns.
+    ///
+    /// **A find, like the bush**, and commonest where the bush is rarest: the
+    /// taiga, which has little else to eat (`berry_spacing` gives it a bush in
+    /// a hundred and fifty), and the birch wood. An oak wood's floor is too
+    /// rich for it and has the bush.
+    fn bilberry_spacing(self) -> Option<u32> {
+        // **Every number here is three times what it was** ("сделай ягод
+        // в 3 раза меньше"). Berries were the food a player never had to
+        // think about: a walk through any wood filled the pack, and the
+        // hunt -- the food that costs a decision -- was optional. See
+        // `BERRY_THINNING`.
+        match self {
+            Biome::Taiga => Some(45 * BERRY_THINNING),
+            Biome::BirchForest => Some(60 * BERRY_THINNING),
+            Biome::Forest => Some(110 * BERRY_THINNING),
+            _ => None,
+        }
+    }
+
+    /// One bracken per this many columns of a wood, shaded or open.
+    ///
+    /// The light woods most -- bracken is what fills a birch wood's floor --
+    /// and fewer under oak and fir.
+    fn bracken_spacing(self) -> Option<u32> {
+        match self {
+            Biome::BirchForest => Some(20),
+            Biome::Forest => Some(32),
+            Biome::Taiga => Some(45),
+            _ => None,
+        }
+    }
+
+    /// One fireweed per this many open columns.
+    ///
+    /// **The clearing's plant**: rolled only where no crown is overhead, so it
+    /// stands in the gaps of a wood and along its edges -- and on a plain,
+    /// rarely, where a wood once was. Thickest in the north, as it is.
+    fn fireweed_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Taiga => Some(28),
+            Biome::BirchForest => Some(32),
+            Biome::Forest => Some(45),
+            Biome::Plains => Some(260),
+            _ => None,
+        }
+    }
+
+    /// One nettle per this many open columns away from a river.
+    ///
+    /// Rich, damp ground at the edge of a wood; commonest in a swamp's open
+    /// ground, rarest on a dry plain.
+    fn nettle_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Swamp => Some(60),
+            Biome::Forest => Some(120),
+            Biome::BirchForest => Some(150),
+            Biome::Plains => Some(400),
+            _ => None,
+        }
+    }
+
+    /// ...and on a river's bank, where nettles really are: one in this many.
+    ///
+    /// **The fibre country, again**: the reed bed is at the water and the
+    /// nettle bed a stride up the bank, so a riverbank is where a player goes
+    /// for cord, with a knife.
+    fn nettle_bank_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Plains | Biome::Forest | Biome::BirchForest | Biome::Swamp | Biome::Taiga => Some(9),
+            _ => None,
+        }
+    }
+
+    /// One wild strawberry per this many open columns.
+    ///
+    /// The bilberry's twin on the sunny side: the edges and clearings of the
+    /// light woods, and a meadow now and then.
+    fn strawberry_spacing(self) -> Option<u32> {
+        // **Every number here is three times what it was** ("сделай ягод
+        // в 3 раза меньше"). Berries were the food a player never had to
+        // think about: a walk through any wood filled the pack, and the
+        // hunt -- the food that costs a decision -- was optional. See
+        // `BERRY_THINNING`.
+        match self {
+            Biome::BirchForest => Some(50 * BERRY_THINNING),
+            Biome::Forest => Some(60 * BERRY_THINNING),
+            Biome::Taiga => Some(110 * BERRY_THINNING),
+            Biome::Plains => Some(160 * BERRY_THINNING),
+            _ => None,
+        }
+    }
+
+    /// One plantain per this many open columns.
+    ///
+    /// **Everywhere people and animals walk**, which in a world with no paths
+    /// is the open grassland first. On the savanna's dry turf too, thinly.
+    fn plantain_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Plains => Some(40),
+            Biome::Forest | Biome::BirchForest => Some(80),
+            Biome::Swamp => Some(90),
+            Biome::Taiga => Some(130),
+            Biome::Savanna => Some(170),
+            _ => None,
+        }
+    }
+
+    /// One cattail per this many columns at a fresh waterline.
+    ///
+    /// **Rarer than the reeds and in the same places**, but not the bog's:
+    /// a cattail is a root to eat, and the bog feeds nobody
+    /// (`berry_spacing`).
+    fn cattail_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Swamp => Some(7),
+            Biome::River => Some(12),
+            Biome::Plains | Biome::Forest | Biome::BirchForest => Some(18),
+            _ => None,
+        }
+    }
+
+    /// One giant reed per this many columns of the waterline, or `None`.
+    ///
+    /// **The cattail's place, one climate south**: where the cattail stops,
+    /// at the savanna and the desert, the arundo starts, so a river bank is
+    /// never without a tall plant and never has both. **Thick, one
+    /// waterline column in three**, because hot country has so little
+    /// waterline that anything thinner is no reed bed at all: measured over
+    /// 96 chunks of each at one in six and one in four, the savanna's 114
+    /// columns at the water grew 3 reeds and the desert's 90 grew 13. See
+    /// `types::BLOCK_ARUNDO`.
+    fn arundo_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Savanna => Some(3),
+            Biome::Desert => Some(3),
+            _ => None,
+        }
+    }
+
+    /// One stand of wild millet per this many columns, or `None`.
+    ///
+    /// **The savanna, and the desert only where it is not sand**: millet is
+    /// the dry country's grain, so it grows where wild wheat thins out and
+    /// wild cotton stands, a little rarer than either -- the savanna now has
+    /// three wild crops, and a place with all three at their thickest would
+    /// be a place a player never leaves. See `types::BLOCK_WILD_MILLET`.
+    fn wild_millet_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Savanna => Some(200),
+            Biome::Desert => Some(260),
+            _ => None,
+        }
+    }
+
+    /// One sundew per this many columns: the bog and only the bog.
+    ///
+    /// Thick enough that a player crossing a bog sees red dots at their feet
+    /// and learns what they mean -- peat under the turf -- in the first one.
+    fn sundew_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Bog => Some(8),
+            _ => None,
+        }
+    }
+
+    /// One root plant per this many columns.
+    ///
+    /// **Rarer than flowers and in fewer places**, which is the whole of
+    /// what makes it worth looking down: a meal you trip over every
+    /// twenty paces is a meal nobody has to find. It wants damp ground
+    /// and shade -- the forest floor and the marsh are thick with them,
+    /// the plains have some, and a steppe or a tundra has none, because
+    /// a root that grew everywhere would make the animals decoration.
+    ///
+    /// Thinned with the berries in 1.5 and for the same reason -- see
+    /// `berry_spacing`. The marsh keeps the best of it, which is the one
+    /// argument for going into a marsh.
+    ///
+    /// Thinned again with the berries, and by the same half. The marsh
+    /// keeps its edge over everything else -- the ratio between the
+    /// three is what says where to dig, and it is the ratio rather than
+    /// the numbers that makes the marsh worth being wet for.
+    fn root_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Forest | Biome::BirchForest => Some(117),
+            Biome::Swamp => Some(93),
+            Biome::Plains => Some(172),
+            _ => None,
+        }
+    }
+
+    /// One stand of reeds per this many columns, at the waterline.
+    ///
+    /// Only where there is fresh water to stand in: a marsh, a river
+    /// bank, the shore of a lake. Not the sea -- reeds in salt water is
+    /// the sort of detail that gets noticed for being wrong, and the
+    /// beach already has its own material.
+    fn reed_spacing(self) -> Option<u32> {
+        match self {
+            Biome::Swamp => Some(6),
+            // As thick as the marsh. Standing water is standing water,
+            // and reeds are what grows in it at any temperature -- this
+            // is the one plant the cold does not drive out.
+            Biome::Bog => Some(6),
+            Biome::River => Some(9),
+            Biome::Plains | Biome::Forest | Biome::BirchForest => Some(14),
+            _ => None,
+        }
+    }
+
     /// One fallen trunk per this many columns.
     ///
     /// Only where trees stand or stood. A log lying in a meadow with no
     /// wood in sight is a puzzle rather than a detail.
+    ///
+    /// **The living woods were nearly bare of them, and that is what
+    /// "сделай поваленные деревья которые легко рубить" is about.** One
+    /// roll per four hundred and twenty columns sounds frequent and is
+    /// not: a trunk is three to six cells long and each of those cells
+    /// has to pass the ground under it, so most rolls lay two or three
+    /// logs. **Measured over twelve solid chunks of oak wood: sixteen
+    /// cells of deadfall in the whole sample, against thirty-six at two
+    /// hundred and sixty** -- one trunk a chunk rather than one every
+    /// three, which is a wood you have to walk a little way into rather
+    /// than a wood with no fallen wood in it.
+    ///
+    /// A fallen trunk is the one wood in the world a player without an
+    /// axe can take (`BlockDef::felled` -- four and a half seconds by
+    /// hand, against a standing trunk that will not open at all), so
+    /// this number decides whether the first hour has timber in it.
+    ///
+    /// **The decision this is meant to create** is the one the player
+    /// named: a standing tree is nine seconds and an axe you have not
+    /// made yet, a fallen one is four and a half seconds and your hands,
+    /// and the fallen one has to be found. Making them common enough to
+    /// *stumble* on would delete that; making them rarer than the axe
+    /// would delete it the other way. See
+    /// `a_fallen_trunk_is_the_wood_a_player_without_an_axe_can_take`.
+    ///
+    /// **A live wood stays below the dead one and the bog**, which is
+    /// the ordering those two rows already argue for: deadfall is what
+    /// has stopped being replaced, and a wood with living trees in it
+    /// replaces most of what comes down. One hundred and fifty was tried
+    /// and it puts one and three quarter trunks in every chunk, at which
+    /// point a live oak wood is strewn with more dead timber than the
+    /// burnt one next to it.
+    ///
+    /// Rejected: leaving the woods alone and only shortening `felled`.
+    /// That makes the fallen trunk cheaper without making it a *place*,
+    /// and a mechanic nobody has to walk to is a number, not a choice.
     fn deadfall_spacing(self) -> Option<u32> {
         match self {
             Biome::DeadForest => Some(220),
-            Biome::Forest => Some(420),
-            Biome::Taiga => Some(520),
+            // Commoner than in the dead forest, for the same reason the
+            // sticks are: sodden ground does not hold a root, so what
+            // grows here falls over.
+            Biome::Bog => Some(180),
+            Biome::Forest => Some(260),
+            // A birch wood had none, as it had no sticks: the row was
+            // never written. Slightly thinner than the oak wood's, for
+            // the same reason its sticks are -- the trees stand wider
+            // apart.
+            Biome::BirchForest => Some(290),
+            // Thinner than the broadleaf woods: a fir holds its root in
+            // thin soil better than an oak does, and a taiga a player
+            // crosses should still be the biome where the wood is
+            // standing rather than lying.
+            Biome::Taiga => Some(380),
+            // A swamp had none either, and it is the wettest ground with
+            // trees on it outside the bog -- the bog's argument at half
+            // strength, because a swamp's trees are alive.
+            Biome::Swamp => Some(340),
             _ => None,
         }
     }
@@ -666,12 +2555,76 @@ fn surface_for(height: i32, biome: Biome, slope: f32) -> Surface {
 
 impl WorldGen {
     pub fn new(seed: u32) -> Self {
+        Self::with_preset(seed, Preset::Normal)
+    }
+
+    /// The generator for a seed *and* a preset.
+    ///
+    /// The noise fields are built whichever preset this is, and the test
+    /// world uses none of them. That is deliberate: they cost a handful
+    /// of microseconds at startup, and the alternative -- an enum whose
+    /// variants carry different data -- would put a `match` in front of
+    /// every field access in this file for the sake of one world that
+    /// does not read them.
+    pub fn with_preset(seed: u32, preset: Preset) -> Self {
+        Self::with_zone(seed, preset, Zone::default())
+    }
+
+    /// The generator for a seed, a preset and a place on the planet. See
+    /// `Zone`: a world laid in the tropics and one laid in the north are two
+    /// worlds with one seed, as surely as two presets are.
+    pub fn with_zone(seed: u32, preset: Preset, zone: Zone) -> Self {
+        Self::with_scale(seed, preset, zone, Self::new_worlds_scale())
+    }
+
+    /// The scale a world made now is drawn at: the Earth's.
+    ///
+    /// **The tests can ask for the regional one**, with
+    /// `PRIMITIVE_TEST_SCALE=regional`: every generator test then runs against
+    /// a world from before the Earth's scale, which is how a test the new
+    /// scale broke is told from one something else broke in the same week.
+    /// Read only in a test build; a game never has the variable to read.
+    #[cfg(test)]
+    fn new_worlds_scale() -> Scale {
+        std::env::var("PRIMITIVE_TEST_SCALE").ok().and_then(|name| Scale::parse(&name)).unwrap_or(Scale::Earth)
+    }
+
+    #[cfg(not(test))]
+    fn new_worlds_scale() -> Scale {
+        Scale::Earth
+    }
+
+    /// The generator for a world drawn at a given scale. Every new world is
+    /// `Scale::Earth`; a world made before that scale existed is
+    /// `Scale::Regional` for ever, because its saved edits stand on the
+    /// ground that scale drew. See `Scale`.
+    pub fn with_scale(seed: u32, preset: Preset, zone: Zone, scale: Scale) -> Self {
+        Self::laid_at(seed, preset, zone, zone.degrees(), scale)
+    }
+
+    /// A world laid at any whole latitude, for the tests that walk the
+    /// planet a degree band at a time -- which no player can, and which is
+    /// the only way left to ask what each latitude is made of.
+    #[cfg(test)]
+    pub(crate) fn at_latitude(seed: u32, degrees: i32) -> Self {
+        Self::laid_at(seed, Preset::Normal, Zone::default(), degrees, Self::new_worlds_scale())
+    }
+
+    fn laid_at(seed: u32, preset: Preset, zone: Zone, origin_degrees: i32, scale: Scale) -> Self {
         // A distinct seed per field. Sharing one would make every field
         // peak in the same places, so biome edges, mountain ranges and
         // cave systems would all trace the same contours -- the world
         // would look like one pattern shown six times.
-        Self {
+        let mut laid = Self {
             seed,
+            preset,
+            zone,
+            origin_degrees,
+            // Placed on the planet's row, then moved along it to land
+            // below -- the fields have to exist before anything can be
+            // asked where the coast is.
+            planet_origin: (0, planet_origin_z(origin_degrees)),
+            scale,
             continent_noise: Perlin::new(seed),
             erosion_noise: Perlin::new(seed.wrapping_add(1)),
             ridge_noise: Perlin::new(seed.wrapping_add(2)),
@@ -687,11 +2640,247 @@ impl WorldGen {
             deposit_noise: Perlin::new(seed.wrapping_add(23)),
             hill_noise: Perlin::new(seed.wrapping_add(29)),
             vein_noise: Perlin::new(seed.wrapping_add(31)),
+            lake_noise: Perlin::new(seed.wrapping_add(0x1A4E)),
+            province_noise: Perlin::new(seed.wrapping_add(37)),
+            mineral_noise: Perlin::new(seed.wrapping_add(41)),
+            strata_noise: Perlin::new(seed.wrapping_add(43)),
+        };
+        laid.planet_origin.0 = laid.meridian_with_land();
+        laid
+    }
+
+    /// Which meridian this world's origin stands on, in blocks east of the
+    /// planet's own.
+    ///
+    /// **A world laid away from the planet's origin can be laid in an
+    /// ocean, and the origin used to be exempt from that by construction.**
+    /// Every slow field is Perlin noise read at a lattice point of its own,
+    /// so all of them are zero at the planet's origin: the continent field
+    /// is zero there, which is the waterline, so the planet's origin is a
+    /// coast with dry land a few dozen blocks off it, and the spawn search
+    /// finds that land inside its first few rings. That was the whole of
+    /// why a new player never woke up treading water.
+    ///
+    /// It stops being true the moment a world is cut from somewhere else on
+    /// the globe, which is what a seed being one planet means. Measured
+    /// before this existed: a tropical world of seed 9 had no dry land at
+    /// all within three kilometres of its origin, and the search fell back
+    /// to the origin itself -- a player in the sea.
+    ///
+    /// So the row is the zone's, and the *meridian* is searched: outwards
+    /// from the planet's own in `STRIDE` steps, taking the first that has
+    /// dry land on it. Three things about that, each of which was the
+    /// alternative:
+    ///
+    /// * **Outwards from zero, nearest first**, so a world laid at the
+    ///   planet's own latitude keeps the planet's own origin and nothing
+    ///   that stands on a disk today moves a block (`PLANET_ORIGIN_DEGREES`).
+    /// * **Along the meridian and never along the row.** The row is the
+    ///   latitude, and the latitude is the whole of what the zone promised.
+    ///   A search that was free to move north would answer "the tropics"
+    ///   with a temperate coast, which is the form lying.
+    /// * **One column read a step, not a spawn judgement.** What is being
+    ///   looked for here is a *continent*, and the three kilometres of
+    ///   ring search that follows is what looks for somewhere to stand on
+    ///   it. A full judgement at every step would cost five times as much
+    ///   to answer the same question worse -- an island the stride steps
+    ///   over is found by the ring search anyway.
+    ///
+    /// **A low coast, not any land**, and both halves came out of
+    /// measurements rather than feelings. The planet's own origin is a
+    /// coast in middling hills, and every promise about a first five
+    /// minutes was measured on it (`scale`, the module note), so a world
+    /// laid elsewhere is asked for the same kind of ground.
+    ///
+    /// * `LOWLAND` is the height band the temperate origin itself sits in.
+    ///   Asking only for dry ground put a tropical player of seed 0 on a
+    ///   mountainside with the nearest tree three hundred and forty-six
+    ///   metres away, against five metres for a temperate world
+    ///   (`scale_from_spawn`).
+    /// * `sea_within` is the coast, asked as a question about *water*
+    ///   rather than about the field that decides where water is. Height
+    ///   alone is satisfied by the middle of a continent, and the middle of
+    ///   a continent at the Earth's scale is hundreds of kilometres from
+    ///   the sea: the beach, the reef, the palms and the fish are all
+    ///   somewhere else, and the tests that look for a beach near a
+    ///   tropical origin found nothing but steppe.
+    ///
+    /// Measured with `scale_from_spawn`, six seeds a zone, before and
+    /// after: the nearest tree to a tropical spawn went from a mean of 85
+    /// metres (worst 346) to 8 (worst 20), the nearest water from 57 to 35;
+    /// the north went from 4 metres to 2 for a tree and from 59 to 36 for
+    /// water. The temperate zone is untouched at 5 and 66, because its
+    /// origin is the planet's own and this never runs for it.
+    ///
+    ///   Rejected: asking the continent field for a number near its own
+    ///   zero. It is the honest field and it is the wrong question -- the
+    ///   height spline is steep across it, so "near zero" is a strip a few
+    ///   hundred metres wide, and intersecting that with `LOWLAND` left the
+    ///   search taking the first sliver of shore it met, islands and
+    ///   sandbars included. Tried, measured: a northern world of seed 8
+    ///   woke its player in the sea.
+    ///
+    /// `STRIDE` is under the ring search's own reach for that last reason.
+    /// The search gives up at `REACH` and takes the planet's meridian: a
+    /// world with four thousand kilometres of open ocean along one parallel
+    /// is not a world this can rescue, and the ring search's own fallback
+    /// is the one that has always been there.
+    fn meridian_with_land(&self) -> i32 {
+        /// Between samples, in blocks. Under the spawn search's own reach,
+        /// so nothing it would have found is stepped over.
+        const STRIDE: i32 = 2_048;
+        /// How far along the parallel to look before giving up, in blocks.
+        const REACH: i32 = 4_096_000;
+        /// The ground a world's origin may stand on, above sea level. Low
+        /// enough that the coast and its trees are near, high enough to be
+        /// clear of the beach the ring search refuses anyway.
+        const LOWLAND: std::ops::RangeInclusive<i32> = 3..=24;
+
+
+        if self.planet_origin.1 == 0 || self.preset == Preset::Test {
+            // The planet's own row, or a world with no planet under it.
+            return 0;
         }
+        let row = self.planet_origin.1;
+        let mut out = 0;
+        while out <= REACH {
+            for at in if out == 0 { vec![0] } else { vec![out, -out] } {
+                if LOWLAND.contains(&(self.height_on_planet(at, row) - SEA_LEVEL))
+                    && self.sea_within(at, row)
+                    // Never an ocean island: a world's origin is a
+                    // continent's coast (`scale::ISLAND_DEEP`).
+                    && !self.on_island(at, row)
+                {
+                    // Whole chunks, for `planet_origin_z`'s reason.
+                    return at;
+                }
+            }
+            out += STRIDE;
+        }
+        0
+    }
+
+    /// Is there sea within a walk of this column?
+    ///
+    /// Three rings of eight, out to `SHORE`. A curve of coastline is not
+    /// caught by one ring -- an inlet can pass between two samples of it --
+    /// and twenty-four column reads is nothing next to the search that asks
+    /// this: it is asked only of ground that is already low and dry.
+    ///
+    /// **`Biome::Ocean` and not "the ground is under the waterline"**, and
+    /// the difference is a river. A channel cut through low coastal ground
+    /// is below sea level too, so the cheaper test was satisfied hundreds
+    /// of kilometres inland by any river wide enough to sample -- measured
+    /// as tropical and dry-belt worlds with no beach chunk at all within
+    /// reach of their origin, and therefore no palm, no reef and no shell.
+    ///
+    /// **`SHORE` is a walk and not a doorstep**, and that too was
+    /// measured. At four hundred blocks the search could only satisfy this
+    /// by standing on the shore itself, where the ground round it is beach
+    /// and marsh -- which `spawn_quality` refuses, so the ring search found
+    /// nothing and the player woke in the sea. At twelve hundred the origin
+    /// sits inland of the coast on ordinary ground and the sea is ten
+    /// minutes' walk: near enough that a dry-belt player finds the palms
+    /// their zone's water comes from, far enough that the country round
+    /// them is country.
+    fn sea_within(&self, gx: i32, gz: i32) -> bool {
+        const SHORE: i32 = 1_200;
+        [SHORE / 3, SHORE * 2 / 3, SHORE].into_iter().any(|reach| {
+            [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
+                .into_iter()
+                .any(|(dx, dz)| {
+                    self.biome_on_planet(gx + dx * reach, gz + dz * reach) == Biome::Ocean
+                })
+        })
     }
 
     pub fn seed(&self) -> u32 {
         self.seed
+    }
+
+    pub fn preset(&self) -> Preset {
+        self.preset
+    }
+
+    /// Where on the planet this world is laid. See `Zone`.
+    pub fn zone(&self) -> Zone {
+        self.zone
+    }
+
+    /// This world's own z, as a row of the planet.
+    ///
+    /// ## The one invariant in this file
+    ///
+    /// **Everything private here works in planet coordinates; everything
+    /// public takes the world's own.** A world is a patch of one globe, and
+    /// where the patch was cut from is `planet_origin_z`: the generator
+    /// reads the planet's fields where the planet actually is, and a player
+    /// counts from their own doorstep, where an `f32` is exact.
+    ///
+    /// The bridge is this function and its twin `off_planet`, and the places
+    /// that cross it can be counted: the column accessors below (`height_at`
+    /// and the rest, each a wrapper over a `_on_planet` twin),
+    /// `generate_chunk`, `spawn_column`, and the three functions that hand
+    /// out the coordinates of ruins and finds. **A private caller that
+    /// reaches for a public wrapper offsets twice**, and the world it draws
+    /// is two places at once -- which is why the twins are named apart
+    /// rather than distinguished by which module they are called from, and
+    /// why `two_worlds_of_one_seed_are_two_places_on_one_planet` compares
+    /// whole chunks rather than a sample of columns.
+    ///
+    /// A temperate world's offset is zero (`PLANET_ORIGIN_DEGREES`), so on
+    /// the world every threshold here was measured in, and every world made
+    /// before any of this existed, both sides of the bridge are the same
+    /// number and nothing can differ.
+    ///
+    /// **Which is also why the tests below reach straight for the private
+    /// side.** Nearly every one of them works on a temperate world, where
+    /// the two frames are one frame, so a sweep that asks `height_at` and
+    /// `water_level_at` about the same column is asking about the same
+    /// column. A test that wants another zone has to convert, and the ones
+    /// that do -- the palm sweeps, the spawn table, the ice -- say so at
+    /// the line where they cross.
+    fn on_planet(&self, gx: i32, gz: i32) -> (i32, i32) {
+        (
+            gx.wrapping_add(self.planet_origin.0),
+            gz.wrapping_add(self.planet_origin.1),
+        )
+    }
+
+    /// A planet column, back in this world's own coordinates. The inverse
+    /// of `on_planet`; see it for what the pair is for.
+    fn off_planet(&self, px: i32, pz: i32) -> (i32, i32) {
+        (
+            px.wrapping_sub(self.planet_origin.0),
+            pz.wrapping_sub(self.planet_origin.1),
+        )
+    }
+
+    /// Where this world's own origin lies on the planet, in blocks. Public
+    /// for the diagnostics and for the new-world form: it is the number
+    /// that says two worlds of one seed are two *places*.
+    pub fn planet_origin(&self) -> (i32, i32) {
+        self.planet_origin
+    }
+
+    /// What identifies the world this generator makes.
+    ///
+    /// Two generators sharing this triple produce byte-identical terrain,
+    /// which is the property the column tile cache is keyed on -- and,
+    /// for that matter, the property the whole save format rests on.
+    ///
+    /// **The latitude is in it**, and leaving it out would be a bug nobody
+    /// sees until two worlds share a thread: the menu's backdrop and a test,
+    /// or a tropical world opened after a northern one of the same seed,
+    /// would each read the other's columns out of the cache -- a desert's
+    /// heights under a taiga's biomes.
+    ///
+    /// **So is the scale**, for the same reason: an old world and a new one
+    /// of one seed open one after the other in a client are the regional
+    /// archipelago and the Earth's coast, and a tile read across them is
+    /// one's heights under the other's rivers.
+    fn key(&self) -> WorldKey {
+        (self.seed, self.preset, self.origin_degrees, self.scale)
     }
 
     // ---- the climate fields ----
@@ -722,18 +2911,39 @@ impl WorldGen {
         (x + wx * AMOUNT, z + wz * AMOUNT)
     }
 
-    /// -1 (deep ocean) .. +1 (continental interior).
+    /// -1 (deep ocean) .. +1 (continental interior), and far past both at
+    /// the Earth's scale, where an ocean basin or a continent carries it.
     ///
     /// Two octaves only, and warped rather than detailed -- see
     /// `warped`.
     fn continent(&self, gx: i32, gz: i32) -> f64 {
-        let (x, z) = self.warped(gx, gz);
-        fbm(&self.continent_noise, x, z, 0.0016, 2)
+        self.continent_on(gx, gz, self.basin(gx, gz))
+    }
+
+    /// `continent` with the basin already in hand, for `humidity`, which
+    /// needs the basin a second time and should not pay six octaves twice.
+    ///
+    /// **The kilometre coast field plus the basin**, and the sum rather than
+    /// either alone is the whole design: the basin decides where the oceans
+    /// and continents are, and within a few tens of kilometres of its zero
+    /// the coast field still draws the shore -- see `scale`'s module note.
+    fn continent_on(&self, gx: i32, gz: i32, basin: f64) -> f64 {
+        let open = self.open_sea(gx, gz, basin);
+        // ...and an island out in the ocean raises it, never lowers it. Only
+        // asked of water, which is where an island can be: see
+        // `scale::island_field`.
+        if open >= 0.0 {
+            return open;
+        }
+        match self.island_field(gx, gz) {
+            Some(island) => open.max(island),
+            None => open,
+        }
     }
 
     /// -1 (jagged) .. +1 (worn flat).
     fn erosion(&self, gx: i32, gz: i32) -> f64 {
-        fbm(&self.erosion_noise, gx as f64, gz as f64, 0.005, 3)
+        fbm(&self.erosion_noise, gx as f64, gz as f64, 0.0032, 3)
     }
 
     /// **The scale the world was missing.**
@@ -756,7 +2966,7 @@ impl WorldGen {
     /// render distance -- near enough that a rise fills the view, far
     /// enough that its far side is a place you have not seen yet.
     fn hills(&self, gx: i32, gz: i32) -> f64 {
-        fbm(&self.hill_noise, gx as f64, gz as f64, 0.0070, 3)
+        fbm(&self.hill_noise, gx as f64, gz as f64, 0.0042, 3)
     }
 
     /// 0 .. 1, peaking along sharp lines rather than in round blobs.
@@ -766,7 +2976,14 @@ impl WorldGen {
         // Low enough that a range is a range: at 0.006 the ridge field
         // turned over every hundred blocks or so, which gives isolated
         // peaks rather than a chain of them with valleys between.
-        let mut frequency = 0.0038;
+        //
+        // **Halved again, from 0.0038, when the mountains were made taller.**
+        // The same frequency under eighty blocks of relief instead of
+        // twenty-four is a slope three times steeper, and it showed as a
+        // flight of six-block walls climbing a birch wood -- thirty blocks
+        // up in five columns, below the mountain line, where people walk.
+        // Twice the height wants twice the width, or a range is a wall.
+        let mut frequency = 0.0019;
         let mut total = 0.0;
         for _ in 0..4 {
             let v = self
@@ -782,18 +2999,159 @@ impl WorldGen {
     }
 
     /// -1 (freezing) .. +1 (baking), before altitude is taken off.
+    ///
+    /// **Latitude first, weather second.** It used to be one noise
+    /// field and nothing else, and that is the thing a player notices
+    /// as *not a world*: with an isotropic field a desert can lie
+    /// against a tundra, the poles are wherever the noise happened to
+    /// dip, and walking in a straight line for an hour tells you
+    /// nothing about where you are. On a planet the first fact about
+    /// the climate is how far you are from the equator, and everything
+    /// else is a wobble on top of it.
+    ///
+    /// So the field is the latitude's warmth (`latitude`) with the noise
+    /// left in at a weight small enough that it moves a column between
+    /// neighbouring bands and never across the map. At real scale the
+    /// latitude is all but one number across a world, so what the player
+    /// meets is the zone they chose with the weather moving about inside
+    /// it -- and what is still true of the planet is that the bands lie in
+    /// order: a forest is between a savanna and a taiga, a world's width of
+    /// kilometres away from either, and never beside one at random.
     fn temperature(&self, gx: i32, gz: i32) -> f64 {
         // Low frequency on purpose: a biome should be somewhere you
         // walk *through*, not a patch you cross in twenty paces. At the
         // frequency this replaced, temperate country turned over every
         // few hundred blocks and the map read as mottling rather than
-        // as regions.
-        fbm(&self.temperature_noise, gx as f64, gz as f64, 0.0014, 2)
+        // as regions. See `CLIMATE_NOISE_FREQUENCY` for the numbers
+        // that settled where it is now.
+        // At the Earth's scale a province hundreds of kilometres across lies
+        // under these lobes (`WorldGen::weather_mix`); a regional world keeps
+        // the lobes alone.
+        let weather = self.weather_mix(
+            gx,
+            gz,
+            fbm(&self.temperature_noise, gx as f64, gz as f64, CLIMATE_NOISE_FREQUENCY, CLIMATE_NOISE_OCTAVES),
+        );
+        (LATITUDE_WEIGHT * self.latitude(gz) + (1.0 - LATITUDE_WEIGHT) * weather).clamp(-1.0, 1.0)
+    }
+
+    /// How warm this row's latitude is: +1 at the equator, -1 at the poles.
+    /// `WARMTH_BY_LATITUDE` read at `degrees_north`, the hemisphere thrown
+    /// away because a latitude is as warm south of the equator as north.
+    ///
+    /// **The profile, not a sine of `z`**, since the planet went to real
+    /// scale -- see `BLOCKS_PER_DEGREE` for the three ways weighed and
+    /// `WARMTH_BY_LATITUDE` for why the Earth's bands and not a cosine.
+    /// What stayed true of the old sine is that there is no line in the
+    /// world where the climate turns round: the profile has no step in it,
+    /// and the equator is the warmest place on both sides of it.
+    fn latitude(&self, gz: i32) -> f64 {
+        along_latitude(&WARMTH_BY_LATITUDE, self.degrees_north(gz))
+    }
+
+    /// Degrees north of the equator at a row of the world: the world's own
+    /// origin latitude (`Zone::degrees`) plus however far north of the
+    /// origin the row is, folded onto the globe. Negative is south.
+    ///
+    /// **Folded, and that is not a nicety.** Walk north over the north pole
+    /// and the latitude falls again while you keep walking, down through the
+    /// far side's equator to the south pole and back up to where you began.
+    /// A readout that ran on past ninety, or jumped from 90N to 90S at the
+    /// pole, would be the panel lying about the one thing it is there for.
+    /// At a hundred and eleven kilometres a degree no `f32` player reaches a
+    /// pole, but a mod or a test asking about a column is not an `f32`.
+    fn degrees_north(&self, gz: i32) -> f64 {
+        // `gz` is a row of the *planet* here, like every other private
+        // coordinate in this file (`on_planet`), so the latitude is read
+        // off the planet's own zero and the world's offset is already in
+        // it. Which is why this line has one constant in it where it used
+        // to have a per-world field: a seed is one globe, and the globe
+        // does not care which patch of itself is being asked about.
+        let raw = f64::from(PLANET_ORIGIN_DEGREES) + gz as f64 / BLOCKS_PER_DEGREE;
+        // Round the globe along a meridian, 0..360 starting at this side's
+        // equator: up to the north pole at 90, down through the far
+        // equator at 180 to the south pole at 270, and back.
+        let round = raw.rem_euclid(360.0);
+        if round <= 90.0 {
+            round
+        } else if round <= 270.0 {
+            180.0 - round
+        } else {
+            round - 360.0
+        }
+    }
+
+    /// The latitude of a column in degrees, the way a player reads one:
+    /// 0 on the equator, 90 on a pole, positive north of the equator and
+    /// negative south of it. A temperate world's spawn is at 45.
+    ///
+    /// `None` on the test world, whose climate is one value everywhere
+    /// (`showcase::climate`): a latitude there would be a number that
+    /// changes as you walk while nothing else does.
+    ///
+    /// **For people, and for the seasons.** Generation reads `latitude`,
+    /// the warmth; this is the same fact in the unit a player already has,
+    /// and it is what `season::seasonal_swing` reads to know how much of a
+    /// winter a place has.
+    pub fn latitude_degrees(&self, gz: i32) -> Option<f32> {
+        (self.preset != Preset::Test).then(|| self.degrees_north(self.on_planet(0, gz).1) as f32)
+    }
+
+    /// **How warm this column's climate is**, -1 polar to +1 equatorial, at
+    /// sea level: the latitude and the weather, without the altitude.
+    ///
+    /// The one question a coast asks of the climate. A palm stands on a beach
+    /// where this is over `TROPICAL`, and a reef grows in the shallows below
+    /// it on the same number, so the beach and the sea beside it agree about
+    /// whether this is the tropics. Sea level because both of those live at
+    /// it; a peak's cold is `surface_temperature`'s business, not the sea's.
+    ///
+    /// The test world answers its one fixed climate, on the same -1..1 scale.
+    pub fn warmth(&self, gx: i32, gz: i32) -> f64 {
+        { let (px, pz) = self.on_planet(gx, gz); self.warmth_on_planet(px, pz) }
+    }
+
+    fn warmth_on_planet(&self, gx: i32, gz: i32) -> f64 {
+        if self.preset == Preset::Test {
+            return f64::from(crate::showcase::climate().0) * 2.0 - 1.0;
+        }
+        self.temperature(gx, gz)
     }
 
     /// -1 (arid) .. +1 (rainforest).
+    ///
+    /// **Rain comes off the sea.** The noise is still most of it, but
+    /// the continent field -- the same one that decides where the ocean
+    /// is, so it costs nothing new -- pulls the deep interior dry and
+    /// the coast wet. That is the second thing a real map has and this
+    /// one did not: deserts in the middle of continents and forest
+    /// along the shore, rather than either landing wherever the
+    /// humidity noise dipped.
+    ///
+    /// **And the planet's rain belts on top** (`RAIN_BY_LATITUDE`): the
+    /// equator wet, the dry belt dry, the westerlies wet. Zero at forty-five,
+    /// so a temperate world rains exactly as it did before latitude went to
+    /// real scale.
     fn humidity(&self, gx: i32, gz: i32) -> f64 {
-        fbm(&self.humidity_noise, gx as f64, gz as f64, 0.0019, 2)
+        // The local lobes, and at the Earth's scale the forest or steppe
+        // province under them. See `WorldGen::rain_mix`.
+        let rain = self.rain_mix(
+            gx,
+            gz,
+            fbm(&self.humidity_noise, gx as f64, gz as f64, RAINFALL_NOISE_FREQUENCY, CLIMATE_NOISE_OCTAVES),
+        );
+        // `continent` runs -1 (deep ocean) to +1 (deep interior), so
+        // subtracting a share of it *is* the rule: the further from the
+        // water, the drier. No offset, because the field's own zero is
+        // already about where the coast is.
+        //
+        // **That field saturates a few tens of kilometres from the sea**, and
+        // a continent's interior is hundreds further: at the Earth's scale the
+        // basin carries the dryness on past there (`WorldGen::inland`).
+        let basin = self.basin(gx, gz);
+        let inland = self.inland(gx, gz, basin);
+        let belt = along_latitude(&RAIN_BY_LATITUDE, self.degrees_north(gz));
+        (rain + belt - CONTINENTALITY * inland).clamp(-1.0, 1.0)
     }
 
     /// Where the ash lies, in a wood that burned.
@@ -848,8 +3206,58 @@ impl WorldGen {
     /// lapse rate applied. This is what puts snow on a peak that sits in
     /// an otherwise temperate region.
     fn surface_temperature(&self, gx: i32, gz: i32, height: i32) -> f64 {
-        let altitude = (height - SEA_LEVEL).max(0) as f64;
+        let altitude = felt_altitude(height - SEA_LEVEL);
         self.temperature(gx, gz) - altitude * LAPSE_PER_BLOCK
+    }
+
+    /// Does still water at this column freeze over **and never open
+    /// again** -- permafrost?
+    ///
+    /// ## Why this is not the freezing line any more
+    ///
+    /// It used to be `temperature < FREEZING`, the same threshold that
+    /// makes tundra out of a lowland column, and the argument for it was
+    /// good: ice appears exactly where the land beside it is already snow
+    /// and bare, so the shoreline of a frozen bay is continuous rather than
+    /// a lake of ice in a green field.
+    ///
+    /// What that argument missed is that the two thresholds are not the
+    /// same *kind* of number. The climate field is a place's average over
+    /// the whole year; the snow on the bank comes and goes with the season,
+    /// and the ice did not, because a chunk is regenerated from the seed and
+    /// a season never reaches it (`season`, the module note). So a northern
+    /// world froze every pond it had, permanently, while the thermometer in
+    /// the corner of the screen read twenty degrees at noon in July -- the
+    /// player's report, and exactly right.
+    ///
+    /// The line is therefore the one the generator can honestly draw: water
+    /// that is still frozen at the height of summer (`season::water_never_thaws`,
+    /// which has the rejected alternatives). Everything between that and the
+    /// yearly mean is a *season's* ice, and the server makes and unmakes it
+    /// on the clock -- see `primitive_server::logic::water::Frost`.
+    ///
+    /// At sixty degrees, the north zone's latitude, this is about a quarter
+    /// of the temperature range colder than the old line: it leaves the
+    /// permanent ice to the polar rows and the coldest weather provinces
+    /// above about sixty-five degrees, which is where the Earth's permafrost
+    /// starts. What a player in the north gets instead is a bay they can
+    /// walk across in February and have to row round in July.
+    ///
+    /// Taken at sea level, because that is where the surface of the
+    /// water is -- the lapse rate has nothing to work on for a cell
+    /// that is by definition at the waterline.
+    fn freezes(&self, gx: i32, gz: i32) -> bool {
+        // The 0..1 scale the seasons are written in, from the -1..1 scale
+        // the generator is. One conversion, here, rather than a second copy
+        // of the freezing line in the other unit: `CLIMATE_FREEZING` is that
+        // mistake already made once and caught.
+        let climate = ((self.temperature(gx, gz) + 1.0) * 0.5) as f32;
+        // How much of the year's swing this row gets. `gz` is a planet row
+        // (`on_planet`), which is what `degrees_north` wants; the test world
+        // has no latitude and takes the temperate swing, as it does
+        // everywhere else.
+        let latitude = (self.preset != Preset::Test).then(|| self.degrees_north(gz) as f32);
+        crate::season::water_never_thaws(climate, crate::season::seasonal_swing(latitude))
     }
 
     /// Temperature and humidity where something is growing, each
@@ -872,8 +3280,77 @@ impl WorldGen {
     /// rate, exactly as `surface_temperature` does: a canopy on a peak
     /// is the same cold as the snow beside it.
     pub fn climate_at(&self, gx: i32, gy: i32, gz: i32) -> (f32, f32) {
-        let (temperature, humidity) = self.climate_column(gx, gz);
+        let (px, pz) = self.on_planet(gx, gz);
+        let (temperature, humidity) = self.climate_column_on_planet(px, pz);
         (cooled_by_altitude(temperature, gy), humidity)
+    }
+
+    /// How good the soil is here, in three grades.
+    ///
+    /// **Not a die roll per block.** Fertility is a property of *place*:
+    /// it comes off the same climate fields the biomes do, plus one slow
+    /// noise so that a meadow has good corners and thin ones rather than
+    /// being uniformly average. Two cells beside each other therefore
+    /// almost always agree, and a player who found rich ground can build
+    /// their field on it -- which is the whole point of the mechanic. A
+    /// per-block roll would make a field a lottery ticket and give
+    /// nobody a reason to look at the land.
+    ///
+    /// What makes ground rich, in the order it matters: **water**, which
+    /// is humidity here; then warmth, because a frozen field grows
+    /// nothing whatever it is made of; then the ground itself -- sand
+    /// and rock are poor by definition and a marsh margin is the best
+    /// soil there is.
+    ///
+    /// Sea level is used rather than the cell's own height on purpose:
+    /// this is a question about a *column*, and a farmer standing on
+    /// their field is not asking about the air above it.
+    pub fn fertility_at(&self, gx: i32, gz: i32) -> Fertility {
+        { let (px, pz) = self.on_planet(gx, gz); self.fertility_on_planet(px, pz) }
+    }
+
+    fn fertility_on_planet(&self, gx: i32, gz: i32) -> Fertility {
+        // The test world is one flat field of the same soil, because
+        // its whole job is that everything in it is where the blueprint
+        // put it -- a gallery with a rich corner would be a gallery
+        // whose exhibits differ for a reason nobody can see.
+        if self.preset == Preset::Test {
+            return Fertility::Ordinary;
+        }
+        let (warmth, wet) = self.climate_column_on_planet(gx, gz);
+        let biome = self.biome_on_planet(gx, gz);
+        // The ground itself, before the climate: some places are simply
+        // not soil, and no amount of rain makes sand into loam.
+        match biome {
+            Biome::Desert | Biome::Beach | Biome::Mountains | Biome::SnowyPeaks | Biome::Tundra => {
+                return Fertility::Poor
+            }
+            // A marsh margin is the richest ground in the world and
+            // always has been -- silt, water and rot. It is also
+            // miserable to live on, which is exactly the trade the
+            // mechanic exists to offer.
+            Biome::Swamp | Biome::River => return Fertility::Rich,
+            _ => {}
+        }
+        // A slow field, so the grades come in patches a few dozen blocks
+        // across rather than in single cells. Its own salt, so it is not
+        // a second reading of the temperature field.
+        // Sampled off the deposit field rather than a new one: it is
+        // already a slow patchy field of exactly this scale, nothing
+        // else reads it about the surface, and a sixteenth noise
+        // generator on a struct that has fifteen is a cost with no
+        // answer to "why". Offset so a rich patch does not sit on top
+        // of whatever else that field decides.
+        let patch =
+            fbm(&self.deposit_noise, gx as f64 + 4096.0, gz as f64 - 4096.0, 0.004, 3) as f32;
+        let score = wet * 1.4 + warmth * 0.6 + patch * 0.5;
+        if score > 1.45 {
+            Fertility::Rich
+        } else if score < 0.95 {
+            Fertility::Poor
+        } else {
+            Fertility::Ordinary
+        }
     }
 
     /// The same two fields at sea level, before altitude is taken off.
@@ -883,6 +3360,13 @@ impl WorldGen {
     /// four noise samples for a column of leaves rather than four per
     /// leaf. `climate_at` is the convenient form for everything else.
     pub fn climate_column(&self, gx: i32, gz: i32) -> (f32, f32) {
+        { let (px, pz) = self.on_planet(gx, gz); self.climate_column_on_planet(px, pz) }
+    }
+
+    fn climate_column_on_planet(&self, gx: i32, gz: i32) -> (f32, f32) {
+        if self.preset == Preset::Test {
+            return crate::showcase::climate();
+        }
         let normalise = |v: f64| (((v + 1.0) * 0.5).clamp(0.0, 1.0)) as f32;
         (
             normalise(self.temperature(gx, gz)),
@@ -921,15 +3405,19 @@ impl WorldGen {
     /// applied one after the other -- see `height_at` -- because they
     /// pull toward different heights: the valley toward a floodplain
     /// just above the waterline, the channel down to the bed.
-    fn river(&self, gx: i32, gz: i32, land_height: f64) -> (f64, f64) {
+    ///
+    /// **One order at a time** -- a brook, a river or a great river at the
+    /// Earth's scale, the one river of a regional world (`scale::RiverOrder`)
+    /// -- each with its own field, width, valley and bed.
+    fn river(&self, order: &scale::RiverOrder, gx: i32, gz: i32, land_height: f64) -> banks::RiverCut {
         // Cheapest test first. The two masks below decide most of the
         // world on the height alone -- open sea has nothing to cut, high
         // ground is not river country -- and everything after this point
         // costs five samples of the river field to estimate its slope.
         // Skipping them where the answer is already zero is most of what
         // rivers cost across a chunk.
-        if land_height < SEA_LEVEL as f64 + 0.5 || land_height > SEA_LEVEL as f64 + 34.0 {
-            return (0.0, 0.0);
+        if land_height < SEA_LEVEL as f64 + 0.5 || land_height > SEA_LEVEL as f64 + order.fades.0 {
+            return banks::RiverCut::NONE;
         }
         // Distance to the field's zero contour, in *blocks*.
         //
@@ -941,28 +3429,66 @@ impl WorldGen {
         // hanging off the side of the channel. Dividing by the local
         // slope converts "how far from zero is the value" into "how far
         // from the line am I", which is the question a bank answers.
-        const FREQUENCY: f64 = 0.0021;
-        let sample = |x: f64, z: f64| fbm(&self.river_noise, x, z, FREQUENCY, 2);
+        let frequency = order.frequency;
+        let sample = |x: f64, z: f64| self.river_field(order, x, z);
         let (x, z) = (gx as f64, gz as f64);
         let field = sample(x, z);
+        // **Far from every river of this order, stop here.** The distance
+        // below is the field over its slope, and the slope can never be
+        // steeper than `RIVER_SLOPE_BOUND` -- so a field this far from zero
+        // is a column the valley does not reach, whatever the slope turns
+        // out to be, and the four samples that measure it are spent on
+        // nothing. At the Earth's scale there are three orders, and this is
+        // what keeps three from costing three times one.
+        if field.abs() > scale::RIVER_SLOPE_BOUND * frequency * order.valley {
+            return banks::RiverCut::NONE;
+        }
         let step = RIVER_GRADIENT_STEP;
-        let slope_x = (sample(x + step, z) - sample(x - step, z)) / (2.0 * step);
-        let slope_z = (sample(x, z + step) - sample(x, z - step)) / (2.0 * step);
+        // **Two more samples at the Earth's scale, four in a regional world.**
+        // A forward difference from the sample already in hand is as good a
+        // slope as a central one for a field that turns over in hundreds of
+        // metres, and it halves what three orders of river cost; a regional
+        // world keeps the central difference its ground was drawn with.
+        let (east, south) = (sample(x + step, z), sample(x, z + step));
+        let behind = match order.lattice {
+            None => Some((sample(x - step, z), sample(x, z - step))),
+            Some(_) => None,
+        };
+        let (slope_x, slope_z) = match behind {
+            Some((west, north)) => ((east - west) / (2.0 * step), (south - north) / (2.0 * step)),
+            None => ((east - field) / step, (south - field) / step),
+        };
         let slope = (slope_x * slope_x + slope_z * slope_z).sqrt();
         if slope <= f64::EPSILON {
-            return (0.0, 0.0);
+            return banks::RiverCut::NONE;
         }
         // Distance from the centre line, in blocks. Kept as a distance
         // rather than immediately normalised, because the two profiles
         // measure it against different widths.
         let distance = field.abs() / slope;
-        let across = (distance / RIVER_HALF_WIDTH).min(1.0);
+        // **This bank's own width and shape**, and only where there is a
+        // bank to shape: past the widest a channel ever wanders to, the cut
+        // is nothing and the samples it takes are spent on nothing. See
+        // `banks` for why one width for a whole river read as a canal.
+        let bank = if distance < order.half_width * banks::WIDEST {
+            // The curvature of the channel, off the Hessian of the field.
+            // A regional world already has the four samples round the
+            // column; an order on a lattice took forward differences and
+            // needs the other two. The diagonal is new either way.
+            let (west, north) = behind.unwrap_or_else(|| (sample(x - step, z), sample(x, z - step)));
+            let corner = sample(x + step, z + step);
+            let curvature = banks::curvature(field, [east, west, south, north, corner], step);
+            self.river_bank(order, x, z, field, distance, curvature)
+        } else {
+            banks::RiverBank::far(order, distance)
+        };
+        let across = (distance / bank.edge).min(1.0);
         // 1 at the centre line, easing off to nothing at the banks.
         let channel = 1.0 - smoothstep(0.0, 1.0, across);
         // The hollow the channel sits in, five times as wide and eased
         // over its whole width, so the ground comes down to the water
         // rather than stopping above it.
-        let valley_across = (distance / (RIVER_HALF_WIDTH * Self::RIVER_VALLEY_SPREAD)).min(1.0);
+        let valley_across = (distance / order.valley).min(1.0);
         let valley = 1.0 - smoothstep(0.0, 1.0, valley_across);
         // Not in the sea (there is nothing to cut), and not up a hill.
         let on_land = smoothstep(
@@ -972,31 +3498,148 @@ impl WorldGen {
         );
         // A long fade rather than a short one: where a river runs out of
         // low country it should shallow out over a stretch, not stop.
+        // Scaled with the relief, from 34 and 10: river country is the
+        // low *half* of the land, and when the hills grew two and a half
+        // times taller the same absolute band stopped rivers at the first
+        // rise, leaving the valleys between the new mountains dry.
         let lowland = smoothstep(
-            SEA_LEVEL as f64 + 34.0,
-            SEA_LEVEL as f64 + 10.0,
+            SEA_LEVEL as f64 + order.fades.0,
+            SEA_LEVEL as f64 + order.fades.1,
             land_height,
         );
         let mask = on_land * lowland;
-        (channel * mask, valley * mask)
+        banks::RiverCut { channel: channel * mask, valley: valley * mask, mask, bank }
     }
 
+    /// The height of the ground at a column of *this world*. See
+    /// `on_planet` for why a public accessor is a wrapper.
     pub fn height_at(&self, gx: i32, gz: i32) -> i32 {
-        let continent = self.continent(gx, gz);
+        { let (px, pz) = self.on_planet(gx, gz); self.height_on_planet(px, pz) }
+    }
+
+    fn height_on_planet(&self, gx: i32, gz: i32) -> i32 {
+        // **The test world is flat, and this has to say so.** Every
+        // other question about a column already answers for the preset
+        // -- `biome_at`, `climate_column`, `spawn_y`, `spawn_column`,
+        // `generate_chunk` -- and this one did not, so it kept reading
+        // the noise of a world the blocks did not come from.
+        //
+        // It is not a private detail: `height_at` is what a mod asks
+        // through `GenerationApi::height_at`, and on the test preset it
+        // answered anywhere in `MIN_HEIGHT..=MAX_HEIGHT` for ground that
+        // is at `showcase::GROUND_Y` everywhere. A mod placing something
+        // "on the surface" put it thirty blocks under it or thirty above.
+        if self.preset == Preset::Test {
+            return crate::showcase::GROUND_Y;
+        }
+        let terrain = self.terrain_height(gx, gz);
+        // Lakes last, and only ever *downward*. A lake bed is the
+        // terrain with a bowl dug out of it; the rim is the terrain
+        // untouched, which is what lets `lake_site` promise the bowl
+        // holds water by reading the rim's heights before the bowl
+        // exists -- carving cannot raise a rim column, so a rim that
+        // was above the water stays above it.
+        match self.lake_near(gx, gz) {
+            Some((lake, d2)) if d2 <= self.lake_reach2(&lake, gx, gz) => {
+                terrain.min(lake.water - lake.depth_at(d2))
+            }
+            // ...and round a wide lake, its shore eased down to the water
+            // rather than cut off at it, never under a block over the water,
+            // and its sill raised to the water: the one place a lake builds
+            // rather than digs. See `scale::wide_skirt`.
+            _ => self.wide_lake_shore(gx, gz, terrain),
+        }
+    }
+
+    /// The height of the ground before any lake is dug into it.
+    ///
+    /// Split from `height_at` because a lake site is judged on the
+    /// terrain around it, and asking `height_at` for that would ask the
+    /// lake about itself: the rim ring lies outside the bed, so the two
+    /// are the same number there, but the split is what makes that a
+    /// fact about the code rather than a fact about the arithmetic.
+    fn terrain_height(&self, gx: i32, gz: i32) -> i32 {
+        let (land_height, island) = self.land_before_rivers(gx, gz);
+        // **No river crosses an ocean island.** A river is what a country's
+        // rain gathers into, and an island of a few hundred metres has no
+        // country: measured, the river field's zero ran across one and left a
+        // channel thirty metres wide through a cay eighty across, its middle
+        // under water. The island field is only ever over the open sea's out
+        // past the shelf, where no river reaches either, so there is no seam.
+        let height = if island { land_height } else { self.cut_rivers(gx, gz, land_height) };
+        (height.round() as i32).clamp(MIN_HEIGHT, MAX_HEIGHT)
+    }
+
+    /// How low the valley of every river pulls the country, a little over the
+    /// water. See `terrain_height`.
+    const FLOODPLAIN: f64 = SEA_LEVEL as f64 + 3.0;
+
+    /// The ground before any river is cut into it, unrounded, and whether it
+    /// is an ocean island's (`scale::island_field`).
+    ///
+    /// Split from `terrain_height` for the river's current
+    /// (`river_current`), which asks how the country falls along a river --
+    /// the country the river runs through, not the channel it cut, whose
+    /// floor is level at the sea.
+    fn land_before_rivers(&self, gx: i32, gz: i32) -> (f64, bool) {
+        let basin = self.basin(gx, gz);
+        // The continent field, and an island's where one raises it: what
+        // `continent_on` answers, taken apart so the rivers can be told.
+        let open = self.open_sea(gx, gz, basin);
+        let island = if open < 0.0 { self.island_field(gx, gz) } else { None };
+        let on_island = island.is_some_and(|raised| raised > open);
+        let continent = island.map_or(open, |raised| open.max(raised));
         let erosion = self.erosion(gx, gz);
 
         // The baseline, through the coast spline. This is the only term
         // with the reach to cross sea level by itself, which is what
         // keeps oceans and land as large coherent regions instead of a
         // speckle of both.
-        let base = spline(CONTINENT_SPLINE, continent);
+        // Read exactly so in a regional world. At the Earth's scale a
+        // continent's land reads no higher up the spline than the old land
+        // stood, and rises into its interior by the basin; the open ocean
+        // falls past the spline's deep end. See `WorldGen::coast_profile`.
+        let base = self.coast_profile(continent, basin);
 
         // Mountains need high ground *and* low erosion. Without the
         // second factor every coastline would also be a mountain range,
         // because the ridge field does not know where it is.
         let land = smoothstep(SEA_LEVEL as f64 + 1.0, SEA_LEVEL as f64 + 7.0, base);
-        let unworn = smoothstep(0.5, -0.25, erosion);
-        let relief = self.ridges(gx, gz).powi(2) * 24.0 * land * unworn;
+        // **Most country is old country.** The window was 0.5 .. -0.25,
+        // which gave every column with erosion under half a share of the
+        // mountains -- nearly all of the land. Measured over four seeds
+        // (`how_much_of_the_land_is_flat`): 39 to 43 per cent of the land
+        // flat, 13 to 15 above the mountain line, and a player's report
+        // of a world that was "a heap of mountains". One number moves
+        // relief, hills, roughness and benches together, because they
+        // all read `unworn`, so the plains that come out are smooth and
+        // the ranges that stay are still ranges rather than being
+        // shaved into a lower copy of themselves.
+        //
+        // **And the window leans with the country** at the Earth's scale: a
+        // mountain belt has more of its land young and a lowland less, and
+        // the hills round every origin -- `highland` is middling there --
+        // keep the window above. See `scale`.
+        let highland = self.highland(gx, gz);
+        let lean = self.unworn_lean(highland);
+        let unworn = smoothstep(0.2 + lean, -0.45 + lean, erosion);
+        // **Wider and taller together, or the world only gets flatter.**
+        // Moving the frequencies alone spreads the same twenty-four
+        // blocks of relief over half again the distance, which is a
+        // gentler slope everywhere -- and the first attempt at "bigger
+        // country" cost the world its cliffs outright: the scree pass
+        // found nothing in a hundred and sixty-nine chunks. Amplitude is
+        // the other half, and it is bounded: the world is sixty-four
+        // blocks tall (`CHUNK_SIZE_Y`) with the sea at twenty, so
+        // everything above water shares forty-four and a peak has to
+        // leave room for the snow on it.
+        //
+        // **Eighty was one country everywhere.** At the Earth's scale it is
+        // the amplitude of the hills round an origin, eighteen in a lowland
+        // and a hundred and sixty on the crest of a mountain belt, under the
+        // same ridge field -- so a high range is taller and exactly as far
+        // between its ridges, which is what keeps its slopes a real range's.
+        let relief = self.ridges(gx, gz).powi(2) * self.relief_amplitude(highland) * land * unworn;
 
         // Small-scale roughness, so a plain is not a plane -- but not at
         // the waterline, where ±2 blocks of noise is the difference
@@ -1025,10 +3668,12 @@ impl WorldGen {
         // else here -- `unworn` is what tells young country from old,
         // and a hill is young ground that has not been ground down yet.
         let hill_field = self.hills(gx, gz);
-        let hill_amplitude = 5.0 + 7.0 * unworn;
+        let hill_amplitude = 10.0 + 12.0 * unworn;
         let hills = hill_field * hill_field.abs() * hill_amplitude * land;
 
-        let land_height = base + relief + hills + detail;
+        // The broad rises of the Earth-scale landscape, and the highest
+        // ground folded under the ceiling. Both nothing in a regional world.
+        let land_height = self.soft_ceiling(base + relief + hills + detail + self.rolling(gx, gz, highland) * land);
 
         // Benches, and the faces between them.
         //
@@ -1065,41 +3710,362 @@ impl WorldGen {
         // five. The shelves survive -- they are what stops a hillside
         // being a ramp -- they are just no longer walls.
         let terracing = unworn
-            * smoothstep(SEA_LEVEL as f64 + 4.0, SEA_LEVEL as f64 + 14.0, land_height)
+            * smoothstep(SEA_LEVEL as f64 + 10.0, SEA_LEVEL as f64 + 35.0, land_height)
             // Eased off from 0.45 when the hill field arrived. Benches
             // were carrying the whole burden of "this ground has shape
             // in it" and were tuned as hard as the player's stride could
             // stand; with hills underneath them they are a texture on a
             // slope rather than the slope itself, and the tallest seam
             // in the world comes down with them.
-            * 0.36;
-        let land_height = land_height + (stepped - land_height) * terracing;
+            //
+            // **And eased again, from 0.36, when the relief was made
+            // taller.** A bench is a fraction pulled out of the slope it
+            // sits on, so the same fraction of a steeper hillside is a
+            // taller face: the worst seam in a hundred and sixty
+            // thousand went to six blocks, which is a wall you cannot
+            // climb in the middle of ground you are meant to walk over.
+            // Measured with `probe_slopes` before and after -- 0.30
+            // brings the worst back to five and costs a tenth of a
+            // percent of the seams that have any step in them at all,
+            // which is nothing anybody can see.
+            * 0.30;
+        (land_height + (stepped - land_height) * terracing, on_island)
+    }
 
-        // Rivers, cut last: they win over whatever the land was doing,
-        // which is what makes a channel a channel rather than a dip that
-        // the detail octave can fill back in.
-        let (channel, valley) = self.river(gx, gz, land_height);
+    /// The rivers, cut into the ground last: they win over whatever the
+    /// land was doing, which is what makes a channel a channel rather than a
+    /// dip that the detail octave can fill back in.
+    ///
+    /// One order at a time, widest first, so a brook is cut into the floor
+    /// of a river's valley and a river into a great river's floodplain
+    /// (`WorldGen::river_orders`).
+    fn cut_rivers(&self, gx: i32, gz: i32, land_height: f64) -> f64 {
+        let mut height = land_height;
+        for order in self.river_orders() {
+            let cut = self.river(order, gx, gz, height);
+            height = self.cut_order(order, gx, gz, height, &cut);
+        }
+        height
+    }
 
+    /// One order's valley and channel cut into `height`.
+    fn cut_order(&self, order: &scale::RiverOrder, gx: i32, gz: i32, mut height: f64, cut: &banks::RiverCut) -> f64 {
         // The valley first: a wide, shallow hollow easing the country
         // down toward the water. Only ever *downward* -- `min` -- so a
         // river running along a low place does not get a rampart built
         // around it.
-        const FLOODPLAIN: f64 = SEA_LEVEL as f64 + 3.0;
-        let land_height = if valley > 0.0 && land_height > FLOODPLAIN {
-            land_height * (1.0 - valley) + FLOODPLAIN * valley
-        } else {
-            land_height
-        };
+        //
+        // **Toward a floodplain that rises and falls**, not one height
+        // everywhere: see `banks::FLOODPLAIN_SWING`. Asked only where the
+        // valley pulls and the ground is over the lowest the plain can be.
+        if cut.valley > 0.0 && height > banks::FLOODPLAIN_LOWEST {
+            let floodplain = self.floodplain_at(order, gx, gz, cut.bank.distance);
+            if height > floodplain {
+                height = height * (1.0 - cut.valley) + floodplain * cut.valley;
+            }
+        }
 
         // ...then the channel, cut into the floor of it.
-        let bed = (SEA_LEVEL - RIVER_DEPTH) as f64;
-        let height = if channel > 0.0 && land_height > bed {
-            land_height * (1.0 - channel) + bed * channel
-        } else {
-            land_height
-        };
+        let bed = (SEA_LEVEL - order.depth) as f64;
+        let before = height;
+        if cut.channel > 0.0 && height > bed {
+            height = height * (1.0 - cut.channel) + bed * cut.channel;
+        }
+        // ...and where this bank is a cut bank, the channel's own shape
+        // pulled toward a wall. See `banks::cut_bank`.
+        if cut.channel > 0.0 && cut.bank.steep > 0.0 {
+            height = banks::cut_bank(order, before, height, cut);
+        }
+        height
+    }
 
-        (height.round() as i32).clamp(MIN_HEIGHT, MAX_HEIGHT)
+    // ---- lakes ----
+
+    /// Where the lake of a grid cell *would* be, before the ground has
+    /// been asked whether it can hold one. Pure arithmetic on the seed
+    /// and the cell, so every column can find its cell's candidate for
+    /// the price of a hash and decide from the distance alone whether
+    /// it needs to know any more -- which nearly all of them do not.
+    ///
+    /// The jitter keeps the whole footprint, rim ring included, inside
+    /// the cell. That is what lets a column ask *one* cell rather than
+    /// the four nearest, and it is also why the grid never shows: with
+    /// most cells refused and the rest wandering over two thirds of
+    /// their width, there is no spacing to see.
+    fn lake_candidate(&self, cell_x: i32, cell_z: i32) -> (i32, i32, i32, i32) {
+        if self.scale == scale::Scale::Earth {
+            return self.earth_pond_candidate(cell_x, cell_z);
+        }
+        let roll = hash2(cell_x, cell_z, self.seed.wrapping_add(0x1A4E));
+        let play = LAKE_CELL - 2 * (LAKE_MAX_RADIUS + 2);
+        let centre_x = cell_x * LAKE_CELL + LAKE_MAX_RADIUS + 2 + (roll % play as u32) as i32;
+        let centre_z =
+            cell_z * LAKE_CELL + LAKE_MAX_RADIUS + 2 + ((roll >> 8) % play as u32) as i32;
+        // Three to six across the radius, two to four down. Seven to
+        // thirteen blocks across is a pond you can throw a stone over
+        // and a pool you cannot see the bottom of, which is the whole
+        // range a lake in walking country needs.
+        let radius = 3 + ((roll >> 16) % (LAKE_MAX_RADIUS - 2) as u32) as i32;
+        let depth = 2 + ((roll >> 20) % (LAKE_MAX_DEPTH - 1) as u32) as i32;
+        (centre_x, centre_z, radius, depth)
+    }
+
+    /// The lake in a grid cell, if the ground there will hold one.
+    ///
+    /// **The basin is proved closed here, once, and nowhere else has to
+    /// think about it.** Water in this game is conserved and flows: a
+    /// cell of it with air beside it at its own level runs out on the
+    /// first tick, and a lake whose rim dipped below its surface on one
+    /// side would empty itself into the wood and leave a mud bowl with
+    /// a wedge of water in the bottom. So the ring of columns just
+    /// outside the bed is read *before* the bed exists, the water is set
+    /// to the lowest of them, and the bed is only ever dug down from
+    /// there. Every four-neighbour of a bed column is either another bed
+    /// column or in that ring, and no ring column is below the water --
+    /// which is the closure, by construction rather than by luck.
+    ///
+    /// Refused when the centre is not lowland, when the rim would put
+    /// the water within four of the sea (see `LAKE_MIN_WATER`), or when
+    /// the rim varies by more than `LAKE_MAX_RIM_SPREAD`: that last one
+    /// is the slope test, and it costs nothing extra because the rim has
+    /// already been read. A river through the rim fails it too, since a
+    /// channel is a dozen blocks under any rim.
+    ///
+    /// Remembered per thread, keyed like the tiles. The ring is forty
+    /// columns of terrain, and without the memo every column in a lake's
+    /// footprint would read all forty -- a lake would cost as much as
+    /// the chunk around it.
+    fn lake_site(&self, cell_x: i32, cell_z: i32) -> Option<Lake> {
+        let key = (self.key(), cell_x, cell_z);
+        let known = LAKE_SITES.with(|store| store.borrow().tiles.get(&key).copied());
+        if let Some(site) = known {
+            return site;
+        }
+        // Built outside the store's borrow for the same reason a column
+        // tile is: the builder reads terrain, and a builder that ran
+        // under the borrow would be one refactor away from re-entering
+        // it.
+        let site = self.judge_lake_site(cell_x, cell_z);
+        LAKE_SITES.with(|store| {
+            *store.borrow_mut().get_or_insert(key, || site)
+        })
+    }
+
+    /// The uncached half of `lake_site`.
+    fn judge_lake_site(&self, cell_x: i32, cell_z: i32) -> Option<Lake> {
+        // A third of the cells at the Earth's scale. See `scale::POND_SHARE`.
+        if !self.pond_offered(cell_x, cell_z) {
+            return None;
+        }
+        let (cx, cz, radius, depth) = self.lake_candidate(cell_x, cell_z);
+        let centre = self.terrain_height(cx, cz);
+        if !(LAKE_MIN_WATER..=SEA_LEVEL + 75).contains(&centre) {
+            return None;
+        }
+        // The rim is judged from the furthest the shore can wander to,
+        // not from the nominal radius: a lake whose rim was measured at
+        // `radius + 1` and whose water reaches `radius + 2` is a lake
+        // that pours out of the side of its own bowl. See `lake_reach2`.
+        let edge = radius + self.pond_wobble(radius).ceil() as i32;
+        // Nor where a wide lake's footprint reaches: the pond's rim would be
+        // read off ground the lake then floods. See `scale`.
+        if self.wide_lake_within(cx, cz, edge + 1) {
+            return None;
+        }
+        let inner = edge * edge;
+        let outer = (edge + 1) * (edge + 1);
+        let (mut lowest, mut highest) = (i32::MAX, i32::MIN);
+        for dz in -(edge + 1)..=(edge + 1) {
+            for dx in -(edge + 1)..=(edge + 1) {
+                let d2 = dx * dx + dz * dz;
+                if d2 <= inner || d2 > outer {
+                    continue;
+                }
+                let h = self.terrain_height(cx + dx, cz + dz);
+                lowest = lowest.min(h);
+                highest = highest.max(h);
+            }
+        }
+        if lowest < LAKE_MIN_WATER || highest - lowest > LAKE_MAX_RIM_SPREAD {
+            return None;
+        }
+        Some(Lake {
+            centre_x: cx,
+            centre_z: cz,
+            radius,
+            depth,
+            water: lowest,
+            wide: false,
+        })
+    }
+
+    /// The lake whose footprint -- bed *or* rim ring -- this column is
+    /// in, and the squared distance to its centre.
+    ///
+    /// Cheap by design, because `height_at` asks it for every column of
+    /// the world: the distance test against the cell's candidate runs
+    /// first, on nothing but a hash, and the memoised judgement is only
+    /// consulted for the one column in forty that is close enough to
+    /// care.
+    /// How far the water reaches from a lake's centre *at this column*,
+    /// squared.
+    ///
+    /// **A lake was a disc.** `d2 <= radius * radius` is a compass
+    /// circle, and three of them in a valley read as three coins
+    /// somebody dropped -- which is what a player saw and said. Nothing
+    /// else in this generator is a circle: coasts come off a warped
+    /// noise field and rivers wander, and a pond was the one body of
+    /// water drawn with a pair of dividers.
+    ///
+    /// The radius is pushed in and out by a field of its own, sampled at
+    /// the *column* -- so the boundary is one closed wiggly curve that
+    /// every column agrees about, rather than a per-column roll that
+    /// would fray the shore into gravel. Nearly two blocks either way
+    /// against a radius of three to six: enough that no two lakes are
+    /// the same shape, not so much that a bowl three across can pinch
+    /// itself in half.
+    fn lake_reach2(&self, lake: &Lake, gx: i32, gz: i32) -> i32 {
+        // A wide lake's shore wanders by a share of its radius; two blocks on
+        // forty is a circle.
+        //
+        // **Told apart by what the lake is, not by its radius.** It was
+        // `radius > LAKE_MAX_RADIUS`, which stopped being a distinction the
+        // day an Earth pond grew past six (`scale::EARTH_PONDS`).
+        if lake.wide {
+            return self.wide_lake_reach2(lake.radius, gx, gz);
+        }
+        let wobble = fbm(&self.lake_noise, gx as f64, gz as f64, 0.075, 2) * self.pond_wobble(lake.radius);
+        let reach = (lake.radius as f64 + wobble).max(1.0);
+        (reach * reach).round() as i32
+    }
+
+    fn lake_near(&self, gx: i32, gz: i32) -> Option<(Lake, i32)> {
+        if self.preset == Preset::Test {
+            return None;
+        }
+        // A wide lake first; no pond is ever let into its footprint, so a
+        // column is in one or the other and never both.
+        if let Some(wide) = self.wide_lake_near(gx, gz) {
+            return Some(wide);
+        }
+        let cell = self.pond_cell();
+        let (cell_x, cell_z) = (gx.div_euclid(cell), gz.div_euclid(cell));
+        let (cx, cz, radius, _) = self.lake_candidate(cell_x, cell_z);
+        let (dx, dz) = (gx - cx, gz - cz);
+        let d2 = dx * dx + dz * dz;
+        // Widened by the wobble: a column the shore has been pushed out
+        // to is a column that has to be asked about, and rejecting it
+        // here would cut the lake off in a straight line.
+        let outer = radius + self.pond_wobble(radius).ceil() as i32 + 1;
+        if d2 > outer * outer {
+            return None;
+        }
+        self.lake_site(cell_x, cell_z).map(|lake| (lake, d2))
+    }
+
+    /// The top of the standing water over a column: the sea, or a lake.
+    ///
+    /// The sea's level everywhere the column is not a lake bed, which
+    /// keeps every rule written against `SEA_LEVEL` true on dry land --
+    /// a shore column beside a lake is *not* under this level, and so
+    /// is not flooded by it.
+    fn water_level_at(&self, gx: i32, gz: i32) -> i32 {
+        match self.lake_near(gx, gz) {
+            Some((lake, d2)) if d2 <= self.lake_reach2(&lake, gx, gz) => lake.water,
+            _ => SEA_LEVEL,
+        }
+    }
+
+    // ---- the rock ----
+
+    /// Which rock lies under the soil here, and how many layers of it
+    /// there are before the plain stone underneath.
+    ///
+    /// Three rocks and a default, each laid where its kind forms, so a
+    /// dig tells you where you are as surely as the surface does:
+    ///
+    /// * **Sandstone under sand.** Deserts, beaches and the sandy sea
+    ///   floor: sand that has been sand long enough. Six to ten layers.
+    /// * **Limestone under the lowlands.** Plains, woods, savanna,
+    ///   marsh, bog and the river country between them -- the flat
+    ///   ground that was once a sea floor, which is what limestone is.
+    ///   Eight to fourteen layers, and this is the one that matters to
+    ///   a player: flint forms in limestone, so a knapper learns to
+    ///   look for the pale rock (see `flint_spacing`).
+    /// * **Granite in the high country.** The mountains' own rock, and
+    ///   the first rock a flint pick will not bite. Under the mountain
+    ///   biomes for the top layers, and *everywhere* above the granite
+    ///   line (`granite_from`), whatever the biome says: a high ridge
+    ///   is the same rock however the climate paints its top.
+    /// * **Stone below all of it**, and under everything else -- taiga,
+    ///   tundra, dead forest, the deep sea floor.
+    ///
+    /// The thickness comes from one flat noise field, so the boundary
+    /// between an upper rock and the stone under it wanders by a few
+    /// layers across a hillside rather than lying at one depth like a
+    /// sheet. Read once per column and not per cell: the rock loop is
+    /// the hottest in the generator, and a noise sample per rock cell
+    /// would cost more than the caves do.
+    ///
+    /// Returns the rock and its thickness; the third number is the
+    /// granite line for this column.
+    fn stratum(&self, gx: i32, gz: i32, biome: Biome, surface: Surface) -> (BlockId, i32, i32) {
+        let wander = fbm(&self.strata_noise, gx as f64, gz as f64, 0.021, 2);
+        // Layers either side of the middle thickness. Clamped, because
+        // `fbm` is only *roughly* -1..1 and a bed that came out fifteen
+        // layers thick where the doc comment promises fourteen is the
+        // kind of number a test catches and a player does not -- until
+        // it is the layer that hides the copper.
+        let swing = |layers: f64| (wander * layers).round().clamp(-layers, layers) as i32;
+        // The line above which every rock is granite, wobbled by the
+        // same field so it is a contour of the rock rather than a
+        // horizontal plane cutting every mountain at one height.
+        let granite_from = SEA_LEVEL + 55 + swing(6.0);
+        let sandy = matches!(biome, Biome::Desert | Biome::Beach)
+            || surface.filler == BLOCK_SAND
+            || surface.top == BLOCK_SAND;
+        // **Which of a biome's rocks, from a second, much broader field**:
+        // a country of chalk or of gneiss is tens of chunks across, so a
+        // player walks *into* one, and the rock under a hill says which
+        // country it is. One more sample per column, not per cell, for the
+        // reason above. See `ground` for what each rock decides.
+        //
+        // The pairings are the geology's: shale is the mud of the wet
+        // lowlands turned to rock, chalk and dolomite are limestone's
+        // kin, quartzite is sandstone baked, gneiss, marble and diorite
+        // are the roots of mountains, andesite the lava of high peaks, tuff
+        // the ash under a dead forest.
+        let region = if ground_on() { fbm(&self.strata_noise, gx as f64 - 3301.0, gz as f64 + 4409.0, 0.0045, 1) } else { -0.2 };
+        use crate::types::{
+            BLOCK_ANDESITE, BLOCK_CHALK, BLOCK_DIORITE, BLOCK_DOLOMITE, BLOCK_GNEISS, BLOCK_MARBLE, BLOCK_QUARTZITE,
+            BLOCK_SHALE, BLOCK_TUFF,
+        };
+        if sandy {
+            let rock = if biome == Biome::Desert && region > 0.2 { BLOCK_QUARTZITE } else { BLOCK_SANDSTONE };
+            return (rock, 8 + swing(2.0), granite_from);
+        }
+        let lowland = |other: BlockId, above: f64| if region > above { other } else { BLOCK_LIMESTONE };
+        match biome {
+            Biome::Plains | Biome::Forest => (lowland(BLOCK_CHALK, 0.2), 11 + swing(3.0), granite_from),
+            Biome::BirchForest | Biome::Savanna => (lowland(BLOCK_DOLOMITE, 0.15), 11 + swing(3.0), granite_from),
+            Biome::Swamp | Biome::Bog | Biome::River => (lowland(BLOCK_SHALE, -0.1), 11 + swing(3.0), granite_from),
+            Biome::Mountains => {
+                let rock = match region {
+                    r if r > 0.3 => BLOCK_MARBLE,
+                    r if r > 0.0 => BLOCK_GNEISS,
+                    r if r < -0.25 => BLOCK_DIORITE,
+                    _ => BLOCK_GRANITE,
+                };
+                (rock, 11 + swing(3.0), granite_from)
+            }
+            Biome::SnowyPeaks => {
+                (if region > -0.05 { BLOCK_ANDESITE } else { BLOCK_GRANITE }, 11 + swing(3.0), granite_from)
+            }
+            // The old north: stone, and gneiss where the field says.
+            Biome::Taiga | Biome::Tundra if region > 0.15 => (BLOCK_GNEISS, 9 + swing(3.0), granite_from),
+            Biome::DeadForest => (BLOCK_TUFF, 8 + swing(2.0), granite_from),
+            _ => (BLOCK_STONE, 0, granite_from),
+        }
     }
 
     /// Which biome a column belongs to.
@@ -1110,7 +4076,17 @@ impl WorldGen {
     /// frozen desert either way; then humidity, which is what separates
     /// the temperate biomes from each other.
     pub fn biome_at(&self, gx: i32, gz: i32) -> Biome {
-        let height = self.height_at(gx, gz);
+        { let (px, pz) = self.on_planet(gx, gz); self.biome_on_planet(px, pz) }
+    }
+
+    fn biome_on_planet(&self, gx: i32, gz: i32) -> Biome {
+        // One field, one biome: what F3 says standing on the test world
+        // should be the same wherever you stand on it, or the readout is
+        // reporting the noise of a world this one is not.
+        if self.preset == Preset::Test {
+            return Biome::Plains;
+        }
+        let height = self.height_on_planet(gx, gz);
         self.biome_from(gx, gz, height)
     }
 
@@ -1166,7 +4142,10 @@ impl WorldGen {
     /// coast test above it.
     fn land_biome(&self, gx: i32, gz: i32, height: i32) -> Biome {
         let temperature = self.surface_temperature(gx, gz, height);
-        let humidity = self.humidity(gx, gz);
+        // With the ground's own share at the Earth's scale -- a glade in a
+        // forest province, a grove in a steppe, a marsh in a floodplain --
+        // which the tint and the air do not read. See `mosaic_wetness`.
+        let humidity = self.humidity(gx, gz) + self.mosaic_wetness(gx, gz, height);
 
         // High ground. Snow line follows temperature rather than a fixed
         // altitude, so a peak in the tropics can still be bare rock
@@ -1182,7 +4161,14 @@ impl WorldGen {
         // that belong between them missing entirely. Now anything cold
         // enough to be white up here is cold enough to be tundra down
         // there, so the bands are always walked through in order.
-        if height > SEA_LEVEL + 22 {
+        // **Fifty above the sea, and it was twenty-two** while the world
+        // was sixty-four tall. The mountain line is a statement about the
+        // relief, not a height: the same twenty-two blocks after the
+        // relief was made two and a half times taller turned half of all
+        // land into bare "mountains" -- measured, 35 to 50 per cent against
+        // 11 to 18 before -- and the woods on every hillside went with it.
+        // Scaled with the relief, the shares come back to what they were.
+        if height > SEA_LEVEL + 42 {
             return if temperature < -0.60 {
                 Biome::SnowyPeaks
             } else {
@@ -1190,8 +4176,32 @@ impl WorldGen {
             };
         }
 
-        if temperature < -0.42 {
-            // Cold. Humid enough for conifers, or bare tundra.
+        if temperature < FREEZING {
+            // Cold, and split three ways rather than two.
+            //
+            // **Wet *and* low is a bog**, and it is tested first for
+            // the same reason the swamp is tested before the forest
+            // further down: a waterlogged hilltop is not a thing. Same
+            // height rule as the swamp, so the two read as one landform
+            // at two temperatures -- walk south out of a bog and it
+            // becomes a marsh.
+            //
+            // The humidity line is the *same one* the temperate band
+            // uses to tell wet country from dry, which is not a
+            // coincidence worth hiding: "wet enough for a wood" and
+            // "wet enough for a bog" are the same amount of rain
+            // falling on ground that is either draining or not, and the
+            // height test is what decides which. It leaves a bog at
+            // about a third of a percent of the world -- half as common
+            // as a marsh and about as common as a river, which is a
+            // place you come across rather than one you live in. See
+            // `a_bog_is_rare_but_not_a_rumour`.
+            //
+            // Then conifers where it is merely damp, and bare tundra
+            // where it is not.
+            if humidity > 0.10 && height <= SEA_LEVEL + 4 {
+                return Biome::Bog;
+            }
             return if humidity > -0.10 {
                 Biome::Taiga
             } else {
@@ -1199,22 +4209,47 @@ impl WorldGen {
             };
         }
 
-        if temperature > 0.14 {
-            // Hot. Dry is desert, anything else is open steppe.
-            return if humidity < -0.05 {
+        // **Wet *and* low is a marsh at any warmth above freezing**, tested
+        // before the hot band for the reason the bog is tested before the
+        // conifers. It used to sit inside the temperate branch only, which
+        // was harmless while the hot line was high; when the savanna was
+        // widened into the warm half of the temperate band it took the
+        // marshes there with it, and seed 4242 had none left on a
+        // four-thousand-block transect. A savanna on waterlogged ground is
+        // not a savanna.
+        if humidity > 0.34 && height <= SEA_LEVEL + 4 {
+            return Biome::Swamp;
+        }
+
+        if temperature > HOT {
+            // Hot. Dry is desert, anything else is savanna.
+            //
+            // **Warm, not only hot, and desert only where it is truly dry.**
+            // With the line at 0.14 and the desert taking everything drier
+            // than -0.05, the savanna came out 10, 1, 5 and 7 per cent of
+            // the land over four seeds -- on one of them a biome you could
+            // walk a whole world without seeing -- while the warm edge of
+            // the temperate band went to plain and dead wood. A savanna is
+            // the wide middle of warm, seasonally dry country, and it has
+            // to be big enough to be a journey. See `biome_shares` for the
+            // numbers these two thresholds were measured at.
+            //
+            // **Not lower than this**: at 0.04 a taiga came within 1 436
+            // blocks of a savanna on seed 99, and
+            // `no_walk_leads_from_a_taiga_to_a_desert_inside_a_kilometre`
+            // holds that line at fifteen hundred. The cold band does not
+            // move, so every step the hot line takes towards it is a
+            // shorter walk from conifers to acacias.
+            return if humidity < -0.22 {
                 Biome::Desert
             } else {
                 Biome::Savanna
             };
         }
 
-        // Temperate, split by rainfall into four bands that each look
-        // like something: bare dead wood, open plain, closed forest,
-        // and -- where it is wet *and* low -- swamp. A waterlogged
-        // hilltop is not a thing.
-        if humidity > 0.34 && height <= SEA_LEVEL + 4 {
-            return Biome::Swamp;
-        }
+        // Temperate, split by rainfall into bands that each look like
+        // something: bare dead wood, open plain, closed forest. The
+        // fourth, swamp, was taken out above the hot band.
         if humidity > 0.10 {
             // Wet temperate country, split once more by temperature.
             // Birch takes the cool half, which puts it between the oak
@@ -1230,11 +4265,37 @@ impl WorldGen {
             } else {
                 Biome::Forest
             }
-        } else if humidity > -0.26 {
+        } else if humidity > -0.26 || !self.burnt(gx, gz) {
+            // **Dry temperate country is a meadow unless it burned.** It
+            // used to be dead wood wherever it was dry enough -- measured, a
+            // tenth to a sixth of all land on four seeds, the second
+            // commonest biome in the world -- and a place that common is not
+            // a place, it is a colour. See `burnt`.
             Biome::Plains
         } else {
             Biome::DeadForest
         }
+    }
+
+    /// Whether dry temperate country here is a wood that burned.
+    ///
+    /// **A patch field over the dry band, not a drier threshold**, and the
+    /// difference is the whole of what "rare" means. Moving the dry line
+    /// down would thin the dead wood evenly -- a fringe of bare trunks along
+    /// every dry meadow, still everywhere, only narrower. A fire is an event:
+    /// it takes a stretch of country and leaves the next one standing. So
+    /// the dead wood is where the dry band and a slow field of burn scars
+    /// overlap, and what a player finds is a grey clearing a few hundred
+    /// blocks across in open country, with meadow all round it.
+    ///
+    /// Off the ash field, far from where `ashy` samples it: the field that
+    /// decides where the ash lies inside a burnt wood is the natural owner
+    /// of where the woods burned, and a new noise generator for one question
+    /// is a cost with no answer. Asked only of columns already in the dry
+    /// band, which is a fifth of temperate land.
+    fn burnt(&self, gx: i32, gz: i32) -> bool {
+        fbm(&self.ash_noise, gx as f64 + 51_130.0, gz as f64 - 29_170.0, DEAD_WOOD_FREQUENCY, 2)
+            > DEAD_WOOD_THRESHOLD
     }
 
     /// What the top of a column is made of, and what sits just under it.
@@ -1242,10 +4303,86 @@ impl WorldGen {
     /// Generation itself goes through the column cache, which already
     /// has the biome and the slope; this is the same question asked from
     /// outside, and the tests are what ask it.
+    ///
+    /// **The lake bed and the bog's peat too**, which the cache lays over
+    /// `surface_for` and this used not to: a pond's two layers of silt read
+    /// here as a meadow's four or five. Both now go through the same two
+    /// functions the cache calls. What it still does not know is the clay
+    /// and gravel the cache lays on the banks of standing water, which
+    /// depend on the neighbouring columns -- a test that has to agree with
+    /// the chunk to the block reads `ColumnCache` itself, as
+    /// `ore_is_always_in_rock_and_never_in_a_hole` does.
     #[cfg(test)]
     fn surface_at(&self, gx: i32, gz: i32, height: i32) -> Surface {
         let biome = self.biome_from(gx, gz, height);
-        surface_for(height, biome, self.slope_at(gx, gz, height))
+        let mut surface = surface_for(height, biome, self.slope_at(gx, gz, height));
+        surface = self.island_shore(gx, gz, biome, surface);
+        if let Some(bed) = Self::lake_bed(height, self.water_level_at(gx, gz)) {
+            surface = bed;
+        }
+        if biome == Biome::Bog && surface.filler == BLOCK_PEAT {
+            surface.soil = Self::bog_soil(self.seed, gx, gz);
+        }
+        surface
+    }
+
+    /// A lake bed's surface, for a column with water standing over it
+    /// above the sea; `None` anywhere else.
+    ///
+    /// The sea's own beds are `surface_for`'s business, by depth; a lake
+    /// is dry land the water stands on, and dry land's surface is turf,
+    /// which under a pond is wrong in the one way a player looks straight
+    /// down at. Sand in the shallows and silt below, as the sea has.
+    fn lake_bed(height: i32, water: i32) -> Option<Surface> {
+        (height < water && height >= SEA_LEVEL).then(|| {
+            if water - height <= 1 {
+                Surface { top: BLOCK_SAND, filler: BLOCK_SAND, soil: 2 }
+            } else {
+                Surface { top: BLOCK_DIRT, filler: BLOCK_SAND, soil: 2 }
+            }
+        })
+    }
+
+    /// How many cells a swamp pool is dug into this column: 0 for none, 1 for
+    /// a pool, 2 for a hole deeper than a player stands. See
+    /// `SWAMP_POOL_FREQUENCY`.
+    ///
+    /// **Only where the water would stay.** The column has to be low, flat
+    /// swamp ground above the sea, and every one of its four neighbours has to
+    /// stand at least as high as it does -- so a pool is always a hollow or a
+    /// level, never a slope, and the water put in it has a wall of ground or of
+    /// the next pool's water, at the same height, on every side. That rule is
+    /// also what keeps two pools side by side at one waterline: a column beside
+    /// a lower one cannot be a pool, so neighbouring pool columns always stand
+    /// at the same height, and nothing between them runs downhill when the
+    /// water simulation first touches it.
+    ///
+    /// The cheap questions are asked first and the biome last, because the
+    /// biome is the climate fields again and nearly every column in the world
+    /// fails on height before it gets there.
+    fn swamp_pool(&self, gx: i32, gz: i32, height: i32, water: i32, around: [i32; 4]) -> i32 {
+        if !(SEA_LEVEL..=SEA_LEVEL + 4).contains(&height) || height < water {
+            return 0;
+        }
+        if around.iter().any(|&neighbour| neighbour < height) {
+            return 0;
+        }
+        let field = fbm(&self.lake_noise, gx as f64 + 3301.0, gz as f64 - 1709.0, SWAMP_POOL_FREQUENCY, 2);
+        if field <= SWAMP_POOL_THRESHOLD || self.biome_from(gx, gz, height) != Biome::Swamp {
+            return 0;
+        }
+        if field > SWAMP_HOLE_THRESHOLD {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// How deep a bog's peat is in this column, counting the top cell --
+    /// three to five, so two to four cells of peat under the turf. See the
+    /// column cache for why it is not the soil depth the slope gave.
+    fn bog_soil(seed: u32, gx: i32, gz: i32) -> i32 {
+        3 + (hash2(gx, gz, seed.wrapping_add(0x9EA7)) % 3) as i32
     }
 
     /// How steep a column is -- see `slope_from` for what the number
@@ -1262,13 +4399,19 @@ impl WorldGen {
     /// has already built, rather than paying for four more columns of
     /// fractal noise apiece; this is the standalone form, and the tests
     /// are what ask for it.
+    ///
+    /// Planet coordinates, like every other private accessor here
+    /// (`on_planet`). `surface_at` calls this beside `biome_from` and
+    /// `water_level_at`, which are planet-space, and the three of them
+    /// answering about two different places would be a surface made of one
+    /// column's biome and another's slope.
     #[cfg(test)]
     fn slope_at(&self, gx: i32, gz: i32, _height: i32) -> f32 {
         slope_from(
-            self.height_at(gx + 1, gz),
-            self.height_at(gx - 1, gz),
-            self.height_at(gx, gz + 1),
-            self.height_at(gx, gz - 1),
+            self.height_on_planet(gx + 1, gz),
+            self.height_on_planet(gx - 1, gz),
+            self.height_on_planet(gx, gz + 1),
+            self.height_on_planet(gx, gz - 1),
         )
     }
 
@@ -1302,16 +4445,30 @@ impl WorldGen {
         const FREQ_XZ: f64 = 0.024;
         const FREQ_Y: f64 = 0.045;
         /// How close to zero counts as "on the surface" of a field.
-        /// Widening this does not widen tunnels so much as multiply
-        /// them, and past about a tenth the underground stops being rock
-        /// with holes in it.
-        const TUNNEL: f64 = 0.075;
+        ///
+        /// Widening this does not widen tunnels so much as *multiply*
+        /// them, which is exactly the complaint it was narrowed for: at
+        /// 0.075 two noise fields agreed often enough that a shaft sunk
+        /// anywhere hit a tunnel within a dozen blocks, and an
+        /// underground that is always open is not a place you go
+        /// looking for anything -- it is the ground being hollow.
+        ///
+        /// **A cave is meant to be a find.** The rule is the product of
+        /// two independent fields being near zero, so the count falls as
+        /// the *square*: 0.048 is under two thirds of the old width and
+        /// leaves about four tenths of the tunnel it used to make. What
+        /// survives is longer runs with rock between them, which is the
+        /// shape that makes a lantern worth carrying.
+        const TUNNEL: f64 = 0.048;
         let p = [gx as f64 * FREQ_XZ, y as f64 * FREQ_Y, gz as f64 * FREQ_XZ];
         let a = self.cave_noise_a.get(p);
 
         // Rooms, deep only: one breaking the surface would open a pit in
         // the middle of a field.
-        if y <= SEA_LEVEL - 8 && a > 0.70 {
+        // Rooms are rarer with the tunnels, and for the same reason: a
+        // chamber every hundred blocks is scenery, one every few
+        // hundred is somewhere you tell somebody about.
+        if y <= SEA_LEVEL - 8 && a > 0.78 {
             return true;
         }
         if a.abs() > TUNNEL {
@@ -1320,127 +4477,326 @@ impl WorldGen {
         self.cave_noise_b.get(p).abs() < TUNNEL
     }
 
-    /// Glowstone, in veins rather than as isolated cells.
+    /// Basalt, in dykes: sheets of black rock standing in the deep
+    /// stone, wide enough to have to be gone round.
     ///
-    /// The narrow band on a single noise field is what makes a vein: the
-    /// set of points where a smooth field sits inside a thin range is a
-    /// shell, and a shell through a 3D field is a connected blob.
-    fn is_glowstone(&self, gx: i32, y: i32, gz: i32) -> bool {
-        if y > SEA_LEVEL - 6 {
-            return false; // deep only, so it lights caves rather than hillsides
+    /// **A dyke rather than a floor, and the reason is where the iron
+    /// is.** The first shape of this was a layer under everything --
+    /// the floor of the world -- and the floor of this world is four
+    /// blocks thick and holds the richest iron in it (`ROOTS`): a
+    /// basalt floor would have buried the ore the deep band exists for
+    /// behind a rock that needs bronze, which needs copper and tin,
+    /// which are found *above* it. A wall you tunnel round takes
+    /// nothing away and still costs a decision -- go round, or come
+    /// back with a pick that opens it.
+    ///
+    /// Two fields at once so the shape is a *sheet* rather than a blob:
+    /// one narrow band picks a shell out of a smooth field (the trick
+    /// `ore_at`'s veins use), and the second, sampled at a
+    /// stretched vertical scale, breaks the sheet into lengths. What
+    /// comes out is a wall a few blocks thick that stands through
+    /// several layers and stops.
+    fn is_basalt(&self, gx: i32, y: i32, gz: i32) -> bool {
+        if y > Self::DEEP {
+            return false;
         }
-        let v = self
+        let sheet = self
             .ore_noise
-            .get([gx as f64 * 0.085, y as f64 * 0.085, gz as f64 * 0.085]);
-        v > 0.70
+            .get([gx as f64 * 0.045, y as f64 * 0.012, gz as f64 * 0.045]);
+        if !(-0.09..=0.09).contains(&sheet) {
+            return false;
+        }
+        // The second field is what stops the dyke being one wall across
+        // the whole world: it is on again, off again along its length.
+        self.strata_noise
+            .get([gx as f64 * 0.03, y as f64 * 0.02, gz as f64 * 0.03])
+            > -0.15
+    }
+
+    /// Below this, the deep rock. Six under the waterline, so it is the
+    /// same depth in every terrain rather than a fixed fraction of a
+    /// column that might be a mountain or a sea floor.
+    const DEEP: i32 = SEA_LEVEL - 6;
+    /// Under this a basalt dyke is gabbro. See `is_basalt`'s caller.
+    const GABBRO_BELOW: i32 = BEDROCK_TOP + 14;
+    /// ...and this is the roots of the world, where the iron is thickest.
+    const ROOTS: i32 = BEDROCK_TOP + 2;
+
+    /// How much copper the shallow rock under ground of this height
+    /// holds: nothing under a meadow, everything a mountain shoulder
+    /// has to give.
+    ///
+    /// A ramp rather than a line, and that matters. A hard threshold
+    /// puts a contour across the world at one height, and a player who
+    /// crossed it would find the copper stop dead along a level that
+    /// nothing on the surface explains. A ramp means the foothills have
+    /// a little and the shoulder has a lot, so "higher is better" is
+    /// something you can *feel* while walking rather than a rule you
+    /// have to be told.
+    fn copper_country(ground: i32) -> f64 {
+        /// Where copper starts being worth a look. Six blocks of relief
+        /// above the sea is more than a beach and less than a hill: the
+        /// land the game calls low country, and the land a player walks
+        /// out of.
+        const FOOT: i32 = SEA_LEVEL + 15;
+        /// ...and where the rock is as rich as it gets. Measured against
+        /// a real world, half the land sits about a third of the way up
+        /// this ramp and the top tenth of it is over the end -- so
+        /// ordinary rolling country has some copper and the mountains
+        /// are where you go when you want a lot of it.
+        ///
+        /// **Thirty-five, and it was fifty while most of the land was young.**
+        /// When the worn window was widened (`terrain_height`, `unworn`)
+        /// the mean land came down from twenty-one blocks over the sea to
+        /// fourteen and the mountain line's share from fourteen per cent
+        /// to six, and copper, which reads the ground's height, fell under
+        /// the floor `all_four_ores_are_actually_in_the_ground` holds it
+        /// to: 0.078 per thousand of rock on seed 1337. The foot stays
+        /// where it is, so a meadow still has none; the shoulder comes
+        /// down to where the hills now top out. Forty was tried first and
+        /// left seed 7 at 0.092.
+        const SHOULDER: i32 = SEA_LEVEL + 35;
+        smoothstep(FOOT as f64, SHOULDER as f64, ground as f64)
+    }
+
+    /// How deep in tin country this column is: zero outside the
+    /// districts, one in the middle of one.
+    ///
+    /// Two dimensional and very low frequency, so a district is a
+    /// *region* of the map -- a few hundred blocks across, with a
+    /// richer middle -- and not a depth, a rock or anything else a
+    /// player can reason their way to from where they are standing.
+    /// That is the whole point of it; see `ore_at`.
+    fn tin_country(&self, gx: i32, gz: i32) -> f64 {
+        /// Something over two hundred blocks between one district and
+        /// the next. Small enough that a world holds a good many, wide
+        /// enough that walking out of one is a walk rather than a step.
+        const FREQ: f64 = 0.0042;
+        /// Where a district begins, and where its heart is. Two octaves
+        /// of fbm do not reach ±1, so these are lower than they look:
+        /// measured, this leaves tin country at about a sixth of the
+        /// map.
+        const EDGE: f64 = 0.30;
+        const HEART: f64 = 0.56;
+        smoothstep(
+            EDGE,
+            HEART,
+            fbm(&self.province_noise, gx as f64, gz as f64, FREQ, 2),
+        )
     }
 
     /// What ore, if any, is in the rock at this cell.
     ///
-    /// ## Two questions, not four
+    /// ## What the player is deciding
     ///
-    /// The obvious shape is a noise field per mineral, each with its own
-    /// threshold and depth band. It reads well and it costs four Perlin
-    /// samples in the *stone* of every column -- eight thousand cells a
-    /// chunk, most of them stone, and a chunk already spends most of its
-    /// time in noise. That is a doubling of generation cost to place
-    /// something that occupies about one cell in a hundred.
+    /// This used to be four weights on one roll, and the consequence was
+    /// that every piece of rock in the world held the same thing. Copper
+    /// under the meadow, copper under the mountain, tin in both, iron
+    /// under all of it: measured, one block in sixty of all the stone in
+    /// the world was ore. "Where do I mine?" answered *here*, wherever
+    /// here was, and the whole metal chain flattened into a number going
+    /// up. A mechanic with one correct answer is not a mechanic yet.
     ///
-    /// So it is asked as two questions instead:
+    /// The fix is not dividing all four by ten. That makes the same
+    /// non-decision take longer, which is the definition of a chore.
+    /// Rarity is only worth anything if the ore is *somewhere* rather
+    /// than thinly everywhere -- so each of the four now answers a
+    /// different question, and each question is a different journey:
     ///
-    /// 1. **Is this rock mineralised?** One field, one sample, thresholded
-    ///    high. A narrow band on a smooth 3D field is a shell, and a
-    ///    shell is a connected blob -- which is what makes this a vein
-    ///    rather than a scatter of isolated cubes. Same trick as
-    ///    `is_glowstone`, and the same reason.
-    /// 2. **What is in it?** A hash, which is free, keyed to a coarse
-    ///    block of the world so a single vein comes out as one mineral
-    ///    rather than a plum pudding -- and weighted by depth, which is
-    ///    where the geology goes.
+    /// * **Coal is everywhere**, at every depth, and it is the only one
+    ///   that is. It is what the other three are melted with, and a
+    ///   world whose bottleneck is its fuel reads as a bug rather than
+    ///   as a challenge. Finding coal is never the question; how much of
+    ///   it you can carry home in one trip is.
+    /// * **Copper is in the hills** -- see `copper_country`. Measured,
+    ///   the shallow rock under high ground holds about three cells of
+    ///   copper per thousand and the rock under low country holds none
+    ///   at all. This is the first
+    ///   journey the game asks for and the only one you can *plan*
+    ///   before setting out, because a hill is a thing you can see from
+    ///   where you are standing.
+    /// * **Iron is deep, and deeper is more of it.** None above `DEEP`
+    ///   at all, and the share of a body that is iron rather than coal
+    ///   climbs the whole way to the bedrock. The decision is how far
+    ///   down to sink the shaft before driving a level: eight more
+    ///   blocks of stair is eight more blocks of hauling for perhaps
+    ///   twice the iron.
+    /// * **Tin is a place you go looking for** -- see `tin_country`.
+    ///   Not a depth, not a landform, nothing you can infer from the
+    ///   surface: districts, and outside them none. Finding tin is
+    ///   prospecting, which is what finding tin has always been and the
+    ///   reason bronze was worth trading for. It is also why the two
+    ///   halves of bronze are two separate expeditions rather than two
+    ///   lines of one shopping list.
     ///
-    /// ## The depths
+    /// The failure all of that is guarding against is the one the player
+    /// actually reported: ore so common that the mine came to *them*,
+    /// and with it the loss of every reason the metal chain has to make
+    /// anybody leave home.
     ///
-    /// Copper and tin near the top of the rock, where in the real world
-    /// they weather out at outcrops and are found by people who are not
-    /// yet miners. Iron deep, and much more of it than copper -- iron is
-    /// not rare, it is *hard to get*, and in this game that difficulty is
-    /// spent on the tool the ore demands rather than on how much of it
-    /// there is. Tin is scarce everywhere: that scarcity is the entire
-    /// reason bronze was worth trading for.
+    /// ## Three fields, two of them nearly free
     ///
-    /// Coal is at every depth and commonest of all, because it is what
-    /// every one of the other three has to be melted with, and an ore
-    /// economy whose fuel is the bottleneck is an economy that reads as
-    /// a bug.
-    fn ore_at(&self, gx: i32, y: i32, gz: i32) -> Option<BlockId> {
-        /// Vein scale. Finer than the glowstone field: an ore body should
-        /// be a handful of blocks you are pleased to find, not a wall.
-        const FREQ: f64 = 0.115;
-        /// How far up the field a cell has to be to be mineralised at
-        /// all. Every point of this is roughly a halving of how much ore
-        /// the world has.
-        const VEIN: f64 = 0.62;
-        /// Below this, the deep rock. Six under the waterline, so it is
-        /// the same depth in every terrain rather than a fixed fraction
-        /// of a column that might be a mountain or a sea floor.
-        const DEEP: i32 = SEA_LEVEL - 6;
-        /// How big a lump of world shares one mineral. A vein is smaller
-        /// than this, so a vein is almost always all one thing.
-        const VEIN_CELL: i32 = 6;
+    /// A field per mineral would be four Perlin samples in the stone of
+    /// every column -- eight thousand cells a chunk, most of them stone,
+    /// and a chunk already spends most of its time in noise. That
+    /// argument has not changed. What has changed is why it does not
+    /// bind: only the *first* question is asked of every cell, and the
+    /// rest are asked only where it said yes, which is now about one
+    /// cell of rock in two hundred. So the first has to be one sample
+    /// and the others can be whatever they need to be.
+    ///
+    /// 1. **Is there a body here?** `vein_noise` over a high threshold.
+    ///    A narrow band on a smooth 3D field is a shell, and a shell is
+    ///    a connected blob -- which is what makes this a vein rather
+    ///    than a scatter of isolated cubes. Same trick as `is_basalt`'s
+    ///    sheets, and the same reason.
+    /// 2. **What country is this?** `tin_country`, off a flat, very low
+    ///    frequency field.
+    /// 3. **What is in the body?** `mineral_noise`, at a scale a few
+    ///    times a body's own, so neighbouring veins tend to agree and
+    ///    an area comes out metal-bearing or barren as a whole.
+    ///
+    /// The hash that used to answer (3) is gone, and that is worth
+    /// writing down: a hash is keyed to a *cube* of the world, so a body
+    /// crossing the face of one changed mineral along a flat plane --
+    /// and a flat plane through a vein is the one thing in a rock face
+    /// that reads as a bug rather than as geology. A smooth field cuts
+    /// the same body along a curved surface, and it cuts every body
+    /// nearby the same way, which is what makes a district a district.
+    /// It also took with it the `% 100` bias that cost this function its
+    /// coal the first time round.
+    fn ore_at(&self, gx: i32, y: i32, gz: i32, ground: i32) -> Option<BlockId> {
+        /// Vein scale across. A third of the frequency the first version
+        /// used, so a body is getting on for three times as wide -- and
+        /// there are far fewer of them, because the threshold went up at
+        /// the same time. Bigger and rarer is the whole change, and both
+        /// halves are measured: along a straight tunnel a vein used to
+        /// be two cells and is now five to eight, and the tunnel walks
+        /// between four and six times as far to reach one. A find has to
+        /// be worth the walk that reached it.
+        const FREQ_XZ: f64 = 0.040;
+        /// Vein scale up. Nearly double the horizontal one, which is the
+        /// same trick `is_cave` uses and for the same reason: a body
+        /// flatter than it is wide is a seam to follow sideways, and
+        /// which way to drive the tunnel is a decision. A body as tall
+        /// as it is wide is a pocket you empty without choosing
+        /// anything.
+        const FREQ_Y: f64 = 0.076;
+        /// How far up the field a cell has to be to hold anything at
+        /// all. Every two points of this is roughly a halving of how
+        /// much ore the world has, so it is the one number to move when
+        /// the answer is simply "less".
+        ///
+        /// **It is 0.78 now, and that is one halving.** Ore was rare
+        /// enough to be worth walking to and not rare enough to be worth
+        /// remembering where: a player who wanted copper sank a shaft
+        /// anywhere and found some. Paired with the narrower caves
+        /// (`is_cave`), the two together are the change: fewer holes to
+        /// walk along and fewer bodies at the end of them, so a seam is
+        /// a place you go back to rather than a thing you trip over.
+        const BODY: f64 = 0.78;
+        /// The scale the minerals themselves vary over: several times a
+        /// body, so a body is nearly always one thing and a hillside
+        /// tends to be rich or poor as a whole.
+        const MINERAL_FREQ: f64 = 0.021;
 
-        let v = self
-            .vein_noise
-            .get([gx as f64 * FREQ, y as f64 * FREQ, gz as f64 * FREQ]);
-        if v <= VEIN {
+        let v = self.vein_noise.get([
+            gx as f64 * FREQ_XZ,
+            y as f64 * FREQ_Y,
+            gz as f64 * FREQ_XZ,
+        ]);
+        if v <= BODY {
             return None;
         }
 
-        // A roll per coarse cell of the world, not per block.
-        //
-        // Shifted before the modulus, and that is not a detail: `hash2`
-        // ends in a multiply, and the low bits of a product depend only
-        // on the low bits of its inputs, so `% 100` straight off the end
-        // of it is visibly biased over a domain this small. The first
-        // cut of this had a third less coal than its weights asked for.
-        let roll = (hash2(
-            gx.div_euclid(VEIN_CELL),
-            gz.div_euclid(VEIN_CELL)
-                .wrapping_mul(31)
-                .wrapping_add(y.div_euclid(VEIN_CELL)),
-            self.seed ^ 0x0FE5,
-        ) >> 8)
-            % 100;
+        // Everything from here down is paid for only in rock that
+        // already holds something.
+        let metal = self.mineral_noise.get([
+            gx as f64 * MINERAL_FREQ,
+            y as f64 * MINERAL_FREQ,
+            gz as f64 * MINERAL_FREQ,
+        ]);
 
-        Some(if y <= DEEP {
-            // Coal outweighs iron even down here, and by a hair rather
-            // than by a lot. It has to outweigh it *somewhere in every
-            // band*: an ocean world is almost all deep rock, so weights
-            // that made coal common only near the surface would ship a
-            // world with plenty of iron ore and nothing to smelt it with.
-            match roll {
-                0..=43 => BLOCK_COAL_ORE,
-                44..=85 => BLOCK_IRON_ORE,
-                86..=94 => BLOCK_COPPER_ORE,
-                _ => BLOCK_TIN_ORE,
-            }
-        } else {
-            // No iron up here at all. The player who has only ever mined
-            // the top of the rock should have seen copper, tin and coal
-            // and no iron whatsoever -- going *down* is the thing the
-            // next age asks of them.
-            match roll {
-                0..=59 => BLOCK_COAL_ORE,
-                60..=84 => BLOCK_COPPER_ORE,
-                _ => BLOCK_TIN_ORE,
-            }
-        })
+        if y <= Self::DEEP {
+            // The gradient that makes depth a decision rather than a
+            // wall. Measured: the roots of the world hold four cells of
+            // iron per thousand of rock and the top of the deep band
+            // holds half of one -- so a shaft driven eight blocks
+            // further down is a different mine, not the same mine
+            // lower.
+            //
+            // Coal has to stay the commoner of the two *taken over the
+            // whole world*, and this is where that is nearly lost: an
+            // ocean world is almost all deep rock, so a share that
+            // favoured iron through the whole band would ship a world
+            // with plenty of iron ore and nothing to smelt it with.
+            let depth = smoothstep(Self::DEEP as f64, Self::ROOTS as f64, y as f64);
+            return Some(if metal > 0.45 - depth * 0.62 {
+                BLOCK_IRON_ORE
+            } else {
+                BLOCK_COAL_ORE
+            });
+        }
+
+        // Tin before copper, and not because tin is worth more. A
+        // district is small, and a district that shared its shallow rock
+        // with copper would be a district where you find copper -- which
+        // you already have, from the hills -- and conclude there is no
+        // tin here.
+        let tin = self.tin_country(gx, gz);
+        // **0.50, and it was 0.55.** Tin lives in the shallow rock, the
+        // band between `DEEP` and the soil, and lowering the land by seven
+        // blocks on average (`unworn`) took seven layers of that band away
+        // from every district: world 1 was left with no tin within six
+        // hundred blocks of its spawn, and at 0.50 finds it at 590. The
+        // districts themselves did not move -- this gives back the rock's
+        // worth, not a wider map. 0.45 was tried as well and changed neither
+        // failure: world 1 still at 590 (its nearest district is where it
+        // is) and the flattest seed still at 0.017.
+        if tin > 0.0 && metal > 0.50 - tin * 0.80 {
+            return Some(BLOCK_TIN_ORE);
+        }
+        // The `> 0.0` is doing real work and is not a tidiness: without
+        // it the flattest country in the world still gets the thin top
+        // of the mineral field, which is a few cells of copper in a
+        // meadow -- and a few cells is all it takes for a player to
+        // conclude that copper is everywhere after all and never climb
+        // anything. Either the rock under a plain has copper in it or it
+        // does not, and it does not.
+        let copper = Self::copper_country(ground);
+        // **0.78, and it was 0.60 while the mountains were shorter.**
+        // Copper is the metal of the *uplands* (`copper_country` reads
+        // the ground height), so making the relief taller made copper
+        // commoner everywhere without anybody asking for it: in a
+        // mountainous world it overtook iron, and "iron is not rare, it
+        // is deep and hard" -- the sentence the whole age ladder rests
+        // on -- stopped being true of the numbers. The threshold moved
+        // to keep the ordering the ladder needs; what a player sees is
+        // that a hillside still carries copper and no longer carries it
+        // in heaps.
+        if copper > 0.0 && metal > 0.62 - copper * 0.95 {
+            return Some(BLOCK_COPPER_ORE);
+        }
+        // No iron up here whatever the country. The player who has only
+        // ever worked the top of the rock should have seen copper, tin
+        // and coal and no iron whatsoever -- going *down* is what the
+        // next age asks of them, and it asks it in a place where the
+        // copper pick they need is already in their hand.
+        Some(BLOCK_COAL_ORE)
     }
 
     /// A safe standing height for a spawn point at (gx, gz): one block
     /// above the surface, never below the waterline (so you don't spawn
     /// inside an ocean).
     pub fn spawn_y(&self, gx: i32, gz: i32) -> f32 {
-        let surface = self.height_at(gx, gz).max(SEA_LEVEL);
+        let (gx, gz) = self.on_planet(gx, gz);
+        if self.preset == Preset::Test {
+            return (crate::showcase::GROUND_Y + 1) as f32;
+        }
+        // The lake's surface where there is one: a spawn point on a
+        // lake bed is a spawn point under water, which is the thing
+        // this function exists to prevent for the sea.
+        let surface = self.height_on_planet(gx, gz).max(self.water_level_at(gx, gz));
         (surface + 1) as f32
     }
 
@@ -1457,7 +4813,59 @@ impl WorldGen {
     /// suitable place: a world's landmarks should be near where it puts
     /// you, and hunting a thousand blocks out for the first tree is not
     /// a first five minutes anyone wants.
+    ///
+    /// **And that is why the spawn search is still near the origin**, at
+    /// real scale, when the obvious way to start a player in the tropics is
+    /// to walk them to the tropics: the tropics are four thousand
+    /// kilometres out, where a crouching player does not move at all
+    /// because a walking step is smaller than the gap between two `f32`s
+    /// (`a_single_latitude_frame_would_put_a_walking_player_on_a_grid` has
+    /// the measurement). The *world* is cut from that part of the planet
+    /// instead, and the player still wakes up next to its origin
+    /// (`WorldGen::on_planet`).
+    ///
+    /// **The origin used to be neutral, and now only the planet's own is.**
+    /// Every slow field is Perlin noise read at a lattice point of its own,
+    /// so all of them are zero at the planet's origin: the weather there is
+    /// zero, which made the temperature the latitude and nothing else, and
+    /// the continent field is zero, which put the origin on a coast with
+    /// dry land a few dozen blocks off it. Measured over three hundred
+    /// seeds of the old banded world, whose origin sat at the same point
+    /// (`where_a_new_player_wakes_up`): every spawn within 56 blocks of the
+    /// origin, at surface temperatures from 0.02 to 0.18 below the
+    /// latitude's.
+    ///
+    /// A world cut from somewhere else on the globe gets neither for free,
+    /// and two things were added to buy them back. `meridian_with_land`
+    /// slides the world's origin along its parallel until the planet has
+    /// dry land there, which is what the continent field used to give. And
+    /// `spawn_quality` now asks for the zone's own climate band -- a test
+    /// this function's notes used to record as *rejected*, on the grounds
+    /// that the origin was neutral and a climate test would hide the day it
+    /// stopped being. It stopped being on purpose; the argument was right,
+    /// and its conclusion has flipped with the premise.
     pub fn spawn_column(&self) -> (i32, i32) {
+        // **`PRIMITIVE_TEST_SPAWN=x,z` puts a new player there in any
+        // world**, not only the test one. The spawn search below looks for
+        // gentle land near the origin, and it never lands in some biomes at
+        // all -- not one seed of the first three thousand starts in a
+        // savanna -- so an in-game photograph of one needed a way to put
+        // the camera there. A dev hook on `PRIMITIVE_AUTOSTART`'s terms: read
+        // only when a player is first placed, and an ordinary world never
+        // has it set.
+        if let Some((x, z)) = std::env::var("PRIMITIVE_TEST_SPAWN").ok().and_then(|raw| {
+            let (x, z) = raw.split_once(',')?;
+            Some((x.trim().parse::<i32>().ok()?, z.trim().parse::<i32>().ok()?))
+        }) {
+            return (x, z);
+        }
+        // The test world has one place worth standing and it is drawn
+        // on the map: the middle of the plaza. Searching for the
+        // flattest column of a world that is flat everywhere would
+        // answer "the origin", which is a corner of it.
+        if self.preset == Preset::Test {
+            return crate::showcase::spawn_column();
+        }
         /// Sampling step. Fine enough that no island is missed, coarse
         /// enough that the whole search is a few thousand columns.
         const STEP: i32 = 8;
@@ -1471,7 +4879,11 @@ impl WorldGen {
             // matters is that nothing inside it is missed.
             let mut best: Option<((i32, i32), i32)> = None;
             let mut consider = |gx: i32, gz: i32| {
-                if let Some(flatness) = self.spawn_quality(gx, gz) {
+                // The rings are walked in the world's own coordinates --
+                // what comes back is where a player is put down -- and the
+                // judgement is asked of the planet. See `on_planet`.
+                let (px, pz) = self.on_planet(gx, gz);
+                if let Some(flatness) = self.spawn_quality(px, pz) {
                     if best.is_none_or(|(_, current)| flatness < current) {
                         best = Some(((gx, gz), flatness));
                     }
@@ -1503,8 +4915,20 @@ impl WorldGen {
     /// in it. Otherwise the total drop to the four neighbours, which is
     /// what picks a meadow over a cliff edge.
     fn spawn_quality(&self, gx: i32, gz: i32) -> Option<i32> {
-        let height = self.height_at(gx, gz);
+        let height = self.height_on_planet(gx, gz);
         if height <= SEA_LEVEL + 2 {
+            return None;
+        }
+        // Nor the bed of a lake, which is above the sea and under water
+        // all the same -- and, being a bowl dug into flat country, is
+        // exactly what a search for the flattest ground would pick.
+        if height < self.water_level_at(gx, gz) {
+            return None;
+        }
+        // Nor an island in the ocean, which is a voyage and not a start: the
+        // first day is a continent's, with its flint and its rivers behind
+        // the beach. See `scale::ISLAND_DEEP`.
+        if self.on_island(gx, gz) {
             return None;
         }
         // **And there has to be ground under it.**
@@ -1525,12 +4949,102 @@ impl WorldGen {
         }
         let drop = [(1, 0), (-1, 0), (0, 1), (0, -1)]
             .into_iter()
-            .map(|(dx, dz)| (self.height_at(gx + dx * 2, gz + dz * 2) - height).abs())
+            .map(|(dx, dz)| (self.height_on_planet(gx + dx * 2, gz + dz * 2) - height).abs())
             .sum();
+        // **Nor a marsh or a bog, at the Earth's scale.** The search wants the
+        // flattest dry ground near the sea, and a coastal flat is exactly
+        // where the ground's own wetness puts a marsh: the first measurement
+        // woke every northern player of six seeds in a bog, ankle-deep in
+        // the pools the shore rule above refuses for the sea. Asked last and
+        // only of ground that passed everything else, because a biome is the
+        // climate fields again. Not asked of a regional world, whose spawn a
+        // player without a bed respawns at and which may not move.
+        if self.scale == Scale::Earth && matches!(self.biome_from(gx, gz, height), Biome::Swamp | Biome::Bog) {
+            return None;
+        }
+        // **And it has to be the country the form promised.**
+        //
+        // This test was written down as *rejected* when the zones were
+        // added, and the reason given was exactly right at the time: the
+        // origin was neutral, so the temperature there was the zone's
+        // latitude and nothing else, the search found the promised climate
+        // without asking for it, and a climate test would have hidden the
+        // day the origin stopped being neutral by quietly walking spawns
+        // further out.
+        //
+        // That day is here and it was walked into on purpose: a world is a
+        // patch of a real globe now (`on_planet`), and the weather at its
+        // origin is whatever the planet has there. A third of the
+        // temperature is weather, which at sixty degrees is enough to put a
+        // mild maritime pocket where the form said taiga -- measured, and
+        // not rare. So the promise is kept by asking for it.
+        //
+        // The band and not the biome: "cold" is what the north sells, and
+        // refusing a tundra for not being a taiga would be the search
+        // hunting a picture rather than a climate. `Scale::Regional` is
+        // exempt for the marsh rule's reason -- an old world's spawn is
+        // where a player without a bed comes back to, and it may not move.
+        if self.scale == Scale::Earth && self.band_at(gx, gz, height) != self.zone_band() {
+            return None;
+        }
         Some(drop)
     }
 
+    /// Which of the three bands `land_biome` splits the world into a column
+    /// is in: below `FREEZING`, above `HOT`, or the temperate country
+    /// between them. `-1`, `1` and `0`.
+    fn band_at(&self, gx: i32, gz: i32, height: i32) -> i32 {
+        let temperature = self.surface_temperature(gx, gz, height);
+        if temperature < FREEZING {
+            -1
+        } else if temperature > HOT {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// ...and which band this world's latitude alone puts it in, which is
+    /// what its zone promised. The latitude term carries `LATITUDE_WEIGHT`
+    /// of the temperature, so this is the same arithmetic as `band_at` with
+    /// the weather and the altitude left out.
+    fn zone_band(&self) -> i32 {
+        let latitude = LATITUDE_WEIGHT * along_latitude(&WARMTH_BY_LATITUDE, f64::from(self.origin_degrees));
+        if latitude < FREEZING {
+            -1
+        } else if latitude > HOT {
+            1
+        } else {
+            0
+        }
+    }
+
     pub fn generate_chunk(&self, pos: ChunkPos) -> Chunk {
+        // The one branch the test world costs the ordinary one: a
+        // predictable compare per chunk, against half a dozen fractal
+        // noise fields per column.
+        if self.preset == Preset::Test {
+            return crate::showcase::generate_chunk(pos);
+        }
+        // **The whole of what makes a seed one planet**, and it is a
+        // relabelling rather than a generation: the chunk is cut from the
+        // patch of the globe this world was laid on, and then told which
+        // chunk of *this world* it is. Everything under here works in
+        // planet coordinates (`on_planet`) and never learns that the world
+        // has an origin of its own -- which is why the offset is a whole
+        // number of chunks (`planet_origin_z`): a chunk boundary on the
+        // planet has to be a chunk boundary in the world, or every column
+        // of the world would straddle two of the planet's.
+        let on_planet = ChunkPos::new(
+            pos.x + self.planet_origin.0.div_euclid(CHUNK_SIZE_X as i32),
+            pos.z + self.planet_origin.1.div_euclid(CHUNK_SIZE_Z as i32),
+        );
+        let mut chunk = self.generate_on_planet(on_planet);
+        chunk.pos = pos;
+        chunk
+    }
+
+    fn generate_on_planet(&self, pos: ChunkPos) -> Chunk {
         let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
         let origin_x = pos.x * CHUNK_SIZE_X as i32;
         let origin_z = pos.z * CHUNK_SIZE_Z as i32;
@@ -1556,10 +5070,76 @@ impl WorldGen {
         }
 
         self.place_trees(&mut blocks, origin_x, origin_z, &columns);
+        // Palms, on warm coasts: after the trees, so a palm on the edge of a
+        // wood grows round the wood rather than through it. See `place_palms`.
+        self.place_palms(&mut blocks, origin_x, origin_z, &columns);
+        // A swamp's drowned snags and hanging moss: after every crown the moss
+        // could hang from, and before the nests, which want the crowns' tops
+        // and not their undersides. See `place_swamp_growth`.
+        self.place_swamp_growth(&mut blocks, origin_x, origin_z, &columns);
+        // Saplings, in a world of branching trees: after every grown
+        // tree, because a sapling gives way to one, and before the nests
+        // and the undergrowth, which would take the ground it stands on.
+        // See `branches`.
+        if self.preset.grows_branches() {
+            self.place_small_trees(&mut blocks, origin_x, origin_z, &columns);
+        }
+        // **After every tree, and that is the whole reason it is its
+        // own pass.** A nest has to have sky over it, and whether a
+        // cell has sky over it is not known until the last canopy in
+        // the chunk has been written -- the first attempt put nests in
+        // while the trees were going up and the next tree along dropped
+        // leaves on top of some of them.
+        self.place_nests(&mut blocks, origin_x, origin_z, &columns);
+        // After the trees and before everything else that stands on the
+        // ground: a bush under a canopy is undergrowth, and a bush
+        // *through* a trunk is a mistake.
+        self.place_bushes(&mut blocks, origin_x, origin_z, &columns);
         self.place_deadfall(&mut blocks, origin_x, origin_z, &columns);
+        // Wild hives, on the trunks: after the undergrowth and the deadfall,
+        // so the cell beside a trunk that a hive hangs in is known to be air
+        // that nothing else is about to fill. See `place_hives`.
+        self.place_hives(&mut blocks, origin_x, origin_z, &columns);
+        // **After the trees and the undergrowth, and before the ground
+        // cover.** A ruin clears the room inside its walls, so anything
+        // planted before it is swept out of the way rather than left
+        // growing through the floor; anything planted after it is
+        // stopped by the paving, which is what puts grass up to the
+        // walls and none inside them.
+        self.place_ruin(&mut blocks, origin_x, origin_z, &columns);
+        // After the trees, so a boulder never lands in a trunk; before
+        // the ground cover, so nothing grows on top of one.
+        self.place_boulders(&mut blocks, origin_x, origin_z, &columns);
+        // The sea floor's own growth and stones. Anywhere after the fill:
+        // nothing else in this list writes under the sea, and the sea floor
+        // writes nowhere else.
+        self.place_seabed(&mut blocks, origin_x, origin_z, &columns);
+        // After the boulders and before the ground cover, for the
+        // boulder's reasons: a mound never lands in a trunk or a stone,
+        // and nothing grows out of the top of one.
+        self.place_termite_mounds(&mut blocks, origin_x, origin_z, &columns);
+        // The finds -- shelters, fallen giants, thickets, knapping floors,
+        // rings -- after everything they may stand beside and before the
+        // ruins, which keep clear of them, and the ground cover, which
+        // leaves the cells they took. See `features`.
+        self.place_features(&mut blocks, origin_x, origin_z);
+        // After the boulders and the mounds, which it sweeps out of its
+        // rooms, and before the ground cover, which grows up to its
+        // walls. See `ruins`.
+        self.place_ruins(&mut blocks, origin_x, origin_z, &columns);
         // Last, so a tuft never lands where a trunk is about to.
         self.place_ground_cover(&mut blocks, origin_x, origin_z, &columns);
+        // The water standing in caves: after every pass that writes near the
+        // surface, so a cell it fills is one nothing else wanted, and before
+        // the scatter and the dripstone, which then find water where a floor
+        // was and leave it alone -- no flint under a lake, no stalagmite in
+        // one. See `cave_water`.
+        self.flood_caves(&mut blocks, origin_x, origin_z);
         self.scatter_in_caves(&mut blocks, origin_x, origin_z);
+        // After the scatter, into the cells it left: a flint on a cave floor
+        // stays where it lay, and a stalagmite goes up beside it. See
+        // `grow_dripstone`.
+        self.grow_dripstone(&mut blocks, origin_x, origin_z, &columns);
 
         Chunk { pos, blocks }
     }
@@ -1575,52 +5155,176 @@ impl WorldGen {
     ) {
         let height = column.height;
         let surface = column.surface;
-        // A cave that breaks the sea floor would drain the ocean into an
-        // unlit void, so columns under water keep a sealed crust.
-        let submerged = height <= SEA_LEVEL;
+        // The sea, or the lake this column is under. See `Column::water`.
+        let water = column.water;
+        // The band the cave carver may not touch -- the crust under
+        // water and the walls beside it. See `Column::seal`.
+        let (seal_floor, seal_roof) = column.seal;
+        // The first rock cell, counting down. Everything from here to
+        // the bedrock is rock of one kind or another, and which kind
+        // depends on how far below this line the cell is.
+        let rock_top = height - surface.soil;
+        // ...and the line under which it is all basalt. Wobbled by the
+        // column's own granite line so the floor of the world is a
+        // contour rather than a sheet, and by the same field, so a
+        // player who has learned that the granite comes lower here has
+        // learned that the basalt does too.
 
-        for y in 0..CHUNK_SIZE_Y as i32 {
+
+        // Everything above the ground *and* above the waterline is air,
+        // and the array arrives full of air. Stopping there rather than
+        // walking to the roof of the world skips half the cells in an
+        // ordinary column and every cell in an ocean one, and writes
+        // exactly the same chunk: the loop below has no branch that puts
+        // anything but `BLOCK_AIR` above that line.
+        let filled_to = height.max(water).min(CHUNK_SIZE_Y as i32 - 1);
+
+        // Walking the index rather than recomputing it. The vertical
+        // stride is a constant, so a column is a stride walk and the two
+        // multiplies `Chunk::index` does are paid once.
+        let stride = CHUNK_SIZE_Z * CHUNK_SIZE_X;
+        let mut index = Chunk::index(lx as usize, 0, lz as usize);
+
+        for y in 0..=filled_to {
             let mut id = if y > height {
-                if y <= SEA_LEVEL {
+                if y == water && self.freezes(gx, gz) {
+                    // **The lid on a cold lake.** Only the surface cell,
+                    // and only where it is cold enough that the snow
+                    // beside it lies as well -- ice under the water
+                    // would be a mineral in the sea floor, and ice that
+                    // formed at a temperature the shore does not freeze
+                    // at would be a white sheet in a green valley.
+                    //
+                    // What it is *for* is that the coldest country in
+                    // the world is the emptiest, and this gives it the
+                    // one surface in the game with no grip on it: a
+                    // frozen bay is a thing to cross rather than swim,
+                    // and crossing it is a decision. See `BLOCK_ICE`.
+                    BLOCK_ICE
+                } else if y <= water {
                     BLOCK_WATER
                 } else {
                     BLOCK_AIR
                 }
             } else if y == height {
                 surface.top
-            } else if y > height - surface.soil {
+            } else if y > rock_top {
                 surface.filler
+            } else if y >= column.granite_from || rock_top - y < column.rock_depth {
+                // The upper rock, and the granite line over everything.
+                // See `stratum`. The granite test first, because it is
+                // the one that wins: a mountain biome's own upper rock
+                // is granite anyway, and a high column of any other
+                // biome is granite above the line whatever its stratum
+                // says.
+                if y >= column.granite_from {
+                    BLOCK_GRANITE
+                } else {
+                    column.rock
+                }
+            } else if self.is_basalt(gx, y, gz) {
+                // A dyke of basalt standing in the deep stone. See
+                // `is_basalt` for the shape and `types::BLOCK_BASALT`
+                // for what meeting one costs.
+                // **Gabbro at the root of a dyke**: the same melt, cooled
+                // slowly enough deep down to grow coarse. A line in depth
+                // rather than a field, so it costs the loop nothing.
+                if y < Self::GABBRO_BELOW {
+                    crate::types::BLOCK_GABBRO
+                } else {
+                    BLOCK_BASALT
+                }
             } else {
                 BLOCK_STONE
             };
 
             if id != BLOCK_AIR && id != BLOCK_WATER && y > BEDROCK_TOP {
-                let sealing_the_seabed = submerged && y > height - 3;
-                if !sealing_the_seabed && self.is_cave(gx, y, gz) {
+                let sealed = y >= seal_floor && y <= seal_roof;
+                if !sealed && self.is_cave(gx, y, gz) {
                     id = BLOCK_AIR;
-                } else if id == BLOCK_STONE && self.is_glowstone(gx, y, gz) {
-                    id = BLOCK_GLOWSTONE;
-                } else if id == BLOCK_STONE {
-                    // Ore replaces stone and only stone, and only after
+                } else if is_rock(id) {
+                    // **No glowstone before the ore any more.** Veins of it
+                    // were cut here, in the deep rock, and lit every cave a
+                    // player walked into: the dark underground was a thing
+                    // the world solved for them, and the torch was a tool
+                    // nobody needed below the surface. What lights a cave
+                    // now is what the player carries into it. The block
+                    // stays in the game and in the test world's lamps
+                    // (`showcase`); it is no longer found.
+                    // Ore replaces rock and only rock, and only after
                     // the caves have been cut. Both halves matter: an ore
                     // written before the cave pass would be carved back
                     // out again (a vein that mostly opens into a chamber
                     // is a vein you can never find in the rock), and one
                     // that ignored what it was replacing would put copper
                     // in the soil and in the sea floor.
-                    if let Some(ore) = self.ore_at(gx, y, gz) {
+                    //
+                    // *Rock*, not stone: the upper rock is limestone or
+                    // sandstone or granite now, and copper lives in the
+                    // top of the rock (see `copper_country`). Ore that
+                    // replaced stone alone would leave the first metal
+                    // in the game under a dozen layers it could not be
+                    // in.
+                    if let Some(ore) = self.ore_at(gx, y, gz, height) {
                         id = ore;
                     }
                 }
             }
 
-            blocks[Chunk::index(lx as usize, y as usize, lz as usize)] = id;
+            blocks[index] = id;
+            index += stride;
         }
 
         // Bedrock floor: guarantees no cave ever opens into the void.
-        for y in 0..=BEDROCK_TOP {
-            blocks[Chunk::index(lx as usize, y as usize, lz as usize)] = BLOCK_STONE;
+        let mut index = Chunk::index(lx as usize, 0, lz as usize);
+        for _ in 0..=BEDROCK_TOP {
+            blocks[index] = BLOCK_STONE;
+            index += stride;
         }
+    }
+
+    /// Does this column have open water against one of its four sides?
+    ///
+    /// What "the waterline" means, and the only question reeds ask that
+    /// grass does not. Read off the cached column heights rather than
+    /// off the block array, because the block array is only filled in
+    /// for *this* chunk and a bank at the chunk edge would otherwise
+    /// have water on one side of the seam and not on the other -- the
+    /// cache reaches a feature margin past the border precisely so that
+    /// questions like this get the same answer from either side.
+    ///
+    /// Four neighbours rather than eight: a stand of reeds diagonally
+    /// across a corner from a pond is standing in a field.
+    ///
+    /// Answers with the *level* of that water rather than yes or no,
+    /// because there are two kinds now: the sea at `SEA_LEVEL`, and a
+    /// lake at whatever its rim set. Reeds stand at the waterline of
+    /// the water they are beside, and a rule that only knew the sea's
+    /// line would put them one block under a pond or three up its bank.
+    fn beside_water(&self, columns: &ColumnCache, lx: i32, lz: i32) -> Option<i32> {
+        [(-1, 0), (1, 0), (0, -1), (0, 1)]
+            .iter()
+            .map(|&(dx, dz)| columns.at(lx + dx, lz + dz))
+            .find(|column| column.height < column.water)
+            .map(|column| column.water)
+    }
+
+    /// Is this column within `BANK_WIDTH` of running water?
+    ///
+    /// River water specifically -- a flooded `Biome::River` column --
+    /// and not the sea or a lake, because bog iron is what a river
+    /// carries down and drops where it slows; a beach has none. Asked of
+    /// the column cache, which reaches `FEATURE_MARGIN` past the chunk,
+    /// so a bank whose river is in the next chunk over is still a bank.
+    /// The caller has already established that this column itself is
+    /// dry.
+    fn on_a_riverbank(&self, columns: &ColumnCache, lx: i32, lz: i32) -> bool {
+        (-BANK_WIDTH..=BANK_WIDTH).any(|dz| {
+            (-BANK_WIDTH..=BANK_WIDTH).any(|dx| {
+                let column = columns.at(lx + dx, lz + dz);
+                column.biome == Biome::River && column.height < column.water
+            })
+        })
     }
 
     /// Grass and cacti: one column each, so no margin is needed.
@@ -1639,9 +5343,33 @@ impl WorldGen {
         for lz in 0..CHUNK_SIZE_Z as i32 {
             for lx in 0..CHUNK_SIZE_X as i32 {
                 let (gx, gz) = (origin_x + lx, origin_z + lz);
-                let Column { height, biome, .. } = columns.at(lx, lz);
+                let Column {
+                    height,
+                    biome,
+                    water,
+                    rock,
+                    ..
+                } = columns.at(lx, lz);
                 let above = height + 1;
-                if height < SEA_LEVEL || above + 3 >= CHUNK_SIZE_Y as i32 {
+                // **Lily pads, on a swamp's still water.** Before the rule
+                // that skips every flooded column, because a pool is exactly
+                // where a pad lies: on the top cell of the water, in the air
+                // over it. Shallow water only -- a pool, the flooded edge of a
+                // swamp -- and never on ice or over a snag.
+                if biome == Biome::Swamp
+                    && height < water
+                    && water - height <= 2
+                    && water + 1 < CHUNK_SIZE_Y as i32
+                    && hash2(gx, gz, self.seed.wrapping_add(0x1111)).is_multiple_of(LILY_SPACING)
+                {
+                    let on = Chunk::index(lx as usize, water as usize, lz as usize);
+                    let over = Chunk::index(lx as usize, (water + 1) as usize, lz as usize);
+                    if blocks[on] == BLOCK_WATER && blocks[over] == BLOCK_AIR {
+                        blocks[over] = crate::types::BLOCK_LILY_PAD;
+                    }
+                    continue;
+                }
+                if height < water || above + 3 >= CHUNK_SIZE_Y as i32 {
                     continue;
                 }
                 let ground_index = Chunk::index(lx as usize, height as usize, lz as usize);
@@ -1671,11 +5399,286 @@ impl WorldGen {
                     }
                 }
 
-                if let Some(spacing) = biome.grass_spacing() {
+                // Two cells of a tall plant, if the cell over the first is
+                // free: the lower half and its top (`types::PLANT_TOP`). What
+                // stands over the ground here is air (checked above), and the
+                // `above + 3` bound keeps the second cell in the world.
+                let up_index = Chunk::index(lx as usize, (above + 1) as usize, lz as usize);
+                let tall = |blocks: &mut [BlockId], kind: BlockId| -> bool {
+                    if blocks[up_index] != BLOCK_AIR || !crate::types::can_grow_on(kind, ground) {
+                        return false;
+                    }
+                    blocks[air_index] = kind;
+                    blocks[up_index] = kind | crate::types::PLANT_TOP;
+                    true
+                };
+                let rolled = |salt: u32, spacing: Option<u32>| {
+                    spacing.is_some_and(|spacing| hash2(gx, gz, self.seed.wrapping_add(salt)).is_multiple_of(spacing.max(2)))
+                };
+
+                // **Cattails, at the waterline and before the reeds**: where
+                // the two want one cell the rarer plant wins it, the wild
+                // wheat's rule.
+                //
+                // **In beds, with open bank between.** The waterline is asked
+                // once here rather than once a plant, and the bed's field only
+                // where there is a waterline: a thick bed divides every
+                // waterline plant's spacing, an open reach grows none of them.
+                // See `banks::waterline_stand`.
+                let waterline = self.beside_water(columns, lx, lz) == Some(height);
+                let stand = if waterline { self.waterline_stand(gx, gz) } else { None };
+                let thick = |spacing: Option<u32>| spacing.map(|spacing| (spacing / stand.unwrap_or(1)).max(2));
+                if stand.is_some()
+                    && rolled(0xCA77, thick(biome.cattail_spacing()))
+                    && tall(blocks, crate::types::BLOCK_CATTAIL)
+                {
+                    continue;
+                }
+                // ...and giant reed where the cattail does not grow.
+                //
+                // **Thickened in a bed and not thinned out of an open reach**,
+                // unlike the rest: hot country has so little waterline that a
+                // third of it bare was a savanna and a desert with no giant
+                // reed in sixty-four chunks of each
+                // (`giant_reed_grows_where_the_cattail_stops_and_never_beside_it`).
+                // See `Biome::arundo_spacing`.
+                if waterline
+                    && rolled(0xA2D0, thick(biome.arundo_spacing()))
+                    && tall(blocks, crate::types::BLOCK_ARUNDO)
+                {
+                    continue;
+                }
+
+                // Reeds, and only at the waterline.
+                //
+                // Before everything else because the condition is the
+                // narrowest in the file: the column has to stand exactly
+                // at sea level *and* have water against it. A stand of
+                // reeds two blocks up a bank is the same mistake as a
+                // tuft of grass on a cave roof, and it is more visible,
+                // because reeds are what tells you at a glance that the
+                // water over there is fresh.
+                if let Some(spacing) = thick(biome.reed_spacing()) {
+                    if stand.is_some()
+                        && crate::types::can_grow_on(BLOCK_REEDS, ground)
+                        && hash2(gx, gz, self.seed.wrapping_add(0x5EED))
+                            .is_multiple_of(spacing.max(2))
+                    {
+                        blocks[air_index] = BLOCK_REEDS;
+                        continue;
+                    }
+                }
+
+                // **Wild wheat, before everything else that grows
+                // here.** Where two plants want one cell the rarer wins,
+                // and this is the rarest thing in a meadow -- a stand
+                // lost to a tuft of grass would be a field a player
+                // never got to plant. See `Biome::wild_wheat_spacing`.
+                if let Some(spacing) = biome.wild_wheat_spacing() {
+                    if crate::types::can_grow_on(crate::types::BLOCK_WILD_WHEAT, ground)
+                        && hash2(gx, gz, self.seed.wrapping_add(0x3EED))
+                            .is_multiple_of(spacing.max(2))
+                    {
+                        blocks[air_index] = crate::types::BLOCK_WILD_WHEAT;
+                        continue;
+                    }
+                }
+
+                // ---- savanna ----
+                //
+                // Wild cotton, right behind the wheat and for the wheat's
+                // reason: where it competes with grass or a flower the
+                // rarer plant wins the cell, and a stand lost to a tuft
+                // is a crop a player never got to find. Behind the wheat
+                // rather than before it, because the two are about as
+                // rare as each other and a cell that rolls both keeps the
+                // seed the rest of the world also grows. See
+                // `Biome::wild_cotton_spacing`.
+                if let Some(spacing) = biome.wild_cotton_spacing() {
+                    if crate::types::can_grow_on(crate::types::BLOCK_WILD_COTTON, ground)
+                        && hash2(gx, gz, self.seed.wrapping_add(0xC077))
+                            .is_multiple_of(spacing.max(2))
+                    {
+                        blocks[air_index] = crate::types::BLOCK_WILD_COTTON;
+                        continue;
+                    }
+                }
+                // ...and wild millet behind the cotton, for the same reason.
+                // See `Biome::wild_millet_spacing`.
+                if let Some(spacing) = biome.wild_millet_spacing() {
+                    if crate::types::can_grow_on(crate::types::BLOCK_WILD_MILLET, ground)
+                        && hash2(gx, gz, self.seed.wrapping_add(0x3111E7))
+                            .is_multiple_of(spacing.max(2))
+                    {
+                        blocks[air_index] = crate::types::BLOCK_WILD_MILLET;
+                        continue;
+                    }
+                }
+
+                // ---- the forest floor, and the open ground's own plants ----
+                //
+                // **"предлагаю убрать траву везде в лесах это не
+                // реалистично"**: a wood's floor was the meadow's grass one
+                // tuft in seven, crowns or no crowns, and a closed oak wood
+                // was a lawn with a roof on. Under a crown now the floor is
+                // the forest's -- ferns, bilberry, bracken -- and the grass,
+                // the flowers and the sun-side plants are rolled only where
+                // the sky reaches: the clearings and the edges.
+                //
+                // "Under a crown" is read off the block array, which already
+                // holds every tree that reaches this column, the neighbours'
+                // included, so both sides of a seam agree (`under_canopy`).
+                // Asked only in the four woods, and only once per column.
+                let shaded = biome.has_forest_floor() && under_canopy(blocks, lx, height, lz);
+                // Bracken grows in the light wood and its clearing alike.
+                if rolled(0xB7AC, biome.bracken_spacing()) && tall(blocks, crate::types::BLOCK_BRACKEN) {
+                    continue;
+                }
+                if shaded {
+                    if rolled(0xB11B, biome.bilberry_spacing())
+                        && crate::types::can_grow_on(crate::types::BLOCK_BILBERRY, ground)
+                    {
+                        blocks[air_index] = crate::types::BLOCK_BILBERRY;
+                        continue;
+                    }
+                    if rolled(0xFE24, biome.fern_spacing()) && crate::types::can_grow_on(crate::types::BLOCK_FERN, ground) {
+                        blocks[air_index] = crate::types::BLOCK_FERN;
+                        continue;
+                    }
+                } else {
+                    if rolled(0x5DE1, biome.sundew_spacing()) && crate::types::can_grow_on(crate::types::BLOCK_SUNDEW, ground) {
+                        blocks[air_index] = crate::types::BLOCK_SUNDEW;
+                        continue;
+                    }
+                    // The bank's roll first and the bank asked only when it
+                    // comes up: `on_a_riverbank` reads a square of columns.
+                    let nettle = rolled(0x4E77, biome.nettle_spacing())
+                        || (rolled(0x4E78, biome.nettle_bank_spacing()) && self.on_a_riverbank(columns, lx, lz));
+                    if nettle && tall(blocks, crate::types::BLOCK_NETTLE) {
+                        continue;
+                    }
+                    if rolled(0xF12E, biome.fireweed_spacing()) && tall(blocks, crate::types::BLOCK_FIREWEED) {
+                        continue;
+                    }
+                    if rolled(0x57AB, biome.strawberry_spacing())
+                        && crate::types::can_grow_on(crate::types::BLOCK_STRAWBERRY, ground)
+                    {
+                        blocks[air_index] = crate::types::BLOCK_STRAWBERRY;
+                        continue;
+                    }
+                    if rolled(0x914A, biome.plantain_spacing())
+                        && crate::types::can_grow_on(crate::types::BLOCK_PLANTAIN, ground)
+                    {
+                        blocks[air_index] = crate::types::BLOCK_PLANTAIN;
+                        continue;
+                    }
+                }
+
+                // Berry bushes: the first food in the world.
+                //
+                // Before the grass, because where the two compete the
+                // bush is the one worth keeping -- a cell holds one
+                // thing, and a player who walks past a meadow needs to
+                // be able to find something in it. Placed with berries
+                // on rather than bare, because a world that generated
+                // its bushes already picked would be a world whose first
+                // evening depends on waiting for them.
+                if let Some(spacing) = biome.berry_spacing() {
+                    if crate::types::can_grow_on(BLOCK_BERRY_BUSH, ground)
+                        && hash2(gx, gz, self.seed.wrapping_add(0xBE44))
+                            .is_multiple_of(spacing.max(2))
+                    {
+                        blocks[air_index] = BLOCK_BERRY_BUSH;
+                        continue;
+                    }
+                }
+
+                // **The country's own grass** (`ground::GRASSES`), before the
+                // common tuft: one roll a column on its own salt, one of two
+                // grasses by a bit of the same hash, and the ground's rule
+                // (`ground::grows_on`) says whether it takes. A meadow is
+                // still mostly the tuft; what these add is which meadow.
+                {
+                    use crate::types::{
+                        BLOCK_BLUEGRASS, BLOCK_COTTON_GRASS, BLOCK_ELEPHANT_GRASS, BLOCK_FEATHER_GRASS, BLOCK_FESCUE,
+                        BLOCK_MARRAM, BLOCK_SEDGE, BLOCK_SPINIFEX, BLOCK_TIMOTHY, BLOCK_TUSSOCK_GRASS,
+                    };
+                    let pair = match biome {
+                        Biome::Plains => Some((BLOCK_TIMOTHY, BLOCK_FEATHER_GRASS)),
+                        Biome::Forest | Biome::BirchForest => Some((BLOCK_BLUEGRASS, BLOCK_TIMOTHY)),
+                        Biome::Swamp | Biome::River => Some((BLOCK_SEDGE, BLOCK_SEDGE)),
+                        Biome::Bog => Some((BLOCK_COTTON_GRASS, BLOCK_SEDGE)),
+                        Biome::Tundra => Some((BLOCK_COTTON_GRASS, BLOCK_TUSSOCK_GRASS)),
+                        Biome::Taiga => Some((BLOCK_TUSSOCK_GRASS, BLOCK_TUSSOCK_GRASS)),
+                        Biome::Mountains | Biome::SnowyPeaks => Some((BLOCK_FESCUE, BLOCK_FESCUE)),
+                        Biome::Beach => Some((BLOCK_MARRAM, BLOCK_MARRAM)),
+                        Biome::Savanna => Some((BLOCK_ELEPHANT_GRASS, BLOCK_ELEPHANT_GRASS)),
+                        Biome::Desert => Some((BLOCK_SPINIFEX, BLOCK_SPINIFEX)),
+                        _ => None,
+                    };
+                    if let Some((first, second)) = pair.filter(|_| ground_on()) {
+                        let roll = hash2(gx, gz, self.seed.wrapping_add(0x6A55E5));
+                        let grass = if roll & (1 << 20) == 0 { first } else { second };
+                        if roll.is_multiple_of(COUNTRY_GRASS_SPACING) && crate::types::can_grow_on(grass, ground) {
+                            blocks[air_index] = grass;
+                            continue;
+                        }
+                    }
+                }
+
+                // **Dry grass on the savanna's dry ground**, before the
+                // green grass -- which cannot stand on sandy soil anyway
+                // (`can_grow_on`), so the two never contend for a cell; it
+                // is first only so the rule for bare ground reads beside
+                // the rule for turf. Its own salt. See
+                // `types::BLOCK_DRY_GRASS`.
+                if biome == Biome::Savanna
+                    && crate::types::can_grow_on(crate::types::BLOCK_DRY_GRASS, ground)
+                    && hash2(gx, gz, self.seed.wrapping_add(0xD7A55)).is_multiple_of(DRY_GRASS_SPACING)
+                {
+                    blocks[air_index] = crate::types::BLOCK_DRY_GRASS;
+                    continue;
+                }
+
+                // Not under a crown: see the forest floor above.
+                if let Some(spacing) = biome.grass_spacing().filter(|_| !shaded) {
                     if crate::types::can_grow_on(BLOCK_TALL_GRASS, ground)
                         && hash2(gx, gz, self.seed.wrapping_add(0x9A55)).is_multiple_of(spacing.max(2))
                     {
                         blocks[air_index] = BLOCK_TALL_GRASS;
+                        continue;
+                    }
+                }
+
+                // Flowers, after the grass and for the opposite reason:
+                // where they compete, the grass is what a meadow is made
+                // of and the flower is what is scattered through it.
+                // ...nor the meadow's flowers.
+                if let Some(spacing) = biome.flower_spacing().filter(|_| !shaded) {
+                    if crate::types::can_grow_on(BLOCK_FLOWER, ground)
+                        && hash2(gx, gz, self.seed.wrapping_add(0xF10E))
+                            .is_multiple_of(spacing.max(2))
+                    {
+                        blocks[air_index] = BLOCK_FLOWER;
+                        continue;
+                    }
+                }
+
+                // Roots, last of the ground cover and rarest.
+                //
+                // After the flower rather than before it for the same
+                // reason the flower comes after the grass: where the two
+                // compete, the one that makes the meadow read as a
+                // meadow wins the cell. What this is here for is the
+                // player who has learnt to look -- and the leaves are
+                // drawn low and pale enough that finding one is
+                // *noticing* rather than being told.
+                if let Some(spacing) = biome.root_spacing() {
+                    if crate::types::can_grow_on(BLOCK_ROOTS, ground)
+                        && hash2(gx, gz, self.seed.wrapping_add(0x2007))
+                            .is_multiple_of(spacing.max(2))
+                    {
+                        blocks[air_index] = BLOCK_ROOTS;
                         continue;
                     }
                 }
@@ -1689,7 +5692,13 @@ impl WorldGen {
                 // with your hands until it turns into planks. Only
                 // where trees stand or stood -- a twig in the middle of
                 // a meadow is a puzzle rather than a detail.
-                if let Some(spacing) = biome.stick_spacing() {
+                //
+                // **Thicker under a crown than in the gap beside it**,
+                // which is the one fact a single number per biome could
+                // not say -- see `Biome::stick_spacing`. `shaded` is the
+                // same answer the forest floor above was rolled from, so
+                // a column is asked about its canopy once.
+                if let Some(spacing) = biome.stick_spacing(shaded) {
                     if crate::types::can_grow_on(BLOCK_STICK, ground)
                         && hash2(gx, gz, self.seed.wrapping_add(0x571C))
                             .is_multiple_of(spacing.max(2))
@@ -1707,11 +5716,54 @@ impl WorldGen {
                 // under a cliff, turn up washed onto sand, and are
                 // scarce anywhere with enough soil to bury them. The
                 // other place is underground -- see `scatter_in_caves`.
+                //
+                // The column's upper rock goes in with the ground,
+                // because the ground on a bared slope is cobble whatever
+                // lies under it, and what lies under it is the thing
+                // that decides how much flint there is -- see
+                // `flint_spacing`.
                 if crate::types::can_grow_on(BLOCK_FLINT, ground)
                     && hash2(gx, gz, self.seed.wrapping_add(0xF117))
-                        .is_multiple_of(flint_spacing(ground))
+                        .is_multiple_of(flint_spacing(ground, rock))
                 {
                     blocks[air_index] = BLOCK_FLINT;
+                    continue;
+                }
+
+                // Native copper, in the same places as flint and far
+                // rarer.
+                //
+                // **The first metal a player ever sees, and it is lying
+                // on the ground.** Copper is the one metal that occurs
+                // already metallic, which is exactly why it was the
+                // first anybody worked -- so it is not behind a pick, a
+                // mine or an ore vein. It weathers out of rock like a
+                // flint nodule and collects where flint collects, one
+                // nugget to about nine of them.
+                //
+                // ...but not the limestone bonus: copper is not a thing
+                // limestone makes, so it is rolled against the plain
+                // rock's spacing whatever the column's stratum is.
+                //
+                // **Only in copper country, and it was everywhere flint
+                // was.** Native copper is the top of a copper deposit gone
+                // green and then back to metal in the weather: it is found
+                // over the lodes, in the hills, and nowhere else. Scattered
+                // over every beach and meadow it made the first metal a
+                // matter of luck on the walk home and the hills a place
+                // nobody needed to go before the pick. Now the first nugget
+                // is a reason to climb -- and where the hills do carry it,
+                // it lies more than twice as thick as it used to (one to
+                // four flints rather than one to nine), so the climb is
+                // rewarded rather than merely required. The ramp is the
+                // veins' own (`copper_country`), so the nuggets and the
+                // lodes under them agree about where copper is.
+                if crate::types::can_grow_on(BLOCK_NATIVE_COPPER, ground)
+                    && hash2(gx, gz, self.seed.wrapping_add(0xC0FF))
+                        .is_multiple_of(flint_spacing(ground, BLOCK_STONE).saturating_mul(4).max(1))
+                    && Self::copper_country(height) > 0.0
+                {
+                    blocks[air_index] = BLOCK_NATIVE_COPPER;
                     continue;
                 }
 
@@ -1737,6 +5789,86 @@ impl WorldGen {
                     continue;
                 }
 
+                // Fallen leaves, under a broadleaf crown and nowhere else.
+                // After the ferns, the berries and the sticks, which stand
+                // *in* the litter, and before the stones -- which lie on top
+                // of it, and are rarer. See `types::BLOCK_LEAF_LITTER` and
+                // `Biome::leaf_litter_spacing`.
+                if shaded {
+                    if let Some(spacing) = biome.leaf_litter_spacing() {
+                        if crate::types::can_grow_on(crate::types::BLOCK_LEAF_LITTER, ground)
+                            && hash2(gx, gz, self.seed.wrapping_add(0x001E_AF11)).is_multiple_of(spacing.max(2))
+                        {
+                            blocks[air_index] = crate::types::BLOCK_LEAF_LITTER;
+                            continue;
+                        }
+                    }
+                }
+
+                // Rusty stones, on the banks of rivers and in the bogs
+                // and nowhere else. See `RUSTY_STONE_SPACING_ON_A_BANK`.
+                //
+                // Before the ordinary stones and on the pebble's own
+                // floor rule: a rusty stone is a pebble with a stain on
+                // it and lies exactly where a pebble lies, so it is
+                // asked about as one rather than given a rule of its
+                // own that could drift -- and asked before the pebble so
+                // that where the two hashes both fire the cell holds the
+                // one worth walking to.
+                //
+                // **The river biome is the channel, not the bank.** Every
+                // column the generator calls `Biome::River` is under
+                // water -- the bed and the flooded margin -- so "river
+                // and dry" is an empty set, and the first draft of this,
+                // which said exactly that, put no stone on any bank of
+                // any river. A bank is a dry column of whatever country
+                // the river runs through with river water within
+                // `BANK_WIDTH` of it (`on_a_riverbank`). The bog wins
+                // where the two meet: wetter ground, richer.
+                //
+                // The die is rolled before the bank is looked for,
+                // because the bank test is twenty-five cache reads and
+                // the die is one hash: asked the other way round, every
+                // dry column in the world pays for the banks.
+                if crate::types::can_grow_on(BLOCK_PEBBLE, ground) {
+                    let roll = hash2(gx, gz, self.seed.wrapping_add(0x2057));
+                    let rusty = if biome == Biome::Bog {
+                        roll.is_multiple_of(RUSTY_STONE_SPACING_IN_A_BOG)
+                    } else {
+                        roll.is_multiple_of(RUSTY_STONE_SPACING_ON_A_BANK)
+                            && self.on_a_riverbank(columns, lx, lz)
+                    };
+                    if rusty {
+                        blocks[air_index] = BLOCK_RUSTY_STONE;
+                        continue;
+                    }
+                }
+
+                // **Stream tin, on the banks of rivers in tin country.**
+                // Cassiterite is nearly twice as heavy as the rock it
+                // weathers out of, so a river carrying the grit of a tin
+                // district drops it first, on its banks and bars -- which
+                // is where tin was got for two thousand years before anybody
+                // sank a shaft for it. A player who has found a district
+                // can pan its rivers with no pick at all; a player who has
+                // not found one has no bronze, which is the district's
+                // whole point (`tin_country`).
+                //
+                // After the rusty stone, so a bank cell both dice pick stays
+                // bog iron and the iron's count does not change under it;
+                // on the pebble's floor rule for the pebble's reason. The
+                // die first, the district's noise second and the bank's
+                // twenty-five reads last, so an ordinary column pays one
+                // hash for it.
+                if crate::types::can_grow_on(BLOCK_PEBBLE, ground)
+                    && hash2(gx, gz, self.seed.wrapping_add(0x5717)).is_multiple_of(STREAM_TIN_SPACING)
+                    && self.tin_country(gx, gz) > 0.0
+                    && self.on_a_riverbank(columns, lx, lz)
+                {
+                    blocks[air_index] = crate::types::BLOCK_STREAM_TIN;
+                    continue;
+                }
+
                 // Loose stones, in every biome there is.
                 //
                 // The one piece of ground cover with no climate to it:
@@ -1749,7 +5881,9 @@ impl WorldGen {
                     && hash2(gx, gz, self.seed.wrapping_add(0x570E))
                         .is_multiple_of(PEBBLE_SPACING)
                 {
-                    blocks[air_index] = BLOCK_PEBBLE;
+                    // A pebble of the rock under it (`ground::rubble_of`):
+                    // granite pebbles in the hills, chalk on the downs.
+                    blocks[air_index] = crate::ground::rubble_of(rock, crate::ground::Form::Pebble);
                 }
             }
         }
@@ -1773,9 +5907,28 @@ impl WorldGen {
     fn scatter_in_caves(&self, blocks: &mut [crate::types::BlockId], origin_x: i32, origin_z: i32) {
         /// One nodule per this many cave-floor cells.
         const FLINT_SPACING: u32 = 11;
+        /// ...and per this many where the floor is limestone.
+        const FLINT_SPACING_IN_LIMESTONE: u32 = 4;
         /// ...and one loose stone, which is commoner: a cave floor is
         /// mostly rubble off the roof.
         const RUBBLE_SPACING: u32 = 7;
+        /// One mushroom per this many, which is rarer than either.
+        ///
+        /// What grows underground, and the only food a player finds
+        /// without going back up. It is a *mouthful* rather than a meal
+        /// (see `food::nutrition`), which is the right size for
+        /// something you stumble on: enough to keep digging, not enough
+        /// to make the surface optional.
+        ///
+        /// One cap in four is a toadstool rather than a mushroom -- same
+        /// spacing, same ground, same depth, and not food at all. See
+        /// where it is rolled below.
+        ///
+        /// Thinned with the surface forage in 1.5 (see
+        /// `Biome::berry_spacing`), and less than the surface was: a
+        /// cave is already a place you have to decide to go into, so
+        /// what grows in one may stay worth the walk.
+        const MUSHROOM_SPACING: u32 = 26;
         // Nothing is scattered above this: near the surface a "cave" is
         // as often a dip in a hillside, and stones appearing in one read
         // as litter rather than as a find.
@@ -1790,9 +5943,21 @@ impl WorldGen {
                         continue;
                     }
                     let under = blocks[Chunk::index(lx as usize, (y - 1) as usize, lz as usize)];
-                    if !matches!(crate::types::block_kind(under), BLOCK_STONE) {
+                    // Any rock, not stone alone: the shallow caves of
+                    // the lowlands run through limestone, and a floor
+                    // that only counted as a floor when it was stone
+                    // would empty every cave a new player can reach.
+                    if !is_rock(crate::types::block_kind(under)) {
                         continue;
                     }
+                    // Flint comes out of limestone, so a limestone floor
+                    // has it nearly three times as thick on the ground.
+                    // See `flint_spacing` for the surface half of this.
+                    let flint_spacing = if crate::types::block_kind(under) == BLOCK_LIMESTONE {
+                        FLINT_SPACING_IN_LIMESTONE
+                    } else {
+                        FLINT_SPACING
+                    };
                     // Head room, so nothing is wedged into a crack too
                     // thin to have been walked into in the first place.
                     if blocks[Chunk::index(lx as usize, (y + 1) as usize, lz as usize)] != BLOCK_AIR
@@ -1800,10 +5965,881 @@ impl WorldGen {
                         continue;
                     }
                     let roll = hash2(gx, gz.wrapping_mul(31).wrapping_add(y), self.seed ^ 0xCA5E);
-                    if roll.is_multiple_of(FLINT_SPACING) {
+                    if roll.is_multiple_of(MUSHROOM_SPACING)
+                        && crate::types::can_grow_on(BLOCK_MUSHROOM, under)
+                    {
+                        // **One in four of them is the wrong one**, and
+                        // it grows in the same places for the same
+                        // reasons -- which is the entire mechanic. A
+                        // toadstool in its own biome, or its own depth,
+                        // or its own spacing, would be a hazard a player
+                        // avoids by walking somewhere else instead of by
+                        // looking at what they are picking up.
+                        //
+                        // A second roll rather than the same one: reusing
+                        // it would tie which mushroom you found to the
+                        // flint and the pebbles beside it, and the
+                        // pattern would be learnable in the wrong way.
+                        let bad = hash2(gx ^ 0x51DE, gz.wrapping_mul(17).wrapping_add(y), self.seed ^ 0xBAD5);
+                        blocks[index] = if bad.is_multiple_of(4) {
+                            BLOCK_TOADSTOOL
+                        } else {
+                            BLOCK_MUSHROOM
+                        };
+                    } else if roll.is_multiple_of(flint_spacing) {
                         blocks[index] = BLOCK_FLINT;
                     } else if roll.is_multiple_of(RUBBLE_SPACING) {
                         blocks[index] = BLOCK_PEBBLE;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stalactites on cave roofs, and stalagmites on the floors under them.
+    ///
+    /// **Where water comes down through limestone.** Dripstone is limestone
+    /// dissolved and laid down again, so a limestone roof carries four times
+    /// what any other rock does, and a wet one twice what a dry one does --
+    /// wet meaning water standing over the column (a sea, a lake, a river:
+    /// the cave carver seals the rock under them, `Column::seal`, so the
+    /// water is *over* the cave and never in it) or a rainy sky
+    /// (`humidity`). What a player learns is the rule a caver knows: a
+    /// chamber hung with spikes is limestone country under rain, and it is
+    /// also a chamber whose floor is not safe to drop onto
+    /// (`dripstone::SPIKE_FROM_BLOCKS`).
+    ///
+    /// **Most stalagmites stand under a stalactite**, because that is where
+    /// the drip lands: a roll that hangs one looks straight down for the
+    /// floor and, two times in three, grows the answering spike there. A
+    /// much rarer roll puts one on a floor with no drip over it. The pair is
+    /// what makes a cave read as dripstone rather than as spikes scattered
+    /// at random, and it costs a walk down one column.
+    ///
+    /// Wet dripstone is also one size bigger, capped at the largest: more
+    /// water is more rock laid down.
+    ///
+    /// **Three ways of deciding wetness were weighed.** The column's own
+    /// water alone left every cave outside a lake's footprint bone dry, so
+    /// the rainforest had no more dripstone than the desert. The humidity
+    /// field alone is a noise and a pair of basin reads *per column* -- a
+    /// cost this pass would pay under every chunk for a question only a hit
+    /// needs answered. **Both, and the field only on a hit (chosen)**: the
+    /// dry spacing is a multiple of the wet one, so a roll that misses the
+    /// wet spacing misses both and nothing is asked; a roll that makes the
+    /// dry spacing needs no answer either; only the rolls in between read
+    /// the sky.
+    ///
+    /// Column by column and never across a chunk seam, so a chunk generates
+    /// alone. Under `SEA_LEVEL - 4`, for the scatter's reason: near the
+    /// surface a "cave" is as often a hollow in a hillside. A stalagmite
+    /// needs a roof of rock over it within `ROOF_REACH` for the same
+    /// reason -- a spike under the open sky is a spike on the surface.
+    fn grow_dripstone(&self, blocks: &mut [crate::types::BlockId], origin_x: i32, origin_z: i32, columns: &ColumnCache) {
+        use crate::dripstone::{grows_from, sized, SIZES};
+        use crate::types::{block_kind, BLOCK_STALACTITE, BLOCK_STALAGMITE};
+        /// One stalactite per this many roof cells of wet limestone...
+        const WET_LIMESTONE: u32 = 5;
+        /// ...of dry limestone, or wet other rock...
+        const DRY_LIMESTONE: u32 = WET_LIMESTONE * 2;
+        const WET_ROCK: u32 = WET_LIMESTONE * 4;
+        /// ...and of dry other rock. A multiple of every spacing above it,
+        /// which is what lets a miss skip the humidity read.
+        const DRY_ROCK: u32 = WET_ROCK * 2;
+        /// A stalagmite with no drip over it: this many times rarer than a
+        /// stalactite on the same rock.
+        const LONE_STALAGMITE: u32 = 3;
+        /// How far down a drip is followed to the floor, and how far up a
+        /// lone stalagmite looks for its roof.
+        const ROOF_REACH: i32 = 16;
+        /// A sky this rainy makes a cave wet. The field runs -1..1 and its
+        /// zero is about the coast, so this is the wetter half of the land.
+        const WET_SKY: f64 = 0.15;
+        let ceiling = SEA_LEVEL - 4;
+        let at = |lx: i32, y: i32, lz: i32| Chunk::index(lx as usize, y as usize, lz as usize);
+
+        for lz in 0..CHUNK_SIZE_Z as i32 {
+            for lx in 0..CHUNK_SIZE_X as i32 {
+                let (gx, gz) = (origin_x + lx, origin_z + lz);
+                let column = columns.at(lx, lz);
+                let under_water = column.water > column.height;
+                // Asked once per column, and only when a roll needs it.
+                let mut wet_sky: Option<bool> = None;
+                let mut is_wet = |this: &Self| -> bool {
+                    under_water || *wet_sky.get_or_insert_with(|| this.humidity(gx, gz) > WET_SKY)
+                };
+                for y in (BEDROCK_TOP + 1)..=ceiling {
+                    if blocks[at(lx, y, lz)] != BLOCK_AIR {
+                        continue;
+                    }
+                    let above = blocks[at(lx, y + 1, lz)];
+                    let below = blocks[at(lx, y - 1, lz)];
+                    let hanging = grows_from(above);
+                    let standing = grows_from(below);
+                    if !hanging && !standing {
+                        continue;
+                    }
+                    let rock = if hanging { above } else { below };
+                    let wet_spacing = if block_kind(rock) == BLOCK_LIMESTONE { WET_LIMESTONE } else { WET_ROCK };
+                    let dry_spacing = if block_kind(rock) == BLOCK_LIMESTONE { DRY_LIMESTONE } else { DRY_ROCK };
+                    let (wet_spacing, dry_spacing) = if hanging {
+                        (wet_spacing, dry_spacing)
+                    } else {
+                        (wet_spacing * LONE_STALAGMITE, dry_spacing * LONE_STALAGMITE)
+                    };
+                    let roll = hash2(gx, gz.wrapping_mul(37).wrapping_add(y), self.seed ^ 0xD819_5703);
+                    if !roll.is_multiple_of(wet_spacing) {
+                        continue;
+                    }
+                    let wet = is_wet(self);
+                    if !wet && !roll.is_multiple_of(dry_spacing) {
+                        continue;
+                    }
+                    // Half small, a third middling, a sixth the largest --
+                    // and a wet cave one size up from that.
+                    let size = match (roll >> 12) % 6 {
+                        0..=2 => 0,
+                        3 | 4 => 1,
+                        _ => 2,
+                    } + u8::from(wet);
+                    let size = size.min(SIZES - 1);
+                    if hanging {
+                        blocks[at(lx, y, lz)] = sized(BLOCK_STALACTITE, size);
+                        // Follow the drip down to the floor it lands on.
+                        if (roll >> 20).is_multiple_of(3) {
+                            continue;
+                        }
+                        let mut floor = y - 1;
+                        while floor > BEDROCK_TOP && y - floor <= ROOF_REACH && blocks[at(lx, floor, lz)] == BLOCK_AIR {
+                            floor -= 1;
+                        }
+                        // `floor` is the first cell that is not air. The spike
+                        // goes in the air over it, and not into the cell the
+                        // stalactite itself is in.
+                        let spike = floor + 1;
+                        if spike < y && floor > BEDROCK_TOP && grows_from(blocks[at(lx, floor, lz)]) {
+                            let size = ((roll >> 24) % u32::from(SIZES)) as u8 + u8::from(wet);
+                            blocks[at(lx, spike, lz)] = sized(BLOCK_STALAGMITE, size.min(SIZES - 1));
+                        }
+                    } else {
+                        // A lone stalagmite needs a roof: rock, somewhere
+                        // straight over it, before the reach runs out.
+                        let mut up = y + 1;
+                        while up < CHUNK_SIZE_Y as i32 && y + ROOF_REACH >= up && blocks[at(lx, up, lz)] == BLOCK_AIR {
+                            up += 1;
+                        }
+                        let roofed = up < CHUNK_SIZE_Y as i32
+                            && y + ROOF_REACH >= up
+                            && is_rock(block_kind(blocks[at(lx, up, lz)]));
+                        if roofed {
+                            blocks[at(lx, y, lz)] = sized(BLOCK_STALAGMITE, size);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Nests, in the canopies that are already standing.
+    ///
+    /// One column in `NEST_SPACING` carries one, and the cell is
+    /// found by looking *down* from above the tallest tree for the
+    /// first leaf with air over it. That is the branch end a bird would
+    /// use, and it is a question only the finished chunk can answer --
+    /// see the call site for what happened when it was asked too early.
+    ///
+    /// **A column is complete after `place_trees`, including canopies
+    /// belonging to trees rooted in the next chunk**, because that pass
+    /// loops over a border of `MAX_CANOPY_RADIUS` around the chunk. So
+    /// the scan sees the same column both sides of a border and needs
+    /// no overhang of its own.
+    ///
+    /// The cost is a roll per column and, for the one that hits, about
+    /// thirty block reads down a window over the terrain -- nothing beside
+    /// the tree pass itself.
+    fn place_nests(
+        &self,
+        blocks: &mut [crate::types::BlockId],
+        origin_x: i32,
+        origin_z: i32,
+        columns: &ColumnCache,
+    ) {
+        /// How far above the ground a canopy can be. Taller than the
+        /// tallest tree this generator makes, so the window never
+        /// starts below a crown.
+        const CANOPY_CEILING: i32 = 30;
+        /// **One column in four hundred and twenty, and it was one in a
+        /// hundred and forty.** At that rate a wood had a nest in nearly
+        /// every other crown you looked up at, which is a henhouse rather
+        /// than a find -- and eggs in every tree take the decision out of
+        /// food: nobody hunts when breakfast is on every branch. Three
+        /// times rarer keeps a nest something a player spots and climbs
+        /// for, and still leaves several in any wood worth the name.
+        const NEST_SPACING: u32 = 420;
+        for lz in 0..CHUNK_SIZE_Z as i32 {
+            for lx in 0..CHUNK_SIZE_X as i32 {
+                let (gx, gz) = (origin_x + lx, origin_z + lz);
+                if !hash2(gx, gz, self.seed.wrapping_add(0x8E57)).is_multiple_of(NEST_SPACING) {
+                    continue;
+                }
+                let Column { height, .. } = columns.at(lx, lz);
+                let top = (height + CANOPY_CEILING).min(CHUNK_SIZE_Y as i32 - 2);
+                // Down from the sky to the first leaf. Anything above a
+                // leaf other than air stops it -- a nest under a second
+                // canopy is a nest in the dark.
+                let mut sky = true;
+                for y in (height + 2..=top).rev() {
+                    let Some(cell) = read_block(blocks, lx, y, lz) else {
+                        continue;
+                    };
+                    let leafy = matches!(
+                        block_kind(cell),
+                        BLOCK_LEAVES
+                            | BLOCK_BIRCH_LEAVES
+                            | crate::types::BLOCK_APPLE_LEAVES
+                            | crate::types::BLOCK_APPLE_LEAVES_FRUIT
+                            // The flat top of an acacia is the best
+                            // nesting ground on a plain: sky over it and
+                            // nothing else for a mile.
+                            | crate::types::BLOCK_ACACIA_LEAVES
+                            | BLOCK_MAPLE_LEAVES
+                    );
+                    if leafy && sky {
+                        put_block(
+                            blocks,
+                            lx,
+                            y + 1,
+                            lz,
+                            crate::types::BLOCK_NEST_EGGS,
+                            false,
+                        );
+                        break;
+                    }
+                    sky = crate::types::is_air(cell);
+                }
+            }
+        }
+    }
+
+    /// Wild hives, on the side of a standing trunk in a warm wood.
+    ///
+    /// **Rooted at the trunk, not at the hive.** One trunk in
+    /// `HIVE_SPACING` carries one, rolled on the trunk's own column, and the
+    /// hive goes in the first of its four sides that is air and inside this
+    /// chunk, two cells over the ground a player stands on -- reachable
+    /// without climbing, and above a boar's head. Choosing a side that stays
+    /// in the chunk is what makes this need no overhang: the trunk and the
+    /// hive are both this chunk's, so no neighbour has to agree.
+    ///
+    /// **Broadleaf woods only**: the oak wood, the birch wood and the
+    /// savanna's acacias. Not the taiga, where the season a bee can fly in is
+    /// a few weeks, and not the swamp's drowned snags or the dead forest's
+    /// poles, where there is nothing in flower. A tundra or a desert has no
+    /// trunks to be asked about anyway. The birch wood is in because it is
+    /// most of the broadleaf wood there is (the oak wood is a rarity between
+    /// the plains), and a hive that only the oak wood grew would be a find
+    /// most worlds never offer -- and because the bees are seasonal on their
+    /// own (`bees::BEES_FLY_C`), the cold end of the woods is already slower.
+    ///
+    /// Rejected: *a hive in a hollow of the trunk* -- a trunk cell with comb
+    /// in it. It is the truer picture, and it makes the hive a piece of the
+    /// tree: felling, the axe's work, the wood a trunk drops and the tree's
+    /// own pass would all have to learn a log that is sometimes honey.
+    /// Rejected too: *a nest on a branch end*, the bird's place. A hive in
+    /// the crown is a hive nobody can reach without a ladder this game does
+    /// not have, and a find you can see and never take is scenery.
+    fn place_hives(
+        &self,
+        blocks: &mut [crate::types::BlockId],
+        origin_x: i32,
+        origin_z: i32,
+        columns: &ColumnCache,
+    ) {
+        /// **One trunk in forty.** An oak wood has a trunk in about fourteen
+        /// columns and a birch wood in thirty (`Biome::tree_spacing`), so
+        /// on paper this is a hive in two to five chunks of wood. Measured
+        /// (`hive_tests`, two seeds), it is one in six, once the trunks with
+        /// no free side or too little height are counted out: a couple in a
+        /// wood worth the name, and few enough that finding one is worth
+        /// remembering where it was. Fifty measured one in seven.
+        const HIVE_SPACING: u32 = 40;
+        /// How far over the ground the hive hangs: five cells, out of reach
+        /// from the ground.
+        ///
+        /// **It was three** -- the cell over a standing player's head, so a
+        /// hive was robbed from the ground with a raised arm ("ульи сделай
+        /// выше"). At five the honey is a climb (`climbing` costs stamina
+        /// and a loaded player is slow at it), and the stings come while
+        /// holding on to the trunk.
+        const HIVE_RISE: i32 = 5;
+        for lz in 0..CHUNK_SIZE_Z as i32 {
+            for lx in 0..CHUNK_SIZE_X as i32 {
+                let (gx, gz) = (origin_x + lx, origin_z + lz);
+                let Column { height, biome, .. } = columns.at(lx, lz);
+                if !matches!(biome, Biome::Forest | Biome::BirchForest | Biome::Savanna) {
+                    continue;
+                }
+                // A standing trunk from the ground to the hive: three cells
+                // of wood one over another. A fallen log lies one cell high,
+                // and a limb three deep is not a thing a tree grows.
+                let trunk = (1..=HIVE_RISE)
+                    .all(|dy| read_block(blocks, lx, height + dy, lz).is_some_and(is_trunk));
+                if !trunk || !hash2(gx, gz, self.seed.wrapping_add(0xB33)).is_multiple_of(HIVE_SPACING) {
+                    continue;
+                }
+                let turn = hash2(gz, gx, self.seed.wrapping_add(0xB33)) as usize;
+                const SIDES: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
+                for step in 0..SIDES.len() {
+                    let (dx, dz) = SIDES[(turn + step) % SIDES.len()];
+                    let y = height + HIVE_RISE;
+                    if read_block(blocks, lx + dx, y, lz + dz).is_some_and(crate::types::is_air) {
+                        // Stuck to the trunk it grew on: the comb is drawn and
+                        // collided against that wall (`types::hive_side`), so a
+                        // hive is part of the tree rather than a box beside it.
+                        let toward_trunk = match (dx, dz) {
+                            (1, 0) => crate::types::Facing::West,
+                            (-1, 0) => crate::types::Facing::East,
+                            (0, 1) => crate::types::Facing::North,
+                            _ => crate::types::Facing::South,
+                        };
+                        let hive = crate::types::hive_against(
+                            crate::bees::hive_holding(crate::bees::HIVE_FULL),
+                            toward_trunk,
+                        );
+                        put_block(blocks, lx + dx, y, lz + dz, hive, false);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bushes: three or four blocks of leaves standing in the open.
+    ///
+    /// **Why a structure rather than a taller sprite.** The berry bush
+    /// and the tuft are crossed planes -- two quads, no volume, and at
+    /// eye level they are a decal on the ground. A wood needs something
+    /// between the canopy and the grass or it reads as a room with
+    /// pillars in it: undergrowth is most of what a real one is made of,
+    /// and undergrowth is the thing you cannot see over.
+    ///
+    /// **And it costs nothing to draw.** A bush is made of the leaf
+    /// block the trees already use: the same texture layer, the same
+    /// cutout pass, the same greedy mesher, the same face culling
+    /// against its own neighbours -- so a hundred bushes in view are a
+    /// few hundred extra faces in a draw call that was already being
+    /// issued, rather than a new pass, a new pipeline or a new sprite
+    /// type. Nothing here is a new kind of thing; that is the whole
+    /// design.
+    ///
+    /// Four shapes, chosen off the same hash that places it, because a
+    /// meadow of identical bushes reads as wallpaper:
+    ///
+    /// * a low sprawl, two tall and three across -- a hazel;
+    /// * a narrow one, three tall and one across at the top -- a
+    ///   sapling that never made it;
+    /// * a dome, three across and three tall with the corners off;
+    /// * a small clump, two by two.
+    ///
+    /// Rooted up to one block outside the chunk, like the trees, so a
+    /// bush that straddles a border is built identically by both sides
+    /// and each keeps the half that falls inside its own array.
+    /// A ruin: what is left of a building nobody remembers.
+    ///
+    /// ## Why it is worth generating at all
+    ///
+    /// **It is a reason to walk to something you can see from a
+    /// distance.** Everything else in this world is either scenery you
+    /// find underfoot or a resource you go to a *kind of place* for -- a
+    /// wood, a hill, a shore. A ruin is the first thing that is a
+    /// *place*: it is somewhere, exactly, and it is the same somewhere
+    /// for everyone on the server.
+    ///
+    /// And it pays. The walls are **fired brick**, which a player cannot
+    /// make until they have clay, a kiln and the fuel to run it -- so a
+    /// ruin found in the first week is an evening of kiln work standing
+    /// in a field, and one found later is a quarry of building material
+    /// that needs no fire at all. Nothing is hidden in it and there is
+    /// no chest: what it gives is what it is made of, which is the only
+    /// kind of reward this generator can hand out honestly (a chest
+    /// placed here would be empty -- contents live in the server's
+    /// container store, not in the terrain).
+    ///
+    /// ## Why it fits inside one chunk
+    ///
+    /// A structure wider than a chunk has to be agreed on by every chunk
+    /// it touches, and chunks are generated independently and in any
+    /// order -- so the agreement has to be a *calculation* every one of
+    /// them can do alone. That is a real mechanism and this is not the
+    /// feature to introduce it with: the footprint is nine by nine
+    /// inside a sixteen-wide chunk, three cells clear of every edge, so
+    /// no neighbour ever needs to know. What that costs is that a ruin
+    /// is a small building rather than a city, and what it buys is that
+    /// it cannot half-exist at a seam.
+    ///
+    /// ## What makes it read as a ruin and not as a wall
+    ///
+    /// Three things, and none of them is randomness for its own sake:
+    ///
+    /// * **The floor is whole and the walls are not.** A slab survives
+    ///   because there is nothing to push it over; a wall falls. So the
+    ///   paving is laid complete and the courses above it are cut down
+    ///   per cell -- which is also what makes the shape readable from
+    ///   outside, because you can see into it.
+    /// * **Columns.** A stump of a column is the one shape that says
+    ///   *built on purpose* rather than *pile of rock*, and four of them
+    ///   at the corners of the room say it at any angle. They stand
+    ///   taller than the walls precisely because a column is the last
+    ///   thing standing in every real ruin: it is holding nothing up.
+    /// * **It is buried a little.** The floor is laid one below the
+    ///   ground rather than on it, so grass and drift come up to it and
+    ///   it looks older than the meadow around it.
+    fn place_ruin(
+        &self,
+        blocks: &mut [crate::types::BlockId],
+        origin_x: i32,
+        origin_z: i32,
+        columns: &ColumnCache,
+    ) {
+        use crate::types::{BLOCK_AIR, BLOCK_BRICKS, BLOCK_COBBLESTONE};
+
+        /// One chunk in this many is *offered* a ruin -- and most of
+        /// the offers are refused, which is the number that matters.
+        /// The site rules below turn down water, beach and slope, and
+        /// they turn down about three quarters of what this lets
+        /// through: measured over a 2560-block square, one in fourteen
+        /// hundred gave two ruins and one in five hundred gives twelve.
+        /// Twelve to the hour of walking is the rate this is set for --
+        /// rare enough that the first one is an event, common enough
+        /// that a player who explores meets them.
+        /// One chunk in this many is *offered* a ruin -- and most of the
+        /// offers are refused, which is the number that matters. The
+        /// site rules below turn down water, beach and slope, and they
+        /// turn down about three quarters of what this lets through.
+        ///
+        /// Measured over a 2560-block square, which is about an hour of
+        /// walking: one in fourteen hundred gave two ruins and one in
+        /// five hundred gave twelve. **Very rare, across five kinds**,
+        /// is what this is set for -- you will not meet the same kind
+        /// twice in a day, and the first one you find is a thing you
+        /// tell somebody about.
+        const RUIN_IN_CHUNKS: u32 = 2000;
+        /// The footprint, in chunk-local cells: three clear of every
+        /// edge. See the note above about seams.
+        const FROM: i32 = 3;
+        const TO: i32 = 11;
+        const MIDDLE: i32 = (FROM + TO) / 2;
+
+        // One roll per *chunk*, not per cell: a ruin is one object and
+        // its position is the chunk's, so the hash is asked once at the
+        // origin rather than sixteen times along a row.
+        let roll = hash2(origin_x, origin_z, self.seed.wrapping_add(0x0DEC));
+        if !roll.is_multiple_of(RUIN_IN_CHUNKS) {
+            return;
+        }
+
+        // **The site has to be flat, dry and above the sea**, and this
+        // is checked before a single block is written. A building laid
+        // across a slope is a wall with its foot in the air at one end
+        // and buried at the other, and the generator has no way to walk
+        // it back afterwards.
+        let (mut lowest, mut highest) = (i32::MAX, i32::MIN);
+        for lz in FROM..=TO {
+            for lx in FROM..=TO {
+                let column = columns.at(lx, lz);
+                // Dry land, and clear of the waterline: `water` is the
+                // level of whatever standing water this column belongs
+                // to, so a column whose ground is below it is a lake bed
+                // however far from the sea it is.
+                if column.height <= SEA_LEVEL + 1 || column.height <= column.water {
+                    return; // in the water or on the beach
+                }
+                lowest = lowest.min(column.height);
+                highest = highest.max(column.height);
+            }
+        }
+        // **Seven blocks of fall across the footprint, and a plinth under
+        // the low side.** It was two, when a hill was twenty blocks tall.
+        // Measured on the 256-block world, the flattest dry site among
+        // the ruins offered in a 2560-block square fell four blocks across
+        // nine cells, and the rest six to eleven -- so a rule about flat
+        // ground found nowhere at all to put a building. Real ruins stand
+        // on slopes; what they stand *on* is a foundation, and that is
+        // what the low side gets below.
+        if highest - lowest > 7 {
+            return; // a cliff, not a site
+        }
+
+        // The floor at the middle of the slope rather than at its foot:
+        // the high side is cut back to it and the low side is built up to
+        // it, so neither a wall of earth nor a drop of seven blocks runs
+        // along one edge of the room.
+        let floor = (lowest + highest) / 2 - 1;
+        let set = |blocks: &mut [crate::types::BlockId], x: i32, y: i32, z: i32, id| {
+            put_block(blocks, x, y, z, id, true);
+        };
+
+        // The paving and the clearing are the same for every kind: a
+        // floor is what survives, and a building that has stood here for
+        // centuries has a clearing round it. Cleared **to the sky**,
+        // because five blocks of room let the canopy close over the
+        // first ruin this generator made, and from above it was a patch
+        // of leaves with brick under it.
+        for lz in FROM..=TO {
+            for lx in FROM..=TO {
+                // The plinth: cobble from the ground up to the floor, on
+                // whichever columns sit lower than it. A floor laid in the
+                // air over a slope is the fault the site check exists to
+                // stop, and this is the other way of stopping it.
+                let ground = columns.at(lx, lz).height;
+                for y in ground + 1..floor {
+                    set(blocks, lx, y, lz, BLOCK_COBBLESTONE);
+                }
+                set(blocks, lx, floor, lz, BLOCK_COBBLESTONE);
+                for y in floor + 1..CHUNK_SIZE_Y as i32 - 1 {
+                    set(blocks, lx, y, lz, BLOCK_AIR);
+                }
+            }
+        }
+
+        // **And a margin of clearing round it.** The footprint alone was
+        // not enough: a tree rooted one cell outside it leans its crown
+        // straight over the walls, and the first pictures of a ruin in a
+        // dead forest were trunks with brick between them. Two cells of
+        // margin, and only *wood* is taken -- the ground, the boulders
+        // and anything else standing there are left, because this is a
+        // clearing that grew around a building rather than a hole
+        // somebody cut.
+        for lz in FROM - 2..=TO + 2 {
+            for lx in FROM - 2..=TO + 2 {
+                for y in floor + 1..CHUNK_SIZE_Y as i32 - 1 {
+                    let Some(cell) = read_block(blocks, lx, y, lz) else {
+                        continue;
+                    };
+                    // Any wood's (`wood::is_log`): a ruin in a fir wood is
+                    // cleared of firs.
+                    let wood = crate::wood::is_log(cell) || crate::types::is_leafy(cell);
+                    if wood {
+                        set(blocks, lx, y, lz, BLOCK_AIR);
+                    }
+                }
+            }
+        }
+
+        // How tall a course may go without leaving the world. A tower on
+        // high ground would otherwise write above the chunk and be
+        // silently clipped -- which reads as a tower somebody sawed off.
+        let ceiling = CHUNK_SIZE_Y as i32 - 2;
+        let up_to = |from: i32, want: i32| (from + want).min(ceiling);
+
+        // **Five kinds, and the kind is the roll's other half.** One
+        // shape repeated is scenery: the second one a player finds says
+        // "oh, another" rather than "what is that". Each of these is
+        // recognisable from outside at a glance, which is the whole
+        // requirement -- a landmark that has to be walked into before it
+        // can be identified is not a landmark.
+        match roll / RUIN_IN_CHUNKS % 5 {
+            // **The hall.** Four columns and the wreck of the walls
+            // between them: the shape everybody pictures. One column has
+            // fallen and lies where it fell, which is what says the roof
+            // came down rather than that it was never finished.
+            0 => {
+                for lz in FROM..=TO {
+                    for lx in FROM..=TO {
+                        if lx != FROM && lx != TO && lz != FROM && lz != TO {
+                            continue;
+                        }
+                        let hash = hash2(origin_x + lx, origin_z + lz, self.seed ^ 0x5A11);
+                        for course in 0..Self::broken_course(hash) {
+                            set(blocks, lx, floor + 1 + course, lz, BLOCK_BRICKS);
+                        }
+                    }
+                }
+                let corners = [
+                    (FROM + 1, FROM + 1),
+                    (TO - 1, FROM + 1),
+                    (FROM + 1, TO - 1),
+                    (TO - 1, TO - 1),
+                ];
+                let down = (roll / 7 % 4) as usize;
+                for (index, (cx, cz)) in corners.into_iter().enumerate() {
+                    let hash = hash2(origin_x + cx, origin_z + cz, self.seed ^ 0xC01A);
+                    // Three to six courses: at forty blocks a two-course
+                    // stump is a bump in the grass, and a column twice
+                    // the height of the wall beside it is a building.
+                    let tall = 6 - (hash % 4) as i32;
+                    if index == down {
+                        // The fallen one, lying away from its own base.
+                        let dx = if cx < MIDDLE { 1 } else { -1 };
+                        let dz = if cz < MIDDLE { 1 } else { -1 };
+                        for step in 1..=4 {
+                            set(blocks, cx + dx * step, floor + 1, cz + dz * step, BLOCK_BRICKS);
+                        }
+                        continue;
+                    }
+                    for y in floor + 1..=up_to(floor, tall) {
+                        set(blocks, cx, y, cz, BLOCK_BRICKS);
+                    }
+                }
+            }
+            // **The tower.** A hollow square stump, five across and ten
+            // tall -- the one kind visible over a canopy, which is what
+            // makes it worth walking to before you know what it is. Its
+            // top course is eaten away, because a tower with a level top
+            // is a chimney.
+            1 => {
+                let (lo, hi) = (MIDDLE - 2, MIDDLE + 2);
+                for lz in lo..=hi {
+                    for lx in lo..=hi {
+                        if lx != lo && lx != hi && lz != lo && lz != hi {
+                            continue;
+                        }
+                        let hash = hash2(origin_x + lx, origin_z + lz, self.seed ^ 0x7011);
+                        let top = up_to(floor, 10 - (hash % 4) as i32);
+                        for y in floor + 1..=top {
+                            set(blocks, lx, y, lz, BLOCK_BRICKS);
+                        }
+                    }
+                }
+                // A doorway, or it is a plinth rather than a tower.
+                for y in floor + 1..=floor + 2 {
+                    set(blocks, MIDDLE, y, lo, BLOCK_AIR);
+                }
+            }
+            // **The aqueduct.** Three piers and the span between them,
+            // broken in the middle: the only kind with a hole you can
+            // walk under, and the only one whose silhouette is
+            // horizontal. Nothing else in this world has a lintel.
+            2 => {
+                let deck = up_to(floor, 5);
+                for lx in [FROM, MIDDLE, TO] {
+                    for y in floor + 1..=deck {
+                        set(blocks, lx, y, MIDDLE - 1, BLOCK_BRICKS);
+                        set(blocks, lx, y, MIDDLE + 1, BLOCK_BRICKS);
+                    }
+                }
+                for lx in FROM..=TO {
+                    // The gap. A span with a hole in it is a ruin; a
+                    // span without one is a bridge somebody maintains.
+                    if (MIDDLE - 1..=MIDDLE + 1).contains(&lx) {
+                        continue;
+                    }
+                    set(blocks, lx, deck, MIDDLE - 1, BLOCK_BRICKS);
+                    set(blocks, lx, deck, MIDDLE, BLOCK_BRICKS);
+                    set(blocks, lx, deck, MIDDLE + 1, BLOCK_BRICKS);
+                }
+            }
+            // **The house.** One room, a doorway and a hearth stone --
+            // the smallest of the five and the only one that reads as
+            // somebody's rather than as a state's.
+            3 => {
+                let (lo, hi) = (FROM + 1, TO - 1);
+                for lz in lo..=hi {
+                    for lx in lo..=hi {
+                        if lx != lo && lx != hi && lz != lo && lz != hi {
+                            continue;
+                        }
+                        let hash = hash2(origin_x + lx, origin_z + lz, self.seed ^ 0x8005);
+                        let tall = 4 - (hash % 3) as i32;
+                        for y in floor + 1..=up_to(floor, tall) {
+                            set(blocks, lx, y, lz, BLOCK_BRICKS);
+                        }
+                    }
+                }
+                for y in floor + 1..=floor + 2 {
+                    set(blocks, MIDDLE, y, lo, BLOCK_AIR);
+                }
+                // The hearth: cobble on the floor inside and off centre,
+                // which is where a hearth goes in a one-room house.
+                for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    set(blocks, MIDDLE + dx, floor, MIDDLE + 1 + dz, BLOCK_COBBLESTONE);
+                }
+            }
+            // **The tomb.** A slab on the ground and a chamber under it,
+            // and it is the only kind whose point is *below* the floor:
+            // the others are a place to stand, this one is a reason to
+            // dig. The shaft is left open, because a sealed room in a
+            // world with no map is a room nobody ever finds.
+            _ => {
+                let (lo, hi) = (MIDDLE - 2, MIDDLE + 2);
+                let roof = floor - 1;
+                let chamber_floor = roof - 3;
+                for lz in lo..=hi {
+                    for lx in lo..=hi {
+                        set(blocks, lx, chamber_floor, lz, BLOCK_BRICKS);
+                        for y in chamber_floor + 1..=roof - 1 {
+                            let wall = lx == lo || lx == hi || lz == lo || lz == hi;
+                            set(blocks, lx, y, lz, if wall { BLOCK_BRICKS } else { BLOCK_AIR });
+                        }
+                        set(blocks, lx, roof, lz, BLOCK_BRICKS);
+                    }
+                }
+                // The shaft down through the slab, at one corner of the
+                // chamber, so that standing on the paving you see a hole
+                // rather than fall into a pit.
+                set(blocks, lo + 1, floor, lo + 1, BLOCK_AIR);
+                set(blocks, lo + 1, roof, lo + 1, BLOCK_AIR);
+                // ...and four short pillars round it, or a tomb is a
+                // hole in a field with nothing to walk towards.
+                for (cx, cz) in [(lo, lo), (hi, lo), (lo, hi), (hi, hi)] {
+                    for y in floor + 1..=up_to(floor, 2) {
+                        set(blocks, cx, y, cz, BLOCK_BRICKS);
+                    }
+                }
+            }
+        }
+    }
+
+/// A wall cell, cut down by its own hash: two courses at most and often
+/// none. What is left of a wall is a line you can read and see over, not
+/// a fence.
+fn broken_course(hash: u32) -> i32 {
+    match hash % 8 {
+        0..=2 => 0,
+        3 | 4 => 1,
+        _ => 2,
+    }
+}
+
+    fn place_bushes(
+        &self,
+        blocks: &mut [crate::types::BlockId],
+        origin_x: i32,
+        origin_z: i32,
+        columns: &ColumnCache,
+    ) {
+        const REACH: i32 = 1;
+        for lz in -REACH..(CHUNK_SIZE_Z as i32 + REACH) {
+            for lx in -REACH..(CHUNK_SIZE_X as i32 + REACH) {
+                let (gx, gz) = (origin_x + lx, origin_z + lz);
+                let Column {
+                    height,
+                    biome,
+                    surface,
+                    water,
+                    ..
+                } = columns.at(lx, lz);
+                let Some(spacing) = biome.bush_spacing() else {
+                    continue;
+                };
+                let roll = hash2(gx, gz, self.seed.wrapping_add(0xB05B));
+                if !roll.is_multiple_of(spacing.max(8)) {
+                    continue;
+                }
+                // The tree's rules, because it is the same question: not
+                // under water, not on rock or sand, not over a hole.
+                if height < water {
+                    continue;
+                }
+                if !matches!(crate::ground::as_common(surface.top), BLOCK_GRASS | BLOCK_DIRT | crate::types::BLOCK_DRY_TURF) {
+                    continue;
+                }
+                if self.is_cave(gx, height, gz) {
+                    continue;
+                }
+                // **The bush's own leaf, not the local tree's.** It
+                // was the canopy's for as long as there was only one
+                // leaf in the game, and a meadow full of tree-tops is
+                // what that looked like. See `types::BLOCK_BUSH_LEAVES`.
+                place_bush(
+                    blocks,
+                    lx,
+                    height,
+                    lz,
+                    (roll >> 12) & 3,
+                    crate::types::BLOCK_BUSH_LEAVES,
+                );
+            }
+        }
+    }
+
+    // ---- savanna ----
+
+    /// Termite mounds: a narrow spire of red earth on the open savanna.
+    ///
+    /// ```text
+    ///      #      the spire: one column, two to four tall
+    ///     ##      the base: two by two, one or two tall
+    ///     ##
+    /// ```
+    ///
+    /// **A landmark, so its rarity is set from distance, as the old
+    /// tree's is** (`Biome::old_tree_share`). On a plain with an acacia
+    /// every couple of hundred columns, the thing a player says "I have
+    /// passed that" about has to be rarer than the trees and a different
+    /// shape from them: a mound is the one thing on a savanna taller than
+    /// it is wide that is not a tree. See `termite_mound_spacing`.
+    ///
+    /// **Only on level, dry turf.** All four columns of the base have to
+    /// be the same height, grass or dirt, above their water and not over
+    /// a cave, and the ring round them within a block of that. A mound on
+    /// a slope has one side buried and one standing on air, and a mound at
+    /// a pond's edge is standing in the pond -- both read as a block
+    /// somebody dropped rather than a thing insects built over years.
+    ///
+    /// Rooted one column outside the chunk on the low side, because the
+    /// base reaches one column up: a mound rooted just west of a chunk has
+    /// half of itself in it. Everything it asks of the ground comes from
+    /// the column cache, which reaches `FEATURE_MARGIN` out, so both
+    /// chunks reach the same verdict about the same mound.
+    fn place_termite_mounds(
+        &self,
+        blocks: &mut [crate::types::BlockId],
+        origin_x: i32,
+        origin_z: i32,
+        columns: &ColumnCache,
+    ) {
+        for lz in -1..CHUNK_SIZE_Z as i32 {
+            for lx in -1..CHUNK_SIZE_X as i32 {
+                let (gx, gz) = (origin_x + lx, origin_z + lz);
+                let Column { height, biome, .. } = columns.at(lx, lz);
+                let Some(spacing) = biome.termite_mound_spacing() else {
+                    continue;
+                };
+                // The die before the ground, as the riverbank stones do
+                // it: the ground is sixteen cache reads and four cave
+                // samples, and the die is one hash.
+                let roll = hash2(gx, gz, self.seed.wrapping_add(0x7E4D));
+                if !roll.is_multiple_of(spacing.max(8)) {
+                    continue;
+                }
+                let level = (-1..=2).all(|dz| {
+                    (-1..=2).all(|dx| {
+                        let column = columns.at(lx + dx, lz + dz);
+                        let dry = column.height >= column.water;
+                        if (0..=1).contains(&dx) && (0..=1).contains(&dz) {
+                            dry && column.height == height
+                                && matches!(
+                                    crate::ground::as_common(column.surface.top),
+                                    BLOCK_GRASS | BLOCK_DIRT | crate::types::BLOCK_SANDY_SOIL | crate::types::BLOCK_DRY_TURF
+                                )
+                                && !self.is_cave(gx + dx, height, gz + dz)
+                        } else {
+                            dry && (column.height - height).abs() <= 1
+                        }
+                    })
+                });
+                if !level {
+                    continue;
+                }
+                let base = 1 + ((roll >> 8) & 1) as i32;
+                let spire = (base + 1).max(2 + ((roll >> 12) % 3) as i32);
+                let peak = (((roll >> 10) & 1) as i32, ((roll >> 11) & 1) as i32);
+                for dz in 0..=1 {
+                    for dx in 0..=1 {
+                        let tall = if (dx, dz) == peak { spire } else { base };
+                        for step in 1..=tall {
+                            let y = height + step;
+                            // Stopped by whatever already stands there, as
+                            // a cactus is: a mound cell over a bush would be
+                            // a spire balanced on a leaf.
+                            if read_block(blocks, lx + dx, y, lz + dz)
+                                .is_some_and(|cell| cell != BLOCK_AIR)
+                            {
+                                break;
+                            }
+                            put_block(blocks, lx + dx, y, lz + dz, BLOCK_TERMITE_MOUND, false);
+                        }
                     }
                 }
             }
@@ -1830,7 +6866,12 @@ impl WorldGen {
         for lz in -MAX_DEADFALL..(CHUNK_SIZE_Z as i32 + MAX_DEADFALL) {
             for lx in -MAX_DEADFALL..(CHUNK_SIZE_X as i32 + MAX_DEADFALL) {
                 let (gx, gz) = (origin_x + lx, origin_z + lz);
-                let Column { height, biome, .. } = columns.at(lx, lz);
+                let Column {
+                    height,
+                    biome,
+                    water,
+                    ..
+                } = columns.at(lx, lz);
                 let Some(spacing) = biome.deadfall_spacing() else {
                     continue;
                 };
@@ -1838,12 +6879,26 @@ impl WorldGen {
                 if !roll.is_multiple_of(spacing.max(8)) {
                     continue;
                 }
-                if height < SEA_LEVEL + 1 {
+                if height < water + 1 {
                     continue;
                 }
 
                 let length = 3 + (roll >> 8) as i32 % (MAX_DEADFALL - 2);
                 let along_x = (roll >> 16) & 1 == 0;
+                // **The bark is the wood it fell out of.** A birch stand
+                // whose deadfall was oak would be the one place in the
+                // world where the timber on the ground and the timber
+                // standing over it disagree -- and a player picking it up
+                // gets a log of the wrong colour for the planks they were
+                // making. Both woods break the same way (`blocks`, the
+                // birch log's `felled` is the oak's), so nothing else here
+                // has to know which it is.
+                // ...and a fir wood's is fir, for the same reason.
+                let bark = match biome {
+                    Biome::BirchForest => crate::types::BLOCK_BIRCH_LOG,
+                    Biome::Taiga | Biome::Tundra => crate::types::BLOCK_FIR_LOG,
+                    _ => BLOCK_LOG,
+                };
                 // A fallen trunk lies along the way it fell, so its cut
                 // ends face along the run and its bark wraps the sides.
                 // Before blocks had an axis these were upright logs laid
@@ -1851,26 +6906,563 @@ impl WorldGen {
                 // the one place in the world where the mistake was
                 // obvious from ten blocks away.
                 let trunk = crate::types::oriented(
-                    BLOCK_LOG,
+                    bark,
                     if along_x {
                         crate::types::Axis::X
                     } else {
                         crate::types::Axis::Z
                     },
                 );
+                // The height the last cell of trunk was laid at, so the
+                // next one is judged against the log rather than against
+                // the root. See the step test below.
+                let mut behind = height;
                 for step in 0..length {
                     let (dx, dz) = if along_x { (step, 0) } else { (0, step) };
                     let column = columns.at(lx + dx, lz + dz);
-                    // A log lies on the ground. Where the ground is not
-                    // level it stops rather than floating on, which
-                    // also keeps it out of the air over a cliff edge.
-                    if (column.height - height).abs() > 1 {
+                    // **A log lies along the slope, a step at a time.**
+                    // This measured every cell against the *root's* height,
+                    // so a trunk on any real hillside stopped after two
+                    // cells: a slope of one in two is one step down per
+                    // cell, and the third cell was already two below the
+                    // stump. What lay in a wood on a slope was therefore a
+                    // stub, and the long trunks were all on the flat --
+                    // which is the opposite of where wind throws a tree.
+                    // Against the cell before it, a trunk walks a slope for
+                    // its whole length and still stops dead at a step of
+                    // two, which is what keeps it off a cliff edge and out
+                    // of the air over a bench face.
+                    if (column.height - behind).abs() > 1 {
+                        break;
+                    }
+                    behind = column.height;
+                    // **And where there is no ground it stops as well.**
+                    // A cave that reaches the surface takes the top
+                    // block of the column away (see `fill_column`), and
+                    // the height this reads is the terrain's, not the
+                    // world's -- so the trunk was laid across the mouth
+                    // of the hole with nothing under it. Measured over
+                    // 2,300 chunks it was 85 cells of floating timber
+                    // against 1,831 lying on anything, which is one
+                    // fallen tree in twenty. `place_trees` has asked
+                    // this question since it was written; this did not.
+                    // Both the top block and the one under it: a cave
+                    // that comes up to the surface can take either
+                    // (`fill_column` asks about both), and a trunk laid
+                    // over a hole one block down is still a trunk in the
+                    // air -- two cells of it, after the relief was made
+                    // taller and more caves broke out on the slopes.
+                    let (gx_here, gz_here) = (origin_x + lx + dx, origin_z + lz + dz);
+                    if self.is_cave(gx_here, column.height, gz_here)
+                        || self.is_cave(gx_here, column.height - 1, gz_here)
+                    {
                         break;
                     }
                     put_block(blocks, lx + dx, column.height + 1, lz + dz, trunk, false);
+
+                    // **A shelf of tinder fungus on the dead wood.**
+                    // Rolled per cell rather than per trunk, off a
+                    // different salt, so a long log carries two or
+                    // three and a short one often carries none -- which
+                    // is what a rotting trunk actually looks like, and
+                    // it means a player who finds one deadfall has not
+                    // automatically found the fungus.
+                    //
+                    // A quarter of the cells in the cold and wet woods,
+                    // an eighth elsewhere: amadou wants damp shade, and
+                    // the bog and the dead forest are the two places
+                    // the player will be looking for it, because they
+                    // are the two with no grass to make a torch out of.
+                    // See `types::BLOCK_BRACKET_FUNGUS`.
+                    //
+                    // **The trunk is read back rather than assumed.**
+                    // `put_block` above writes only into air, so a cell
+                    // a tree or a boulder already owns keeps what it
+                    // had -- and a fungus laid on top of that would be
+                    // growing on leaves, or on nothing. The lookup is
+                    // the same array, so it costs an index.
+                    // **This trunk exactly, axis and all.** The test was
+                    // `block_kind(b) == BLOCK_LOG`, which a *standing*
+                    // tree's foot also answers yes to: where a tree had
+                    // already taken the cell the deadfall wanted, this
+                    // pass went on to decorate the living tree as though
+                    // it were the log it failed to lay. It cost a bracket
+                    // on a growing trunk, harmlessly, until the litter
+                    // below started taking the turf off the ground under
+                    // it -- and then `trees_stand_on_grass_and_nothing_
+                    // else` reported oaks growing out of bare earth.
+                    // `put_block` writes this id or nothing, so this is
+                    // the one question that cannot be wrong.
+                    let laid = read_block(blocks, lx + dx, column.height + 1, lz + dz) == Some(trunk);
+                    // **The turf under a trunk is dead turf.** A log that
+                    // has lain long enough to be pulled apart by hand has
+                    // been lying long enough to kill the grass under it,
+                    // and bare earth is also the one ground a fungus will
+                    // stand on (`types::can_grow_on`) -- so this is both
+                    // the picture and the reason the mushrooms below have
+                    // anywhere to grow. Only turf is taken: sand, gravel
+                    // and stone are not something a log kills.
+                    if laid && block_kind(column.surface.top) == BLOCK_GRASS {
+                        put_block(blocks, lx + dx, column.height, lz + dz, BLOCK_DIRT, true);
+                    }
+                    let damp = matches!(biome, Biome::Bog | Biome::DeadForest | Biome::Taiga);
+                    let on = if damp { 4 } else { 8 };
+                    if laid
+                        && hash2(gx + dx, gz + dz, self.seed.wrapping_add(0xF0AD))
+                            .is_multiple_of(on)
+                    {
+                        // **Out of the flank of the log, not on top of
+                        // it.** A bracket is a fruiting body pushing
+                        // through bark sideways, with its pores facing
+                        // down; one standing on the log's upper face is
+                        // a mushroom somebody balanced there. The cell
+                        // it goes in is beside the trunk, and the
+                        // facing is the one whose `support_at` points
+                        // back at the wood -- asked rather than worked
+                        // out here, so the model, the support rule and
+                        // this pass cannot drift apart.
+                        attach_bracket(blocks, lx + dx, column.height + 1, lz + dz);
+                    }
+
+                    // **What came down with it, lying beside it.** "палки
+                    // логично лежат под деревьями и у поваленных стволов":
+                    // a tree that fell shed its crown where it landed, so
+                    // the ground along a fallen trunk is where the sticks
+                    // are -- and a player who has found the trunk has
+                    // found the firewood too, which is what makes walking
+                    // to one worth the walk.
+                    //
+                    // Rolled per flank cell off its own salt, as the
+                    // bracket is, so a long trunk carries a scatter and a
+                    // short one may carry none; and rolled from the
+                    // **column cache** rather than from the block array,
+                    // because a flank cell one side of a chunk border is
+                    // outside the array of the chunk the trunk is rooted
+                    // in. The cache reaches a feature margin past the
+                    // border (`FEATURE_MARGIN`), so both chunks decide the
+                    // same cell the same way and each writes the part that
+                    // is its own -- the contract `place_trees` describes.
+                    //
+                    // A mushroom instead of a stick on one roll in four,
+                    // and only on the earth the turf was taken off: the
+                    // shaded, rotting side of a fallen trunk is exactly
+                    // where a fungus stands, and it is the cheapest way to
+                    // say "this has been here a while" that does not cost
+                    // a new block.
+                    // Across the run, not along it: the two cells the
+                    // trunk's flanks face.
+                    let (px, pz) = if along_x { (0, 1) } else { (1, 0) };
+                    for side in [1, -1] {
+                        let (fx, fz) = (dx + px * side, dz + pz * side);
+                        let flank = columns.at(lx + fx, lz + fz);
+                        let litter = hash2(gx + fx, gz + fz, self.seed.wrapping_add(0x571CFA11));
+                        if !laid || !litter.is_multiple_of(3) {
+                            continue;
+                        }
+                        // Beside the log rather than below a step of it,
+                        // out of the water, and on ground a cave has not
+                        // taken -- the trunk's own three questions.
+                        if (flank.height - column.height).abs() > 1
+                            || flank.height < flank.water
+                            || self.is_cave(origin_x + lx + fx, flank.height, origin_z + lz + fz)
+                        {
+                            continue;
+                        }
+                        // **Only into a cell that is free, and the check
+                        // is what keeps the turf under a tree.** Taking
+                        // the grass off this column is an *overwrite*, so
+                        // unlike everything else in this pass it does not
+                        // stop at what is already standing here -- and a
+                        // trunk rooted in the next column over has its
+                        // foot exactly here. `trees_stand_on_grass_and_
+                        // nothing_else` caught it the first time this ran:
+                        // a wood full of oaks growing out of bare earth.
+                        //
+                        // `read_block` answering `None` is a cell outside
+                        // this chunk, and refusing there costs nothing:
+                        // `put_block` would drop the write anyway, and the
+                        // chunk that owns the cell runs this same roll
+                        // from its own copy of the trunk.
+                        if read_block(blocks, lx + fx, flank.height + 1, lz + fz) != Some(BLOCK_AIR)
+                        {
+                            continue;
+                        }
+                        let earth = block_kind(flank.surface.top) == BLOCK_GRASS
+                            || block_kind(flank.surface.top) == BLOCK_DIRT;
+                        // Not gated on `damp`, where the bracket is: the
+                        // bracket is amadou and wants the cold wet woods,
+                        // a mushroom at the foot of a rotting log is what
+                        // every wood in the world looks like.
+                        let shroom = earth && (litter >> 8).is_multiple_of(4);
+                        if shroom {
+                            put_block(blocks, lx + fx, flank.height, lz + fz, BLOCK_DIRT, true);
+                            put_block(
+                                blocks,
+                                lx + fx,
+                                flank.height + 1,
+                                lz + fz,
+                                crate::types::BLOCK_MUSHROOM,
+                                false,
+                            );
+                        } else if crate::types::can_grow_on(BLOCK_STICK, flank.surface.top) {
+                            put_block(blocks, lx + fx, flank.height + 1, lz + fz, BLOCK_STICK, false);
+                        }
+                    }
                 }
             }
         }
+    }
+
+    /// Whether a column is the kind of ground a boulder ends up on: a
+    /// bank steeper than the angle of repose, or the flat ground under
+    /// a bench face. Nothing that is under water or on the beach.
+    ///
+    /// Both are places rock *arrives* rather than places it is: a
+    /// boulder on a slope is one that has not finished rolling, and one
+    /// at the foot of a cliff is one that has. A boulder in the middle
+    /// of a meadow is neither, and it is the first thing a player would
+    /// ask about -- so the test that guards this is named for it.
+    fn boulder_ground(columns: &ColumnCache, lx: i32, lz: i32) -> bool {
+        let column = columns.at(lx, lz);
+        if column.height <= SEA_LEVEL + 2 || column.height < column.water {
+            return false;
+        }
+        column.slope >= BANK_SLOPE
+            || [(2, 0), (-2, 0), (0, 2), (0, -2)]
+                .iter()
+                .any(|&(dx, dz)| columns.at(lx + dx, lz + dz).height - column.height >= CLIFF_STEP)
+    }
+
+    /// What a sea-floor column is made of, once the depth has had its say.
+    ///
+    /// **`surface_for` gives three bands** -- sand in the surf, silt over the
+    /// shelf, rock past the shelf break -- and a sea bed that is exactly
+    /// those three is a sea bed a swimmer reads in one look and never looks
+    /// at again. This breaks each band into patches off one flat field (the
+    /// strata field, at an offset of its own, so the patches under the sea
+    /// do not trace the bogs above it):
+    ///
+    /// * the surf keeps its sand, with shingle where the field is low;
+    /// * the shelf is silt, with **sand bars** where the field is low and
+    ///   **bare rock** where it is high -- an outcrop is where the current
+    ///   scours the shelf down to the bed;
+    /// * the deep floor is rock, with sand collected in its hollows and a
+    ///   gravel pavement where the field is high.
+    ///
+    /// One sample per sea column, and only for sea columns. Clay and gravel
+    /// from the deposit field still come after this in the column tile, so a
+    /// clay bay stays a clay bay.
+    ///
+    /// **Ridges and trenches were considered and are not here.** They would
+    /// be a change to `height_at`, which the rivers, the lakes, the spawn
+    /// search, the cave seal and the ocean-shape tests all read; a trench cut
+    /// into the abyssal plain deep enough to read from the surface is a hole
+    /// down toward the bedrock the seal is sized against. The floor's
+    /// *material* can vary for the cost of a noise sample and nothing else.
+    fn seabed_surface(&self, gx: i32, gz: i32, depth: i32, surface: Surface) -> Surface {
+        let bed = fbm(&self.strata_noise, gx as f64 + 5021.0, gz as f64 - 3389.0, 0.035, 2);
+        let rock = Surface { top: BLOCK_STONE, filler: BLOCK_STONE, soil: 0 };
+        let sand = Surface { top: BLOCK_SAND, filler: BLOCK_SAND, soil: 3 };
+        let gravel = Surface { top: BLOCK_GRAVEL, filler: BLOCK_SAND, soil: 2 };
+        if depth <= 3 {
+            if bed < -0.38 { gravel } else { surface }
+        } else if depth <= 10 {
+            if bed > 0.36 {
+                rock
+            } else if bed < -0.22 {
+                sand
+            } else {
+                surface
+            }
+        } else if bed < -0.25 {
+            Surface { soil: 2, ..sand }
+        } else if bed > 0.4 {
+            Surface { filler: BLOCK_STONE, soil: 1, ..gravel }
+        } else {
+            surface
+        }
+    }
+
+    /// How warm the sea is at the four corners of a chunk, west-north,
+    /// east-north, west-south, east-south. See `sea_warmth`.
+    fn sea_warmth_corners(&self, origin_x: i32, origin_z: i32) -> [f64; 4] {
+        let side = CHUNK_SIZE_X as i32;
+        [
+            self.temperature(origin_x, origin_z),
+            self.temperature(origin_x + side, origin_z),
+            self.temperature(origin_x, origin_z + side),
+            self.temperature(origin_x + side, origin_z + side),
+        ]
+    }
+
+    /// Is there a boulder on the sea bed at this column, and how tall?
+    ///
+    /// **One in each cell of `SEA_BOULDER_GRID`, at most, and always inside
+    /// its own cell.** A cross of five columns, the middle two high and the
+    /// corners filled on half of them, jittered to anywhere it fits in the
+    /// cell -- so the decision for a column needs only its own cell's hash,
+    /// and a boulder that a chunk border runs through is decided identically
+    /// from both chunks. That is the whole seam argument, and it is why this
+    /// does not reuse `place_boulders`, whose clusters reach over a border
+    /// and have to be rooted in the column cache's margin.
+    ///
+    /// Not in the surf: a boulder three blocks down is a rock a swimmer
+    /// stands on to breathe, which is a thing to build, not to find.
+    fn sea_boulder(&self, gx: i32, gz: i32, depth: i32) -> Option<i32> {
+        if depth < 4 {
+            return None;
+        }
+        let (cx, cz) = (gx.div_euclid(SEA_BOULDER_GRID), gz.div_euclid(SEA_BOULDER_GRID));
+        let h = hash2(cx, cz, self.seed.wrapping_add(0x0B0B_05EA));
+        if !h.is_multiple_of(4) {
+            return None;
+        }
+        let span = (SEA_BOULDER_GRID - 2) as u32;
+        let bx = cx * SEA_BOULDER_GRID + 1 + ((h >> 4) % span) as i32;
+        let bz = cz * SEA_BOULDER_GRID + 1 + ((h >> 11) % span) as i32;
+        let (dx, dz) = (gx - bx, gz - bz);
+        if dx.abs() > 1 || dz.abs() > 1 {
+            return None;
+        }
+        let corner = dx != 0 && dz != 0;
+        if corner && (h >> 18) & 1 == 0 {
+            return None;
+        }
+        let tall = if corner { 1 } else if dx == 0 && dz == 0 { 3 } else { 2 };
+        Some(tall.min(depth - 2))
+    }
+
+    /// **What grows on the sea floor, and the stones lying on it.**
+    ///
+    /// One pass over the chunk's own sea columns, each decided by itself --
+    /// warmth, depth, what it is floored with, a hash, and at most one slow
+    /// field -- in the order the rarest thing wins:
+    ///
+    /// 1. **A boulder** (`sea_boulder`).
+    /// 2. **A reef**, in water warmer than `REEF_WARMTH` and inside
+    ///    `REEF_DEPTHS`, where a patch field says so: a mound of one to
+    ///    three coral blocks, brain or fire in clumps a few blocks across,
+    ///    and often a sea fan or staghorn on top of it.
+    /// 3. **Kelp**, in cool and temperate water deep enough to stand a stem
+    ///    in, as forests off a second field: a column from the floor to a
+    ///    block short of the surface or `KELP_TALLEST`, whichever is lower.
+    /// 4. **Seagrass**, in shallow sand and silt in anything but cold water,
+    ///    as meadows.
+    /// 5. **A shell**, now and then, on sand or shingle.
+    ///
+    /// **No sand waves any more.** There were ridges of sand a block high
+    /// every five blocks, broken up by a hash so they would read as the sea's
+    /// doing -- and a block is a metre. Ripples on a real sea floor are a
+    /// hand's height; at a metre, cut into pieces, they were lumps of sand
+    /// scattered over every sandy shallow ("под водой генерируются какие то
+    /// прыщи из песка"). A ripple a voxel can draw is not a ripple.
+    ///
+    /// **The warmth is the chunk's four corners, interpolated**, rather than a
+    /// temperature sample per column. The field is kilometres across, so the
+    /// error is nothing a diver could feel, and four samples a chunk against
+    /// two hundred and fifty-six is most of what this pass would otherwise
+    /// cost. It is still seamless: the corners a border shares are the same
+    /// two numbers from either side, and the interpolation along the border
+    /// uses only those two.
+    ///
+    /// **Everything is written into water cells and nothing else**, and only
+    /// under the surface cell: a plant in the top cell of the sea stands up
+    /// through the waterline, which the mesher draws as a plant in the air.
+    fn place_seabed(
+        &self,
+        blocks: &mut [crate::types::BlockId],
+        origin_x: i32,
+        origin_z: i32,
+        columns: &ColumnCache,
+    ) {
+        use crate::types::{
+            can_grow_on, BLOCK_BRAIN_CORAL, BLOCK_FIRE_CORAL, BLOCK_KELP, BLOCK_KELP_TOP,
+            BLOCK_SEAGRASS, BLOCK_SEA_FAN, BLOCK_SHELL, BLOCK_STAGHORN_CORAL,
+        };
+        let mut corners: Option<[f64; 4]> = None;
+        for lz in 0..CHUNK_SIZE_Z as i32 {
+            for lx in 0..CHUNK_SIZE_X as i32 {
+                let column = columns.at(lx, lz);
+                // The sea, and deep enough that a cell of it lies between
+                // the floor and the surface.
+                if column.biome != Biome::Ocean || column.water != SEA_LEVEL || column.height >= SEA_LEVEL - 1 {
+                    continue;
+                }
+                let floor = column.height;
+                let depth = SEA_LEVEL - floor;
+                let at = |y: i32| Chunk::index(lx as usize, y as usize, lz as usize);
+                if blocks[at(floor + 1)] != BLOCK_WATER {
+                    continue;
+                }
+                let (gx, gz) = (origin_x + lx, origin_z + lz);
+                let ground = blocks[at(floor)];
+
+                if let Some(tall) = self.sea_boulder(gx, gz, depth) {
+                    // Granite stands whole; any other rock lies as its own
+                    // cobble (`ground::rubble_of`), plain stone as cobblestone.
+                    let stone = if column.rock == BLOCK_GRANITE {
+                        BLOCK_GRANITE
+                    } else {
+                        crate::ground::rubble_of(column.rock, crate::ground::Form::Cobble)
+                    };
+                    for y in floor + 1..=floor + tall {
+                        blocks[at(y)] = stone;
+                    }
+                    continue;
+                }
+
+                let warmth = sea_warmth(*corners.get_or_insert_with(|| self.sea_warmth_corners(origin_x, origin_z)), lx, lz);
+                let roll = hash2(gx, gz, self.seed.wrapping_add(0x5EA_BED));
+
+                // **Patches, not a floor.** At a threshold of 0.08 a fifth
+                // of every tropical sea column was reef (measured over seed
+                // 1337 by `what_the_sea_floor_is_made_of`), which is a
+                // coral pavement to the horizon; a reef is somewhere a
+                // swimmer finds, with sand between it and the next one.
+                if warmth >= REEF_WARMTH
+                    && REEF_DEPTHS.contains(&depth)
+                    && fbm(&self.deposit_noise, gx as f64 + 911.0, gz as f64 - 4271.0, 0.045, 2) > 0.2
+                {
+                    // Lumpy on purpose: a reef is a thousand colonies, not a
+                    // slab, and a column a block higher than its neighbour is
+                    // where a fish hides.
+                    let top = (floor + 1 + (roll % 3) as i32).min(SEA_LEVEL - 2);
+                    let colony = hash2(gx.div_euclid(4), gz.div_euclid(4), self.seed.wrapping_add(0xC0A1));
+                    let stone = if colony.is_multiple_of(3) { BLOCK_FIRE_CORAL } else { BLOCK_BRAIN_CORAL };
+                    for y in floor + 1..=top {
+                        blocks[at(y)] = stone;
+                    }
+                    // Only on the mound: a crown over a column that got no
+                    // coral would be a fan standing on sand.
+                    if top > floor && top < SEA_LEVEL - 1 && blocks[at(top + 1)] == BLOCK_WATER {
+                        match (roll >> 8) % 6 {
+                            0 | 1 => blocks[at(top + 1)] = BLOCK_STAGHORN_CORAL,
+                            2 | 3 => blocks[at(top + 1)] = BLOCK_SEA_FAN,
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+
+                if (KELP_COLDEST..KELP_WARMEST).contains(&warmth)
+                    && KELP_DEPTHS.contains(&depth)
+                    && can_grow_on(BLOCK_KELP, ground)
+                    // Fourteen in a hundred inside a forest. At forty-two a
+                    // swimmer's view in one was a wall of stems with no water
+                    // between them; a forest is something you swim *through*,
+                    // with lanes in it. Twenty-eight was still the wall: in
+                    // front of the sea-floor tool's swimmer, thirteen columns
+                    // by seventeen held sixty-five stems twelve tall -- 778
+                    // cells of kelp, a cross in each -- and a ray met a stem
+                    // every few blocks, well inside the eighteen the water's
+                    // fog reaches. At fourteen the gap between stems is about
+                    // as long as the fog, so what is past the nearest ribbons
+                    // is water.
+                    && roll % 100 < 14
+                    && fbm(&self.deposit_noise, gx as f64 - 2203.0, gz as f64 + 1777.0, 0.028, 2) > 0.02
+                {
+                    // A block of open water over the top, always.
+                    let tallest = (depth - 1).min(KELP_TALLEST);
+                    let stem = (tallest - ((roll >> 8) % 5) as i32).max(2).min(tallest);
+                    for y in floor + 1..floor + stem {
+                        blocks[at(y)] = BLOCK_KELP;
+                    }
+                    blocks[at(floor + stem)] = BLOCK_KELP_TOP;
+                    continue;
+                }
+
+                if warmth >= SEAGRASS_COLDEST
+                    && SEAGRASS_DEPTHS.contains(&depth)
+                    && can_grow_on(BLOCK_SEAGRASS, ground)
+                    && roll % 100 < 55
+                    && fbm(&self.strata_noise, gx as f64 + 331.0, gz as f64 + 7717.0, 0.05, 1) > -0.05
+                {
+                    blocks[at(floor + 1)] = BLOCK_SEAGRASS;
+                    continue;
+                }
+
+                if matches!(ground, BLOCK_SAND | BLOCK_GRAVEL) && depth <= 10 && roll % 37 == 5 {
+                    blocks[at(floor + 1)] = BLOCK_SHELL;
+                }
+            }
+        }
+    }
+
+    /// Boulders: clusters of two to five solid blocks of rock sitting on
+    /// the surface, on the ground `boulder_ground` describes.
+    ///
+    /// Solid blocks rather than another flat item, and that is the point
+    /// of them: a pebble is something you pick up and a boulder is
+    /// something you walk around, climb, or shelter behind, and a
+    /// hillside with a few of them has *cover* in a way a smooth one
+    /// does not. Granite where the column's rock is granite -- high
+    /// country sheds its own stone -- and cobble everywhere else, which
+    /// is the same block a bared slope wears and so reads as the slope
+    /// having come apart.
+    ///
+    /// Rooted up to `BOULDER_REACH` outside the chunk, like a tree, so a
+    /// cluster on a border is the same cluster from both sides. Written
+    /// only into air: after the trees, so a boulder never replaces the
+    /// foot of a trunk and leaves the tree hanging; before the ground
+    /// cover, which sees the boulder and leaves the cell alone.
+    fn place_boulders(
+        &self,
+        blocks: &mut [crate::types::BlockId],
+        origin_x: i32,
+        origin_z: i32,
+        columns: &ColumnCache,
+    ) {
+        /// The eight neighbours, in a ring, so walking it with a stride
+        /// of three visits scattered cells rather than one side.
+        const AROUND: [(i32, i32); 8] =
+            [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)];
+        for lz in -BOULDER_REACH..CHUNK_SIZE_Z as i32 + BOULDER_REACH {
+            for lx in -BOULDER_REACH..CHUNK_SIZE_X as i32 + BOULDER_REACH {
+                let (gx, gz) = (origin_x + lx, origin_z + lz);
+                let roll = hash2(gx, gz, self.seed.wrapping_add(0xB01D));
+                // The hash before the ground test: the test reads five
+                // columns, and one column in thirty-four is the only one
+                // that needs them.
+                if !roll.is_multiple_of(BOULDER_SPACING) || !Self::boulder_ground(columns, lx, lz) {
+                    continue;
+                }
+                let root = columns.at(lx, lz);
+                let stone = if root.rock == BLOCK_GRANITE {
+                    BLOCK_GRANITE
+                } else {
+                    crate::ground::rubble_of(root.rock, crate::ground::Form::Cobble)
+                };
+                // A boulder in a wet country wears moss, one in two.
+                let stone = if root.biome.grows_moss() && (roll >> 24) & 1 == 0 && ground_on() {
+                    crate::ground::with_moss(stone)
+                } else {
+                    stone
+                };
+                let count = 2 + ((roll >> 8) % 4) as usize;
+                let turn = ((roll >> 16) % 8) as usize;
+                let mut cells = vec![(0, 0)];
+                cells.extend((0..count - 1).map(|i| AROUND[(turn + i * 3) % 8]));
+                for (dx, dz) in cells {
+                    let column = columns.at(lx + dx, lz + dz);
+                    // A boulder sits on the ground. Where the ground is
+                    // not level with the root's it stops, like a fallen
+                    // trunk, so a cluster never hangs off a step -- and
+                    // where a cave has opened the column there is no
+                    // ground, so it stops there too.
+                    if (column.height - root.height).abs() > 1 || column.height < column.water {
+                        continue;
+                    }
+                    if self.is_cave(gx + dx, column.height, gz + dz) {
+                        continue;
+                    }
+                    put_block(blocks, lx + dx, column.height + 1, lz + dz, stone, false);
+                }
+            }
+        }
+        // ...and the stones a rapid breaks on, which are boulders in water.
+        // Here rather than as a pass of their own so the pass timings
+        // (`which_pass_the_time_goes_to`) see what they cost.
+        self.place_rapid_stones(blocks, origin_x, origin_z, columns);
     }
 
     /// Whether a tree is rooted at this exact column.
@@ -1883,7 +7475,70 @@ impl WorldGen {
         let Some(spacing) = biome.tree_spacing() else {
             return false;
         };
+        // **A savanna's trees stand in groves, with open grass between
+        // them.** One acacia every two hundred and forty columns, spread
+        // by a hash, is an even scatter -- and an even scatter of trees
+        // from any height is a thin wood, which is what the player saw:
+        // "a recoloured forest". Real savanna is grass to the horizon with
+        // stands of trees in it. So the rate follows a slow field: dense
+        // inside a grove, a lone tree now and then outside one.
+        let spacing = if biome == Biome::Savanna {
+            if self.savanna_grove(gx, gz) {
+                SAVANNA_GROVE_SPACING
+            } else {
+                SAVANNA_OPEN_SPACING
+            }
+        } else {
+            spacing
+        };
         hash2(gx, gz, self.seed.wrapping_add(0x7EE5)).is_multiple_of(spacing.max(4))
+    }
+
+    /// Whether a savanna column is inside a grove of acacias. See
+    /// `tree_at`. Off the deposit field at its own offset, for the reason
+    /// `fertility_at` gives: a slow patchy field of this scale already
+    /// exists, and a new noise generator for one question is a cost with no
+    /// answer.
+    fn savanna_grove(&self, gx: i32, gz: i32) -> bool {
+        fbm(&self.deposit_noise, gx as f64 - 7331.0, gz as f64 + 2213.0, 0.012, 2) > SAVANNA_GROVE_THRESHOLD
+    }
+
+    /// Whether the tree rooted at this column bears apples: one in the
+    /// biome's `fruit_share`, on a salt of its own. Only ever asked of a column
+    /// that grows a tree. See `place_trees`.
+    fn apple_tree_at(&self, gx: i32, gz: i32, biome: Biome) -> bool {
+        biome
+            .fruit_share()
+            .is_some_and(|share| hash2(gx, gz, self.seed.wrapping_add(0xA9971)).is_multiple_of(share))
+    }
+
+    /// Whether the tree rooted at this column is an old one.
+    ///
+    /// Only ever asked of a column that already grows a tree, which is
+    /// what makes an old tree a tree that *got* old rather than a
+    /// second kind of thing planted on its own schedule: it stands
+    /// where the wood put a tree, at the wood's own spacing, and the
+    /// clearing round it is the clearing that was there anyway.
+    ///
+    /// Its own salt, unrelated to the one `tree_at` uses, because two
+    /// rolls off the same hash would correlate -- every old tree in the
+    /// world would be the first tree of some fixed pattern, and a
+    /// player who noticed would be able to predict where the next one
+    /// is from where the last one was.
+    fn old_tree_at(&self, gx: i32, gz: i32, biome: Biome) -> bool {
+        let Some(share) = biome.old_tree_share() else {
+            return false;
+        };
+        // **A baobab stands alone.** Out on open grass a lone tree is a
+        // baobab far more often than in a grove, where it would be one
+        // trunk among acacias -- the landmark belongs where it can be seen
+        // from a long way off.
+        let share = if biome == Biome::Savanna && !self.savanna_grove(gx, gz) {
+            SAVANNA_LONE_BAOBAB_SHARE
+        } else {
+            share
+        };
+        hash2(gx, gz, self.seed.wrapping_add(0x01D7)).is_multiple_of(share.max(2))
     }
 
     /// Trees, including the ones rooted outside this chunk.
@@ -1902,6 +7557,18 @@ impl WorldGen {
     /// from (seed, global position) both chunks independently agree on
     /// where the tree is and what it looks like. Generation stays a pure
     /// function of (seed, pos) -- no ordering, no cross-chunk writes.
+    /// **Is this column in a pinewood?** A pine is the taiga's other conifer,
+    /// on the drier ground between the fir woods, and a pinewood is tens of
+    /// trees across -- a stand, walked into and out of -- so it is a broad,
+    /// slow field rather than a roll per tree. Asked only where a tree roots.
+    ///
+    /// Rejected: *a pine biome*. A biome is a climate, and a pinewood and a
+    /// fir wood share theirs; a new biome would be a new line in every table
+    /// that is keyed by one.
+    fn pine_wood_at(&self, gx: i32, gz: i32) -> bool {
+        fbm(&self.strata_noise, gx as f64 + 7919.0, gz as f64 - 5171.0, 0.006, 1) > 0.2
+    }
+
     fn place_trees(
         &self,
         blocks: &mut [crate::types::BlockId],
@@ -1911,16 +7578,113 @@ impl WorldGen {
     ) {
         let span_x = CHUNK_SIZE_X as i32;
         let span_z = CHUNK_SIZE_Z as i32;
-        for lz in -MAX_CANOPY_RADIUS..span_z + MAX_CANOPY_RADIUS {
-            for lx in -MAX_CANOPY_RADIUS..span_x + MAX_CANOPY_RADIUS {
+        // The border is `OLD_TREE_REACH` wide rather than
+        // `MAX_CANOPY_RADIUS`, because an old tree is wider than any
+        // canopy -- and the ring between the two is walked *only* for
+        // old trees. An ordinary tree rooted four blocks outside cannot
+        // put a leaf inside however the roll lands, so taking its roll
+        // would be a hash computed to be thrown away, on forty per cent
+        // more columns than the pass used to touch. Measured over 144
+        // chunks with `which_pass_the_time_goes_to`, the wider border
+        // costs the tree pass 0.003 ms/chunk against 0.004..0.007 --
+        // two thousandths of a millisecond on a chunk that takes one
+        // and a third, which is well under the run-to-run spread of the
+        // total.
+        for lz in -OLD_TREE_REACH..span_z + OLD_TREE_REACH {
+            for lx in -OLD_TREE_REACH..span_x + OLD_TREE_REACH {
                 let gx = origin_x + lx;
                 let gz = origin_z + lz;
                 let Column {
                     height: ground,
                     biome,
                     surface,
+                    water,
+                    ..
                 } = columns.at(lx, lz);
                 if !self.tree_at(gx, gz, biome) {
+                    continue;
+                }
+                // Nor where its crown could reach a ruin's walls: a tree
+                // cut back afterwards is half a tree. See `ruin_claims`.
+                if self.ruin_claims(gx, gz) {
+                    continue;
+                }
+                // **An old tree needs four columns of ground, not
+                // one.** Its bole is two by two, and an ordinary tree's
+                // single "is this rootable" says nothing about the
+                // three columns beside it -- a corner over the lip of a
+                // bank or over the water at a swamp's edge draws a tree
+                // on stilts, which is the single most visible thing a
+                // generator can get wrong.
+                //
+                // **Dead level and the same ground, not merely close
+                // to it.** A block of tolerance was tried first and is
+                // wrong twice over: a corner one block higher has its
+                // own turf replaced by the bole, which leaves a trunk
+                // rooted in bare dirt (and fails
+                // `trees_stand_on_grass_and_nothing_else`, which is how
+                // it was caught); and a corner one lower leaves a
+                // cell of daylight under the bole unless the trunk is
+                // extended down into it, which is a second special case
+                // for a case worth nothing. Level ground is what a
+                // wide-boled tree grows on anyway.
+                //
+                // Where the ground will not take one, the wood grows an
+                // ordinary tree there rather than a gap: a hole in a
+                // closed canopy is as odd-looking as a floating trunk.
+                //
+                // Read from the column cache, which every chunk that
+                // can see this tree holds the same copy of, so both
+                // sides of a border reach the same verdict.
+                //
+                // **Turf and the savanna's sandy soil are one ground for
+                // this.** The rule is there so a bole never stands half on
+                // something a tree does not root in; turf and sandy soil
+                // are both ground an acacia or a baobab roots in, and
+                // neither is replaced by the bole. Asking for the identical
+                // block made every edge of a bare patch a refusal, and the
+                // savanna -- whose old trees were already rare -- came out
+                // with no baobab at all in a hundred and sixty chunks.
+                let same_ground = |a: BlockId, b: BlockId| {
+                    let soil = |block: BlockId| {
+                        matches!(crate::ground::as_common(block), BLOCK_GRASS | crate::types::BLOCK_SANDY_SOIL | crate::types::BLOCK_DRY_TURF)
+                    };
+                    a == b || (soil(a) && soil(b))
+                };
+                let old = self.old_tree_at(gx, gz, biome)
+                    && [(1, 0), (0, 1), (1, 1)].iter().all(|&(dx, dz)| {
+                        let corner = columns.at(lx + dx, lz + dz);
+                        corner.height == ground
+                            && corner.height >= corner.water
+                            && same_ground(corner.surface.top, surface.top)
+                            && !self.is_cave(gx + dx, corner.height, gz + dz)
+                    });
+                // An acacia's plate hangs beside its root rather than over
+                // it, so it reaches further than any other canopy -- see
+                // `TreeKind::reach`.
+                // ...and a branching broadleaf further still, with its
+                // limbs -- see `branches::BRANCH_REACH`.
+                // An apple tree is a branching broadleaf in any wood (see
+                // `APPLE_TRUNK`), a birch wood's too, so it is walked as one.
+                let reach = if self.preset.grows_branches()
+                    && (biome.tree_kind() == TreeKind::Broadleaf || self.apple_tree_at(gx, gz, biome))
+                {
+                    branches::BRANCH_REACH
+                } else {
+                    biome.tree_kind().reach()
+                };
+                let beyond_a_canopy = lx < -reach
+                    || lz < -reach
+                    || lx >= span_x + reach
+                    || lz >= span_z + reach;
+                if beyond_a_canopy && !old {
+                    continue;
+                }
+                // Not under a lake. The sea keeps trees off its floor
+                // through the biome -- the ocean grows none -- but a
+                // lake bed belongs to the wood around it, and its silt
+                // is exactly the dirt a tree roots in.
+                if ground < water {
                     continue;
                 }
                 // Nothing grows on rock, sand or snow, and nothing grows
@@ -1947,8 +7711,16 @@ impl WorldGen {
                 // and refusing to root one there left the tundra with
                 // no trees at all -- which is what it had.
                 let kind = biome.tree_kind();
-                let rootable = matches!(surface.top, BLOCK_GRASS | BLOCK_DIRT | BLOCK_ASH)
-                    || (kind == TreeKind::Conifer && block_kind(surface.top) == BLOCK_SNOW);
+                // Sandy soil too: an acacia on bare savanna earth is what
+                // one looks like. See `types::BLOCK_SANDY_SOIL`.
+                let rootable = matches!(
+                    crate::ground::as_common(surface.top),
+                    BLOCK_GRASS | BLOCK_DIRT | BLOCK_ASH | crate::types::BLOCK_SANDY_SOIL | crate::types::BLOCK_DRY_TURF
+                )
+                    || (kind == TreeKind::Conifer && block_kind(surface.top) == BLOCK_SNOW)
+                    // ...and sand for a saxaul, and only for a saxaul: it is
+                    // the tree that grows in a dune.
+                    || (kind == TreeKind::Saxaul && block_kind(surface.top) == BLOCK_SAND);
                 if !rootable {
                     continue;
                 }
@@ -1961,30 +7733,891 @@ impl WorldGen {
                 // canopies at a distance, even though both are built
                 // from the same two blocks.
                 let (shortest, tallest, canopy) = biome.tree_shape();
-                let wood = biome.tree_wood();
+                // ...and as tall as its kind at the Earth's scale; the shape's
+                // own range in a regional world. See `WorldGen::trunks`.
+                let (shortest, tallest) = self.trunks(biome, (shortest, tallest));
+                // **An orchard tree is a roll on top of the wood, not a
+                // wood of its own.** Its timber is the broadleaf's and its
+                // shape its own (`APPLE_TRUNK`), so the fruit is chosen
+                // here rather than in `tree_wood` -- which keeps the
+                // "shape and wood vary independently" rule from
+                // acquiring a third axis nobody would remember. On its
+                // own hash, because the roll that picks the trunk
+                // height is already spent and a tree whose height
+                // predicted its fruit would put every apple in the
+                // wood at the same size.
+                //
+                // In plain apple leaves: the fruit is hung on afterwards,
+                // five to seven of it, by `hang_apples` below. A crown of
+                // nothing but fruit was the first version, and a tree of
+                // forty apples is a larder rather than a find.
+                let wood = if self.apple_tree_at(gx, gz, biome) {
+                    (BLOCK_LOG, BLOCK_APPLE_LEAVES)
+                } else if biome == Biome::Taiga && ground_on() && self.pine_wood_at(gx, gz) {
+                    (crate::types::BLOCK_PINE_LOG, crate::types::BLOCK_PINE_NEEDLES)
+                } else {
+                    biome.tree_wood()
+                };
+                // **A maple is a roll on top of a forest, as an apple tree
+                // is**, and on its own salt for the apple's reason. An oak
+                // wood with one crown in five turned red is still an oak
+                // wood; a maple wood would be another biome to walk
+                // between. Only over plain oak leaves, so an apple tree
+                // stays an apple tree.
+                let maple = biome == Biome::Forest
+                    && wood.1 == BLOCK_LEAVES
+                    && hash2(gx, gz, self.seed.wrapping_add(0x3A91E)).is_multiple_of(MAPLE_SHARE);
+                let wood = if maple { (BLOCK_LOG, BLOCK_MAPLE_LEAVES) } else { wood };
+                // **An apple tree is an orchard tree**: a short trunk and a
+                // low, wide, round crown, whatever wood it stands in. "яблони
+                // сделай нормального размера": it was drawn as the wood's own
+                // tree in apple leaves, which at the Earth's scale was a forest
+                // oak -- its fruit eighteen blocks up, where nobody picks
+                // anything -- and in a birch wood a birch. So the arms below
+                // draw it as a broadleaf of `APPLE_TRUNK` with the widest
+                // crown, and the old-tree roll passes it by: an old apple tree
+                // is a big apple tree, not a landmark oak with apples in it.
+                let apple = wood.1 == BLOCK_APPLE_LEAVES;
+                let old = old && !apple;
+                let kind = if apple && self.preset.grows_branches() { TreeKind::Broadleaf } else { kind };
+                let (trunk_range, canopy) = if apple && self.preset.grows_branches() {
+                    ((APPLE_TRUNK, APPLE_TRUNK), MAX_CANOPY_RADIUS)
+                } else {
+                    ((shortest, tallest), canopy)
+                };
                 let variant = hash2(gx, gz, self.seed.wrapping_add(0x7A11));
+                let (shortest, tallest) = trunk_range;
                 let span = (tallest - shortest + 1).max(1) as u32;
                 let trunk = shortest + (variant % span) as i32;
+                // **Five to seven apples on an apple tree, and leaves on
+                // the rest of it.** The arms below draw the tree in plain
+                // apple leaves; this hangs the fruit on what they drew,
+                // chosen on the tree drawn alone -- see `fruit_cells` for
+                // why alone, and how a crown cut by a border keeps its
+                // count.
+                //
+                // The shapes here have to be the shapes the arms draw an
+                // apple tree in: an old tree, a tree of branches, a birch,
+                // a broadleaf. Never a maple (only over oak leaves), a fir
+                // or an acacia (`fruit_share` grows no apple tree where
+                // those stand). If an arm changes and this does not, the
+                // apples are chosen on a tree the world does not have, and
+                // `every_apple_tree_the_generator_grows_carries_five_to_seven_apples`
+                // goes red.
+                let hang_apples = |blocks: &mut [BlockId]| {
+                    if wood.1 != BLOCK_APPLE_LEAVES {
+                        return;
+                    }
+                    let salt = hash2(gx, gz, self.seed.wrapping_add(0xA9972));
+                    let fruit = fruit_cells(salt, |alone, ax, ag, az| {
+                        if old {
+                            place_old_tree_between(alone, ax, ag, az, variant, wood, self.old_trunks());
+                        } else if kind == TreeKind::Broadleaf
+                            && self.preset.grows_branches()
+                            && canopy > 0
+                        {
+                            // The ground round the *real* root, as
+                            // `place_branch_tree` asks it: a limb grows
+                            // only where there is air under it, so the
+                            // same tree on other ground is another tree.
+                            let rise = |dx: i32, dz: i32| columns.at(lx + dx, lz + dz).height - ground;
+                            let neighbour = |dx: i32, dz: i32| self.tree_at(gx + dx, gz + dz, biome);
+                            for ((dx, dy, dz), id) in
+                                branches::branch_tree_cells(trunk, canopy, variant, wood.1, rise, neighbour)
+                            {
+                                put_block(alone, ax + dx, ag + dy, az + dz, id, crate::types::is_branch(id));
+                            }
+                        } else if kind == TreeKind::Birch && self.preset.grows_branches() && canopy > 0 {
+                            // The birch of pieces the arm below writes, on the
+                            // real root's ground for the limb's reason above.
+                            let rise = |dx: i32, dz: i32| columns.at(lx + dx, lz + dz).height - ground;
+                            let neighbour = |dx: i32, dz: i32| self.tree_at(gx + dx, gz + dz, biome);
+                            let cells = branches::birch_tree_cells(trunk, variant, wood.1, rise, neighbour);
+                            for ((dx, dy, dz), id) in branches::in_bark(cells, wood.0) {
+                                put_block(alone, ax + dx, ag + dy, az + dz, id, crate::types::is_branch(id));
+                            }
+                        } else if kind == TreeKind::Birch {
+                            place_birch(alone, ax, ag, az, trunk, canopy, wood);
+                        } else {
+                            place_tree(alone, ax, ag, az, trunk, canopy, wood);
+                        }
+                    });
+                    hang_fruit(blocks, lx, ground, lz, &fruit);
+                };
+                // **An old tree ignores the biome's trunk range.** That
+                // range is what the wood around it looks like, and the
+                // whole of what an old tree is for is not looking like
+                // that -- a swamp's tallest is five, and an old tree
+                // built to five would be an ordinary tree with branches
+                // stuck on. `place_old_tree` carries its own range and
+                // its own shape; what it takes from the biome is the
+                // wood it is made of.
+                //
+                // Which includes the fruit roll, deliberately. One
+                // forest tree in fourteen bears apples (`fruit_share`)
+                // and the roll is independent of this one, so about one
+                // old tree in fourteen is an old apple tree -- a crown
+                // eight blocks across with fruit in it, a few hundred
+                // blocks apart. Suppressing it was considered and
+                // rejected: it costs a special case to turn the best
+                // thing that can happen to a player in a wood into the
+                // ordinary thing.
+                if old {
+                    // The savanna's old tree is a baobab, not a spreading
+                    // crown -- see `Biome::old_tree_share`.
+                    if kind == TreeKind::Acacia && self.preset.grows_branches() {
+                        branches::place_branch_baobab(blocks, columns, lx, ground, lz, variant);
+                    } else if kind == TreeKind::Acacia {
+                        place_baobab(blocks, lx, ground, lz, variant);
+                    } else {
+                        place_old_tree_between(blocks, lx, ground, lz, variant, wood, self.old_trunks());
+                    }
+                    hang_apples(blocks);
+                    continue;
+                }
                 match kind {
+                    // A maple is a broadleaf grown taller and fuller: two
+                    // more blocks of trunk and the widest crown the border
+                    // allows, so it stands up out of the oaks round it as
+                    // well as out-colouring them.
+                    // **The world builds its broadleaf out of branches** --
+                    // the oak, the maple and the apple tree alike, each the
+                    // same shape in another leaf, the maple taller and wider
+                    // as below. Not a dead wood's snag (no canopy for limbs
+                    // to hold) and not the fir or the birch, which keep
+                    // their logs. See `branches`.
+                    TreeKind::Broadleaf if self.preset.grows_branches() && canopy > 0 => {
+                        let (height, radius) =
+                            if maple { (trunk + 2, MAX_CANOPY_RADIUS) } else { (trunk, canopy) };
+                        // The trees round it, by the root's own biome so both
+                        // chunks of a seam ask the same question -- see
+                        // `branches::NEIGHBOUR_REACH`.
+                        let neighbour = |dx: i32, dz: i32| self.tree_at(gx + dx, gz + dz, biome);
+                        branches::place_branch_tree(
+                            blocks, columns, lx, ground, lz, height, radius, variant, wood.1, neighbour,
+                        )
+                    }
+                    TreeKind::Broadleaf if maple => place_tree(
+                        blocks,
+                        lx,
+                        ground,
+                        lz,
+                        trunk + 2,
+                        MAX_CANOPY_RADIUS,
+                        wood,
+                    ),
                     TreeKind::Broadleaf => {
                         place_tree(blocks, lx, ground, lz, trunk, canopy, wood)
                     }
                     TreeKind::Conifer => {
-                        place_conifer(blocks, lx, ground, lz, trunk, canopy, variant, wood)
+                        place_conifer(blocks, lx, ground, lz, trunk, canopy, variant, wood);
+                        // **Moss on the foot of a trunk in a wet wood**, two
+                        // trees in three. Its north face is what the mesher
+                        // greens (`ground::MOSSY`).
+                        if biome.grows_moss() && !variant.is_multiple_of(3) && ground_on() {
+                            for y in ground + 1..=ground + 3 {
+                                if let Some(log) = read_block(blocks, lx, y, lz).filter(|&b| crate::wood::is_log(b)) {
+                                    put_block(blocks, lx, y, lz, crate::ground::with_moss(log), true);
+                                }
+                            }
+                        }
                     }
+                    TreeKind::Saxaul => place_saxaul(blocks, lx, ground, lz, trunk, canopy, variant, wood),
+                    // **A birch of pieces, in birch bark.** See
+                    // `branches::birch_tree_cells` for its shape, and
+                    // `types::birch_branch` for the bark.
+                    TreeKind::Birch if self.preset.grows_branches() && canopy > 0 => {
+                        let neighbour = |dx: i32, dz: i32| self.tree_at(gx + dx, gz + dz, biome);
+                        branches::place_birch_tree(blocks, columns, lx, ground, lz, trunk, variant, wood, neighbour)
+                    }
+                    TreeKind::Birch => {
+                        place_birch(blocks, lx, ground, lz, trunk, canopy, wood)
+                    }
+                    TreeKind::Acacia => {
+                        // **Not leaning into a rise.** The stem steps one
+                        // column across three blocks up, and ground more
+                        // than a block above the root under that column
+                        // takes the limb into the hill: a log driven into
+                        // the turf beside a tree.
+                        //
+                        // The main limb's column only. At the very edge
+                        // of the border that column is one past the
+                        // column cache, which clamps, and two chunks
+                        // could then disagree about the same tree -- but
+                        // only about one leaning *away* from the chunk
+                        // asking, and every cell of such a tree lands
+                        // outside it. The fork's short limb leans the
+                        // other way, where the same argument does not
+                        // hold, so it goes unasked; it is the smaller
+                        // plate, on the shorter limb.
+                        let (sx, sz) = acacia_lean(variant);
+                        if columns.at(lx + sx, lz + sz).height > ground + 1 {
+                            continue;
+                        }
+                        if self.preset.grows_branches() {
+                            branches::place_branch_acacia(
+                                blocks, columns, lx, ground, lz, trunk, canopy, variant,
+                            )
+                        } else {
+                            place_acacia(blocks, lx, ground, lz, trunk, canopy, variant, wood)
+                        }
+                    }
+                }
+                hang_apples(blocks);
+
+            }
+        }
+    }
+}
+
+impl WorldGen {
+    /// Palms, on warm coasts, including the ones rooted outside this chunk.
+    ///
+    /// **Its own pass rather than a row in the tree tables.** A palm is not
+    /// the wood of a biome: it is what grows on a *coast* where the climate is
+    /// warm, and the beach it mostly stands on grows no other tree at all. So
+    /// it is decided by the beach and the warmth together (`TROPICAL`, the
+    /// same line a reef is drawn on) rather than by `Biome::tree_spacing`,
+    /// whose every other row would have to learn to say "no palms". The
+    /// padding is `place_trees`' and for its reason: a root up to
+    /// `PALM_REACH` outside the chunk reaches in, both chunks draw the same
+    /// palm from the same hash and the same column cache, and what misses the
+    /// array is dropped.
+    ///
+    /// The warmth is asked last, of a column that has already rolled a palm,
+    /// so the climate noise is paid for one beach column in eleven.
+    ///
+    /// **A palm stands only where it has room** (`palm_stands`): no column
+    /// of it touches a column of a palm that outranks it, or of a tree's
+    /// crown. Decided before a cell is written, from hashes and columns, so a
+    /// palm across a seam is either whole on both sides or on neither.
+    fn place_palms(
+        &self,
+        blocks: &mut [BlockId],
+        origin_x: i32,
+        origin_z: i32,
+        columns: &ColumnCache,
+    ) {
+        let span = CHUNK_SIZE_X as i32;
+        // The chunk's own cache where it reaches, the tile store past it: a
+        // rival palm or a tree can stand further out than any feature of this
+        // chunk is rooted, and both hold the same columns.
+        let cached = -FEATURE_MARGIN..span + FEATURE_MARGIN;
+        let column = |gx: i32, gz: i32| {
+            let (lx, lz) = (gx - origin_x, gz - origin_z);
+            if cached.contains(&lx) && cached.contains(&lz) {
+                columns.at(lx, lz)
+            } else {
+                self.column_anywhere(gx, gz)
+            }
+        };
+        let mut clear = std::collections::HashMap::new();
+        for lz in -PALM_REACH..span + PALM_REACH {
+            for lx in -PALM_REACH..span + PALM_REACH {
+                let (gx, gz) = (origin_x + lx, origin_z + lz);
+                let Some(root) = self.palm_root(gx, gz, &column) else {
+                    continue;
+                };
+                if !self.palm_stands(gx, gz, &root, PALM_ROUNDS, &column, &mut clear) {
+                    continue;
+                }
+                let PalmRoot { ground, variant, lean } = root;
+                for ((dx, dy, dz), id) in palm_cells(variant, lean) {
+                    let (x, y, z) = (lx + dx, ground + dy, lz + dz);
+                    // The trunk goes through anything soft -- a tuft of grass
+                    // on the dune -- and never through wood or ground; the
+                    // crown only fills air. No tree's leaf is left in its way
+                    // to go through: `palm_clear_of_trees` keeps it off crowns.
+                    let soft = read_block(blocks, x, y, z)
+                        .is_some_and(|here| here == BLOCK_AIR || crate::types::is_leafy(here));
+                    if crate::types::is_branch(id) {
+                        if soft {
+                            put_block(blocks, x, y, z, id, true);
+                        }
+                    } else {
+                        put_block(blocks, x, y, z, id, false);
+                    }
+                }
+            }
+        }
+    }
+
+    /// One column anywhere in the world, out of the tile store the column
+    /// caches are copied from -- so it is the column a cache holds, where a
+    /// cache holds it. For the rare question that looks further than
+    /// `FEATURE_MARGIN`: every call resolves a tile, which is why no pass
+    /// asks it of every column.
+    fn column_anywhere(&self, gx: i32, gz: i32) -> Column {
+        let (tx, tz) = (gx.div_euclid(TILE), gz.div_euclid(TILE));
+        let (lx, lz) = (gx.rem_euclid(TILE), gz.rem_euclid(TILE));
+        column_tile_with(self, tx, tz, |tile| tile[(lz * TILE + lx) as usize])
+    }
+
+    /// Whether a palm is rooted at this column, before anything round it is
+    /// asked: its roll, its ground, the climate, and which way it leans.
+    ///
+    /// Two rolls are tried before any column is read, so the rivals
+    /// `palm_has_room` walks cost a hash each where no palm could be.
+    fn palm_root(&self, gx: i32, gz: i32, column: &impl Fn(i32, i32) -> Column) -> Option<PalmRoot> {
+        let roll = hash2(gx, gz, self.seed.wrapping_add(0x9A1A));
+        if !roll.is_multiple_of(PALM_BEACH_SPACING) && !roll.is_multiple_of(PALM_COAST_SPACING) {
+            return None;
+        }
+        let Column { height: ground, biome, surface, water, .. } = column(gx, gz);
+        let spacing = match biome {
+            Biome::Beach => PALM_BEACH_SPACING,
+            Biome::Savanna | Biome::Desert | Biome::Swamp if ground <= SEA_LEVEL + 5 => PALM_COAST_SPACING,
+            _ => return None,
+        };
+        if !roll.is_multiple_of(spacing) {
+            return None;
+        }
+        let rooted = matches!(
+            crate::ground::as_common(surface.top),
+            BLOCK_SAND | BLOCK_GRASS | BLOCK_DIRT | crate::types::BLOCK_SANDY_SOIL | crate::types::BLOCK_DRY_TURF
+        );
+        if ground < water || !rooted || ground + PALM_TALLEST + 3 >= CHUNK_SIZE_Y as i32 {
+            return None;
+        }
+        if self.warmth_on_planet(gx, gz) <= TROPICAL || self.ruin_claims(gx, gz) || self.is_cave(gx, ground, gz) {
+            return None;
+        }
+        let variant = hash2(gx, gz, self.seed.wrapping_add(0x9A1B));
+        let lean = palm_lean(variant, |dx, dz| column(gx + dx, gz + dz).height);
+        Some(PalmRoot { ground, variant, lean })
+    }
+
+    /// **Whether a rolled palm stands: clear of every tree's crown, and no
+    /// column of it touching a column of a better-ranked palm that stands.**
+    ///
+    /// "пальмы прорастают в друг друга": one beach column in thirty-seven
+    /// rolled a palm with nothing asked of its neighbours, and a palm is
+    /// eleven columns across. Measured with `palm_neighbours_census` over
+    /// forty beach chunks on four tropical seeds, four palms in five had a
+    /// cell of another palm in or against their own -- a trunk through a
+    /// crown, two crowns in one, and fronds the mesher turned towards the
+    /// stranger beside them, since a crown cell and a piece of trunk read
+    /// their shape off the ring of cells round them (`mesh::crown_part`,
+    /// `palm::palm_course`). And a palm on the edge of a wood grew *into* it:
+    /// the trunk went through the leaves, the crown filled the air between
+    /// them, and a tree's crown -- a swamp tree's with its moss -- sat in the
+    /// fronds: the "лишай" half of the same report.
+    ///
+    /// Three ways to keep them apart were weighed:
+    ///
+    /// * *Read the chunk being written*, and refuse a palm any of whose cells
+    ///   is taken. A chunk sees only its own cells, so the two chunks of a
+    ///   seam would disagree about a palm across it, and draw half of it.
+    /// * *A jittered grid*, one palm a cell at most, kept off the cell's
+    ///   edges. Apart without asking anything, and a grove of them in rows --
+    ///   the edge margin a palm's eleven columns need is most of the cell.
+    /// * **A rank, from the hash and the columns alone (chosen).** Every palm
+    ///   carries a rank and gives way to a better-ranked one whose columns
+    ///   come within one of its own. Each palm is its real shape, lean
+    ///   included, rather than a worst-case square, so two palms leaning out
+    ///   to sea stand closer than two leaning at each other. Trees are asked
+    ///   the way `branches::place_small_trees` asks them: rolled at a column
+    ///   and rootable there, with the reach `place_trees` gives their kind.
+    ///
+    /// **One clear column between them**, not merely no shared column: a cell
+    /// against another palm's is inside the ring its shape is read from.
+    ///
+    /// **`rounds` deep, and odd** (`PALM_ROUNDS`). Whether the rival a palm
+    /// gives way to stands is the same question one rank up, a chain no chunk
+    /// can follow to its end. Cut after one round, every palm rolled counts
+    /// against its neighbours whether it stood or not, and one palm in five
+    /// that could stand gave way to a rival that had itself given way -- 32,
+    /// 44, 34 and 35 standing on `palm_neighbours_census`'s four seeds after
+    /// one round, 39, 51, 41 and 44 after three. Cut after an
+    /// even number, a palm and the rival it touches can both be let stand.
+    /// Cut after an odd number, the palms that stand are some of those the
+    /// whole chain would keep, which never touch -- and more of them each
+    /// round. Paid only by a column that has already rolled a palm on a warm
+    /// coast; a tree verdict is remembered in `clear` for the rounds that ask
+    /// it again.
+    fn palm_stands(
+        &self,
+        gx: i32,
+        gz: i32,
+        root: &PalmRoot,
+        rounds: u32,
+        column: &impl Fn(i32, i32) -> Column,
+        clear: &mut std::collections::HashMap<(i32, i32), bool>,
+    ) -> bool {
+        let mine = palm_footprint(root.variant, root.lean);
+        let clear_of_trees = match clear.get(&(gx, gz)) {
+            Some(&known) => known,
+            None => {
+                let known = self.palm_clear_of_trees(gx, gz, &mine, column);
+                clear.insert((gx, gz), known);
+                known
+            }
+        };
+        if !clear_of_trees {
+            return false;
+        }
+        if rounds == 0 {
+            return true;
+        }
+        let rank = |x: i32, z: i32| (hash2(x, z, self.seed.wrapping_add(0x9A1C)), x, z);
+        let own_rank = rank(gx, gz);
+        let (lo_x, hi_x, lo_z, hi_z) = footprint_bounds(&mine);
+        let rivals = 2 * PALM_REACH + 1;
+        for dz in -rivals..=rivals {
+            for dx in -rivals..=rivals {
+                // Nothing of a palm is further than `PALM_REACH` from its
+                // root, so a root whose square cannot come within one of this
+                // palm's columns is passed over before any hash or column.
+                let apart_x = (dx - PALM_REACH - hi_x).max(lo_x - dx - PALM_REACH);
+                let apart_z = (dz - PALM_REACH - hi_z).max(lo_z - dz - PALM_REACH);
+                if (dx, dz) == (0, 0) || apart_x.max(apart_z) > 1 {
+                    continue;
+                }
+                let (x, z) = (gx + dx, gz + dz);
+                if rank(x, z) > own_rank {
+                    continue;
+                }
+                let Some(rival) = self.palm_root(x, z, column) else {
+                    continue;
+                };
+                let theirs = palm_footprint(rival.variant, rival.lean);
+                let touching = mine
+                    .iter()
+                    .any(|&(mx, mz)| theirs.iter().any(|&(tx, tz)| (dx + tx - mx).abs().max((dz + tz - mz).abs()) <= 1));
+                if touching && self.palm_stands(x, z, &rival, rounds - 1, column, clear) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Whether no tree's crown comes within one column of a palm's columns
+    /// (`mine`, from its root). See `palm_stands`. A column further than any
+    /// crown reaches from all of the palm is passed over unread.
+    fn palm_clear_of_trees(&self, gx: i32, gz: i32, mine: &[(i32, i32)], column: &impl Fn(i32, i32) -> Column) -> bool {
+        let (lo_x, hi_x, lo_z, hi_z) = footprint_bounds(mine);
+        let far = OLD_TREE_REACH + 1;
+        for dz in lo_z - far..=hi_z + far {
+            for dx in lo_x - far..=hi_x + far {
+                let nearest = mine.iter().map(|&(mx, mz)| (dx - mx).abs().max((dz - mz).abs())).min().unwrap_or(i32::MAX);
+                if nearest > far {
+                    continue;
+                }
+                let (x, z) = (gx + dx, gz + dz);
+                let Column { height, biome, surface, water, .. } = column(x, z);
+                if !self.tree_at(x, z, biome) || height < water {
+                    continue;
+                }
+                let kind = biome.tree_kind();
+                let rootable = matches!(
+                    crate::ground::as_common(surface.top),
+                    BLOCK_GRASS | BLOCK_DIRT | BLOCK_ASH | crate::types::BLOCK_SANDY_SOIL | crate::types::BLOCK_DRY_TURF
+                ) || (kind == TreeKind::Conifer && block_kind(surface.top) == BLOCK_SNOW)
+                    || (kind == TreeKind::Saxaul && block_kind(surface.top) == BLOCK_SAND);
+                if !rootable {
+                    continue;
+                }
+                // `place_trees`' own reach for this tree, an old one's first.
+                let reach = if self.old_tree_at(x, z, biome) {
+                    OLD_TREE_REACH
+                } else if self.preset.grows_branches() && (kind == TreeKind::Broadleaf || self.apple_tree_at(x, z, biome)) {
+                    branches::BRANCH_REACH
+                } else {
+                    kind.reach()
+                };
+                if nearest <= reach + 1 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// A swamp's drowned snags and hanging moss. One column at a time and
+    /// only this chunk's own, so nothing here reaches over a border.
+    ///
+    /// **Snags stand in the pools.** A tree whose roots drowned is a bare pole
+    /// of grey wood standing out of still water, and a swamp is recognised by
+    /// them from a long way off. Built of pieces of branch, as a palm is --
+    /// a bough thinning to a twig -- so a snag cut at the waterline comes down
+    /// by what holds it up (`felling::fell_branches`) and gives its wood, and
+    /// is never a standing log with no crown to fell.
+    ///
+    /// **Moss hangs under the crowns**: from any leaf over a swamp column with
+    /// air under it, a strand one or two cells long. Read off the chunk as the
+    /// trees left it, crowns reaching in from next door included, so the moss
+    /// under a crown over a seam is the same moss from either side.
+    fn place_swamp_growth(
+        &self,
+        blocks: &mut [BlockId],
+        origin_x: i32,
+        origin_z: i32,
+        columns: &ColumnCache,
+    ) {
+        for lz in 0..CHUNK_SIZE_Z as i32 {
+            for lx in 0..CHUNK_SIZE_X as i32 {
+                let Column { height, biome, water, .. } = columns.at(lx, lz);
+                if biome != Biome::Swamp {
+                    continue;
+                }
+                let (gx, gz) = (origin_x + lx, origin_z + lz);
+                if height < water {
+                    // In the pools above the sea only: a snag in a flooded
+                    // swamp at the sea's own level would take cells of the
+                    // sea, and a basin with a hole in its water is the one
+                    // thing the sea is tested never to have.
+                    if water > SEA_LEVEL && hash2(gx, gz, self.seed.wrapping_add(0x5AA6)).is_multiple_of(SNAG_SPACING) {
+                        let tall = water - height + 2 + (hash2(gx, gz, self.seed.wrapping_add(0x5AA7)) % 3) as i32;
+                        for dy in 1..=tall {
+                            let width = if dy == tall { 4 } else { 12 - (4 * dy / tall) as u8 };
+                            // **Under the surface the wood is drowned**: the
+                            // piece and the water it stands in, one id
+                            // (`types::BLOCK_DROWNED_BOUGH`). A dry piece here
+                            // took the pool's cell and left a square hole of
+                            // air round the snag down to the mud.
+                            let piece = crate::types::branch(width);
+                            let piece = if height + dy <= water { crate::types::drowned(piece) } else { piece };
+                            put_block(blocks, lx, height + dy, lz, piece, true);
+                        }
+                    }
+                    continue;
+                }
+                let top = (height + 12).min(CHUNK_SIZE_Y as i32 - 1);
+                // From four up, not three: the moss hangs in the cell under
+                // the leaf, and that cell has to leave a clear one above the
+                // plants on the ground. From three, a low crown hung its moss
+                // straight onto the fern under it, and the two read as one
+                // strange grass two blocks tall.
+                for y in height + 4..top {
+                    let (Some(here), Some(under)) = (read_block(blocks, lx, y, lz), read_block(blocks, lx, y - 1, lz)) else {
+                        continue;
+                    };
+                    // Not from a palm's fronds: a palm on the swamp's coast, or
+                    // a beach palm whose crown reached over the swamp's edge,
+                    // came out with moss hanging off its leaves -- the "лишай на
+                    // пальмах" of a tropical beach. See `types::is_palm_crown`.
+                    if !crate::types::is_canopy(here) || crate::types::is_palm_crown(here) || under != BLOCK_AIR {
+                        continue;
+                    }
+                    let roll = hash2(gx ^ (y << 20), gz, self.seed.wrapping_add(0x3055));
+                    if !roll.is_multiple_of(3) {
+                        continue;
+                    }
+                    // **One cell, never two.** The moss's picture narrows to
+                    // a wisp at its foot, so a second cell under the first
+                    // drew a strand that thinned, went wide again and thinned
+                    // again -- "растёт сама на себе в 2 блока, сужается к
+                    // низу" -- which is no plant anybody has seen.
+                    put_block(blocks, lx, y - 1, lz, crate::types::BLOCK_HANGING_MOSS, false);
                 }
             }
         }
     }
 }
 
-/// The two shapes a tree comes in. See `Biome::tree_kind`.
+/// Whether a tree's crown stands over the ground of a column, as the block
+/// array holds it after every tree is written.
+///
+/// **A leaf within a tall tree's height over the ground**, of any living
+/// canopy but a palm's -- a palm's fronds shade a beach, not a forest floor.
+/// Wood without a leaf over it (a bare limb, a snag) shades nothing worth the
+/// name. Twenty-eight cells: an old tree's crown stands at sixteen and a
+/// fir's top at a dozen, and anything higher is not this column's canopy.
+fn under_canopy(blocks: &[BlockId], lx: i32, height: i32, lz: i32) -> bool {
+    let top = (height + 28).min(CHUNK_SIZE_Y as i32 - 1);
+    (height + 2..=top).any(|y| {
+        let block = blocks[Chunk::index(lx as usize, y as usize, lz as usize)];
+        crate::types::is_canopy(block) && !crate::types::is_palm_crown(block)
+    })
+}
+
+/// A palm rolled at a column: the ground under it, its hash and its lean.
+/// See `WorldGen::palm_root`.
+#[derive(Clone, Copy)]
+struct PalmRoot {
+    ground: i32,
+    variant: u32,
+    lean: (i32, i32),
+}
+
+/// The columns a palm stands over, trunk and crown, as offsets from its root.
+/// What `WorldGen::palm_stands` keeps apart.
+fn palm_footprint(variant: u32, lean: (i32, i32)) -> Vec<(i32, i32)> {
+    let mut columns: Vec<(i32, i32)> = palm_cells(variant, lean).into_iter().map(|((dx, _, dz), _)| (dx, dz)).collect();
+    columns.sort_unstable();
+    columns.dedup();
+    columns
+}
+
+/// The least and greatest x and z of a palm's columns.
+fn footprint_bounds(columns: &[(i32, i32)]) -> (i32, i32, i32, i32) {
+    columns.iter().fold((i32::MAX, i32::MIN, i32::MAX, i32::MIN), |(lx, hx, lz, hz), &(x, z)| {
+        (lx.min(x), hx.max(x), lz.min(z), hz.max(z))
+    })
+}
+
+/// Which way a palm leans: towards the lowest of its four neighbours, which
+/// on a beach is the sea.
+///
+/// **Palms lean out over the water**, and on a coast that one fact is most of
+/// what makes a grove read as a grove rather than as a row of poles: the wind
+/// off the sea and the light over it pull every trunk the same way. Where the
+/// ground is level all round the tree has no reason to prefer a side, and the
+/// hash decides. Asked of the column cache one column out, which every chunk
+/// that can see the palm holds the same copy of.
+fn palm_lean(variant: u32, height: impl Fn(i32, i32) -> i32) -> (i32, i32) {
+    const SIDES: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
+    let start = (variant >> 20) as usize % 4;
+    let mut best = SIDES[start];
+    for i in 0..4 {
+        let side = SIDES[(start + i) % 4];
+        if height(side.0, side.1) < height(best.0, best.1) {
+            best = side;
+        }
+    }
+    best
+}
+
+/// Every cell of a palm, as offsets from the ground under its root, with
+/// what goes there.
+///
+/// **A trunk that bends by stepping sideways at one height.** A piece of
+/// branch is joined to its neighbours across faces only (`mesh::branch_block`),
+/// so a stem that climbed across a corner would be drawn as posts that do not
+/// meet. Two steps, the first two or three pieces up and the second three
+/// higher, so the lean grows with the height the way a palm's does; ten
+/// sixteenths across at the foot and eight at the top.
+///
+/// **The steps are where the trunk crosses a cell, not what it looks like.**
+/// Drawn as posts joined by arms, two steps were a right-angled Z of bark a
+/// player photographed as a staircase; the mesher reads the steps back and
+/// draws one leaning curve through them (`mesh::palm_course`). Public so the
+/// client's test of that curve grows the palm this grows.
+///
+/// **A crown of fronds**, eight of them in a star round the last piece: four
+/// along the axes, three long and drooping at the tip, and three of the four
+/// diagonals two long -- the missing one by the hash, so no two crowns are
+/// the same star. **Two to four clusters of coconuts** hang beside the top of
+/// the trunk, under the crown, where a player looks up and sees them.
+///
+/// A list rather than writes, so the test that holds a palm whole across every
+/// border can draw the palm it is checking.
+///
+/// **All eight fronds, since "мало листвы".** One diagonal used to be left
+/// bare by the hash, so no two crowns were the same star; seen from the sand
+/// a seven-frond crown was a gap as wide as a frond on one side of every palm,
+/// and the crowns differ enough by height, lean and bunches. The frond itself
+/// grew fuller in the mesher (`mesh::frond_block`).
+pub fn palm_cells(variant: u32, (sx, sz): (i32, i32)) -> Vec<((i32, i32, i32), BlockId)> {
+    let pieces = PALM_SHORTEST + (variant % (PALM_TALLEST - PALM_SHORTEST + 1) as u32) as i32;
+    let first_bend = 2 + ((variant >> 4) & 1) as i32;
+    let second_bend = first_bend + 3;
+    let piece = |i: i32| {
+        let width = 10 - (2 * i / (pieces - 1).max(1));
+        crate::types::BLOCK_PALM_TRUNK | ((((width.clamp(8, 16) - 8) / 2) as BlockId) << crate::types::VARIANT_SHIFT)
+    };
+    let mut cells = Vec::with_capacity(48);
+    let (mut x, mut z) = (0, 0);
+    for i in 0..pieces {
+        cells.push(((x, 1 + i, z), piece(i)));
+        if i == first_bend || (i == second_bend && pieces > second_bend + 2) {
+            x += sx;
+            z += sz;
+            cells.push(((x, 1 + i, z), piece(i)));
+        }
+    }
+    let (tx, ty, tz) = (x, pieces, z);
+    let fronds = crate::types::BLOCK_PALM_FRONDS;
+    cells.push(((tx, ty + 1, tz), fronds));
+    for (dx, dz) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+        cells.push(((tx + dx, ty + 1, tz + dz), fronds));
+        cells.push(((tx + 2 * dx, ty + 1, tz + 2 * dz), fronds));
+        cells.push(((tx + PALM_FROND_REACH * dx, ty, tz + PALM_FROND_REACH * dz), fronds));
+    }
+    for (dx, dz) in [(1, 1), (-1, 1), (-1, -1), (1, -1)] {
+        cells.push(((tx + dx, ty + 1, tz + dz), fronds));
+        cells.push(((tx + 2 * dx, ty, tz + 2 * dz), fronds));
+    }
+    let clusters = 2 + ((variant >> 10) % 3) as usize;
+    let first = (variant >> 12) as usize % 4;
+    let sides = [(1, 0), (0, 1), (-1, 0), (0, -1)];
+    for i in 0..clusters {
+        let (dx, dz) = sides[(first + i) % 4];
+        cells.push(((tx + dx, ty, tz + dz), crate::types::BLOCK_PALM_COCONUTS));
+    }
+    cells
+}
+
+/// A baobab: a bottle of a trunk two columns wide that swells through the
+/// middle, and a few short thick branches holding small tufts of leaves --
+/// the savanna's old tree, and its landmark.
+///
+/// **Not `place_old_tree` in savanna wood**, which the old-tree roll would
+/// otherwise draw: a spreading crown eight blocks across is the forest's
+/// landmark moved to the wrong country, and on a plain of acacia plates it
+/// would read as a very big acacia. A baobab is recognised by the reverse
+/// -- all trunk and almost no crown -- so it is its own shape.
+///
+/// **Inside `OLD_TREE_REACH`.** The bole is columns 0 and 1; the swelling
+/// adds one column on each side of it; a branch runs two out from the
+/// bole and its tuft is one wider -- four from the root at most. See
+/// `a_baobab_is_all_trunk_and_stays_inside_the_border`.
+///
+/// **The swelling only fills air.** The old-tree roll checks that the
+/// four columns under the bole are level; the ring round it is not
+/// checked, and on uneven ground a swelling that overwrote would carve
+/// its way into a bank.
+fn place_baobab(blocks: &mut [crate::types::BlockId], lx: i32, ground: i32, lz: i32, variant: u32) {
+    let height = 7 + (variant % 3) as i32;
+    let top = ground + height;
+    if top + 4 >= CHUNK_SIZE_Y as i32 {
+        return;
+    }
+    for y in ground + 1..=top {
+        let dy = y - ground;
+        let swollen = (2..=height - 2).contains(&dy);
+        for dz in -1..=2 {
+            for dx in -1..=2 {
+                let inner = (0..=1).contains(&dx) && (0..=1).contains(&dz);
+                // The ring round the bole, corners left off, or the
+                // swelling is a crate.
+                let ring = !inner && ((0..=1).contains(&dx) || (0..=1).contains(&dz));
+                if inner {
+                    put_block(blocks, lx + dx, y, lz + dz, BLOCK_LOG, true);
+                } else if swollen && ring {
+                    put_block(blocks, lx + dx, y, lz + dz, BLOCK_LOG, false);
+                }
+            }
+        }
+    }
+    // A thin cap of leaves on the flat top of the bole.
+    for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        put_block(blocks, lx + dx, top + 1, lz + dz, BLOCK_ACACIA_LEAVES, false);
+    }
+    // Three or four branches out of the top of the bole, two columns out and
+    // one up, each ending in a tuft.
+    const OUT: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
+    let branches = 3 + ((variant >> 4) & 1) as usize;
+    for i in 0..branches {
+        let (dx, dz) = OUT[((variant >> 6) as usize + i) % 4];
+        let side = ((variant >> (10 + i as u32)) & 1) as i32;
+        let from = (
+            if dx > 0 {
+                1
+            } else if dx < 0 {
+                0
+            } else {
+                side
+            },
+            if dz > 0 {
+                1
+            } else if dz < 0 {
+                0
+            } else {
+                side
+            },
+        );
+        let near = (from.0 + dx, from.1 + dz);
+        let tip = (from.0 + 2 * dx, from.1 + 2 * dz);
+        for (tx, ty, tz) in [
+            (tip.0, top + 3, tip.1),
+            (tip.0 + 1, top + 2, tip.1),
+            (tip.0 - 1, top + 2, tip.1),
+            (tip.0, top + 2, tip.1 + 1),
+            (tip.0, top + 2, tip.1 - 1),
+        ] {
+            put_block(blocks, lx + tx, ty, lz + tz, BLOCK_ACACIA_LEAVES, false);
+        }
+        put_block(blocks, lx + near.0, top + 1, lz + near.1, BLOCK_LOG, true);
+        put_block(blocks, lx + tip.0, top + 2, lz + tip.1, BLOCK_LOG, true);
+    }
+}
+
+/// How good the ground is for growing things, in three grades.
+///
+/// Three rather than a number, because the player has to be able to
+/// *say* it: "this is good ground" is a decision about where to build,
+/// and a 0.83 is not. What each grade is worth is one multiplier on how
+/// long a crop takes -- see `Fertility::growth_factor` and
+/// `server::logic::growth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Fertility {
+    /// River silt and marsh margin. Half again as fast as ordinary
+    /// ground, and worth walking to.
+    Rich,
+    /// Most of the world.
+    Ordinary,
+    /// Sand, cold, high ground and the dry middle of a continent. A
+    /// field here is possible and slow, which is the honest answer --
+    /// refusing to till it would be a rule the player cannot see.
+    Poor,
+}
+
+impl Fertility {
+    /// What one stage of a crop costs here, as a multiplier on the
+    /// ordinary time.
+    ///
+    /// **Chosen so the difference is a plan rather than a nuisance.**
+    /// Rich soil saves about a third of a growing season and poor soil
+    /// costs about half again: on the default day length that is the
+    /// difference between a harvest before nightfall and one you come
+    /// back for tomorrow. Wider than that and a poor field would be a
+    /// trap; narrower and nobody would cross a meadow for the good
+    /// ground.
+    pub fn growth_factor(self) -> f32 {
+        match self {
+            Fertility::Rich => 0.66,
+            Fertility::Ordinary => 1.0,
+            Fertility::Poor => 1.5,
+        }
+    }
+
+    /// What to call it. Not translated -- like a block name, this is an
+    /// identifier; the interface looks the phrase up by it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Fertility::Rich => "rich",
+            Fertility::Ordinary => "ordinary",
+            Fertility::Poor => "poor",
+        }
+    }
+}
+
+/// The shapes a tree comes in. See `Biome::tree_kind`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum TreeKind {
     /// A trunk with a rounded canopy on top of it.
     Broadleaf,
     /// A fir: rings of branches from low down, narrowing to a point.
     Conifer,
+    /// A birch: a bare mast, a small crown, and one whorl of branches
+    /// partway down it.
+    Birch,
+    /// An acacia: a short stem that leans or forks, holding up a wide,
+    /// thin plate. See `place_acacia`.
+    Acacia,
+    /// A saxaul: a short grey trunk and a thin, ragged crown. See
+    /// `place_saxaul`.
+    Saxaul,
+}
+
+impl TreeKind {
+    /// How far outside the chunk `place_trees` looks for a root of this
+    /// shape.
+    ///
+    /// **One owner for the padding**, so the pass that walks it and
+    /// `every_tree_shape_fits_the_canopy_padding`, which checks every
+    /// biome against it, cannot drift. That test used to restate
+    /// `MAX_CANOPY_RADIUS` itself, and the first tree to need a wider
+    /// border made it fail about a tree that was never clipped.
+    fn reach(self) -> i32 {
+        match self {
+            // The plate hangs beside the root rather than over it.
+            TreeKind::Acacia => ACACIA_REACH,
+            TreeKind::Broadleaf | TreeKind::Conifer | TreeKind::Birch | TreeKind::Saxaul => MAX_CANOPY_RADIUS,
+        }
+    }
 }
 
 /// What a column is, before anything is written into it.
@@ -1994,94 +8627,706 @@ struct Column {
     biome: Biome,
     /// What the ground is made of here -- climate and slope together.
     surface: Surface,
+    /// How steep it is -- see `slope_from`. Kept rather than re-derived
+    /// so a feature pass can ask "is this a bank" without four more
+    /// height lookups per column per pass.
+    slope: f32,
+    /// The top of the standing water this column belongs to: the sea,
+    /// or the lake whose footprint it is in. Water fills from the ground
+    /// up to here wherever the ground is lower. A rim column of a lake
+    /// carries the lake's level too, so that the shore rules -- reeds,
+    /// clay -- see the same waterline from both sides of it.
+    water: i32,
+    /// The upper rock and how many layers of it lie over the stone.
+    /// See `stratum`.
+    rock: BlockId,
+    rock_depth: i32,
+    /// Every rock cell at or above this is granite, whatever `rock` is.
+    granite_from: i32,
+    /// The band of cells, floor to roof inclusive, that the cave carver
+    /// may not touch. Empty (floor above roof) for most of the world.
+    ///
+    /// It covers the crust under any water and the walls beside it: a
+    /// cave that opened a sea floor drained the ocean into an unlit
+    /// void, and a cave that opened the wall of a lake one cell under
+    /// its surface would drain the lake into the hill. Worked out from
+    /// the column's neighbours in `build_column_tile`, which is the one
+    /// place that has them.
+    seal: (i32, i32),
+}
+
+/// A lake, once its site has been accepted. See `WorldGen::lake_site`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Lake {
+    centre_x: i32,
+    centre_z: i32,
+    /// The bed reaches this far from the centre; the rim ring is the
+    /// next block out.
+    radius: i32,
+    /// How far below the water the middle of the bed is dug.
+    depth: i32,
+    /// The surface of the water: the lowest column of the rim ring.
+    water: i32,
+    /// A wide lake (`scale`) rather than a pond: its shore wanders by a
+    /// share of its radius and its banks are eased down to it.
+    wide: bool,
+}
+
+impl Lake {
+    /// How far below the water the bed lies at a squared distance from
+    /// the centre: `depth` in the middle, easing to one at the edge, so
+    /// the bed is a bowl rather than a tank and the last ring of water
+    /// is ankle deep.
+    fn depth_at(&self, d2: i32) -> i32 {
+        let across = (d2 as f64).sqrt() / self.radius as f64;
+        let bowl = 1.0 - smoothstep(0.0, 1.0, across);
+        1 + ((self.depth - 1) as f64 * bowl).round() as i32
+    }
 }
 
 /// Every column a chunk needs, worked out once.
 ///
-/// Covers the chunk plus a `MAX_CANOPY_RADIUS` ring, because trees
-/// rooted next door drop their leaves over the border and the decision
-/// about where they stand has to be made here too.
+/// Covers the chunk plus a `FEATURE_MARGIN` ring, because a feature
+/// rooted next door reaches over the border and the decision about
+/// where it stands has to be made here too. The margin is the widest
+/// reach of anything that writes blocks -- which is a fallen trunk
+/// rather than a canopy, so shrinking this to `MAX_CANOPY_RADIUS` would
+/// break the deadfall without touching a single tree.
 struct ColumnCache {
     columns: Vec<Column>,
 }
 
 /// Side of the cached area: the chunk plus a feature margin each side.
 const CACHE_SPAN: i32 = CHUNK_SIZE_X as i32 + FEATURE_MARGIN * 2;
-/// ...and of the heights behind it, which reach one further out.
+// The heights behind a cache reach one ring further out than the columns
+// do, which is what lets every column have its slope worked out from
+// *real* neighbours rather than from a clamped lookup at the edge of an
+// array. Without it the outermost columns -- which are exactly the ones
+// a neighbouring chunk also computes -- would get a different slope
+// depending on which chunk was asking, and the two would disagree about
+// what the ground there is made of.
+//
+// That ring is now the ring `build_column_tile` reads out of the
+// neighbouring height tiles, so there is no separate span constant for
+// it any more: a tile is 16 wide and the block it works from is 18.
+
+/// The columns of one chunk-sized tile.
 ///
-/// That one extra ring is what lets every cached column have its slope
-/// worked out from *real* neighbours rather than from a clamped lookup
-/// at the edge of the array. Without it the outermost columns -- which
-/// are exactly the ones a neighbouring chunk also computes -- would get
-/// a different slope depending on which chunk was asking, and the two
-/// would disagree about what the ground there is made of.
-const HEIGHT_SPAN: i32 = CACHE_SPAN + 2;
+/// **Why tiles exist at all.** A chunk's `ColumnCache` covers the chunk
+/// *plus a feature margin*, because a tree rooted next door drops leaves
+/// over the border and the decision about where it stands has to be made
+/// on both sides of the seam. That margin is what makes the cache
+/// `CACHE_SPAN` square -- 28x28 columns for a 16x16 chunk -- and it means every column in the ring is
+/// worked out again by each neighbouring chunk that also reaches into
+/// it. Nearly half of all the column work in the generator was a
+/// neighbour's column being computed for the second, fourth or eighth
+/// time, and a column is the expensive half of making terrain: half a
+/// dozen fractal noise fields, five samples of the river field, and a
+/// climate classification on top of both.
+///
+/// So columns are worked out a chunk-aligned tile at a time and kept,
+/// and a `ColumnCache` is assembled by copying out of nine of them. Each
+/// tile is then computed once and read nine times rather than computed
+/// nine times, and the arithmetic is identical either way -- a column is
+/// a pure function of the seed and its own coordinates, which is the
+/// same property that lets the server evict a chunk and regenerate it
+/// later.
+struct ColumnTile {
+    columns: Box<[Column]>,
+}
+
+/// Heights for one chunk-aligned tile.
+///
+/// Kept apart from the columns rather than as a field of them, because
+/// the two have different reach: a tile's *columns* need the heights of
+/// the ring one cell outside the tile in order to take a slope, so
+/// building one tile of columns reads into the tiles on all four sides.
+/// Cached separately, each height tile is read by twenty-five chunks
+/// rather than by one.
+struct HeightTile {
+    heights: Box<[i32]>,
+}
+
+/// How many tiles of each kind one thread keeps.
+///
+/// Sized for the access pattern rather than to a memory budget: making a
+/// chunk touches twenty-five height tiles and nine column tiles, and the
+/// generator pool works through a queue ordered by distance from a
+/// player, so consecutive chunks are neighbours far more often than not.
+/// A hundred and twenty-eight height tiles is a band of the world five
+/// chunks wide resident per thread, which is what a spiral outwards from
+/// somebody standing still actually walks over.
+const HEIGHT_TILES_KEPT: usize = 128;
+const COLUMN_TILES_KEPT: usize = 64;
+
+/// The identity of the world a tile belongs to.
+///
+/// Seed and preset, not a pointer: two `WorldGen`s built from the same
+/// seed and preset are the same generator by construction -- that is the
+/// determinism the whole save format rests on -- and keying on the
+/// object would mean the client's copy of the generator could not read
+/// tiles the server's copy had already worked out in the same process,
+/// which is exactly the singleplayer case.
+type WorldKey = (u32, Preset, i32, Scale);
+
+/// Per-thread tile store.
+///
+/// Thread-local rather than shared behind a lock, and that is the whole
+/// design: a shared cache would put a mutex in the middle of the one
+/// loop the generator pool exists to run on every core at once, and the
+/// hit rate that matters here comes from *locality* -- consecutive
+/// chunks on one thread -- rather than from sharing between them.
+/// Duplicating a tile across two threads costs a few kilobytes and
+/// saves a lock.
+struct TileStore<T> {
+    /// Insertion-ordered, and evicted from the front. A plain queue
+    /// rather than an LRU: the access pattern is a walk outwards, so the
+    /// oldest tile really is the furthest away, and keeping use counts
+    /// would cost more than it saved.
+    order: std::collections::VecDeque<(WorldKey, i32, i32)>,
+    tiles: std::collections::HashMap<(WorldKey, i32, i32), T>,
+    kept: usize,
+}
+
+impl<T> TileStore<T> {
+    fn new(kept: usize) -> Self {
+        Self {
+            order: std::collections::VecDeque::with_capacity(kept + 1),
+            tiles: std::collections::HashMap::with_capacity(kept + 1),
+            kept,
+        }
+    }
+
+    fn get_or_insert(&mut self, key: (WorldKey, i32, i32), make: impl FnOnce() -> T) -> &T {
+        // One lookup rather than two. Eviction has to happen *after*
+        // the insert and cannot hold the entry's borrow, which is why
+        // this is a vacant-entry check rather than `or_insert_with`.
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.tiles.entry(key) {
+            slot.insert(make());
+            self.order.push_back(key);
+            while self.order.len() > self.kept {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.tiles.remove(&oldest);
+                }
+            }
+        }
+        self.tiles.get(&key).expect("just inserted")
+    }
+}
+
+thread_local! {
+    static HEIGHT_TILES: std::cell::RefCell<TileStore<HeightTile>> =
+        std::cell::RefCell::new(TileStore::<HeightTile>::new(HEIGHT_TILES_KEPT));
+    static COLUMN_TILES: std::cell::RefCell<TileStore<ColumnTile>> =
+        std::cell::RefCell::new(TileStore::<ColumnTile>::new(COLUMN_TILES_KEPT));
+    // Lake judgements, keyed by lake cell rather than by tile. A cell is
+    // three chunks on a side, so this is a band of the world far wider
+    // than the height tiles cover, for a few bytes each.
+    static LAKE_SITES: std::cell::RefCell<TileStore<Option<Lake>>> =
+        std::cell::RefCell::new(TileStore::<Option<Lake>>::new(LAKE_SITES_KEPT));
+}
+
+/// How many lake cells one thread remembers. See `LAKE_SITES`.
+const LAKE_SITES_KEPT: usize = 256;
+
+/// Side of a tile, in columns. A chunk, so a tile coordinate and a chunk
+/// coordinate are the same number.
+const TILE: i32 = CHUNK_SIZE_X as i32;
+
+/// Heights for the tile at (`tx`, `tz`), computed or remembered.
+fn height_tile_with<R>(gen: &WorldGen, tx: i32, tz: i32, read: impl FnOnce(&[i32]) -> R) -> R {
+    HEIGHT_TILES.with(|store| {
+        let mut store = store.borrow_mut();
+        let tile = store.get_or_insert((gen.key(), tx, tz), || {
+            let (ox, oz) = (tx * TILE, tz * TILE);
+            let mut heights = Vec::with_capacity((TILE * TILE) as usize);
+            for lz in 0..TILE {
+                for lx in 0..TILE {
+                    heights.push(gen.height_on_planet(ox + lx, oz + lz));
+                }
+            }
+            HeightTile {
+                heights: heights.into_boxed_slice(),
+            }
+        });
+        read(&tile.heights)
+    })
+}
+
+/// One height, wherever in the world it is.
+///
+/// Deliberately *not* the inner call of any loop: it resolves a tile per
+/// lookup. The tile builder below reads whole rows out of one tile at a
+/// time, which is what makes the cache pay.
+fn cached_height(gen: &WorldGen, gx: i32, gz: i32) -> i32 {
+    let (tx, tz) = (gx.div_euclid(TILE), gz.div_euclid(TILE));
+    let (lx, lz) = (gx.rem_euclid(TILE), gz.rem_euclid(TILE));
+    height_tile_with(gen, tx, tz, |heights| heights[(lz * TILE + lx) as usize])
+}
+
+/// Columns for the tile at (`tx`, `tz`), computed or remembered.
+fn column_tile_with<R>(gen: &WorldGen, tx: i32, tz: i32, read: impl FnOnce(&[Column]) -> R) -> R {
+    // Built *outside* the store's borrow, because building a column tile
+    // reads height tiles, and a builder that ran while the column store
+    // was borrowed would be one refactor away from a re-entrant borrow
+    // and a panic. Two statements make that impossible rather than
+    // merely unlikely.
+    let key = (gen.key(), tx, tz);
+    let known = COLUMN_TILES.with(|store| store.borrow().tiles.contains_key(&key));
+    if !known {
+        let tile = build_column_tile(gen, tx, tz);
+        COLUMN_TILES.with(|store| {
+            store.borrow_mut().get_or_insert(key, || tile);
+        });
+    }
+    COLUMN_TILES.with(|store| {
+        let mut store = store.borrow_mut();
+        // The tile can have been evicted between the two statements
+        // above only if the store is smaller than one chunk's working
+        // set, which the constants rule out; the closure is the honest
+        // fallback rather than an `expect`.
+        let tile = store.get_or_insert(key, || build_column_tile(gen, tx, tz));
+        read(&tile.columns)
+    })
+}
+
+/// Works out one tile's worth of columns.
+///
+/// The heights come in as a 20x20 block -- the tile plus a ring two
+/// wide -- assembled out of the height tile store, which is where the
+/// second layer of sharing comes from. One ring is what a slope needs;
+/// the second is for the cliff-foot test, which looks two columns out
+/// (see `CLIFF_STEP`). It was 18x18 for a long time, and widening it
+/// costs seventy-six more cached lookups per tile against the two
+/// hundred and fifty-six columns of noise it already pays for.
+fn build_column_tile(gen: &WorldGen, tx: i32, tz: i32) -> ColumnTile {
+    const RING: i32 = 2;
+    const SPAN: i32 = TILE + 2 * RING;
+    let (ox, oz) = (tx * TILE, tz * TILE);
+    let mut heights = vec![0i32; (SPAN * SPAN) as usize];
+    // The tile's own heights in one pass of row copies, then the ring
+    // around them one column at a time. The ring is the only part that
+    // reaches into another tile.
+    height_tile_with(gen, tx, tz, |own| {
+        for lz in 0..TILE {
+            let src = (lz * TILE) as usize;
+            let dst = ((lz + RING) * SPAN + RING) as usize;
+            heights[dst..dst + TILE as usize].copy_from_slice(&own[src..src + TILE as usize]);
+        }
+    });
+    for lz in -RING..TILE + RING {
+        for lx in -RING..TILE + RING {
+            if lx >= 0 && lz >= 0 && lx < TILE && lz < TILE {
+                continue;
+            }
+            heights[((lz + RING) * SPAN + lx + RING) as usize] = cached_height(gen, ox + lx, oz + lz);
+        }
+    }
+    let at = |lx: i32, lz: i32| ((lz + RING) * SPAN + lx + RING) as usize;
+    let height_at = |lx: i32, lz: i32| heights[at(lx, lz)];
+
+    // The waterline over every column of the block, sea or lake, for
+    // the tile and the one ring the seal below reads. A lake's own
+    // footprint is what makes the lookup non-trivial, and it is asked
+    // once per cell here rather than five times per column below.
+    let mut waterline = vec![SEA_LEVEL; (SPAN * SPAN) as usize];
+    for lz in -1..=TILE {
+        for lx in -1..=TILE {
+            waterline[at(lx, lz)] = match gen.lake_near(ox + lx, oz + lz) {
+                Some((lake, _)) => lake.water,
+                None => SEA_LEVEL,
+            };
+        }
+    }
+    let water_at = |lx: i32, lz: i32| waterline[at(lx, lz)];
+
+    // **A swamp's pools**, dug here and nowhere else, because this is the
+    // one place that has a column's neighbours in hand: a pool can only be
+    // dug where every neighbour stands at least as high as the column, so
+    // the water put in it is held on all four sides and never runs out
+    // across a lower one (`WorldGen::swamp_pool`). For the tile and the ring
+    // the seal reads, as the waterline is.
+    //
+    // **Not in `height_at`**, which is where a lake's bowl is dug. A lake is
+    // decided by its rim alone, before any biome is known; a pool is a swamp's
+    // and the swamp is decided *from* the height, so the height cannot also
+    // be decided from it -- and asking four neighbours' heights inside
+    // `height_at` would be four more columns of fractal noise for every
+    // column in the world. The cost is that `height_at` is the ground a pool
+    // was dug into rather than the pool's bed, which nothing that asks it
+    // cares about: a pool is a cell or two of water on flat ground.
+    let mut dig = vec![0i32; (SPAN * SPAN) as usize];
+    for lz in -1..=TILE {
+        for lx in -1..=TILE {
+            let around = [height_at(lx + 1, lz), height_at(lx - 1, lz), height_at(lx, lz + 1), height_at(lx, lz - 1)];
+            dig[at(lx, lz)] = gen.swamp_pool(ox + lx, oz + lz, height_at(lx, lz), water_at(lx, lz), around);
+        }
+    }
+    let dig_at = |lx: i32, lz: i32| dig[at(lx, lz)];
+    // The ground and the water a column really has, pools included.
+    let ground_at = |lx: i32, lz: i32| height_at(lx, lz) - dig_at(lx, lz);
+    let water_of = |lx: i32, lz: i32| if dig_at(lx, lz) > 0 { height_at(lx, lz) } else { water_at(lx, lz) };
+    // A column with water standing over it.
+    let wet = |lx: i32, lz: i32| ground_at(lx, lz) < water_of(lx, lz);
+
+    let mut columns = Vec::with_capacity((TILE * TILE) as usize);
+    for lz in 0..TILE {
+        for lx in 0..TILE {
+            let (gx, gz) = (ox + lx, oz + lz);
+            let height = height_at(lx, lz);
+            let water = water_at(lx, lz);
+            // The same gradient `slope_at` takes, off the heights
+            // already in hand rather than four more columns' worth of
+            // fractal noise apiece.
+            let slope = slope_from(
+                height_at(lx + 1, lz),
+                height_at(lx - 1, lz),
+                height_at(lx, lz + 1),
+                height_at(lx, lz - 1),
+            );
+            let biome = gen.biome_from(gx, gz, height);
+            let mut surface = surface_for(height, biome, slope);
+            // A cold sea's island has a shore of stone. See
+            // `scale::ROCKY_SHORE`; `surface_at` asks the same.
+            surface = gen.island_shore(gx, gz, biome, surface);
+
+            // A lake bed -- see `WorldGen::lake_bed`, which `surface_at`
+            // asks too, so the tests and the chunks agree about a pond.
+            if let Some(bed) = WorldGen::lake_bed(height, water) {
+                surface = bed;
+            }
+
+            // The sea floor, as a patchwork rather than three bands. See
+            // `WorldGen::seabed_surface`. Before the clay and gravel below,
+            // which still get the last word where the deposit field says
+            // the water dropped them.
+            if biome == Biome::Ocean && water == SEA_LEVEL && height < SEA_LEVEL {
+                surface = gen.seabed_surface(gx, gz, SEA_LEVEL - height, surface);
+            }
+
+            // Peat, in a bog. Two to four layers under the turf rather
+            // than the soil depth the slope gave, because peat is a
+            // thing that *accumulates* -- its depth is how long the bog
+            // has been one, not how flat the ground is -- and the turf
+            // itself is gone where the ground is wettest: beside open
+            // water, and in the hollows the strata field picks out, a
+            // bog is bare peat you can dig from the top. That is the
+            // half a player sees, and it is what tells a bog from a
+            // marsh at a glance: the marsh is green to the water's
+            // edge and the bog is brown.
+            if biome == Biome::Bog && surface.filler == BLOCK_PEAT {
+                // `soil` counts the top cell (see `Surface::soil` and
+                // `fill_column`), so three to five here is two to four
+                // cells of peat under the turf -- and three to five of
+                // it where the turf is gone.
+                surface.soil = WorldGen::bog_soil(gen.seed, gx, gz);
+                let beside_water = wet(lx + 1, lz) || wet(lx - 1, lz) || wet(lx, lz + 1) || wet(lx, lz - 1);
+                if beside_water || fbm(&gen.strata_noise, gx as f64 + 977.0, gz as f64, 0.05, 1) > 0.12 {
+                    surface.top = BLOCK_PEAT;
+                }
+            }
+
+            // **The savanna's bare ground**, decided the way the bog's is:
+            // per column, off a slow patchy field, so the bare earth comes
+            // in patches a few blocks to a few dozen across rather than as
+            // a speckle. Turf stays where the field is low. See
+            // `types::BLOCK_SANDY_SOIL` for why grassland needs it to read
+            // as dry, and for what grows on it and what does not.
+            //
+            // Only over turf, so a bank the slope rules stripped to rock or
+            // a lake bed stays what they made it; and off the strata field
+            // at its own offset, so a bare patch does not sit on top of
+            // wherever that field puts a bog's peat.
+            if biome == Biome::Savanna
+                && surface.top == crate::types::BLOCK_DRY_TURF
+                && fbm(&gen.strata_noise, gx as f64 - 1733.0, gz as f64 + 811.0, 0.04, 2) > 0.1
+            {
+                surface.top = crate::types::BLOCK_SANDY_SOIL;
+            }
+
+            // **A swamp pool's bed, and the mud round it.** The biome and
+            // the slope above were read off the ground as it was before the
+            // pool was dug, which is the ground the swamp is; from here on
+            // the column is its pool -- a bed of mud a cell or two down, with
+            // water to the brim -- so the clay below sees still water over it,
+            // and a pool in the clay country gets a clay bed. A hummock beside
+            // a pool is mud to its edge rather than turf: the ring a boot sinks
+            // into, and the thing that makes a swamp slow to cross.
+            let dug = dig_at(lx, lz);
+            let (height, water) = if dug > 0 { (height - dug, height) } else { (height, water) };
+            if dug > 0 {
+                surface = Surface { top: crate::types::BLOCK_MUD, filler: BLOCK_DIRT, soil: 3 };
+            } else if biome == Biome::Swamp
+                && surface.top == BLOCK_GRASS
+                && [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| dig_at(lx + dx, lz + dz) > 0)
+            {
+                surface.top = crate::types::BLOCK_MUD;
+            }
+
+            // The foot of a cliff: ground with a bench face standing
+            // over it, two columns out in some direction. Not a face
+            // in its own right -- that is bare rock already -- but the
+            // ground under one, flat or banked. *Banked* is doing real
+            // work: the first version asked for flat ground here, and
+            // it found twenty-eight columns in a hundred and sixty-nine
+            // chunks, because the ground under a face is nearly always
+            // still rising toward it. Scree on a slope is what scree
+            // is.
+            let cliff_foot = height > SEA_LEVEL + 2
+                && slope < ROCK_SLOPE
+                && [(2, 0), (-2, 0), (0, 2), (0, -2)]
+                    .iter()
+                    .any(|&(dx, dz)| height_at(lx + dx, lz + dz) - height >= CLIFF_STEP);
+
+            // Clay and gravel, the two deposits water leaves, and the
+            // scree a cliff leaves.
+            //
+            // After the biome and the slope have had their say, because
+            // neither is a *climate*: they are what the water did here,
+            // and what the water did depends on where the water is. Clay
+            // wants the still shallows and the flat ground just above
+            // them; gravel wants the opposite -- a bed that ran fast, or
+            // a slope that has shed everything finer than a stone.
+            // The free geometric tests run first and the noise runs
+            // last, once: most land columns are neither near water nor
+            // on a bank slope, and they should not pay two Perlin
+            // samples to find that out.
+            //
+            // The waterline is the column's own rather than the sea's,
+            // so a lake shore is a shore and gets the clay a shore
+            // gets, and a lake bed is a shallows and gets what the surf
+            // zone gets -- clay in one pond, gravel in the next, sand
+            // in most. That is what makes wading into a pond worth
+            // doing once.
+            let near_water = height <= water + 2;
+            let clay_site = near_water && slope < BANK_SLOPE;
+            // **Gravel only where water left it.** A bank slope used to
+            // qualify too, and so every hillside in the mountains carried
+            // loose patches that slid out from under a player's feet and
+            // read as litter on the rock -- "убери блоки гравия с гор".
+            // The slope's rubble is the scree below, and it is stone now.
+            let gravel_site = near_water;
+            if clay_site || gravel_site || cliff_foot {
+                let deposit = gen.deposit(gx, gz);
+                if clay_site && deposit > CLAY_DEPOSIT {
+                    surface.top = BLOCK_CLAY;
+                    surface.filler = BLOCK_CLAY;
+                    surface.soil = 3;
+                } else if gravel_site && deposit < GRAVEL_DEPOSIT {
+                    surface.top = BLOCK_GRAVEL;
+                    surface.filler = BLOCK_GRAVEL;
+                    surface.soil = 2;
+                } else if cliff_foot && !near_water && deposit < SCREE_DEPOSIT {
+                    // Scree: what a face sheds, lying where it landed.
+                    // A patch rather than a strip, because the deposit
+                    // field decides.
+                    //
+                    // **Rubble, not gravel.** It was gravel, and gravel
+                    // falls: a mountain's every cliff foot was a patch
+                    // that collapsed into the hole a player dug beside it,
+                    // and the player asked for the gravel off the
+                    // mountains. Cobble is the same broken rock that does
+                    // not run, and it is what a player breaks it into
+                    // anyway.
+                    surface.top = BLOCK_COBBLESTONE;
+                    surface.filler = BLOCK_COBBLESTONE;
+                    surface.soil = 2;
+                }
+            }
+
+            // **The margin of a river**, after the deposits, because it is
+            // the finer of the two and the one a player stands on: the bed,
+            // and a dry column with the river's water against it on any of
+            // eight sides. See `banks::river_margin` for what it lays and why
+            // a ring of sand was not a river's edge. The eight reads are of
+            // the ring this tile already holds; the field is sampled only
+            // for the columns that pass them.
+            if dug == 0 && water == SEA_LEVEL {
+                let river_water = |lx: i32, lz: i32| wet(lx, lz) && water_of(lx, lz) == SEA_LEVEL;
+                let bed = biome == Biome::River && height < SEA_LEVEL;
+                let bank = !bed
+                    && (SEA_LEVEL..=SEA_LEVEL + 4).contains(&height)
+                    && !matches!(biome, Biome::Beach | Biome::Ocean)
+                    && [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (1, -1), (-1, 1)]
+                        .iter()
+                        .any(|&(dx, dz)| river_water(lx + dx, lz + dz));
+                if bed || bank {
+                    if let Some(margin) = gen.river_margin(gx, gz, height - SEA_LEVEL, biome) {
+                        surface = margin;
+                    }
+                }
+            }
+
+            // **The soil under the turf is the climate's** (`ground`): the
+            // plain dirt a biome's surface names becomes the earth that
+            // climate makes. Only where the surface still says dirt, so clay,
+            // peat, gravel and a stripped bank stay what earlier rules made
+            // them. The mountains and the river keep plain dirt.
+            {
+                use crate::types::{
+                    BLOCK_ANDOSOL, BLOCK_CHERNOZEM, BLOCK_GLEY, BLOCK_LATERITE, BLOCK_LOAM, BLOCK_LOESS,
+                    BLOCK_PERMAFROST, BLOCK_PODZOL, BLOCK_RENDZINA, BLOCK_SOLONCHAK,
+                };
+                let soil = match biome {
+                    _ if !ground_on() => None,
+                    Biome::Forest => Some(BLOCK_LOAM),
+                    // The steppe's black earth, and loess where the wind laid
+                    // it: the same strata field at its own offset.
+                    Biome::Plains => Some(
+                        if fbm(&gen.strata_noise, gx as f64 + 2203.0, gz as f64 - 1409.0, 0.008, 1) > 0.25 {
+                            BLOCK_LOESS
+                        } else {
+                            BLOCK_CHERNOZEM
+                        },
+                    ),
+                    Biome::Taiga => Some(BLOCK_PODZOL),
+                    Biome::Savanna => Some(BLOCK_LATERITE),
+                    Biome::Swamp => Some(BLOCK_GLEY),
+                    Biome::BirchForest => Some(BLOCK_RENDZINA),
+                    Biome::DeadForest => Some(BLOCK_ANDOSOL),
+                    Biome::Tundra => Some(BLOCK_PERMAFROST),
+                    _ => None,
+                };
+                if let Some(soil) = soil {
+                    if surface.filler == BLOCK_DIRT {
+                        surface.filler = soil;
+                    }
+                    // The top only where bare earth *is* the biome's face -- a
+                    // dead forest's. Elsewhere a dirt top is silt on a lake
+                    // bed or a stripped bank, which is not the climate's soil.
+                    if surface.top == BLOCK_DIRT && biome == Biome::DeadForest {
+                        surface.top = soil;
+                    }
+                }
+                // **A salt flat in the desert**: the low, flat floor of a dry
+                // basin, in patches off the same kind of slow field.
+                if biome == Biome::Desert
+                    && ground_on()
+                    && surface.top == BLOCK_SAND
+                    && height <= SEA_LEVEL + 6
+                    && fbm(&gen.strata_noise, gx as f64 - 911.0, gz as f64 - 2687.0, 0.03, 1) > 0.3
+                {
+                    surface.top = BLOCK_SOLONCHAK;
+                }
+            }
+
+            let (rock, rock_depth, granite_from) = gen.stratum(gx, gz, biome, surface);
+
+            // **Rubble in the stone it broke off** (`ground::rubble_of`): a
+            // river bed over shale is shale gravel, the scree under a
+            // granite face granite cobble, a quartzite desert white sand.
+            // After the stratum, which reads the surface's sand as it was.
+            // Plain stone's rubble is the common rubble, so a column over
+            // stone is untouched.
+            if rock != BLOCK_STONE && ground_on() {
+                use crate::ground::{rubble_of, Form};
+                let remap = |id: BlockId| match id {
+                    BLOCK_GRAVEL => rubble_of(rock, Form::Gravel),
+                    BLOCK_COBBLESTONE => rubble_of(rock, Form::Cobble),
+                    // Sand only in a desert over quartzite: a beach's sand is
+                    // the sea's, carried from everywhere.
+                    BLOCK_SAND if biome == Biome::Desert => rubble_of(rock, Form::Sand),
+                    other => other,
+                };
+                surface.top = remap(surface.top);
+                surface.filler = remap(surface.filler);
+            }
+            // **Scree in a wet country is mossy on top** -- the one cell of
+            // it the sky sees. The column's data, so it costs the fill loop
+            // nothing.
+            if biome.grows_moss() && crate::ground::rock_of(surface.top).is_some_and(|(_, f)| f == Some(crate::ground::Form::Cobble)) {
+                surface.top = crate::ground::with_moss(surface.top);
+            }
+
+            // The cave seal: the crust under standing water, and the
+            // wall beside it. Any wet column among this one and its
+            // four neighbours contributes the band from two below its
+            // bed to the top of its water, and the union is what the
+            // carver leaves alone. For a sea-floor column that is the
+            // three cells of crust it always had; for the bank of a
+            // lake it is the wall the water leans on, which is new --
+            // and it is why a lake can be dug into a hillside that has
+            // caves in it.
+            let mut seal = (i32::MAX, i32::MIN);
+            for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+                if wet(lx + dx, lz + dz) {
+                    // The pool's own bed and brim, so a cave cannot open the
+                    // floor of a swamp pool any more than a lake's.
+                    seal.0 = seal.0.min(ground_at(lx + dx, lz + dz) - 2);
+                    seal.1 = seal.1.max(water_of(lx + dx, lz + dz));
+                }
+            }
+
+            columns.push(Column {
+                height,
+                biome,
+                surface,
+                slope,
+                water,
+                rock,
+                rock_depth,
+                granite_from,
+                seal,
+            });
+        }
+    }
+    ColumnTile {
+        columns: columns.into_boxed_slice(),
+    }
+}
 
 impl ColumnCache {
     fn build(gen: &WorldGen, origin_x: i32, origin_z: i32) -> Self {
-        let reach = FEATURE_MARGIN + 1;
-        let mut heights = Vec::with_capacity((HEIGHT_SPAN * HEIGHT_SPAN) as usize);
-        for lz in -reach..(CHUNK_SIZE_Z as i32 + reach) {
-            for lx in -reach..(CHUNK_SIZE_X as i32 + reach) {
-                heights.push(gen.height_at(origin_x + lx, origin_z + lz));
-            }
-        }
-        let height_at = |lx: i32, lz: i32| {
-            let x = lx + reach;
-            let z = lz + reach;
-            heights[(z * HEIGHT_SPAN + x) as usize]
+        // A chunk's cache is a window onto the tiled world: the chunk's
+        // own tile plus whatever of the eight around it the feature
+        // margin reaches into. Assembling it is a row copy per
+        // overlapping tile, and the columns themselves were worked out
+        // by whichever chunk reached that tile first.
+        const {
+            assert!(
+                FEATURE_MARGIN < TILE,
+                "a feature margin wider than a tile would reach past the eight neighbours"
+            )
         };
+        debug_assert!(
+            origin_x.rem_euclid(TILE) == 0 && origin_z.rem_euclid(TILE) == 0,
+            "a column cache is built for a chunk, and a chunk is tile-aligned"
+        );
+        let (tx0, tz0) = (origin_x.div_euclid(TILE), origin_z.div_euclid(TILE));
 
-        let mut columns = Vec::with_capacity((CACHE_SPAN * CACHE_SPAN) as usize);
-        for lz in -FEATURE_MARGIN..(CHUNK_SIZE_Z as i32 + FEATURE_MARGIN) {
-            for lx in -FEATURE_MARGIN..(CHUNK_SIZE_X as i32 + FEATURE_MARGIN) {
-                let (gx, gz) = (origin_x + lx, origin_z + lz);
-                let height = height_at(lx, lz);
-                // The same gradient `slope_at` takes, off the heights
-                // already in hand rather than four more columns' worth
-                // of fractal noise apiece.
-                let slope = slope_from(
-                    height_at(lx + 1, lz),
-                    height_at(lx - 1, lz),
-                    height_at(lx, lz + 1),
-                    height_at(lx, lz - 1),
-                );
-                let biome = gen.biome_from(gx, gz, height);
-                let mut surface = surface_for(height, biome, slope);
-                // Clay and gravel, the two deposits water leaves.
-                //
-                // After the biome and the slope have had their say,
-                // because neither is a *climate*: they are what the
-                // water did here, and what the water did depends on
-                // where the water is. Clay wants the still shallows and
-                // the flat ground just above them; gravel wants the
-                // opposite -- a bed that ran fast, or a slope that has
-                // shed everything finer than a stone.
-                // The free geometric tests run first and the noise runs
-                // last, once: most land columns are neither near water
-                // nor on a bank slope, and they should not pay two
-                // Perlin samples to find that out.
-                let near_water = height <= SEA_LEVEL + 2;
-                let clay_site = near_water && slope < BANK_SLOPE;
-                let gravel_site =
-                    near_water || (BANK_SLOPE..ROCK_SLOPE).contains(&slope);
-                if clay_site || gravel_site {
-                    let deposit = gen.deposit(gx, gz);
-                    if clay_site && deposit > CLAY_DEPOSIT {
-                        surface.top = BLOCK_CLAY;
-                        surface.filler = BLOCK_CLAY;
-                        surface.soil = 3;
-                    } else if gravel_site && deposit < GRAVEL_DEPOSIT {
-                        surface.top = BLOCK_GRAVEL;
-                        surface.filler = BLOCK_GRAVEL;
-                        surface.soil = 2;
-                    }
+        let blank = Column {
+            height: 0,
+            biome: Biome::Plains,
+            surface: surface_for(0, Biome::Plains, 0.0),
+            slope: 0.0,
+            water: SEA_LEVEL,
+            rock: BLOCK_STONE,
+            rock_depth: 0,
+            granite_from: i32::MAX,
+            seal: (i32::MAX, i32::MIN),
+        };
+        let mut columns = vec![blank; (CACHE_SPAN * CACHE_SPAN) as usize];
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                // Where this tile lands in the window, in window
+                // coordinates. The middle tile fills the middle 16x16;
+                // the corners contribute a `FEATURE_MARGIN` square each.
+                let tile_x0 = dx * TILE + FEATURE_MARGIN;
+                let tile_z0 = dz * TILE + FEATURE_MARGIN;
+                let x_from = tile_x0.max(0);
+                let x_to = (tile_x0 + TILE).min(CACHE_SPAN);
+                let z_from = tile_z0.max(0);
+                let z_to = (tile_z0 + TILE).min(CACHE_SPAN);
+                if x_from >= x_to || z_from >= z_to {
+                    continue;
                 }
-
-                columns.push(Column {
-                    height,
-                    biome,
-                    surface,
+                column_tile_with(gen, tx0 + dx, tz0 + dz, |tile| {
+                    for z in z_from..z_to {
+                        let src = ((z - tile_z0) * TILE + (x_from - tile_x0)) as usize;
+                        let dst = (z * CACHE_SPAN + x_from) as usize;
+                        let run = (x_to - x_from) as usize;
+                        columns[dst..dst + run].copy_from_slice(&tile[src..src + run]);
+                    }
                 });
             }
         }
@@ -2097,18 +9342,58 @@ impl ColumnCache {
     }
 }
 
-/// One nodule of flint per this many columns, by what the ground is.
+/// One nodule of flint per this many columns, by what the ground is and
+/// what rock lies under it.
 ///
 /// Rock first, because that is where flint forms and where the ground
 /// has nothing on it to hide a nodule; then sand, which is what a
 /// nodule washed out of a bank ends up lying on; then everywhere else,
 /// where it is rare enough to be worth stopping for.
-fn flint_spacing(ground: crate::types::BlockId) -> u32 {
-    match crate::types::block_kind(ground) {
-        BLOCK_STONE | BLOCK_COBBLESTONE => 30,
+///
+/// **And limestone is the rock it forms in.** Flint is silica that
+/// gathered into nodules inside chalk and limestone as they were laid
+/// down; it is not found in granite because granite never had any. So
+/// where the rock under a bared slope is limestone the nodules lie
+/// two and a half times as thick, and a knapper who has learnt that
+/// walks toward the pale rock rather than combing every cliff alike.
+/// That is the whole mechanic: knowing where to look is a skill the
+/// world rewards, and the reward is a stone age that goes faster the
+/// second time.
+///
+/// `rock` is the column's upper stratum (see `stratum`), not the block
+/// under the nodule: a bared slope is cobble on top whatever the rock
+/// beneath, and it is the rock beneath that decides.
+fn flint_spacing(ground: crate::types::BlockId, rock: crate::types::BlockId) -> u32 {
+    // Any rock's cobble or pebble is ground as cobble is; any new rock is
+    // bare stone (`ground::as_common`).
+    match crate::ground::as_common(ground) {
+        BLOCK_STONE | BLOCK_COBBLESTONE | BLOCK_LIMESTONE | BLOCK_SANDSTONE | BLOCK_GRANITE => {
+            // ...and chalk is where flint grows, as limestone is.
+            if rock == BLOCK_LIMESTONE || rock == crate::types::BLOCK_CHALK {
+                12
+            } else {
+                30
+            }
+        }
         BLOCK_SAND => 64,
         _ => 150,
     }
+}
+
+/// Whether a block is one of the rocks the generator lays under the
+/// soil -- the thing caves are cut through, ore replaces and a cave
+/// floor is made of. Cobble is not: it is a *surface*, the weathered
+/// skin on a bared slope, and nothing that asks this question about a
+/// buried cell should find it there.
+fn is_rock(id: crate::types::BlockId) -> bool {
+    matches!(
+        id,
+        BLOCK_STONE | BLOCK_SANDSTONE | BLOCK_LIMESTONE | BLOCK_GRANITE
+    )
+    // ...and the ten rocks `ground` added, save gabbro, which is a dyke's as
+    // basalt is and is left out for basalt's reason.
+    // A range, not a scan: this is asked of every buried cell.
+    || ((crate::types::BLOCK_SHALE..=crate::types::BLOCK_TUFF).contains(&id) && id != crate::types::BLOCK_GABBRO)
 }
 
 /// Fractional Brownian motion: several octaves of the same field, each
@@ -2190,6 +9475,75 @@ fn hash2(x: i32, z: i32, seed: u32) -> u32 {
 /// Silently skipped when they are: the part that misses belongs to a
 /// neighbouring chunk, which is generating it itself from the same
 /// inputs. `overwrite` false only fills air.
+/// Reads one cell of a chunk being generated, if it is inside it.
+///
+/// The counterpart of `put_block`, and it exists for one reason: a pass
+/// that writes only into air (`overwrite: false`) does not know whether
+/// its write landed, and a pass that builds on top of that write has to
+/// ask. See `place_deadfall`, where a fungus must not be laid on a cell
+/// the trunk failed to claim.
+/// Hangs a bracket fungus on the side of the wood at `(lx, ly, lz)`.
+///
+/// Tries the four flanks in a fixed order and takes the first that is
+/// air: a shelf inside a second trunk is a shelf nobody sees, and a
+/// deadfall lying against a boulder should carry its fungus on the open
+/// side. The facing is found by asking `support_at` which way each one
+/// leans, so the picture, the support rule and this pass are one
+/// answer rather than three that have to be kept in step.
+fn attach_bracket(blocks: &mut [BlockId], lx: i32, ly: i32, lz: i32) {
+    use crate::types::{faced, support_at, Facing, BLOCK_BRACKET_FUNGUS};
+    for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+        let block = faced(BLOCK_BRACKET_FUNGUS, facing);
+        let (dx, _, dz) = support_at(block);
+        // The cell the shelf would sit in is on the opposite side of the
+        // wood from where it looks for support.
+        let (sx, sz) = (lx - dx, lz - dz);
+        if read_block(blocks, sx, ly, sz) != Some(crate::types::BLOCK_AIR) {
+            continue;
+        }
+        put_block(blocks, sx, ly, sz, block, false);
+        return;
+    }
+}
+
+/// Is this a cell of a tree's trunk: a log, or -- in a world of branching
+/// trees, where a trunk is built of the branch pieces -- a bough?
+///
+/// **The bough is the case that matters.** The first `place_hives` asked
+/// `wood::is_log` alone, and the default world grew no hive at all: its
+/// trunks are boughs from the ground up (`branches`), and a log is only the
+/// old, straight trees.
+fn is_trunk(block: crate::types::BlockId) -> bool {
+    crate::wood::is_log(block) || crate::types::is_bough(block)
+}
+
+fn read_block(
+    blocks: &[crate::types::BlockId],
+    lx: i32,
+    y: i32,
+    lz: i32,
+) -> Option<crate::types::BlockId> {
+    if lx < 0 || lz < 0 || lx >= CHUNK_SIZE_X as i32 || lz >= CHUNK_SIZE_Z as i32 {
+        return None;
+    }
+    if y < 0 || y >= CHUNK_SIZE_Y as i32 {
+        return None;
+    }
+    Some(blocks[Chunk::index(lx as usize, y as usize, lz as usize)])
+}
+
+/// The sea's warmth at a column of a chunk, from the chunk's four corners
+/// (`WorldGen::sea_warmth_corners`): a bilinear blend, which along a border
+/// reads only the two corners that border shares -- so the neighbour on the
+/// other side of it gets the same number. See `WorldGen::place_seabed`.
+fn sea_warmth(corners: [f64; 4], lx: i32, lz: i32) -> f64 {
+    let side = CHUNK_SIZE_X as f64;
+    let (u, v) = (lx as f64 / side, lz as f64 / side);
+    let north = corners[0] + (corners[1] - corners[0]) * u;
+    let south = corners[2] + (corners[3] - corners[2]) * u;
+    north + (south - north) * v
+}
+
 fn put_block(
     blocks: &mut [crate::types::BlockId],
     lx: i32,
@@ -2217,6 +9571,380 @@ fn put_block(
 /// write is bounds-checked and silently skipped, so the parts that miss
 /// simply belong to the neighbouring chunk, which is generating them
 /// itself from the same inputs.
+/// Writes one bush: a few blocks of leaves standing on the ground.
+///
+/// Four shapes off `shape`, which is two bits of the hash that placed
+/// it. Every write goes through the same bounds-checked `put_block` the
+/// trees use, so the part of a bush that belongs to the next chunk is
+/// simply dropped here and written there.
+///
+/// Nothing is overwritten: a bush yields to a trunk, to a boulder and
+/// to anything else already standing, which is why this pass runs after
+/// the trees and why a bush never grows through one.
+fn place_bush(
+    blocks: &mut [crate::types::BlockId],
+    lx: i32,
+    ground: i32,
+    lz: i32,
+    shape: u32,
+    leaves: BlockId,
+) {
+    let base = ground + 1;
+    if base + 3 >= CHUNK_SIZE_Y as i32 {
+        return;
+    }
+    let mut leaf = |dx: i32, dy: i32, dz: i32| {
+        put_block(blocks, lx + dx, base + dy, lz + dz, leaves, false);
+    };
+    match shape {
+        // A hazel: low, wide, and the thing that actually blocks a
+        // wood. Three across at the bottom with the corners off, two
+        // across on top.
+        0 => {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    if dx != 0 && dz != 0 {
+                        continue;
+                    }
+                    leaf(dx, 0, dz);
+                }
+            }
+            leaf(0, 1, 0);
+            leaf(1, 1, 0);
+        }
+        // A sapling that never made it: one column, three tall, with a
+        // shoulder halfway up. Reads as scrub rather than as a tree
+        // precisely because there is no trunk in it.
+        1 => {
+            for dy in 0..3 {
+                leaf(0, dy, 0);
+            }
+            leaf(1, 1, 0);
+            leaf(0, 1, -1);
+        }
+        // A dome: the biggest of the four, three across and three tall
+        // with every corner off. This is the one a player hides behind.
+        2 => {
+            for dz in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx.abs() + dz.abs() == 2 {
+                        continue;
+                    }
+                    leaf(dx, 0, dz);
+                    leaf(dx, 1, dz);
+                }
+            }
+            leaf(0, 2, 0);
+        }
+        // A clump: two by two, one tall, with one block sitting on it.
+        // The small one, and the reason the other three do not have to
+        // be small.
+        _ => {
+            leaf(0, 0, 0);
+            leaf(1, 0, 0);
+            leaf(0, 0, 1);
+            leaf(1, 0, 1);
+            leaf(0, 1, 0);
+        }
+    }
+}
+
+// ---- savanna ----
+
+/// Which way an acacia leans, as a step across a corner.
+///
+/// **Across a corner rather than square to a face**, and that is most of
+/// what makes the stem read as crooked. A step along an axis is a jog --
+/// two straight posts standing side by side -- while a step across a
+/// corner joins the two runs of trunk at an edge, which is the nearest a
+/// grid of cubes comes to a bend.
+///
+/// Its own function because `place_trees` asks the same question before
+/// it builds the tree, to look at the ground the stem leans over.
+fn acacia_lean(variant: u32) -> (i32, i32) {
+    match (variant >> 9) & 3 {
+        0 => (1, 1),
+        1 => (1, -1),
+        2 => (-1, 1),
+        _ => (-1, -1),
+    }
+}
+
+/// An acacia: a short stem that leans or forks, and a wide, thin plate of
+/// leaves held up flat on the end of it.
+///
+/// ```text
+///    ^^^^^^^^^        the plate: nine across, one deep at the rim and
+///      ^^^^^          two over the middle, with a ragged edge
+///       |
+///      /              the bend: one step across a corner
+///     |               the stem, two or three blocks of it
+/// ```
+///
+/// **Why it is not `place_tree` with a flatter ball.** Every broadleaf
+/// here hides its trunk under its crown and stands the crown over its
+/// root, and a savanna tree is recognised by doing neither. What a player
+/// sees from across a plain is a flat top with daylight under it and a
+/// stem that is not straight; take away the lean and it is a mushroom,
+/// take away the flatness and it is an oak. Both halves are structure, so
+/// both are in the builder rather than in numbers handed to another one.
+///
+/// Two forms, about half the trees each:
+///
+/// * **leaning** -- one stem, a step across a corner two or three blocks
+///   up, and on half of them a second step back along an axis: the
+///   one-plate tree.
+/// * **forked** -- the stem splits at the bend into two limbs that lean
+///   apart, a full plate on the long one and a small plate on the short
+///   one, which reaches twice as far out. From a distance that is a
+///   crown with a notch in it, the other acacia a person pictures.
+///
+/// **The ragged rim is hashed from the tree's own variant and the cell's
+/// offset**, never from the world position, so the chunk that draws a
+/// plate's east half and the chunk that draws its west half agree about
+/// which rim leaves are missing without either knowing about the other --
+/// the contract `place_trees` describes for every tree.
+///
+/// **Every log stands on the one below it or across a corner from it.**
+/// That is the step `felling` follows up a crooked stem, and
+/// `every_log_of_an_acacia_stands_on_the_one_below_it_or_across_a_corner`
+/// holds the builder to it.
+///
+/// Every cell lies within `ACACIA_REACH` of the root on each axis;
+/// `no_part_of_an_acacia_lands_further_than_the_generator_looks` checks
+/// that against this code rather than against the arithmetic above.
+#[allow(clippy::too_many_arguments)] // a shape, a place and a material
+fn place_acacia(
+    blocks: &mut [crate::types::BlockId],
+    lx: i32,
+    ground: i32,
+    lz: i32,
+    trunk_height: i32,
+    canopy_radius: i32,
+    variant: u32,
+    (log, leaves): (BlockId, BlockId),
+) {
+    let top = ground + trunk_height;
+    // The plate is two layers over the last log.
+    if top + 2 >= CHUNK_SIZE_Y as i32 {
+        return;
+    }
+
+    let mut put = |x: i32, y: i32, z: i32, id: crate::types::BlockId, overwrite: bool| {
+        if x < 0 || z < 0 || x >= CHUNK_SIZE_X as i32 || z >= CHUNK_SIZE_Z as i32 {
+            return; // belongs to a neighbouring chunk
+        }
+        if y < 0 || y >= CHUNK_SIZE_Y as i32 {
+            return;
+        }
+        let index = Chunk::index(x as usize, y as usize, z as usize);
+        if overwrite || blocks[index] == BLOCK_AIR {
+            blocks[index] = id;
+        }
+    };
+
+    let (sx, sz) = acacia_lean(variant);
+    let forked = (variant >> 7) & 1 == 1;
+    // Where the stem leaves the vertical: two or three blocks up, and
+    // never so high that the limb above the bend has less than two.
+    let bend = (ground + 2 + ((variant >> 12) & 1) as i32).min(top - 2);
+
+    // A plate: a flat disc, one layer at the rim and two over the middle.
+    //
+    // `dx² + dz² <= r² + 1` is the rounder of the two integer circles.
+    // `<= r²` leaves a single leaf standing proud at each compass point,
+    // which from above is a plus sign laid on a disc. A rim leaf goes
+    // missing one time in three, and that is the ragged edge.
+    let mut plate = |cx: i32, cy: i32, cz: i32, radius: i32, salt: u32| {
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                let d = dx * dx + dz * dz;
+                if d > radius * radius + 1 {
+                    continue;
+                }
+                let rim = d > (radius - 1) * (radius - 1) + 1;
+                if rim && hash2(dx, dz, variant ^ salt).is_multiple_of(3) {
+                    continue;
+                }
+                put(cx + dx, cy, cz + dz, leaves, false);
+                // The dome over the middle, on a plate big enough for one.
+                // Without it the plate is a sheet one leaf thick, which
+                // from under it reads as a ceiling rather than a crown.
+                if radius >= 3 && d <= (radius - 2) * (radius - 2) + 1 {
+                    put(cx + dx, cy + 1, cz + dz, leaves, false);
+                }
+            }
+        }
+    };
+
+    // Plates first and wood after, so a log overwrites any leaf a plate
+    // put in its way -- the order `place_tree` uses.
+    if forked {
+        // The short limb reaches twice as far out as the long one leans,
+        // which is what opens the notch between the two plates; a block
+        // lower, so the small plate sits under the big one's edge rather
+        // than merging into it. Never lower than two above the bend, or
+        // the small plate would have no log of its own to stand on.
+        let short_top = (top - 1).max(bend + 2);
+        plate(lx + sx, top + 1, lz + sz, canopy_radius, 0);
+        plate(lx - 2 * sx, short_top + 1, lz - 2 * sz, (canopy_radius - 2).max(1), 0x5A11);
+        for y in ground + 1..=bend {
+            put(lx, y, lz, log, true);
+        }
+        for y in bend + 1..=top {
+            put(lx + sx, y, lz + sz, log, true);
+        }
+        put(lx - sx, bend + 1, lz - sz, log, true);
+        for y in bend + 2..=short_top {
+            put(lx - 2 * sx, y, lz - 2 * sz, log, true);
+        }
+    } else {
+        // Half the leaning trees step back along one axis a block after
+        // the bend: a dog-leg rather than a lean, and the plate lands
+        // over the side of the root instead of past its corner.
+        let back = (variant >> 13) & 1 == 1;
+        let (hx, hz) = if back { (0, sz) } else { (sx, sz) };
+        plate(lx + hx, top + 1, lz + hz, canopy_radius, 0);
+        for y in ground + 1..=bend {
+            put(lx, y, lz, log, true);
+        }
+        put(lx + sx, bend + 1, lz + sz, log, true);
+        for y in bend + 2..=top {
+            put(lx + hx, y, lz + hz, log, true);
+        }
+    }
+}
+
+/// How few apples an apple tree carries: fruiting leaves, the rest of the
+/// crown plain. See `FRUIT_MOST`.
+pub const FRUIT_FEWEST: usize = 5;
+
+/// ...and how many.
+///
+/// **A count for the tree, not a share of its leaves.** One leaf in eight
+/// was the obvious shape and it cannot keep a promise about a tree: a
+/// birch's small crown rolls two and an old tree's great one fifteen, and
+/// "how many apples does a tree have" stops being a thing a player learns.
+/// A count chosen per tree and spent on its leaves is five to seven on
+/// every crown in the world. Five to seven is what the player asked for.
+pub const FRUIT_MOST: usize = 7;
+
+/// Where `fruit_cells` draws a tree on its own: the middle of a chunk-sized
+/// array, two cells above its floor. The middle, because an old tree
+/// reaches `OLD_TREE_REACH` either side of its root and every cell of it
+/// has to land inside sixteen columns.
+const ALONE: (i32, i32, i32) = (8, 2, 8);
+
+/// ...and how far over that floor a tree can reach: the tallest bole, its
+/// crown, and a margin. The tallest of either scale's old trees
+/// (`scale::EARTH_OLD_TRUNK`): a canvas sized for the regional bole would
+/// cut the crown off an Earth-scale one, and the apples would be chosen on
+/// the trunk.
+const ALONE_HEIGHT: i32 = if OLD_TRUNK_TALLEST > scale::EARTH_OLD_TRUNK.1 {
+    OLD_TRUNK_TALLEST + 6
+} else {
+    scale::EARTH_OLD_TRUNK.1 + 6
+};
+
+thread_local! {
+    /// The array `fruit_cells` draws in, left empty after every use. One
+    /// per thread rather than one per tree: a chunk-sized allocation for
+    /// every apple tree, in every chunk that can see it, is a cost the
+    /// tree pass has been measured free of and would not be.
+    static ALONE_TREE: std::cell::RefCell<Vec<BlockId>> =
+        std::cell::RefCell::new(vec![BLOCK_AIR; CHUNK_VOLUME]);
+}
+
+/// Which leaves of an apple tree carry its fruit, as offsets from the
+/// ground under its root.
+///
+/// `draw` puts the tree into a block array with its root at the given
+/// place, in plain apple leaves, as the tree pass draws it. The fruit is
+/// chosen on the tree **drawn alone** rather than on the chunk, because
+/// the chunk is wrong twice:
+///
+/// - **it holds only part of the tree.** A crown over a border is drawn by
+///   both chunks, each its own half, and a count chosen from what each
+///   could see would be two counts. Alone, it is the same tree to both
+///   sides, so both choose the same cells and each hangs the ones inside
+///   it -- five to seven between them, wherever the border cuts;
+/// - **it holds other trees.** A neighbour's crown grown into this one
+///   hides which leaves are on the outside.
+///
+/// Which leaves: those with open air beside them -- **on the outside**, to
+/// be seen from a few blocks off -- and of those the lowest rows first, as
+/// many rows as hold twice the most apples, so there is a choice and it is
+/// made within reach of somebody standing on the ground. The tree's own
+/// hash (`salt`) then picks how many and which.
+///
+/// Rejected: working out each shape's outside cells by formula. Four
+/// shapes, four formulas, and the day one shape changes its apples hang in
+/// the air beside it. Drawing the tree is the formula.
+fn fruit_cells(salt: u32, draw: impl FnOnce(&mut [BlockId], i32, i32, i32)) -> Vec<(i32, i32, i32)> {
+    ALONE_TREE.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        let (ax, ag, az) = ALONE;
+        let top = ag + ALONE_HEIGHT;
+        draw(&mut scratch, ax, ag, az);
+
+        let mut outside: Vec<(i32, i32, i32)> = Vec::new();
+        let at = |x: i32, y: i32, z: i32| {
+            if x < 0 || z < 0 || x >= CHUNK_SIZE_X as i32 || z >= CHUNK_SIZE_Z as i32 {
+                return BLOCK_AIR;
+            }
+            scratch[Chunk::index(x as usize, y as usize, z as usize)]
+        };
+        // Bottom row first, which is the order the rows are chosen in.
+        for y in ag..=top {
+            for z in 0..CHUNK_SIZE_Z as i32 {
+                for x in 0..CHUNK_SIZE_X as i32 {
+                    if block_kind(at(x, y, z)) != BLOCK_APPLE_LEAVES {
+                        continue;
+                    }
+                    let open = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .iter()
+                        .any(|&(dx, dz)| at(x + dx, y, z + dz) == BLOCK_AIR);
+                    if open {
+                        outside.push((x - ax, y - ag, z - az));
+                    }
+                }
+            }
+        }
+        scratch[Chunk::index(0, ag as usize, 0)..Chunk::index(0, top as usize + 1, 0)].fill(BLOCK_AIR);
+
+        let mut rows = 0;
+        while rows < outside.len() && rows < 2 * FRUIT_MOST {
+            let row = outside[rows].1;
+            rows += outside[rows..].iter().take_while(|cell| cell.1 == row).count();
+        }
+        outside.truncate(rows);
+        // Hashed with the cell as the tie-break, so two cells that hash
+        // alike are still in one order on both sides of a border.
+        outside.sort_unstable_by_key(|&(x, y, z)| (hash2(x + 64 * y, z, salt), x, y, z));
+        let spread = (FRUIT_MOST - FRUIT_FEWEST + 1) as u32;
+        outside.truncate(FRUIT_FEWEST + (salt % spread) as usize);
+        outside
+    })
+}
+
+/// Hangs the fruit `fruit_cells` chose on the tree as this chunk holds it.
+///
+/// **Over any canopy leaf, not only this tree's own.** Where a neighbour's
+/// crown was drawn first, its leaf is in the cell and this tree's never
+/// went in; the apple is still this tree's, and hanging it there is what
+/// keeps the count. What does take one is wood: a later tree's trunk
+/// written through the cell. That is a trunk standing inside this crown --
+/// the rarest thing a wood grows, and the least wrong place in it for an
+/// apple to be missing.
+fn hang_fruit(blocks: &mut [BlockId], lx: i32, ground: i32, lz: i32, fruit: &[(i32, i32, i32)]) {
+    for &(dx, dy, dz) in fruit {
+        let (x, y, z) = (lx + dx, ground + dy, lz + dz);
+        if read_block(blocks, x, y, z).is_some_and(crate::types::is_canopy) {
+            put_block(blocks, x, y, z, BLOCK_APPLE_LEAVES_FRUIT, true);
+        }
+    }
+}
+
 fn place_tree(
     blocks: &mut [crate::types::BlockId],
     lx: i32,
@@ -2248,31 +9976,32 @@ fn place_tree(
     // top. Without this the taper below would still put a single leaf
     // block on the end of it, which reads as a tree wearing a hat.
     if canopy_radius > 0 {
-    // Canopy first, so the trunk overwrites any leaf that lands on it.
-    for dy in -2..=2 {
-        let y = top + dy;
-        // Widest in the middle, tapering to a point: a cylinder of
-        // leaves reads as a lollipop, which is what the old fixed radius
-        // produced.
-        let radius = match dy {
-            -2 | -1 => canopy_radius,
-            0 => canopy_radius - 1,
-            _ => canopy_radius - 2,
-        };
-        if radius < 0 {
-            continue;
-        }
-        for dz in -radius..=radius {
-            for dx in -radius..=radius {
-                // Round the corners off, or every tree is a stack of
-                // squares seen from above.
-                if dx.abs() == radius && dz.abs() == radius && radius > 0 {
-                    continue;
+        // Canopy first, so the trunk overwrites any leaf that lands on
+        // it.
+        for dy in -2..=2 {
+            let y = top + dy;
+            // Widest in the middle, tapering to a point: a cylinder of
+            // leaves reads as a lollipop, which is what the old fixed
+            // radius produced.
+            let radius = match dy {
+                -2 | -1 => canopy_radius,
+                0 => canopy_radius - 1,
+                _ => canopy_radius - 2,
+            };
+            if radius < 0 {
+                continue;
+            }
+            for dz in -radius..=radius {
+                for dx in -radius..=radius {
+                    // Round the corners off, or every tree is a stack of
+                    // squares seen from above.
+                    if dx.abs() == radius && dz.abs() == radius && radius > 0 {
+                        continue;
+                    }
+                    put(lx + dx, y, lz + dz, leaves, false);
                 }
-                put(lx + dx, y, lz + dz, leaves, false);
             }
         }
-    }
     }
 
     for y in ground + 1..=top {
@@ -2372,10 +10101,529 @@ fn place_conifer(
     for y in ground + 1..=top {
         put(lx, y, lz, log, true);
     }
+    // **Dead twigs on the bare trunk under the crown**, in the tree's own bark
+    // (`types::piece_in`): the lower limbs a conifer drops as its crown shades
+    // them, and a fir's own twig where a player reaches for a stick. One or
+    // two, on sides the variant picks, joined into the trunk
+    // (`branch::joins`); never overwriting, so a twig does not take a
+    // neighbour's leaf.
+    let twig = crate::types::piece_in(log, 2 + 2 * ((variant >> 9) & 1) as u8);
+    if crate::types::is_twig(twig) && skirt > ground + 2 {
+        const SIDES: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
+        for k in 0..1 + ((variant >> 7) & 1) {
+            let (dx, dz) = SIDES[((variant >> (11 + 2 * k)) & 3) as usize];
+            let y = ground + 2 + ((variant >> (15 + k)) & 1) as i32;
+            if y < skirt {
+                put(lx + dx, y, lz + dz, twig, false);
+            }
+        }
+    }
+}
+
+/// A saxaul: a trunk a person's height, and a thin, ragged crown of grey-green
+/// twigs round the top of it.
+///
+/// **Why it is not `place_tree` with smaller numbers.** A broadleaf's crown
+/// is a closed ball, and a closed ball of green in a desert is a bush from a
+/// meadow somebody put on a post. What says "desert tree" from a dune away
+/// is the *gaps*: a saxaul's crown is a tangle of jointed twigs with the sky
+/// through it, and one cell in three of this one is left empty, by a hash of
+/// the cell so the same tree is the same every time.
+///
+/// **A straight trunk, not a crooked one**, though a saxaul is crooked. A
+/// trunk that stepped across a corner would be felled only to the bend --
+/// felling follows a crooked stem only under an acacia's plate, which is
+/// what tells a limb from a stair a player built (`logic::felling`). The
+/// crown hangs off to one side instead, by the same roll, which reads as a
+/// lean from any distance and costs felling nothing.
+///
+/// Two or three rows of crown from one under the top to one over it, the
+/// widest in the middle; the top of the trunk is inside it.
+#[allow(clippy::too_many_arguments)] // a shape, a place and a material
+fn place_saxaul(
+    blocks: &mut [crate::types::BlockId],
+    lx: i32,
+    ground: i32,
+    lz: i32,
+    trunk_height: i32,
+    canopy_radius: i32,
+    variant: u32,
+    (log, leaves): (BlockId, BlockId),
+) {
+    let top = ground + trunk_height;
+    if top + 2 >= CHUNK_SIZE_Y as i32 {
+        return;
+    }
+    let mut put = |x: i32, y: i32, z: i32, id: crate::types::BlockId, overwrite: bool| {
+        if x < 0 || z < 0 || x >= CHUNK_SIZE_X as i32 || z >= CHUNK_SIZE_Z as i32 {
+            return; // belongs to a neighbouring chunk
+        }
+        if y < 0 || y >= CHUNK_SIZE_Y as i32 {
+            return;
+        }
+        let index = Chunk::index(x as usize, y as usize, z as usize);
+        if overwrite || blocks[index] == BLOCK_AIR {
+            blocks[index] = id;
+        }
+    };
+    // Which way the crown hangs: one of the four, or straight over the top.
+    let (sx, sz) = [(0, 0), (1, 0), (0, 1), (-1, 0), (0, -1)][(variant >> 3) as usize % 5];
+    for (dy, radius) in [(-1, canopy_radius - 1), (0, canopy_radius), (1, canopy_radius - 1)] {
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx.abs() == radius && dz.abs() == radius && radius > 0 {
+                    continue;
+                }
+                let (cx, cz) = (dx + sx, dz + sz);
+                // The gaps. Off the offset from the root, not the world
+                // position, so a tree cut by a chunk border is the same
+                // tree on both sides.
+                let at = (cx + 17) as u32 * 31 + (dy + 3) as u32 * 7 + (cz + 17) as u32;
+                if (variant.rotate_left(at % 29) ^ at.wrapping_mul(0x9E37_79B9)).is_multiple_of(3) && (cx, cz) != (0, 0) {
+                    continue;
+                }
+                put(lx + cx, top + dy, lz + cz, leaves, false);
+            }
+        }
+    }
+    // **A saxaul is a stem of pieces**, not a column of log cubes: a gnarled
+    // grey stem a hand's width across, thinner at the top, in its own bark
+    // (`types::piece_in`) -- a bough to the axe, a twig by hand under the
+    // crown. The crown's cells are the same; only the stem changed.
+    for y in ground + 1..=top {
+        let width = if y == top { 6 } else if y == ground + 1 { 10 } else { 8 };
+        put(lx, y, lz, crate::types::piece_in(log, width), true);
+    }
+}
+
+/// A birch: a bare white mast, a small crown on the end of it, and one
+/// whorl of branches halfway down.
+///
+/// **Why it is not `place_tree` with smaller numbers.** A broadleaf here
+/// is a trunk with a ball balanced on top, and every parameter of it
+/// describes that ball: five rows of leaves, widest at the bottom,
+/// tapering upward. Draw a birch that way and it is an oak painted
+/// white -- and what a player actually recognises a birch by, from
+/// across a valley where no single leaf is visible, is *bark showing
+/// through*. An oak's crown hides its trunk; a birch's does not, and
+/// that is the whole silhouette:
+///
+/// ```text
+///        ^          the crown: four rows, small, and widest one row
+///       ^^^         down from its top, so it reads as a head rather
+///      ^^^^^        than a cap
+///       ^^^
+///        |          bare trunk -- the part that says "birch"
+///        |
+///      ^ | ^        one whorl of branches, four leaves round the mast
+///        |
+///        |
+/// ```
+///
+/// The whorl is the piece that cannot be got out of `place_tree` at any
+/// setting, and it is doing real work: without it a tall bare trunk
+/// with a tuft on the end is a *palm*, and a stand of them is a beach.
+/// One ring of branches partway down puts the eye back on the trunk and
+/// says the tree grew there rather than being planted as scenery.
+///
+/// Four leaves rather than eight -- the cross, no diagonals -- for the
+/// reason `place_conifer` gives about narrow rings, read backwards: a
+/// full three-by-three would be a second crown, and what this is is a
+/// branch.
+///
+/// `lx`/`lz` may be outside the chunk, exactly as in `place_tree`: the
+/// parts that miss belong to the neighbour, which generates them itself
+/// from the same inputs.
+fn place_birch(
+    blocks: &mut [crate::types::BlockId],
+    lx: i32,
+    ground: i32,
+    lz: i32,
+    trunk_height: i32,
+    canopy_radius: i32,
+    (log, leaves): (BlockId, BlockId),
+) {
+    let top = ground + trunk_height;
+    if top + 2 >= CHUNK_SIZE_Y as i32 {
+        return;
+    }
+
+    let mut put = |x: i32, y: i32, z: i32, id: crate::types::BlockId, overwrite: bool| {
+        if x < 0 || z < 0 || x >= CHUNK_SIZE_X as i32 || z >= CHUNK_SIZE_Z as i32 {
+            return; // belongs to a neighbouring chunk
+        }
+        if y < 0 || y >= CHUNK_SIZE_Y as i32 {
+            return;
+        }
+        let index = Chunk::index(x as usize, y as usize, z as usize);
+        if overwrite || blocks[index] == BLOCK_AIR {
+            blocks[index] = id;
+        }
+    };
+
+    // The crown, from one row above the trunk down to two below it:
+    // one leaf at the tip, then three across, then five, then three.
+    // Widest one row *below* the middle, because a crown widest at its
+    // base is a cone and reads as a small fir -- and a birch wearing a
+    // taiga's silhouette is exactly the confusion those two biomes
+    // exist to avoid.
+    for dy in -2..=1 {
+        let radius = match dy {
+            -1 => canopy_radius,
+            1 => canopy_radius - 2,
+            _ => canopy_radius - 1,
+        };
+        if radius < 0 {
+            continue;
+        }
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                // Corners off, as every other canopy here has them: a
+                // crown drawn as stacked squares is a box from above.
+                if dx.abs() == radius && dz.abs() == radius && radius > 0 {
+                    continue;
+                }
+                put(lx + dx, top + dy, lz + dz, leaves, false);
+            }
+        }
+    }
+
+    // The whorl. Placed from the *bottom* rather than as a fraction of
+    // the height, so a short birch and a tall one both keep a couple of
+    // blocks of clear trunk under it -- a branch at head height on a
+    // six-block tree is a bush, and the player walks through it.
+    let whorl = ground + 3 + (trunk_height - 6).max(0) / 2;
+    // ...and only if there is bare trunk left between it and the crown.
+    // On the shortest birch there is not, and one ring of leaves welded
+    // to the bottom of the crown is a longer crown, which is the shape
+    // this whole function exists not to draw.
+    if whorl <= top - 4 {
+        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            put(lx + dx, whorl, lz + dz, leaves, false);
+        }
+    }
+
+    for y in ground + 1..=top {
+        put(lx, y, lz, log, true);
+    }
+}
+
+/// How tall an old tree's bole is, shortest and tallest.
+///
+/// Eleven to sixteen against a forest's four to seven, and the gap is
+/// the point rather than the numbers: an old tree has to clear the
+/// canopy around it by enough that you can see it from outside the
+/// wood, and half again as tall is not enough to do that. Sixteen is
+/// also as much as fits: a forest column tops out at `SEA_LEVEL + 22`
+/// (above that `land_biome` calls it mountain and grows nothing), and
+/// forty-two plus sixteen plus the two rows of crown above it is sixty,
+/// four short of the world's ceiling.
+const OLD_TRUNK_SHORTEST: i32 = 11;
+const OLD_TRUNK_TALLEST: i32 = 16;
+
+/// How far a branch runs out from the side of the bole.
+///
+/// Two or three. Three plus the two-wide trunk plus the leaf clump on
+/// the end is `OLD_TREE_REACH`, and that constant is what sizes the
+/// border the generator walks round every chunk -- so this is not a
+/// number that can be raised on its own.
+const OLD_BRANCH_SHORTEST: i32 = 2;
+const OLD_BRANCH_LONGEST: i32 = 3;
+
+/// How wide the crown of an old tree is, measured from the middle of
+/// the bole. Three, which with the two-wide trunk makes a crown eight
+/// blocks across -- twice anything else in the wood.
+const OLD_CROWN_RADIUS: i32 = 3;
+
+/// An old tree: a bole two columns thick, branches of laid logs coming
+/// off it, and a crown twice the span of anything else in the wood.
+///
+/// ## What it is for
+///
+/// **A landmark, and only incidentally a tree.** The three shapes above
+/// this one are about telling one *wood* from another at a distance;
+/// this one is about telling one *place* from another inside a single
+/// wood, which is a thing this world could not do at all. A forest was
+/// four hundred identical trunks and a player who walked into it had no
+/// way of saying where in it they were. See `Biome::old_tree_share`
+/// for why there is one every ninety-odd blocks and not one every ten.
+///
+/// ## Why the branches are laid logs and not more leaves
+///
+/// A canopy is a shape you read from outside. A branch is a thing you
+/// stand under, and what makes it read as a branch rather than as a
+/// hole in the leaves is *bark running the wrong way*: a log with an
+/// axis (`types::oriented`) shows its cut ends along the run and wraps
+/// its bark round the sides, which is the same trick `place_deadfall`
+/// uses and for the same reason. Built out of upright logs a branch is
+/// a row of stumps hanging in the air -- the one modelling mistake in
+/// this world that is obvious from ten blocks away.
+///
+/// ```text
+///        #####          crown: five rows, widest two down from the
+///      #########        top, corners cut in doubled coordinates
+///      #########        because a two-wide bole has no middle column
+///        #####
+///       ##||##
+///     ###-||   ###      branches: a quarter turn apart as they rise,
+///      ## ||-###        a clump of leaves on the end of each
+///         ||
+///     ###-||
+///      ##  ||
+///         ||            the bole: two columns by two, all the way up
+///         ||
+/// ```
+///
+/// ## Chunk borders
+///
+/// `lx`/`lz` may be up to `OLD_TREE_REACH` outside the chunk, exactly
+/// as in `place_tree`: whatever misses belongs to the neighbour, which
+/// draws it itself from the same seed and the same position. Everything
+/// here is derived from `variant`, `ground` and nothing else, so the
+/// two sides cannot disagree -- and `place_trees` walks a border five
+/// wide rather than three so that the neighbour is asked in the first
+/// place.
+#[cfg(test)]
+fn place_old_tree(
+    blocks: &mut [crate::types::BlockId],
+    lx: i32,
+    ground: i32,
+    lz: i32,
+    variant: u32,
+    wood: (BlockId, BlockId),
+) {
+    place_old_tree_between(blocks, lx, ground, lz, variant, wood, (OLD_TRUNK_SHORTEST, OLD_TRUNK_TALLEST));
+}
+
+/// `place_old_tree` with the bole's range given: the regional one, or the
+/// Earth's (`WorldGen::old_trunks`). The shape is the same tree taller --
+/// the branches are placed as shares of the bole, and the crown on top.
+fn place_old_tree_between(
+    blocks: &mut [crate::types::BlockId],
+    lx: i32,
+    ground: i32,
+    lz: i32,
+    variant: u32,
+    (log, leaves): (BlockId, BlockId),
+    (shortest, tallest): (i32, i32),
+) {
+    let span = (tallest - shortest + 1) as u32;
+    let trunk_height = shortest + (variant % span) as i32;
+    let top = ground + trunk_height;
+    // Unreachable in the two biomes that grow these -- see
+    // `OLD_TRUNK_TALLEST` for the arithmetic -- and kept because the
+    // arithmetic is about a biome threshold rather than about this
+    // function, and a threshold moves.
+    if top + 2 >= CHUNK_SIZE_Y as i32 {
+        return;
+    }
+
+    let mut put = |x: i32, y: i32, z: i32, id: crate::types::BlockId, overwrite: bool| {
+        if x < 0 || z < 0 || x >= CHUNK_SIZE_X as i32 || z >= CHUNK_SIZE_Z as i32 {
+            return; // belongs to a neighbouring chunk
+        }
+        if y < 0 || y >= CHUNK_SIZE_Y as i32 {
+            return;
+        }
+        let index = Chunk::index(x as usize, y as usize, z as usize);
+        if overwrite || blocks[index] == BLOCK_AIR {
+            blocks[index] = id;
+        }
+    };
+
+    // One layer of the crown, rounded.
+    //
+    // **In doubled coordinates, and that is not a flourish.** The bole
+    // occupies columns 0 and 1, so the middle of this tree falls
+    // *between* two columns and cannot be written down in whole blocks
+    // at all. Working in halves puts the centre at a coordinate that
+    // exists: a cell at `dx` is `2 * dx - 1` half-blocks from it, and
+    // the test below is an honest circle in those units. Rounding the
+    // corners off the way the one-wide canopies do -- comparing
+    // `dx.abs()` against the radius -- measures from column zero
+    // instead, and draws a crown that is round on one side of the trunk
+    // and square on the other.
+    let mut ring = |y: i32, radius: i32| {
+        if radius < 1 {
+            return;
+        }
+        let limit = (2 * radius + 1) * (2 * radius + 1) + 1;
+        for dz in -radius..=radius + 1 {
+            for dx in -radius..=radius + 1 {
+                let (ax, az) = (2 * dx - 1, 2 * dz - 1);
+                if ax * ax + az * az <= limit {
+                    put(lx + dx, y, lz + dz, leaves, false);
+                }
+            }
+        }
+    };
+    // Widest two rows down from the top, so the crown reads as a head
+    // rather than as a cone or a cylinder -- the same judgement
+    // `place_tree` and `place_birch` make about their own, at twice the
+    // size.
+    for (dy, radius) in [
+        (-3, OLD_CROWN_RADIUS - 1),
+        (-2, OLD_CROWN_RADIUS),
+        (-1, OLD_CROWN_RADIUS),
+        (0, OLD_CROWN_RADIUS - 1),
+        (1, OLD_CROWN_RADIUS - 2),
+    ] {
+        ring(top + dy, radius);
+    }
+
+    /// The four ways a branch can run, in the order a quarter turn
+    /// takes them.
+    const OUT: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
+    // Three or four branches, a quarter turn apart as they rise. A real
+    // whorl spirals, and four branches all on one side is not a tree,
+    // it is a tree that has already fallen over.
+    let branches = 3 + ((variant >> 9) & 1) as i32;
+    // Where they live: from two fifths of the way up to five blocks
+    // short of the top. Never below four, because a player is two
+    // blocks tall and a limb at head height is a thing you walk into
+    // rather than under; and never into the crown, because a log
+    // buried in leaves is a log nobody will ever see, which is the
+    // same as not drawing it.
+    //
+    // Two fifths rather than half, which is what it was first: on the
+    // shortest bole half left three blocks of room for four branches
+    // and two of them came out at the same height. They read as a
+    // whorl rather than as a mistake, but a tree whose limbs are all
+    // in one band is a tree with a tuft, and the tall ones are the
+    // ones that were already right.
+    let lowest = (trunk_height * 2 / 5).max(4);
+    let highest = (trunk_height - 5).max(lowest);
+    for i in 0..branches {
+        let (dx, dz) = OUT[((variant >> 11) as usize + i as usize) % 4];
+        let y = ground + lowest + (highest - lowest) * i / (branches - 1).max(1);
+        let length = if (variant >> (13 + i as u32)) & 1 == 0 {
+            OLD_BRANCH_SHORTEST
+        } else {
+            OLD_BRANCH_LONGEST
+        };
+        // Which of the two columns on that face of the bole the branch
+        // leaves from. Without it every branch runs out of the same
+        // corner and the tree has a seam down it.
+        let side = ((variant >> (17 + i as u32)) & 1) as i32;
+        // The face of the bole the branch starts from: column 1 on the
+        // far side, column 0 on the near side, and either on the two
+        // faces the branch runs along.
+        let (from_x, from_z) = (
+            if dx > 0 {
+                1
+            } else if dx < 0 {
+                0
+            } else {
+                side
+            },
+            if dz > 0 {
+                1
+            } else if dz < 0 {
+                0
+            } else {
+                side
+            },
+        );
+        let tip = (from_x + dx * length, from_z + dz * length);
+        // The clump on the end, written before the branch so the last
+        // log of the branch sits in the middle of it rather than under
+        // it. A flat plate of leaves would read as a shelf; three rows
+        // of it, widest at the branch, read as foliage hanging off the
+        // end of a limb.
+        for (ddy, spread) in [(-1, 0), (0, 1), (1, 0)] {
+            for cz in -spread..=spread {
+                for cx in -spread..=spread {
+                    put(lx + tip.0 + cx, y + ddy, lz + tip.1 + cz, leaves, false);
+                }
+            }
+        }
+        // A branch lies along the way it grew, so its bark wraps the
+        // sides and its cut ends face along the run. See the note above
+        // on why this matters more here than anywhere else.
+        let limb = crate::types::oriented(
+            log,
+            if dx != 0 {
+                crate::types::Axis::X
+            } else {
+                crate::types::Axis::Z
+            },
+        );
+        for step in 1..=length {
+            put(lx + from_x + dx * step, y, lz + from_z + dz * step, limb, true);
+        }
+    }
+
+    // The bole, last, so it wins every cell a leaf or a branch wanted.
+    //
+    // Four columns from `ground + 1` exactly as a one-wide trunk does,
+    // and that is only correct because `place_trees` will not root one
+    // of these unless all four columns are dead level -- see the note
+    // there on why "within a block" was not good enough.
+    for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        for y in ground + 1..=top {
+            put(lx + dx, y, lz + dz, log, true);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    /// How steep the ground actually is, in blocks up per block across.
+    ///
+    /// **The one honest reading of "one to one".** A block is a metre,
+    /// so a step of one block sideways that gains more than one block of
+    /// height is ground steeper than forty-five degrees -- and a height
+    /// field made of smooth octaves has no business being that steep
+    /// except where it is *meant* to be, which in this world is the
+    /// benches and nothing else.
+    ///
+    /// Prints the distribution rather than asserting, because the number
+    /// wanted is a judgement and the point of the tool is to have the
+    /// number before making it.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --lib how_steep_the_ground_is -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion -- run it explicitly"]
+    fn how_steep_the_ground_is() {
+        use super::*;
+        for seed in [1337u32, 7, 2024] {
+            let world = WorldGen::new(seed);
+            let span = 900i32;
+            let mut steps: Vec<f64> = Vec::with_capacity((span * span) as usize);
+            let mut previous_row: Vec<i32> = Vec::new();
+            for z in 0..span {
+                let mut row = Vec::with_capacity(span as usize);
+                for x in 0..span {
+                    row.push(world.height_at(x - span / 2, z - span / 2));
+                }
+                for x in 1..span as usize {
+                    steps.push((row[x] - row[x - 1]).abs() as f64);
+                }
+                if !previous_row.is_empty() {
+                    for x in 0..span as usize {
+                        steps.push((row[x] - previous_row[x]).abs() as f64);
+                    }
+                }
+                previous_row = row;
+            }
+            steps.sort_by(|a, b| a.partial_cmp(b).expect("no NaN heights"));
+            let at = |q: f64| steps[((steps.len() - 1) as f64 * q) as usize];
+            let mean = steps.iter().sum::<f64>() / steps.len() as f64;
+            let over = steps.iter().filter(|s| **s > 1.0).count() as f64 / steps.len() as f64;
+            println!(
+                "seed {seed:>5}: mean {mean:.2}  median {:.0}  p95 {:.0}  p99 {:.0}                   p99.9 {:.0}  max {:.0}  | steeper than 1:1: {:.1}%",
+                at(0.50),
+                at(0.95),
+                at(0.99),
+                at(0.999),
+                steps[steps.len() - 1],
+                over * 100.0,
+            );
+        }
+    }
+
     use super::*;
     use crate::types::BlockId;
 
@@ -2390,6 +10638,56 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_warm_column_cache_makes_the_same_chunk_as_a_cold_one() {
+        // **The property the tile cache has to have, and the only one.**
+        // Columns are worked out a chunk-aligned tile at a time and kept
+        // per thread, so the chunk a generator makes now depends on
+        // which other chunks that thread happened to make first. It must
+        // not: an evicted chunk is regenerated later, on whichever
+        // thread is free, and the server's whole save format rests on
+        // getting the same bytes back.
+        //
+        // Cold is a fresh thread, which is a fresh store. Warm is the
+        // same chunk after its eight neighbours have been made, which is
+        // the case where every column comes out of a tile somebody else
+        // built.
+        let seed = 90210;
+        let pos = ChunkPos::new(5, -3);
+        let cold = std::thread::spawn(move || WorldGen::new(seed).generate_chunk(pos))
+            .join()
+            .expect("cold generation panicked");
+        let warm = std::thread::spawn(move || {
+            let gen = WorldGen::new(seed);
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    std::hint::black_box(gen.generate_chunk(ChunkPos::new(pos.x + dx, pos.z + dz)));
+                }
+            }
+            gen.generate_chunk(pos)
+        })
+        .join()
+        .expect("warm generation panicked");
+        assert_eq!(cold.blocks, warm.blocks, "the tile cache changed the world");
+    }
+
+    #[test]
+    fn two_worlds_in_one_process_do_not_read_each_other_s_tiles() {
+        // The cache is keyed by seed and preset, and this is why: the
+        // game client runs a server in-process *and* keeps a generator
+        // of its own, and a player who leaves one world for another does
+        // both on the same threads. A cache keyed on position alone
+        // would hand the second world the first one's terrain.
+        let pos = ChunkPos::new(2, 2);
+        let alone = WorldGen::new(4242).generate_chunk(pos);
+        let after = {
+            let other = WorldGen::new(1111);
+            std::hint::black_box(other.generate_chunk(pos));
+            WorldGen::new(4242).generate_chunk(pos)
+        };
+        assert_eq!(alone.blocks, after.blocks);
     }
 
     #[test]
@@ -2435,8 +10733,9 @@ mod tests {
 
     #[test]
     fn caves_actually_carve_something() {
-        // Block light (glowstone) only earns its keep if there is
-        // somewhere dark for it to light.
+        // A torch only earns its keep if there is somewhere dark for it
+        // to light -- and since the glowstone veins went, a cave is dark
+        // until a player brings the light in.
         let gen = WorldGen::new(2024);
         let mut air_underground = 0;
         for cx in 0..4 {
@@ -2495,12 +10794,31 @@ mod tests {
                     if h >= SEA_LEVEL {
                         continue;
                     }
-                    for y in (h + 1)..=SEA_LEVEL {
-                        assert_eq!(
-                            chunk.get(x, y as usize, z),
-                            BLOCK_WATER,
-                            "gap in the water at ({x},{y},{z}) of {:?}",
-                            chunk.pos
+                    // The sea floor is dressed on top of the height field: a
+                    // sand ripple one block high, a boulder of the bed's own
+                    // rock a few high. Those sit on the floor and are no gap,
+                    // so the run of them straight above it is skipped. What
+                    // this test is for -- air, or anything floating in the
+                    // sea -- is still caught above the run.
+                    let dressed = ((h + 1)..=SEA_LEVEL)
+                        .take_while(|&y| {
+                            matches!(
+                                block_kind(chunk.get(x, y as usize, z)),
+                                BLOCK_SAND | BLOCK_COBBLESTONE | BLOCK_GRANITE
+                            )
+                        })
+                        .count() as i32;
+                    for y in (h + 1 + dressed)..=SEA_LEVEL {
+                        // Kelp, seagrass and coral are water with a plant in
+                        // it (`stands_in_water`): the fluid and the swimmer
+                        // treat the cell as sea, so it is no gap. A stone or
+                        // air cell still is.
+                        let id = chunk.get(x, y as usize, z);
+                        assert!(
+                            id == BLOCK_WATER || crate::types::stands_in_water(id),
+                            "gap in the water at ({x},{y},{z}) of {:?}: {}",
+                            chunk.pos,
+                            crate::types::block_name(id)
                         );
                     }
                 }
@@ -2519,7 +10837,13 @@ mod tests {
             for z in 0..CHUNK_SIZE_Z {
                 for x in 0..CHUNK_SIZE_X {
                     let h = gen.height_at(origin_x + x as i32, origin_z + z as i32);
-                    if h > SEA_LEVEL {
+                    // Submerged means *below* the waterline. A column whose
+                    // ground is exactly at it has no water standing on it
+                    // (`wet` is `height < water`), so it is shore, and the
+                    // carver is right to treat it as land unless a wet
+                    // neighbour seals it. This said `> SEA_LEVEL`, and the
+                    // off-by-one waited for a cave to open at (5, 63, 4).
+                    if h >= SEA_LEVEL {
                         continue;
                     }
                     // The crust under a submerged column must be solid.
@@ -2562,6 +10886,937 @@ mod tests {
         );
     }
 
+    /// Every cell an old tree writes, as (x, y, z) offsets from its
+    /// root, taken by drawing one in the middle of an empty chunk where
+    /// nothing can be clipped.
+    ///
+    /// `OLD_TREE_REACH` is five and the chunk is sixteen wide, so a
+    /// tree rooted at eight reaches from three to thirteen and every
+    /// block of it lands -- with room to spare either side, which is
+    /// what lets `no_part_of_an_old_tree_lands_further_than_the_generator_looks`
+    /// notice a tree that grew too wide instead of silently losing the
+    /// evidence over the edge.
+    fn old_tree_cells(variant: u32) -> Vec<(i32, i32, i32, BlockId)> {
+        const ROOT: i32 = 8;
+        const GROUND: i32 = 20;
+        let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+        place_old_tree(
+            &mut blocks,
+            ROOT,
+            GROUND,
+            ROOT,
+            variant,
+            (BLOCK_LOG, BLOCK_LEAVES),
+        );
+        let mut out = Vec::new();
+        for y in 0..CHUNK_SIZE_Y {
+            for z in 0..CHUNK_SIZE_Z {
+                for x in 0..CHUNK_SIZE_X {
+                    let id = blocks[Chunk::index(x, y, z)];
+                    if id != BLOCK_AIR {
+                        out.push((
+                            x as i32 - ROOT,
+                            y as i32 - GROUND,
+                            z as i32 - ROOT,
+                            id,
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Every shape `place_old_tree` can draw, exactly once.
+    ///
+    /// **Not a sweep of the low numbers, and the difference cost a
+    /// wrong answer.** The function reads six fields out of one hash
+    /// and they are spread across twenty-one bits: the trunk height off
+    /// the bottom as a remainder, the branch count at bit nine, the
+    /// quarter turn at eleven, four branch lengths from thirteen and
+    /// four starting corners from seventeen. Sweeping `0..4096` --
+    /// which is what this was first written as -- leaves every bit
+    /// above the twelfth at zero, so every branch in every tree came
+    /// out the short length from the same corner of the bole, and
+    /// `no_part_of_an_old_tree_lands_further_than_the_generator_looks`
+    /// reported a reach of four where the shape can make five.
+    ///
+    /// So the index is unpacked into the fields instead. Twelve
+    /// thousand two hundred and eighty-eight indices is six trunk
+    /// heights times two branch counts times four turns times sixteen
+    /// length patterns times sixteen corner patterns: the whole space,
+    /// and small enough to walk it all.
+    fn old_tree_variants() -> impl Iterator<Item = u32> {
+        (0..6 * 2 * 4 * 16 * 16).map(|index: u32| {
+            let sides = index % 16;
+            let lengths = (index / 16) % 16;
+            let turn = (index / 256) % 4;
+            let branches = (index / 1024) % 2;
+            let height = (index / 2048) % 6;
+            let packed = (branches << 9) | (turn << 11) | (lengths << 13) | (sides << 17);
+            // The trunk height is the whole hash modulo six, so the
+            // fields above have already had their say in it. Adding
+            // what is left to reach the wanted height touches only the
+            // bottom three bits, which no field uses.
+            packed + (height + 6 - packed % 6) % 6
+        })
+    }
+
+    /// What an old tree actually looks like, without a client.
+    ///
+    /// A silhouette and a plan of the crown, in characters: `|` an
+    /// upright log, `-` and `=` a log laid along x or z, `*` a leaf.
+    /// The shape is the whole of what this feature is, and the only
+    /// other way to look at it is to build the game and go and find one
+    /// -- which is a thing a person can do once and not a thing that
+    /// can be repeated on demand.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --release --lib what_an_old_tree_looks_like -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a picture, not an assertion"]
+    fn what_an_old_tree_looks_like() {
+        for variant in [7u32, 0x5A17F3, 0xC0FFEE] {
+            let cells = old_tree_cells(variant);
+            let glyph = |x: i32, y: i32, z: i32| -> char {
+                match cells.iter().find(|&&(cx, cy, cz, _)| (cx, cy, cz) == (x, y, z)) {
+                    None => ' ',
+                    Some(&(_, _, _, id)) if crate::types::block_kind(id) != BLOCK_LOG => '*',
+                    Some(&(_, _, _, id)) => match crate::types::block_axis(id) {
+                        crate::types::Axis::X => '-',
+                        crate::types::Axis::Z => '=',
+                        crate::types::Axis::Y => '|',
+                    },
+                }
+            };
+            let top = cells.iter().map(|&(_, y, _, _)| y).max().unwrap_or(0);
+            println!("\nvariant {variant:#x} -- looking along z, then the crown from above");
+            for y in (0..=top).rev() {
+                let row: String = (-OLD_TREE_REACH..=OLD_TREE_REACH)
+                    .map(|x| {
+                        // Wood beats leaf all the way through the
+                        // depth, rather than nearest-first. This is a
+                        // picture of the skeleton: a branch with its
+                        // own clump of leaves in front of it would
+                        // otherwise never appear at all, which is the
+                        // one thing the picture is for.
+                        let mut best = ' ';
+                        for z in -OLD_TREE_REACH..=OLD_TREE_REACH {
+                            match glyph(x, y, z) {
+                                ' ' => {}
+                                '*' if best == ' ' => best = '*',
+                                '*' => {}
+                                wood => best = wood,
+                            }
+                        }
+                        best
+                    })
+                    .collect();
+                println!("  {row}");
+            }
+            // The widest ring of the crown: two rows down from the top
+            // of it, which is where `place_old_tree` puts the shoulders.
+            for z in -OLD_TREE_REACH..=OLD_TREE_REACH {
+                let row: String = (-OLD_TREE_REACH..=OLD_TREE_REACH)
+                    .map(|x| glyph(x, top - 2, z))
+                    .collect();
+                println!("  {row}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_old_trees_branches_are_logs_lying_along_their_own_direction() {
+        // The whole reason this shape exists as a separate function.
+        // Built out of upright logs a branch is a row of stumps
+        // hanging in the air; what makes it read as a limb is bark
+        // running the wrong way, which is what an axis on the block
+        // *is*. See `place_deadfall` for the same lesson learnt on the
+        // ground.
+        for variant in old_tree_variants().step_by(37) {
+            let cells = old_tree_cells(variant);
+            let mut laid = 0;
+            for &(x, y, z, id) in &cells {
+                if crate::types::block_kind(id) != BLOCK_LOG {
+                    continue;
+                }
+                let axis = crate::types::block_axis(id);
+                if axis == crate::types::Axis::Y {
+                    continue;
+                }
+                laid += 1;
+                // A limb lies along itself: the next cell out is either
+                // more limb or the clump of leaves on its end, and
+                // never air. That one property is both halves of the
+                // ask -- branches made of logs, with leaves on the
+                // ends -- and it fails the moment either is dropped.
+                let (dx, dz) = if axis == crate::types::Axis::X { (1, 0) } else { (0, 1) };
+                let neighbours = [(dx, dz), (-dx, -dz)].map(|(sx, sz)| {
+                    cells
+                        .iter()
+                        .find(|&&(cx, cy, cz, _)| (cx, cy, cz) == (x + sx, y, z + sz))
+                        .map(|&(_, _, _, id)| id)
+                });
+                assert!(
+                    neighbours.iter().all(Option::is_some),
+                    "variant {variant}: a limb at ({x},{y},{z}) has nothing on one end"
+                );
+            }
+            assert!(
+                laid >= 2 * 3,
+                "variant {variant}: only {laid} cells of limb in a whole old tree"
+            );
+        }
+    }
+
+    #[test]
+    fn no_part_of_an_old_tree_lands_further_than_the_generator_looks() {
+        // `place_trees` walks a border `OLD_TREE_REACH` wide round every
+        // chunk, and anything wider than that is clipped at a chunk
+        // seam -- which is not a crash and not a visible tree, it is one
+        // leaf missing from one side of one tree in a wood, where
+        // nobody will ever find it. So the constant is checked against
+        // the code rather than against the comment that explains it.
+        //
+        // Equality rather than "at most", because a reach that is too
+        // *large* is also a bug: it costs the tree pass forty per cent
+        // more columns for a border nothing ever reaches into.
+        let mut furthest = 0;
+        for variant in old_tree_variants() {
+            for (x, _, z, _) in old_tree_cells(variant) {
+                furthest = furthest.max(x.abs()).max(z.abs());
+                assert!(
+                    x.abs() <= OLD_TREE_REACH && z.abs() <= OLD_TREE_REACH,
+                    "variant {variant} reaches ({x},{z}), past a border of {OLD_TREE_REACH}"
+                );
+            }
+        }
+        assert_eq!(
+            furthest, OLD_TREE_REACH,
+            "no old tree ever reaches {OLD_TREE_REACH}, so the border is wider than it needs to be"
+        );
+    }
+
+    // ---- savanna ----
+
+    /// Every cell of an acacia built in the middle of an empty chunk, as
+    /// offsets from its root: `old_tree_cells` for the savanna's tree.
+    fn acacia_cells(trunk: i32, variant: u32) -> Vec<(i32, i32, i32, BlockId)> {
+        const ROOT: i32 = 8;
+        const GROUND: i32 = 20;
+        let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+        let (_, _, radius) = Biome::Savanna.tree_shape();
+        place_acacia(
+            &mut blocks,
+            ROOT,
+            GROUND,
+            ROOT,
+            trunk,
+            radius,
+            variant,
+            Biome::Savanna.tree_wood(),
+        );
+        let mut out = Vec::new();
+        for y in GROUND..GROUND + 16 {
+            for z in 0..CHUNK_SIZE_Z as i32 {
+                for x in 0..CHUNK_SIZE_X as i32 {
+                    let id = blocks[Chunk::index(x as usize, y as usize, z as usize)];
+                    if id != BLOCK_AIR {
+                        out.push((x - ROOT, y - GROUND, z - ROOT, id));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Every combination of the bits `place_acacia` reads -- form, lean,
+    /// bend height, dog-leg -- under a spread of ragged rims, at every
+    /// trunk height a savanna grows.
+    fn acacia_variants() -> impl Iterator<Item = (i32, u32)> {
+        let (shortest, tallest, _) = Biome::Savanna.tree_shape();
+        (shortest..=tallest).flat_map(|trunk| {
+            (0..32u32).flat_map(move |bits| {
+                (0..6u32).map(move |rim| {
+                    let variant = ((bits & 1) << 7)
+                        | (((bits >> 1) & 3) << 9)
+                        | (((bits >> 3) & 1) << 12)
+                        | (((bits >> 4) & 1) << 13)
+                        | (rim.wrapping_mul(0x9E37) << 16);
+                    (trunk, variant)
+                })
+            })
+        })
+    }
+
+    #[test]
+    fn an_acacia_is_a_plate_far_wider_than_it_is_deep_on_a_stem_that_is_not_straight() {
+        // The silhouette, and the whole reason the savanna has a tree of
+        // its own: from across a plain an acacia is a flat top with
+        // daylight under it on a stem that bends. Wide and thin, off the
+        // root's column, and high enough to stand under.
+        for (trunk, variant) in acacia_variants() {
+            let cells = acacia_cells(trunk, variant);
+            let leaves: Vec<_> = cells.iter().filter(|c| c.3 == BLOCK_ACACIA_LEAVES).collect();
+            assert!(!leaves.is_empty(), "trunk {trunk}, variant {variant:#x}: no crown at all");
+            let span = |axis: usize| {
+                let along = || leaves.iter().map(|c| [c.0, c.1, c.2][axis]);
+                along().max().unwrap_or(0) - along().min().unwrap_or(0) + 1
+            };
+            let (across, deep) = (span(0).max(span(2)), span(1));
+            assert!(
+                across >= 7 && deep <= 3,
+                "trunk {trunk}, variant {variant:#x}: a crown {across} across and {deep} deep \
+                 is not a plate"
+            );
+            let lowest = leaves.iter().map(|c| c.1).min().unwrap_or(0);
+            assert!(
+                lowest >= 3,
+                "trunk {trunk}, variant {variant:#x}: the crown comes down to {lowest} above \
+                 the ground, and nobody can stand under it"
+            );
+            let highest_log = cells
+                .iter()
+                .filter(|c| c.3 == BLOCK_LOG)
+                .max_by_key(|c| c.1)
+                .expect("an acacia with no stem");
+            assert_ne!(
+                (highest_log.0, highest_log.2),
+                (0, 0),
+                "trunk {trunk}, variant {variant:#x}: the crown stands straight over the \
+                 root, which is a mushroom"
+            );
+        }
+    }
+
+    #[test]
+    fn no_part_of_an_acacia_lands_further_than_the_generator_looks() {
+        // `place_trees` roots an acacia up to `ACACIA_REACH` outside the
+        // chunk and felling clears a box that wide; a plate that reached
+        // further would lose a straight-edged strip at a chunk seam and
+        // leave leaves in the air when felled. Equal rather than "at
+        // most", as for the old tree: a reach nothing uses is a border
+        // walked for nothing.
+        let mut furthest = 0;
+        for (trunk, variant) in acacia_variants() {
+            for (x, _, z, _) in acacia_cells(trunk, variant) {
+                furthest = furthest.max(x.abs()).max(z.abs());
+                assert!(
+                    x.abs() <= ACACIA_REACH && z.abs() <= ACACIA_REACH,
+                    "trunk {trunk}, variant {variant:#x} reaches ({x},{z}), past {ACACIA_REACH}"
+                );
+            }
+        }
+        assert_eq!(furthest, ACACIA_REACH, "no acacia reaches {ACACIA_REACH}");
+    }
+
+    #[test]
+    fn every_log_of_an_acacia_stands_on_the_one_below_it_or_across_a_corner() {
+        // The step `felling` follows up a crooked stem. A limb that
+        // skipped a block would be a stem felling stops at, with the
+        // plate left standing on the rest of it.
+        for (trunk, variant) in acacia_variants() {
+            let cells = acacia_cells(trunk, variant);
+            let log_at = |x: i32, y: i32, z: i32| {
+                cells.iter().any(|c| (c.0, c.1, c.2) == (x, y, z) && c.3 == BLOCK_LOG)
+            };
+            assert!(log_at(0, 1, 0), "trunk {trunk}, variant {variant:#x}: not rooted");
+            for &(x, y, z, id) in &cells {
+                if id != BLOCK_LOG || y == 1 {
+                    continue;
+                }
+                let held = (-1..=1).any(|dz| (-1..=1).any(|dx| log_at(x + dx, y - 1, z + dz)));
+                assert!(
+                    held,
+                    "trunk {trunk}, variant {variant:#x}: the log at ({x},{y},{z}) stands on nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn acacia_leaves_are_a_canopy_you_push_through_and_keep_their_own_colour() {
+        use crate::types::{is_canopy, is_collidable, is_foliage, is_leafy, is_placeable};
+        let acacia = crate::blocks::definition(BLOCK_ACACIA_LEAVES);
+        let birch = crate::blocks::definition(BLOCK_BIRCH_LEAVES);
+        assert!(is_canopy(BLOCK_ACACIA_LEAVES), "a bird will not nest in an acacia");
+        assert!(is_leafy(BLOCK_ACACIA_LEAVES), "a dropped apple lands on top of an acacia");
+        assert!(!is_collidable(BLOCK_ACACIA_LEAVES), "an acacia is a wall where every tree is a thicket");
+        assert!(
+            (acacia.drag - birch.drag).abs() < f32::EPSILON,
+            "pushing through an acacia costs something other than pushing through a birch"
+        );
+        assert!(crate::animals::is_cover(BLOCK_ACACIA_LEAVES), "a deer cannot hide in an acacia");
+        assert_eq!(acacia.drop, Some(crate::types::BLOCK_LEAF_HANDFUL), "a crown gives a handful, as every broadleaf does");
+        assert!(is_placeable(BLOCK_ACACIA_LEAVES));
+        assert!(
+            !is_foliage(BLOCK_ACACIA_LEAVES),
+            "acacia leaves take the climate tint, whose hot, dry corner is the straw of the \
+             grass under them"
+        );
+    }
+
+    /// Every non-air cell one tree-drawing call writes into an empty
+    /// chunk, relative to its root column at (8, 20, 8).
+    fn drawn_round_a_root(draw: impl FnOnce(&mut [BlockId])) -> Vec<(i32, i32, i32, BlockId)> {
+        let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+        draw(&mut blocks);
+        let mut cells = Vec::new();
+        for y in 0..CHUNK_SIZE_Y {
+            for z in 0..CHUNK_SIZE_Z {
+                for x in 0..CHUNK_SIZE_X {
+                    let id = blocks[Chunk::index(x, y, z)];
+                    if id != BLOCK_AIR {
+                        cells.push((x as i32 - 8, y as i32, z as i32 - 8, id));
+                    }
+                }
+            }
+        }
+        cells
+    }
+
+    #[test]
+    fn a_baobab_is_all_trunk_and_stays_inside_the_border() {
+        for variant in 0..64u32 {
+            let cells = drawn_round_a_root(|blocks| place_baobab(blocks, 8, 20, 8, variant));
+            let logs = cells.iter().filter(|c| c.3 == BLOCK_LOG).count();
+            let leaves = cells.iter().filter(|c| c.3 == BLOCK_ACACIA_LEAVES).count();
+            assert!(
+                logs > leaves,
+                "variant {variant}: {logs} logs under {leaves} leaves is a crown, not a baobab"
+            );
+            for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                assert!(
+                    cells.contains(&(dx, 21, dz, BLOCK_LOG)),
+                    "variant {variant}: the bole is not two by two at the root"
+                );
+            }
+            for (x, _, z, _) in &cells {
+                assert!(
+                    x.abs() <= OLD_TREE_REACH && z.abs() <= OLD_TREE_REACH,
+                    "variant {variant} reaches ({x},{z}), past the old-tree border"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_savanna_has_baobabs_and_a_forest_has_maples() {
+        assert_eq!(Biome::Savanna.old_tree_share(), Some(30));
+        let gen = WorldGen::new(1337);
+        let maple: usize = chunks_in(&gen, Biome::Forest, 24)
+            .iter()
+            .map(|chunk| count_of(chunk, BLOCK_MAPLE_LEAVES))
+            .sum();
+        assert!(maple > 0, "twenty-four chunks of forest without one maple in them");
+        // A baobab is the only thing on a savanna that stands on a piece of
+        // the widest wood there is, sixteen sixteenths: count those feet, over
+        // enough plain to hold a few landmarks. It was a two-by-two log while
+        // the ordinary world grew its trees of logs; it is a bole of pieces now
+        // (`branches::place_branch_baobab`).
+        let mut boles = 0;
+        for chunk in chunks_in(&world_for(1337, Biome::Savanna), Biome::Savanna, 160) {
+            for y in 1..CHUNK_SIZE_Y - 1 {
+                for z in 0..CHUNK_SIZE_Z - 1 {
+                    for x in 0..CHUNK_SIZE_X - 1 {
+                        let foot = chunk.get(x, y, z);
+                        let square = crate::types::is_branch(foot) && crate::types::branch_width(foot) == Some(16);
+                        // On turf or on the savanna's bare sandy soil,
+                        // which a baobab roots in as readily.
+                        if square
+                            && matches!(chunk.get(x, y - 1, z), BLOCK_GRASS | crate::types::BLOCK_SANDY_SOIL | crate::types::BLOCK_DRY_TURF)
+                        {
+                            boles += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(boles > 0, "a hundred and sixty chunks of savanna without one baobab");
+    }
+
+    #[test]
+    fn a_savanna_grows_acacias_rather_than_oaks() {
+        assert_eq!(Biome::Savanna.tree_kind(), TreeKind::Acacia);
+        assert_eq!(Biome::Savanna.tree_wood(), (BLOCK_LOG, BLOCK_ACACIA_LEAVES));
+        for biome in Biome::ALL {
+            if *biome != Biome::Savanna {
+                assert_ne!(
+                    biome.tree_wood().1,
+                    BLOCK_ACACIA_LEAVES,
+                    "acacias in the {}",
+                    biome.name()
+                );
+            }
+        }
+        // In a world laid where the savanna lives: a temperate world's weather
+        // no longer puts a warm pocket of it a few kilometres from spawn. See
+        // `world_for`.
+        let gen = world_for(1337, Biome::Savanna);
+        let acacia: usize = chunks_in(&gen, Biome::Savanna, 24)
+            .iter()
+            .map(|chunk| count_of(chunk, BLOCK_ACACIA_LEAVES))
+            .sum();
+        assert!(acacia > 0, "twenty-four chunks of savanna without one acacia in them");
+    }
+
+    /// Every block of `kind` in `chunks` chunks of `wanted` country, counted
+    /// only where the column is that country.
+    fn stands_of(kind: BlockId, wanted: Biome, chunks: usize) -> usize {
+        let gen = world_for(31337, wanted);
+        let mut total = 0usize;
+        for chunk in chunks_in(&gen, wanted, chunks) {
+            let origin = (chunk.pos.x * CHUNK_SIZE_X as i32, chunk.pos.z * CHUNK_SIZE_Z as i32);
+            for y in 0..CHUNK_SIZE_Y {
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let here = chunk.get(lx, y, lz);
+                        if block_kind(here) != kind || crate::types::is_plant_top(here) {
+                            continue;
+                        }
+                        total += usize::from(gen.biome_at(origin.0 + lx as i32, origin.1 + lz as i32) == wanted);
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn wild_millet_stands_in_the_savanna_and_not_in_the_wheat_country() {
+        // The grain of hot, dry country, so a player finds it by walking out
+        // of the meadow -- and a meadow that grew it would make it a second
+        // wheat nobody had to go anywhere for.
+        use crate::types::BLOCK_WILD_MILLET;
+        assert!(stands_of(BLOCK_WILD_MILLET, Biome::Savanna, 14) > 0, "a savanna with no millet in it");
+        for elsewhere in [Biome::Plains, Biome::Forest, Biome::Taiga] {
+            assert!(elsewhere.wild_millet_spacing().is_none(), "wild millet is rolled in the {}", elsewhere.name());
+            assert_eq!(stands_of(BLOCK_WILD_MILLET, elsewhere, 6), 0, "wild millet on {} ground", elsewhere.name());
+        }
+    }
+
+    #[test]
+    fn giant_reed_grows_where_the_cattail_stops_and_never_beside_it() {
+        // One tall plant of the waterline per climate: a bank with both would
+        // be two pictures of one place, and a hot river with neither would
+        // be the one bank in the world with nothing growing on it.
+        for biome in Biome::ALL {
+            assert!(
+                biome.arundo_spacing().is_none() || biome.cattail_spacing().is_none(),
+                "the {} grows cattail and giant reed both",
+                biome.name()
+            );
+        }
+        assert!(Biome::Savanna.arundo_spacing().is_some() && Biome::Desert.arundo_spacing().is_some());
+        let mut reeds = 0;
+        for chunk in [Biome::Savanna, Biome::Desert].into_iter().flat_map(|country| {
+            let gen = world_for(31337, country);
+            chunks_in(&gen, country, 64)
+        }) {
+            for y in 1..CHUNK_SIZE_Y - 1 {
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let here = chunk.get(lx, y, lz);
+                        if block_kind(here) != crate::types::BLOCK_ARUNDO || crate::types::is_plant_top(here) {
+                            continue;
+                        }
+                        reeds += 1;
+                        assert!(
+                            crate::types::is_plant_top(chunk.get(lx, y + 1, lz)),
+                            "a giant reed at ({lx},{y},{lz}) has no upper half"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(reeds > 0, "sixty-four chunks each of savanna and desert and not one giant reed at the water");
+    }
+
+    #[test]
+    fn wild_cotton_grows_in_the_savanna_and_nowhere_else() {
+        // Where cloth starts, the wheat test's map one climate south.
+        // Counted per column rather than per chunk, for the reason that
+        // test gives: a plains chunk can have a savanna corner.
+        for biome in Biome::ALL {
+            if *biome != Biome::Savanna {
+                assert!(
+                    biome.wild_cotton_spacing().is_none(),
+                    "wild cotton grows in the {}",
+                    biome.name()
+                );
+            }
+        }
+        let stands = |wanted: Biome| -> usize {
+            // **Each country in a world laid where it lives.** At the Earth's
+            // scale one world is one zone's country for hundreds of
+            // kilometres, and asking a temperate world for its savanna found
+            // no chunk to ask. See `world_for`.
+            let gen = world_for(31337, wanted);
+            let mut total = 0usize;
+            for chunk in chunks_in(&gen, wanted, 14) {
+                let origin = (
+                    chunk.pos.x * CHUNK_SIZE_X as i32,
+                    chunk.pos.z * CHUNK_SIZE_Z as i32,
+                );
+                for y in 0..CHUNK_SIZE_Y {
+                    for lz in 0..CHUNK_SIZE_Z {
+                        for lx in 0..CHUNK_SIZE_X {
+                            if block_kind(chunk.get(lx, y, lz)) != crate::types::BLOCK_WILD_COTTON {
+                                continue;
+                            }
+                            let here = gen.biome_at(origin.0 + lx as i32, origin.1 + lz as i32);
+                            total += usize::from(here == wanted);
+                        }
+                    }
+                }
+            }
+            total
+        };
+        assert!(stands(Biome::Savanna) > 0, "a savanna with no cotton in it");
+        for elsewhere in [Biome::Plains, Biome::Forest, Biome::Desert, Biome::Taiga] {
+            assert_eq!(stands(elsewhere), 0, "wild cotton on {} ground", elsewhere.name());
+        }
+    }
+
+    #[test]
+    fn termite_mounds_stand_on_level_dry_turf_and_are_a_long_walk_apart() {
+        for biome in Biome::ALL {
+            if *biome != Biome::Savanna {
+                assert!(
+                    biome.termite_mound_spacing().is_none(),
+                    "termite mounds in the {}",
+                    biome.name()
+                );
+            }
+        }
+        let gen = world_for(2024, Biome::Savanna);
+        let chunks = chunks_in(&gen, Biome::Savanna, 80);
+        assert!(chunks.len() >= 40, "only {} chunks of savanna on the transect", chunks.len());
+        let mut bases = 0usize;
+        for chunk in &chunks {
+            let origin = (
+                chunk.pos.x * CHUNK_SIZE_X as i32,
+                chunk.pos.z * CHUNK_SIZE_Z as i32,
+            );
+            for lz in 0..CHUNK_SIZE_Z {
+                for lx in 0..CHUNK_SIZE_X {
+                    // The lowest mound cell in the column, if it has one.
+                    let Some(y) = (1..CHUNK_SIZE_Y)
+                        .find(|&y| block_kind(chunk.get(lx, y, lz)) == BLOCK_TERMITE_MOUND)
+                    else {
+                        continue;
+                    };
+                    bases += 1;
+                    let (gx, gz) = (origin.0 + lx as i32, origin.1 + lz as i32);
+                    let ground = block_kind(chunk.get(lx, y - 1, lz));
+                    assert!(
+                        matches!(crate::ground::as_common(ground), BLOCK_GRASS | BLOCK_DIRT | crate::types::BLOCK_SANDY_SOIL | crate::types::BLOCK_DRY_TURF),
+                        "a termite mound at ({gx},{gz}) stands on block {ground}, not on ground"
+                    );
+                    for (dx, dz) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                        let step = (gen.height_at(gx + dx, gz + dz) - (y as i32 - 1)).abs();
+                        assert!(
+                            step <= 1,
+                            "a termite mound at ({gx},{gz}) stands on a slope: a step of {step}"
+                        );
+                        let (nx, nz) = (lx as i32 + dx, lz as i32 + dz);
+                        if (0..CHUNK_SIZE_X as i32).contains(&nx)
+                            && (0..CHUNK_SIZE_Z as i32).contains(&nz)
+                        {
+                            assert_ne!(
+                                block_kind(chunk.get(nx as usize, y, nz as usize)),
+                                BLOCK_WATER,
+                                "a termite mound at ({gx},{gz}) is standing in water"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Four base columns to a mound; one cut by a chunk edge counts
+        // for the part of it inside, which averages out.
+        let mounds = bases as f64 / 4.0;
+        let columns = (chunks.len() * CHUNK_SIZE_X * CHUNK_SIZE_Z) as f64;
+        let apart = columns / mounds.max(1.0);
+        println!("termite mounds: {mounds:.1} in {columns} columns, one per {apart:.0}");
+        assert!(mounds >= 1.0, "no termite mound in {columns} columns of savanna");
+        assert!(apart >= 400.0, "a termite mound every {apart:.0} columns is scenery, not a landmark");
+    }
+
+    #[test]
+    fn an_old_tree_on_a_chunk_border_is_two_halves_that_fit_together() {
+        // **The cross-chunk story, checked rather than argued.** A tree
+        // rooted near a seam is drawn twice: once by the chunk it
+        // stands in, which keeps the part inside itself, and once by
+        // the neighbour, which is handed the same root at a local
+        // position sixteen lower and keeps the rest. Neither knows
+        // about the other. If the two ever disagreed the seam would
+        // show as half a crown -- and it would show for one tree in a
+        // wood, on one border, which is exactly the kind of fault that
+        // ships.
+        //
+        // So: the same tree is drawn whole in the middle of a chunk,
+        // then drawn again as the two halves a seam would produce, and
+        // the halves are required to account for every cell of the
+        // whole and for nothing else.
+        for variant in old_tree_variants().step_by(53) {
+            let whole = old_tree_cells(variant);
+            const NEAR: i32 = 13;
+            const GROUND: i32 = 20;
+            let mut mine = vec![BLOCK_AIR; CHUNK_VOLUME];
+            let mut theirs = vec![BLOCK_AIR; CHUNK_VOLUME];
+            place_old_tree(&mut mine, NEAR, GROUND, 8, variant, (BLOCK_LOG, BLOCK_LEAVES));
+            place_old_tree(
+                &mut theirs,
+                NEAR - CHUNK_SIZE_X as i32,
+                GROUND,
+                8,
+                variant,
+                (BLOCK_LOG, BLOCK_LEAVES),
+            );
+            let mut halves = 0;
+            for &(dx, dy, dz, id) in &whole {
+                let (x, y, z) = (NEAR + dx, GROUND + dy, 8 + dz);
+                let (side, at) = if x < CHUNK_SIZE_X as i32 {
+                    (&mine, x)
+                } else {
+                    (&theirs, x - CHUNK_SIZE_X as i32)
+                };
+                assert_eq!(
+                    side[Chunk::index(at as usize, y as usize, z as usize)],
+                    id,
+                    "variant {variant}: the cell at ({dx},{dy},{dz}) is missing from its half"
+                );
+                halves += 1;
+            }
+            // ...and nothing beyond the tree was written on either
+            // side, which is the half of the property a "did every cell
+            // arrive" check on its own cannot see.
+            let written = mine.iter().filter(|&&b| b != BLOCK_AIR).count()
+                + theirs.iter().filter(|&&b| b != BLOCK_AIR).count();
+            assert_eq!(
+                written, halves,
+                "variant {variant}: the two halves hold more than the tree does"
+            );
+            // A tree at thirteen must actually straddle the seam, or
+            // this test is passing on an empty second half.
+            assert!(
+                theirs.iter().any(|&b| b != BLOCK_AIR),
+                "variant {variant}: nothing crossed the seam, so nothing was tested"
+            );
+        }
+    }
+
+    #[test]
+    fn the_border_the_tree_pass_walks_is_exactly_wide_enough_for_an_old_tree() {
+        // Two halves of one property, and both are needed. That the
+        // border is *wide* enough: a tree rooted the full
+        // `OLD_TREE_REACH` outside a chunk does put blocks inside it,
+        // so a narrower walk would lose them. And that it is *not
+        // wider* than it needs to be: rooted one column further out,
+        // no variant of the shape reaches in at all, so every column of
+        // the extra ring is a hash computed to be thrown away.
+        let inside = |root: i32, variant: u32| {
+            let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+            place_old_tree(&mut blocks, root, 20, 8, variant, (BLOCK_LOG, BLOCK_LEAVES));
+            blocks.iter().filter(|&&b| b != BLOCK_AIR).count()
+        };
+        assert!(
+            old_tree_variants().any(|variant| inside(-OLD_TREE_REACH, variant) > 0),
+            "no old tree rooted {OLD_TREE_REACH} outside a chunk reaches into it"
+        );
+        for variant in old_tree_variants() {
+            assert_eq!(
+                inside(-OLD_TREE_REACH - 1, variant),
+                0,
+                "variant {variant} reaches in from further out than the pass looks"
+            );
+        }
+    }
+
+    #[test]
+    fn an_old_tree_is_a_landmark_rather_than_the_forest() {
+        // The frequency argument in `Biome::old_tree_share`, as a
+        // measurement. A wood has to be mostly ordinary trees or the
+        // big one is scenery rather than a landmark, and it has to hold
+        // one often enough to be a thing a player meets rather than a
+        // thing in the source code.
+        //
+        // Counted over a square kilometre of columns asked as if they
+        // were all forest, because that isolates the two rolls from
+        // where the forests happen to be -- which is a separate
+        // question with its own tests.
+        let gen = WorldGen::new(1337);
+        let (mut trees, mut old) = (0u32, 0u32);
+        const SIDE: i32 = 1_000;
+        for gx in 0..SIDE {
+            for gz in 0..SIDE {
+                if !gen.tree_at(gx, gz, Biome::Forest) {
+                    continue;
+                }
+                trees += 1;
+                if gen.old_tree_at(gx, gz, Biome::Forest) {
+                    old += 1;
+                }
+            }
+        }
+        assert!(old > 0, "a forest with no old trees in it at all");
+        // One in four hundred trees, checked as a distance rather than
+        // as a ratio, because the distance is what the player meets.
+        // Measured at a million columns and three seeds: 45,511 trees
+        // and 121 old ones, one every 8,264 columns -- a square 91
+        // blocks on a side -- and 10,638 columns at the other two. The
+        // window is generous on purpose: this is a hash over a finite
+        // square and the point of the test is that the order of
+        // magnitude has not moved, not that the hash is fair to three
+        // digits. `how_often_an_old_tree_stands` is where the number
+        // comes from, and where the ground's veto is measured too.
+        let columns_each = (SIDE * SIDE) as f64 / old as f64;
+        assert!(
+            (5_000.0..16_000.0).contains(&columns_each),
+            "an old tree every {columns_each:.0} columns is not one every ninety-odd blocks"
+        );
+        assert!(
+            old * 100 < trees,
+            "{old} of {trees} trees are old: a wood should be mostly ordinary trees"
+        );
+    }
+
+    /// What `Biome::old_tree_share` is worth once the ground has had
+    /// its say.
+    ///
+    /// The share is a roll, and a roll is not a tree: a bole two
+    /// columns wide needs four columns of level ground of the same
+    /// material, and a wood on a hillside refuses a good many of them.
+    /// This is the number that decides whether the share is right,
+    /// because the share is stated in the doc comment as a *distance*
+    /// and only this end of it is measurable.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --release --lib how_often_an_old_tree_stands -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn how_often_an_old_tree_stands() {
+        // First the hash on its own, over a million columns asked as if
+        // every one of them were forest. This is what
+        // `an_old_tree_is_a_landmark_rather_than_the_forest` counts,
+        // and it is the roll with the ground left out of it.
+        for seed in [1337u32, 7, 99] {
+            let gen = WorldGen::new(seed);
+            let (mut trees, mut old) = (0u64, 0u64);
+            for gx in 0..1_000 {
+                for gz in 0..1_000 {
+                    if !gen.tree_at(gx, gz, Biome::Forest) {
+                        continue;
+                    }
+                    trees += 1;
+                    if gen.old_tree_at(gx, gz, Biome::Forest) {
+                        old += 1;
+                    }
+                }
+            }
+            println!(
+                "seed {seed}: of {trees} trees in a million columns, {old} rolled old \
+                 -- one every {:.0} columns, {:.0} blocks apart",
+                1e6 / old.max(1) as f64,
+                (1e6 / old.max(1) as f64).sqrt(),
+            );
+        }
+        // ...and then the same roll in real woods, where the ground
+        // gets a vote.
+        for seed in [1337u32, 7, 99] {
+            let gen = WorldGen::new(seed);
+            let (mut wood, mut trees, mut rolled, mut standing) = (0u64, 0u64, 0u64, 0u64);
+            for gx in -1_500..1_500 {
+                for gz in -1_500..1_500 {
+                    let height = gen.height_at(gx, gz);
+                    let biome = gen.biome_from(gx, gz, height);
+                    if biome != Biome::Forest {
+                        continue;
+                    }
+                    wood += 1;
+                    if !gen.tree_at(gx, gz, biome) {
+                        continue;
+                    }
+                    trees += 1;
+                    if !gen.old_tree_at(gx, gz, biome) {
+                        continue;
+                    }
+                    rolled += 1;
+                    // The level-ground rule, minus the water and cave
+                    // tests -- neither fires often enough on dry forest
+                    // to move a density measurement, and both need a
+                    // column cache this does not have.
+                    let top = gen.surface_at(gx, gz, height).top;
+                    let level = [(1, 0), (0, 1), (1, 1)].iter().all(|&(dx, dz)| {
+                        let corner = gen.height_at(gx + dx, gz + dz);
+                        corner == height && gen.surface_at(gx + dx, gz + dz, corner).top == top
+                    });
+                    if level {
+                        standing += 1;
+                    }
+                }
+            }
+            let spacing = |count: u64| (wood as f64 / count.max(1) as f64).sqrt();
+            println!(
+                "seed {seed}: {wood} columns of wood, {trees} trees, {rolled} rolled old \
+                 ({:.0} blocks apart), {standing} stood ({:.0} blocks apart)",
+                spacing(rolled),
+                spacing(standing),
+            );
+        }
+    }
+
+    #[test]
+    fn a_generated_wood_actually_has_an_old_tree_standing_in_it() {
+        // Everything above tests the shape and the roll in isolation.
+        // This is the one that says the two ever meet: that somewhere
+        // in a real world, on real ground, a chunk comes out with a
+        // tree in it taller than any ordinary tree in that biome and
+        // with limbs lying off its sides.
+        //
+        // Found by rolling first and asking about the ground second --
+        // the two hashes reject all but one column in nine thousand,
+        // and `biome_at` is the expensive question.
+        let gen = WorldGen::new(1337);
+        for gx in -1_200..1_200 {
+            for gz in -1_200..1_200 {
+                if !gen.old_tree_at(gx, gz, Biome::Forest)
+                    || !gen.tree_at(gx, gz, Biome::Forest)
+                    || gen.biome_at(gx, gz) != Biome::Forest
+                {
+                    continue;
+                }
+                let ground = gen.height_at(gx, gz);
+                let (cx, cz) = (gx.div_euclid(16), gz.div_euclid(16));
+                let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                let (lx, lz) = (gx.rem_euclid(16) as usize, gz.rem_euclid(16) as usize);
+                // A forest's tallest ordinary trunk is seven
+                // (`tree_shape`), so a log eleven blocks up this column
+                // cannot be anything else.
+                if chunk.get(lx, (ground + OLD_TRUNK_SHORTEST) as usize, lz) != BLOCK_LOG {
+                    continue; // the ground under this one refused it
+                }
+                let limbs = chunk
+                    .blocks
+                    .iter()
+                    .filter(|&&b| {
+                        crate::types::block_kind(b) == BLOCK_LOG
+                            && crate::types::block_axis(b) != crate::types::Axis::Y
+                    })
+                    .count();
+                assert!(
+                    limbs > 0,
+                    "an old tree at ({gx},{gz}) with no limbs on it"
+                );
+                return;
+            }
+        }
+        panic!("no old tree anywhere in five and a half million columns of world");
+    }
+
     #[test]
     fn a_tree_that_straddles_a_border_agrees_with_itself() {
         // Both chunks decide independently what the overlapping tree
@@ -2593,10 +11848,14 @@ mod tests {
                     if chunk.get(x, (ground + 1) as usize, z) != BLOCK_LOG {
                         continue;
                     }
-                    assert_eq!(
-                        chunk.get(x, ground as usize, z),
-                        BLOCK_GRASS,
-                        "a tree at ({x},{z}) is rooted in something other than grass"
+                    // Turf, or the savanna's bare sandy soil, which an
+                    // acacia roots in as readily -- see
+                    // `types::BLOCK_SANDY_SOIL`.
+                    let root = chunk.get(x, ground as usize, z);
+                    assert!(
+                        root == BLOCK_GRASS || root == crate::types::BLOCK_SANDY_SOIL || root == crate::types::BLOCK_DRY_TURF,
+                        "a tree at ({x},{z}) is rooted in {}",
+                        crate::types::block_name(root)
                     );
                 }
             }
@@ -2624,16 +11883,62 @@ mod tests {
     }
 
     #[test]
+    fn a_bog_is_rare_but_not_a_rumour() {
+        // **The check a threshold in a corner of the climate grid
+        // needs.** Cold *and* very wet *and* low is three conditions at
+        // once, and it would be easy to write a bog that is technically
+        // reachable and that no player will ever walk into -- which is
+        // a biome that exists in the source and not in the game.
+        //
+        // The bounds are wide on purpose. What is being asserted is
+        // "this is a place, and it is not everywhere", not a particular
+        // frequency: the noise fields move with every change to the
+        // generator, and a test that pinned the number would fail for
+        // reasons that are not bugs.
+        let mut bogs = 0usize;
+        let mut total = 0usize;
+        // In the north, which is where a bog can be: at real scale a
+        // temperate world has none, and a bog that is a rumour in the one
+        // zone it belongs to is the failure this test is for.
+        for seed in [1337u32, 42, 7, 2024] {
+            let gen = world_for(seed, Biome::Bog);
+            for gx in (-4000..4000).step_by(37) {
+                for gz in (-4000..4000).step_by(41) {
+                    total += 1;
+                    if gen.biome_at(gx, gz) == Biome::Bog {
+                        bogs += 1;
+                    }
+                }
+            }
+        }
+        let share = bogs as f64 / total as f64;
+        assert!(
+            share > 0.0002,
+            "bogs are {:.4}% of the world, which is a biome nobody will find",
+            share * 100.0,
+        );
+        assert!(
+            share < 0.05,
+            "bogs are {:.2}% of the world, which is not a corner of the climate any more",
+            share * 100.0,
+        );
+        println!("bogs: {:.3}% of {total} columns", share * 100.0);
+    }
+
+    #[test]
     fn every_biome_is_reachable_somewhere() {
         // A biome that no combination of the fields can produce is dead
         // code that reads as a feature.
         use std::collections::HashSet;
         let mut seen: HashSet<Biome> = HashSet::new();
+        // Every zone of the planet, since one world is one latitude.
         for seed in [1337u32, 42, 7, 2024, 99, 31337] {
-            let gen = WorldGen::new(seed);
-            for gx in (-3000..3000).step_by(29) {
-                for gz in (-3000..3000).step_by(307) {
-                    seen.insert(gen.biome_at(gx, gz));
+            for &zone in Zone::ALL {
+                let gen = WorldGen::with_zone(seed, Preset::Normal, zone);
+                for gx in (-3000..3000).step_by(29) {
+                    for gz in (-3000..3000).step_by(307) {
+                        seen.insert(gen.biome_at(gx, gz));
+                    }
                 }
             }
         }
@@ -2724,6 +12029,262 @@ mod tests {
         );
     }
 
+    /// How tall the trees of one wood stand: for every tree rooted in the
+    /// middle of `chunks` chunks of `biome`, its kind and the height of its
+    /// highest piece of wood over the ground it is rooted in.
+    ///
+    /// **The kind is read off the tree**, not the biome: a forest grows oaks,
+    /// maples, apple trees and the odd old tree side by side. An old tree is
+    /// the one standing on a bole of four; otherwise the timber names fir,
+    /// saxaul and birch, and an oak's timber is named by the crown round it --
+    /// apple, maple, acacia, oak, or none at all, a dead wood's snag.
+    ///
+    /// The tree is the wood joined to its root through every cell touching
+    /// another, stopped at wood standing on the ground more than a column from
+    /// the root, which is another tree's foot or deadfall.
+    fn tree_heights(biome: Biome, chunks: usize) -> Vec<(&'static str, i32)> {
+        use crate::types::{is_branch, is_birch_wood, BLOCK_APPLE_LEAVES_FRUIT, BLOCK_FIR_LOG, BLOCK_PALM_TRUNK, BLOCK_SAXAUL_LOG};
+        let gen = world_for(4242, biome);
+        let mut out = Vec::new();
+        for chunk in chunks_in(&gen, biome, chunks) {
+            let (ox, oz) = (chunk.pos.x * CHUNK_SIZE_X as i32, chunk.pos.z * CHUNK_SIZE_Z as i32);
+            let at = |x: i32, y: i32, z: i32| -> Option<BlockId> {
+                ((0..CHUNK_SIZE_X as i32).contains(&x) && (0..CHUNK_SIZE_Z as i32).contains(&z) && (1..CHUNK_SIZE_Y as i32).contains(&y))
+                    .then(|| chunk.get(x as usize, y as usize, z as usize))
+            };
+            let wood = |b: BlockId| crate::wood::is_log(b) || (is_branch(b) && block_kind(b) != BLOCK_PALM_TRUNK);
+            let footed = |x: i32, y: i32, z: i32| {
+                at(x, y, z).is_some_and(wood) && at(x, y - 1, z).is_some_and(|b| !wood(b) && crate::types::is_collidable(b))
+            };
+            for lz in 4..CHUNK_SIZE_Z as i32 - 4 {
+                for lx in 4..CHUNK_SIZE_X as i32 - 4 {
+                    if gen.biome_at(ox + lx, oz + lz) != biome {
+                        continue;
+                    }
+                    let ground = gen.height_at(ox + lx, oz + lz);
+                    let root = ground + 1;
+                    if !footed(lx, root, lz) || crate::types::block_axis(chunk.get(lx as usize, root as usize, lz as usize)) != crate::types::Axis::Y {
+                        continue;
+                    }
+                    // The second, third or fourth column of a bole is the
+                    // same tree as the first.
+                    if footed(lx - 1, root, lz) || footed(lx, root, lz - 1) || footed(lx - 1, root, lz - 1) {
+                        continue;
+                    }
+                    let old = footed(lx + 1, root, lz) && footed(lx, root, lz + 1) && footed(lx + 1, root, lz + 1);
+                    let mut seen = std::collections::HashSet::from([(lx, root, lz)]);
+                    let mut frontier = vec![(lx, root, lz)];
+                    let mut crowns: std::collections::HashMap<BlockId, usize> = std::collections::HashMap::new();
+                    while let Some((x, y, z)) = frontier.pop() {
+                        for dy in -1..=1 {
+                            for dz in -1..=1 {
+                                for dx in -1..=1 {
+                                    let n = (x + dx, y + dy, z + dz);
+                                    let Some(block) = at(n.0, n.1, n.2) else { continue };
+                                    if crate::types::is_canopy(block) {
+                                        *crowns.entry(block_kind(block)).or_default() += 1;
+                                        continue;
+                                    }
+                                    if n.1 < root || (n.0 - lx).abs() > 6 || (n.2 - lz).abs() > 6 || !wood(block) || seen.contains(&n) {
+                                        continue;
+                                    }
+                                    if footed(n.0, n.1, n.2) && ((n.0 - lx).abs() > 1 || (n.2 - lz).abs() > 1) {
+                                        continue;
+                                    }
+                                    seen.insert(n);
+                                    frontier.push(n);
+                                }
+                            }
+                        }
+                    }
+                    let top = seen.iter().map(|c| c.1).max().unwrap_or(root);
+                    let foot = chunk.get(lx as usize, root as usize, lz as usize);
+                    let crown = crowns.iter().max_by_key(|(_, n)| **n).map(|(k, _)| *k);
+                    let kind = if old {
+                        "old"
+                    } else if block_kind(foot) == BLOCK_FIR_LOG {
+                        "fir"
+                    } else if block_kind(foot) == BLOCK_SAXAUL_LOG {
+                        "saxaul"
+                    } else if block_kind(foot) == BLOCK_BIRCH_LOG || is_birch_wood(foot) {
+                        "birch"
+                    } else if gen.apple_tree_at(ox + lx, oz + lz, biome) {
+                        // Asked of the generator, not read off the leaves: a young
+                        // oak of eight boughs standing under a neighbour's apple
+                        // crown has apple leaves all round its wood, and read that
+                        // way it was an "apple tree" nine and fourteen blocks tall
+                        // -- enough of them, once the woods grew denser, to put the
+                        // middle apple tree at 8 with no apple tree taller than 7.
+                        "apple"
+                    } else {
+                        match crown {
+                            Some(BLOCK_APPLE_LEAVES) | Some(BLOCK_APPLE_LEAVES_FRUIT) => "oak",
+                            Some(BLOCK_MAPLE_LEAVES) => "maple",
+                            Some(BLOCK_ACACIA_LEAVES) => "acacia",
+                            Some(_) => "oak",
+                            None => "dead",
+                        }
+                    };
+                    out.push((kind, top - ground));
+                }
+            }
+        }
+        out
+    }
+
+    /// The woods whose heights are measured, and how many chunks of each.
+    const MEASURED_WOODS: [(Biome, usize); 8] = [
+        (Biome::Forest, 40),
+        (Biome::Plains, 40),
+        (Biome::BirchForest, 24),
+        (Biome::Swamp, 24),
+        (Biome::DeadForest, 16),
+        (Biome::Taiga, 24),
+        (Biome::Savanna, 24),
+        (Biome::Desert, 16),
+    ];
+
+    /// Every wood's trees by kind: how many, the middle height, the ninetieth
+    /// percentile, the tallest and how many stand over twenty.
+    ///
+    /// Measured on seed 4242 before and after "не все деревья высотой с 10ти
+    /// этажный дом" (the counts move a little: an apple tree stopped being the
+    /// wood's own tree, and a tree whose limbs touch a neighbour's is counted
+    /// as one tall tree -- which is why an apple can read fourteen):
+    ///
+    /// ```text
+    ///          before                          after
+    /// oak     126, middle 19, 90% 22, max 24   121, middle 12, 90% 14, max 16
+    ///         39 over twenty                   none over twenty
+    /// maple    14, middle 21, 90% 24, max 24    14, middle 15, 90% 16, max 16
+    /// birch    43, middle 19, 90% 22, max 22    43, middle 12, 90% 14, max 14
+    /// fir      65, middle 19, 90% 22, max 23    65, middle 12, 90% 14, max 14
+    /// dead     46, middle 12, 90% 16, max 18    40, middle  8, 90% 11, max 11
+    /// apple     8, middle 18, 90% 20, max 20    19, middle  6, 90% 14, max 14
+    /// saxaul    6, middle  2, 90%  3, max  3     6, middle  3, 90%  4, max  4
+    /// ```
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --lib -- --ignored --nocapture how_tall_the_trees_stand
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn how_tall_the_trees_stand() {
+        let mut all: std::collections::BTreeMap<&str, Vec<i32>> = std::collections::BTreeMap::new();
+        for (biome, chunks) in MEASURED_WOODS {
+            for (kind, height) in tree_heights(biome, chunks) {
+                all.entry(kind).or_default().push(height);
+            }
+        }
+        for (kind, mut heights) in all {
+            heights.sort_unstable();
+            let n = heights.len();
+            println!(
+                "{kind:7} {n:4} trees: middle {:2}, 90% {:2}, tallest {:2}, over twenty {}",
+                heights[n / 2],
+                heights[(n * 9 / 10).min(n - 1)],
+                heights[n - 1],
+                heights.iter().filter(|&&h| h > 20).count()
+            );
+        }
+    }
+
+    /// **The report, as a property of the woods the generator grows**: most
+    /// trees of every kind stand eight to sixteen blocks, hardly any over
+    /// twenty, and an apple tree is an orchard tree. See
+    /// `how_tall_the_trees_stand` for the numbers and `WorldGen::trunks` for
+    /// the heights.
+    #[test]
+    fn a_wood_is_trees_a_few_storeys_tall_and_an_apple_tree_is_an_orchard_tree() {
+        let mut all: std::collections::BTreeMap<&str, Vec<i32>> = std::collections::BTreeMap::new();
+        for (biome, chunks) in MEASURED_WOODS {
+            for (kind, height) in tree_heights(biome, chunks) {
+                all.entry(kind).or_default().push(height);
+            }
+        }
+        let mut trees = 0;
+        let mut over_twenty = 0;
+        for kind in ["oak", "maple", "birch", "fir"] {
+            let mut heights = all.get(kind).cloned().unwrap_or_default();
+            assert!(heights.len() >= 10, "only {} {kind} trees measured", heights.len());
+            heights.sort_unstable();
+            let middle = heights[heights.len() / 2];
+            assert!((8..=16).contains(&middle), "the middle {kind} stands {middle} blocks, not eight to sixteen");
+            trees += heights.len();
+            over_twenty += heights.iter().filter(|&&h| h > 20).count();
+        }
+        assert!(
+            over_twenty * 20 <= trees,
+            "{over_twenty} of {trees} trees stand over twenty blocks: a wood of ten-storey houses"
+        );
+        let mut apples = all.get("apple").cloned().unwrap_or_default();
+        assert!(apples.len() >= 5, "only {} apple trees measured", apples.len());
+        apples.sort_unstable();
+        assert!(apples[apples.len() / 2] <= 7, "the middle apple tree stands {} blocks", apples[apples.len() / 2]);
+
+        // ...and every apple tree the shape can grow, whatever its roll, on
+        // flat ground: its wood tops out at seven, and its crown is wider
+        // than it is tall off the trunk.
+        for variant in 0..64u32 {
+            let cells = branches::branch_tree_cells(APPLE_TRUNK, MAX_CANOPY_RADIUS, variant, BLOCK_APPLE_LEAVES, |_, _| 0, |_, _| false);
+            let top = cells.iter().filter(|(_, id)| crate::types::is_branch(*id)).map(|((_, y, _), _)| *y).max().unwrap_or(0);
+            assert!(top <= 7, "an apple tree of variant {variant} grew wood {top} blocks up");
+            let span = cells.iter().filter(|(_, id)| *id == BLOCK_APPLE_LEAVES).map(|((x, _, z), _)| x.abs().max(z.abs())).max().unwrap_or(0);
+            assert!(span >= 3, "an apple tree of variant {variant} has a crown {span} wide: a pole, not an orchard tree");
+        }
+    }
+
+    #[test]
+    fn a_taiga_is_fir_and_pine_and_a_desert_grows_saxaul_on_its_sand() {
+        use crate::types::{block_axis, piece_log, Axis, BLOCK_FIR_LOG, BLOCK_PINE_LOG, BLOCK_SAXAUL_LEAVES, BLOCK_SAXAUL_LOG};
+        // "в пустыне растёт то же дерево, что и в лесу": each country's
+        // trees are its own wood, trunk and crown.
+        for (biome, wood, sand) in [(Biome::Taiga, BLOCK_FIR_LOG, false), (Biome::Desert, BLOCK_SAXAUL_LOG, true)] {
+            let gen = world_for(4242, biome);
+            let (mut own, mut oak, mut on_sand) = (0, 0, 0);
+            for chunk in chunks_in(&gen, biome, 16) {
+                let (ox, oz) = (chunk.pos.x * CHUNK_SIZE_X as i32, chunk.pos.z * CHUNK_SIZE_Z as i32);
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        if gen.biome_at(ox + lx as i32, oz + lz as i32) != biome {
+                            continue;
+                        }
+                        for y in 1..CHUNK_SIZE_Y {
+                            let block = chunk.get(lx, y, lz);
+                            // A saxaul's stem is pieces of saxaul now, and a
+                            // pinewood's pines are the taiga's own too.
+                            let stem = piece_log(block).filter(|_| crate::types::is_bough(block));
+                            if stem.is_none() && (block_axis(block) != Axis::Y || !crate::wood::is_log(block)) {
+                                continue;
+                            }
+                            let timber = stem.unwrap_or(block_kind(block));
+                            if timber == wood || (biome == Biome::Taiga && timber == BLOCK_PINE_LOG) {
+                                own += 1;
+                                on_sand += usize::from(crate::ground::as_common(chunk.get(lx, y - 1, lz)) == BLOCK_SAND);
+                            } else if stem.is_none() && block_kind(chunk.get(lx, y - 1, lz)) != block_kind(block) {
+                                // Counted by root, not by cell: a ruin's log
+                                // wall is not a tree.
+                                oak += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(own > 20, "only {own} cells of its own wood stand in the {}", biome.name());
+            assert!(oak <= own / 20, "{oak} trunks of another wood stand in the {} beside {own} of its own", biome.name());
+            if sand {
+                assert!(on_sand > 0, "no saxaul in the desert stands on sand");
+            }
+        }
+        // ...and a saxaul wears its own thin crown.
+        let gen = world_for(4242, Biome::Desert);
+        let crowns: usize = chunks_in(&gen, Biome::Desert, 16)
+            .iter()
+            .map(|chunk| chunk.blocks.iter().filter(|&&b| block_kind(b) == BLOCK_SAXAUL_LEAVES).count())
+            .sum();
+        assert!(crowns > 0, "the desert's saxauls stand without a crown");
+    }
+
     #[test]
     fn nothing_grows_where_nothing_should() {
         // Trees are placed from the biome, and the biomes that have no
@@ -2731,10 +12292,12 @@ mod tests {
         // this list any more: a treeline is *made of* the last firs
         // before the ground gives up, and the peaks above it are what
         // make it read as one.
+        //
+        // Nor is the desert: it grows the saxaul, the one tree that stands in
+        // a dune (`place_saxaul`).
         for biome in [
             Biome::Ocean,
             Biome::Beach,
-            Biome::Desert,
             Biome::Mountains,
             Biome::SnowyPeaks,
         ] {
@@ -2756,6 +12319,94 @@ mod tests {
         // open country with trees in it, not a wood.
         let tundra = Biome::Tundra.tree_spacing().unwrap();
         assert!(tundra > Biome::Taiga.tree_spacing().unwrap() * 2, "a tundra forest");
+    }
+
+
+    #[test]
+    fn a_birch_shows_its_own_trunk_between_the_crown_and_the_branches_below() {
+        // The whole silhouette, and the reason `place_birch` exists
+        // rather than another set of numbers for `place_tree`: an oak's
+        // crown hides its trunk and a birch's does not. What a player
+        // recognises across a valley is white bark standing clear
+        // between a small crown and one whorl of branches -- so there
+        // has to be a band of trunk with *no* leaf beside it, and a
+        // whorl below that band with leaves in it.
+        for trunk in 7..=10 {
+            let mut birch = vec![BLOCK_AIR; CHUNK_VOLUME];
+            super::place_birch(
+                &mut birch,
+                8,
+                20,
+                8,
+                trunk,
+                2,
+                (BLOCK_BIRCH_LOG, BLOCK_BIRCH_LEAVES),
+            );
+            let leaves_at = |y: i32| {
+                let mut count = 0;
+                for z in 0..CHUNK_SIZE_Z {
+                    for x in 0..CHUNK_SIZE_X {
+                        if birch[Chunk::index(x, y as usize, z)] == BLOCK_BIRCH_LEAVES {
+                            count += 1;
+                        }
+                    }
+                }
+                count
+            };
+            let top = 20 + trunk;
+            // The crown: four rows, widest one below the top, and one
+            // leaf at the tip. A crown widest at its base is a cone.
+            assert_eq!(leaves_at(top + 1), 1, "a birch with no tip at trunk {trunk}");
+            assert!(
+                leaves_at(top - 1) > leaves_at(top),
+                "a birch crown widest at its base at trunk {trunk}"
+            );
+            assert!(
+                leaves_at(top - 1) > leaves_at(top - 2),
+                "a birch crown widest at its base at trunk {trunk}"
+            );
+            // The whorl, and the bare mast under the crown that is the
+            // point of the whole shape.
+            let whorl = (21..top - 2)
+                .find(|&y| leaves_at(y) > 0)
+                .unwrap_or_else(|| panic!("a birch with no branches at trunk {trunk}"));
+            assert_eq!(leaves_at(whorl), 4, "a whorl is a branch, not a second crown");
+            assert!(
+                (whorl + 1..top - 2).any(|y| leaves_at(y) == 0),
+                "a birch with no bare trunk at all at trunk {trunk}"
+            );
+            // ...and the mast itself runs the whole way up.
+            for y in 21..=top {
+                assert_eq!(
+                    birch[Chunk::index(8, y as usize, 8)],
+                    BLOCK_BIRCH_LOG,
+                    "a gap in the mast at {y}, trunk {trunk}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_birch_is_a_narrower_tree_than_an_oak_of_the_same_height() {
+        // Same trunk, same canopy radius, and the birch still has to be
+        // the thinner tree -- it is what makes a birch wood open where
+        // an oak wood is closed, and it is decided here rather than by
+        // `Biome::tree_spacing`, which only says how far apart they
+        // stand.
+        let mut oak = vec![BLOCK_AIR; CHUNK_VOLUME];
+        super::place_tree(&mut oak, 8, 20, 8, 9, 2, (BLOCK_LOG, BLOCK_LEAVES));
+        let mut birch = vec![BLOCK_AIR; CHUNK_VOLUME];
+        super::place_birch(&mut birch, 8, 20, 8, 9, 2, (BLOCK_LOG, BLOCK_LEAVES));
+
+        let leaves = |blocks: &[BlockId]| {
+            blocks.iter().filter(|&&b| b == BLOCK_LEAVES).count()
+        };
+        assert!(
+            leaves(&birch) < leaves(&oak),
+            "a birch ({}) with more leaves than an oak ({})",
+            leaves(&birch),
+            leaves(&oak)
+        );
     }
 
     #[test]
@@ -2859,6 +12510,86 @@ mod tests {
     }
 
     #[test]
+    fn a_forest_floor_has_roots_in_it_and_a_desert_does_not() {
+        // The plant is a *find*, so the test is about how often: common
+        // enough that walking a wood turns some up, and absent where
+        // nothing grows. A chunk count rather than a single cell,
+        // because a scatter with a spacing of forty-three is a thing you
+        // measure over ground rather than look for at a coordinate.
+        let gen = WorldGen::new(4242);
+        let mut wooded = 0;
+        let mut dry = 0;
+        let mut chunks_of_wood = 0;
+        let mut chunks_of_desert = 0;
+        for cx in -12..12 {
+            for cz in -12..12 {
+                let pos = ChunkPos::new(cx, cz);
+                let biome = gen.biome_at(cx * CHUNK_SIZE_X as i32 + 8, cz * CHUNK_SIZE_Z as i32 + 8);
+                let wood = matches!(biome, Biome::Forest | Biome::BirchForest | Biome::Swamp);
+                let desert = matches!(biome, Biome::Desert | Biome::Tundra);
+                if !wood && !desert {
+                    continue;
+                }
+                let chunk = gen.generate_chunk(pos);
+                let mut found = 0;
+                for y in 0..CHUNK_SIZE_Y {
+                    for z in 0..CHUNK_SIZE_Z {
+                        for x in 0..CHUNK_SIZE_X {
+                            if chunk.get(x, y, z) == BLOCK_ROOTS {
+                                found += 1;
+                            }
+                        }
+                    }
+                }
+                if wood {
+                    wooded += found;
+                    chunks_of_wood += 1;
+                } else {
+                    dry += found;
+                    chunks_of_desert += 1;
+                }
+            }
+        }
+        assert!(chunks_of_wood > 0, "the sample found no wood to look in");
+        assert!(wooded > 0, "{chunks_of_wood} chunks of forest and marsh with nothing to dig up");
+        if chunks_of_desert > 0 {
+            assert_eq!(dry, 0, "roots grew in a desert or a tundra");
+        }
+    }
+
+    #[test]
+    fn a_toadstool_grows_where_a_mushroom_does_and_is_rarer() {
+        // Both halves of the trap. They have to be found *together* --
+        // a toadstool in a place of its own would be a hazard a player
+        // avoids by walking elsewhere -- and the good one has to be the
+        // common one, or foraging underground stops being worth doing.
+        let gen = WorldGen::new(99);
+        let (mut mushrooms, mut toadstools) = (0, 0);
+        for cx in -8..8 {
+            for cz in -8..8 {
+                let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                for y in 0..CHUNK_SIZE_Y {
+                    for z in 0..CHUNK_SIZE_Z {
+                        for x in 0..CHUNK_SIZE_X {
+                            match chunk.get(x, y, z) {
+                                BLOCK_MUSHROOM => mushrooms += 1,
+                                BLOCK_TOADSTOOL => toadstools += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(mushrooms > 0 && toadstools > 0, "{mushrooms} mushrooms, {toadstools} toadstools");
+        assert!(
+            toadstools * 2 < mushrooms,
+            "the bad one is not rare: {toadstools} of {} caps",
+            mushrooms + toadstools
+        );
+    }
+
+    #[test]
     fn a_birch_wood_exists_and_is_made_of_birch() {
         // A biome nothing ever classifies as is a biome that does not
         // exist, and a threshold in the middle of a noise field is very
@@ -2958,14 +12689,24 @@ mod tests {
 
     #[test]
     fn every_tree_shape_fits_the_canopy_padding() {
-        // `place_trees` only considers roots within `MAX_CANOPY_RADIUS`
-        // of the chunk. A biome whose canopy is wider than that would
-        // have its edge silently clipped at chunk borders.
+        // `place_trees` only considers roots within `TreeKind::reach` of
+        // the chunk. A biome whose canopy is wider than that would have
+        // its edge silently clipped at chunk borders.
+        //
+        // Asked of the padding the pass actually walks, per shape, rather
+        // than of `MAX_CANOPY_RADIUS`: an acacia is walked with a wider
+        // border, and its plate sits one column of lean off the root, so
+        // what has to fit is the plate plus the lean.
+        // `no_part_of_an_acacia_lands_further_than_the_generator_looks`
+        // checks that against the builder cell by cell.
         for biome in Biome::ALL {
             let (shortest, tallest, canopy) = biome.tree_shape();
+            let kind = biome.tree_kind();
+            let lean = i32::from(kind == TreeKind::Acacia);
+            let padding = kind.reach();
             assert!(
-                canopy <= MAX_CANOPY_RADIUS,
-                "{} has a canopy of {canopy} against padding of {MAX_CANOPY_RADIUS}",
+                canopy + lean <= padding,
+                "{} has a canopy of {canopy} and a lean of {lean} against padding of {padding}",
                 biome.name()
             );
             assert!(shortest > 0 && tallest >= shortest, "{} has a bad trunk range", biome.name());
@@ -2997,6 +12738,56 @@ mod tests {
     }
 
     #[test]
+    fn snow_falls_on_everything_the_generator_paints_white() {
+        // **The threshold that exists in two scales.** The generator
+        // decides what a column is made of from a temperature in -1..1;
+        // the client decides what falls out of the sky from the same
+        // field remapped to 0..1 (`climate_at`), because that is the form
+        // the mesher already had. Two scales, one line -- and for a while
+        // two lines, because `weather::SNOW_TEMPERATURE` was picked by
+        // hand at `0.25` where the generator's own freezing line lands at
+        // `0.29`.
+        //
+        // A column in the gap is tundra: the ground is snow and the sky
+        // rained on it. That is not a corner -- this sweep found it on
+        // 692 of 2489 white columns, better than a quarter of every
+        // snowfield in the world.
+        //
+        // One direction only, deliberately. Snow falling on a taiga or a
+        // frozen bog is snow falling where water freezes, which is
+        // coherent; snow *not* falling on snow is the thing the player
+        // can see.
+        let gen = WorldGen::new(1337);
+        let mut white = 0;
+        let mut rained_on = 0;
+        // **The sweep goes to the pole, not round the origin.** Three
+        // thousand blocks square about spawn used to hold thousands of
+        // white columns; at the climate scale this world has now (see
+        // `CLIMATE_NOISE_FREQUENCY`) it holds forty-two, because spawn
+        // is temperate by construction and the cold is no longer a
+        // patch of noise a walk away. Twelve thousand blocks of z is
+        // pole to pole, which is where the snow is; the step is coarser
+        // to keep the probe count where it was.
+        for gx in (-1500..1500).step_by(29) {
+            for gz in (-6000..6000).step_by(29) {
+                let h = gen.height_at(gx, gz);
+                if gen.surface_at(gx, gz, h).top != BLOCK_SNOW {
+                    continue;
+                }
+                white += 1;
+                if !crate::weather::falls_as_snow(gen.climate_at(gx, h, gz).0) {
+                    rained_on += 1;
+                }
+            }
+        }
+        assert!(white > 100, "the sweep found no snow to test: {white} columns");
+        assert_eq!(
+            rained_on, 0,
+            "{rained_on} of {white} snowfields get rain instead of snow"
+        );
+    }
+
+    #[test]
     fn snow_sits_on_peaks_even_in_temperate_country() {
         // The altitude term in `surface_temperature`. Without it snow is
         // purely latitudinal and mountains look like grassy lumps.
@@ -3020,6 +12811,140 @@ mod tests {
         }
         assert!(peaks > 0, "the sweep found no high ground to test");
         assert!(snowy_peaks > 0, "nothing high is ever cold");
+    }
+
+    /// **The ice the world lays is permafrost and nothing else**, which is
+    /// the generator's half of "на севере вся вода заледеневшая хотя
+    /// температура 20 градусов". A chunk is rebuilt from the seed and knows
+    /// no season, so anything it freezes is frozen for ever -- and the line
+    /// it used to freeze at was the *yearly mean*, which put a permanent
+    /// lid on a country whose own thermometer read twenty degrees in July.
+    ///
+    /// Two claims, and the second is the one that was broken:
+    ///
+    /// * The planet still has permanent ice. It is above about sixty-five
+    ///   degrees now rather than above fifty-eight, which is where the
+    ///   Earth's permafrost begins.
+    /// * Every cell of it is cold enough that midsummer does not open it
+    ///   (`season::water_never_thaws`) -- so no ice the generator lays is
+    ///   ice the server would thaw a second later.
+    ///
+    /// The seasonal ice -- the bay that closes in November -- is the
+    /// server's, and `primitive_server::logic::water::Frost` is where it is
+    /// tested.
+    #[test]
+    fn the_world_lays_ice_only_where_the_summer_never_opens_it() {
+        // Rows of the planet from the temperate zone to the pole, which is
+        // the span the question is about. One generator: a seed is one
+        // globe (`PLANET_ORIGIN_DEGREES`).
+        let gen = WorldGen::new(1234);
+        let mut permanent = 0;
+        let mut seasonal_and_frozen = 0;
+        let mut open_water = 0;
+        let mut frozen_by_latitude: std::collections::BTreeMap<i32, usize> = Default::default();
+        for degrees in [45, 55, 60, 65, 70, 80, 90] {
+            let row = planet_row(f64::from(degrees));
+            for cx in (-150_000..150_000).step_by(20_000) {
+                for cz in 0..3 {
+                    let pos = ChunkPos::new(cx, row.div_euclid(CHUNK_SIZE_Z as i32) + cz);
+                    let chunk = gen.generate_chunk(pos);
+                    let (ox, oz) = (cx * CHUNK_SIZE_X as i32, pos.z * CHUNK_SIZE_Z as i32);
+                    for lx in 0..CHUNK_SIZE_X {
+                        for lz in 0..CHUNK_SIZE_Z {
+                            let (gx, gz) = (ox + lx as i32, oz + lz as i32);
+                            if gen.height_on_planet(gx, gz) >= SEA_LEVEL {
+                                continue;
+                            }
+                            let climate = ((gen.temperature(gx, gz) + 1.0) * 0.5) as f32;
+                            let swing =
+                                crate::season::seasonal_swing(Some(gen.degrees_north(gz) as f32));
+                            let never_thaws = crate::season::water_never_thaws(climate, swing);
+                            match (never_thaws, chunk.get(lx, SEA_LEVEL as usize, lz)) {
+                                (true, BLOCK_ICE) => {
+                                    permanent += 1;
+                                    *frozen_by_latitude.entry(degrees).or_default() += 1;
+                                }
+                                (false, BLOCK_ICE) => seasonal_and_frozen += 1,
+                                (_, BLOCK_WATER) => open_water += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!(
+            "[ice] permanent {permanent}, seasonal-but-frozen {seasonal_and_frozen}, open {open_water},              by latitude {frozen_by_latitude:?}"
+        );
+        // **Six thousand kilometres of row for the coldest column, and
+        // that is the measurement this test was first written too narrow
+        // to make.** Two kilometres of a row at the pole found -0.59 and
+        // no ice at all, and read as "the planet has no permafrost"; a
+        // weather province is eight hundred kilometres across, so two of
+        // them is one province and says nothing about a latitude.
+        for degrees in [45, 60, 90] {
+            let row = planet_row(f64::from(degrees));
+            let coldest = (-3_000_000..3_000_000)
+                .step_by(9_973)
+                .map(|gx| gen.temperature(gx, row))
+                .fold(f64::MAX, f64::min);
+            let swing = crate::season::seasonal_swing(Some(gen.degrees_north(row) as f32));
+            println!("[ice] {degrees} degrees: coldest column {coldest:.3}, year's swing {swing:.3}");
+        }
+        assert_eq!(
+            seasonal_and_frozen, 0,
+            "the world laid ice on {seasonal_and_frozen} cells the summer would open"
+        );
+        assert!(permanent > 0, "the planet has no permanent ice at all, not even at the pole");
+        assert!(open_water > permanent, "the whole ocean froze");
+        // The north zone's own latitude is *not* permafrost: that is the
+        // bug, stated as a number. Its water is the server's to freeze and
+        // thaw with the year.
+        assert_eq!(
+            frozen_by_latitude.get(&60).copied().unwrap_or(0),
+            0,
+            "sixty degrees still has permanent ice in it"
+        );
+        assert!(
+            frozen_by_latitude.contains_key(&90),
+            "the pole has no permanent ice: {frozen_by_latitude:?}"
+        );
+    }
+
+    #[test]
+    fn ice_is_a_lid_rather_than_a_layer_of_the_sea_bed() {
+        // One cell thick, at the waterline. Ice that went further down
+        // would be a mineral in the sea floor, and everything worth
+        // finding on a shallow bottom -- clay, flint, gravel -- would be
+        // buried under a block that was never meant to be ground.
+        // **At the pole, which is where the permanent ice is now.** This
+        // used to sweep a northern world, and found plenty while the
+        // generator froze everything under the yearly mean; the line is
+        // permafrost now (`WorldGen::freezes`), so the only ice a generated
+        // chunk has is polar -- see
+        // `the_world_lays_ice_only_where_the_summer_never_opens_it` for the
+        // measurement, including why the row has to be sampled across
+        // thousands of kilometres rather than a couple.
+        let gen = WorldGen::new(1234);
+        let pole = planet_row(90.0).div_euclid(CHUNK_SIZE_Z as i32);
+        let mut checked = 0;
+        for cx in (-150_000..150_000).step_by(20_000) {
+            let chunk = gen.generate_chunk(ChunkPos::new(cx, pole));
+            for lx in 0..CHUNK_SIZE_X {
+                for lz in 0..CHUNK_SIZE_Z {
+                    if chunk.get(lx, SEA_LEVEL as usize, lz) != BLOCK_ICE {
+                        continue;
+                    }
+                    checked += 1;
+                    assert_ne!(
+                        chunk.get(lx, SEA_LEVEL as usize - 1, lz),
+                        BLOCK_ICE,
+                        "ice reaches below the waterline"
+                    );
+                }
+            }
+        }
+        assert!(checked > 0, "the sweep found no ice to check");
     }
 
     #[test]
@@ -3232,21 +13157,1105 @@ mod tests {
                 );
     }
 
+    /// What a chunk costs to generate in each kind of country.
+    ///
+    /// **`generation_timings` only ever stands in one place**: the temperate
+    /// world at the origin. What landed since -- palms on every tropical
+    /// beach, the swamps and their roots, the finds, a denser seabed -- lives
+    /// mostly somewhere else, and a generator that got dearer only on a
+    /// tropical beach is one that tool reports as unchanged. So this one goes
+    /// to each country, finds the patch of it nearest the origin, and times
+    /// the five-by-five around it.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --release --lib -- --ignored --nocapture what_each_country_costs_to_generate
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn what_each_country_costs_to_generate() {
+        use std::time::Instant;
+        const RUNS: usize = 5;
+        let places = [
+            ("temperate plains", Zone::Temperate, Biome::Plains),
+            ("temperate forest", Zone::Temperate, Biome::Forest),
+            ("temperate swamp", Zone::Temperate, Biome::Swamp),
+            ("temperate sea", Zone::Temperate, Biome::Ocean),
+            ("tropical beach", Zone::Tropics, Biome::Beach),
+            ("tropical sea", Zone::Tropics, Biome::Ocean),
+            ("dry-belt desert", Zone::DryBelt, Biome::Desert),
+            ("northern bog", Zone::North, Biome::Bog),
+        ];
+        for (name, zone, wanted) in places {
+            let gen = WorldGen::with_zone(1234, Preset::Normal, zone);
+            // The nearest chunk whose middle is the country asked for, on a
+            // grid four chunks apart: coarse enough to be quick, fine enough
+            // that no country worth measuring fits between two samples.
+            let mut nearest: Option<(i64, ChunkPos)> = None;
+            for gz in (-3008..3008).step_by(64) {
+                for gx in (-3008..3008).step_by(64) {
+                    let distance = i64::from(gx) * i64::from(gx) + i64::from(gz) * i64::from(gz);
+                    if nearest.is_some_and(|(best, _)| best <= distance) || gen.biome_at(gx + 8, gz + 8) != wanted {
+                        continue;
+                    }
+                    nearest = Some((distance, ChunkPos::from_global(gx, gz).0));
+                }
+            }
+            let Some((_, centre)) = nearest else {
+                println!("[gen] {name:17} none within three thousand blocks");
+                continue;
+            };
+            let mut best = f64::MAX;
+            for _ in 0..RUNS {
+                let started = Instant::now();
+                for dz in -2..=2 {
+                    for dx in -2..=2 {
+                        std::hint::black_box(gen.generate_chunk(ChunkPos::new(centre.x + dx, centre.z + dz)));
+                    }
+                }
+                best = best.min(started.elapsed().as_secs_f64() * 1e3 / 25.0);
+            }
+            println!("[gen] {name:17} {best:.3} ms/chunk, best of {RUNS}, round ({}, {})", centre.x, centre.z);
+        }
+    }
+
     /// Finds a chunk whose middle column is in `wanted`, within a few
     /// thousand blocks of the origin.
     ///
     /// Feature tests need somewhere the feature belongs, and hard-coded
     /// coordinates go stale the first time a threshold moves.
+    /// A world laid in the zone where `biome` is at home.
+    ///
+    /// At real scale a temperate world has no desert, savanna, taiga or bog
+    /// within a day's walk (`Zone`), so a test about one of those has to be
+    /// asked of a world that has it -- which is what the test always meant by
+    /// searching "along the transect" of the old banded world.
+    pub(super) fn world_for(seed: u32, biome: Biome) -> WorldGen {
+        // **The savanna in the tropics, since the Earth's scale.** The dry
+        // belt round its origin is a desert province now, with a savanna
+        // grove where a hollow holds rain -- which is the planet's rule and
+        // leaves a test of acacias a dozen empty chunks; the tropics are
+        // savanna country.
+        let zone = match biome {
+            Biome::Savanna => Zone::Tropics,
+            Biome::Desert => Zone::DryBelt,
+            Biome::Taiga | Biome::Tundra | Biome::Bog | Biome::SnowyPeaks => Zone::North,
+            _ => Zone::Temperate,
+        };
+        WorldGen::with_zone(seed, Preset::Normal, zone)
+    }
+
     pub(super) fn chunk_in(gen: &WorldGen, wanted: Biome) -> Option<Chunk> {
-        for cx in -140..140 {
-            for cz in -140..140 {
+        chunks_in(gen, wanted, 1).into_iter().next()
+    }
+
+    /// Up to `want` chunks whose middle column is in `wanted`, searched
+    /// **along the world's climate transect** rather than in a square
+    /// around the origin.
+    ///
+    /// The search shape is the whole point. Temperature is a latitude
+    /// band (see `WorldGen::latitude`), so the country around spawn is
+    /// temperate and nothing else: a square of a few hundred blocks
+    /// holds forests, meadows and marshes, and no test looking in one
+    /// will ever find a desert or a snowfield again. So the sweep runs
+    /// the long way -- five thousand blocks each way in z is the
+    /// equator and the pole.
+    ///
+    /// **And it is no longer narrow across.** It used to be sixteen
+    /// chunks either side of the meridian, on the argument that
+    /// latitude does not depend on x so a wide sweep buys nothing. That
+    /// argument stopped holding when the weather fields were slowed to
+    /// kilometres (see `CLIMATE_NOISE_FREQUENCY`): five hundred blocks
+    /// of x is now well inside a single lobe of them, so a strip that
+    /// narrow samples *one* value of the weather at each latitude and
+    /// finds either every dry biome or none of them, depending on the
+    /// seed. A desert would be missing from a world that has plenty.
+    /// Stepping five chunks at a time over ten times the width costs
+    /// the same number of probes and covers five kilometres either
+    /// side, which is several lobes.
+    pub(super) fn chunks_in(gen: &WorldGen, wanted: Biome, want: usize) -> Vec<Chunk> {
+        let mut out = Vec::new();
+        // A whole cycle of latitude, at four chunks a step, by sixty-four
+        // columns across: about twelve thousand `biome_at` calls in the
+        // worst case, which is a fraction of generating one chunk.
+        for cz in (-360..360).step_by(4) {
+            for cx in (-160..160).step_by(5) {
                 let (gx, gz) = (cx * CHUNK_SIZE_X as i32 + 8, cz * CHUNK_SIZE_Z as i32 + 8);
-                if gen.biome_at(gx, gz) == wanted {
-                    return Some(gen.generate_chunk(ChunkPos::new(cx, cz)));
+                if gen.biome_at(gx, gz) != wanted {
+                    continue;
+                }
+                out.push(gen.generate_chunk(ChunkPos::new(cx, cz)));
+                if out.len() == want {
+                    return out;
                 }
             }
         }
-        None
+        out
+    }
+
+    // ---- the ground: soils, grasses, moss (see `ground`) ----
+
+    /// Every chunk of a few in each biome, once, for the three tests below.
+    fn ground_sample() -> &'static Vec<(Biome, WorldGen, Vec<Chunk>)> {
+        static SAMPLE: std::sync::OnceLock<Vec<(Biome, WorldGen, Vec<Chunk>)>> = std::sync::OnceLock::new();
+        SAMPLE.get_or_init(|| {
+            Biome::ALL
+                .iter()
+                .filter(|&&b| b != Biome::Ocean)
+                .map(|&biome| {
+                    let gen = world_for(4242, biome);
+                    let chunks = chunks_in(&gen, biome, 6);
+                    (biome, gen, chunks)
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn every_soil_and_every_grass_grows_somewhere_in_its_own_country() {
+        let mut seen = std::collections::HashSet::new();
+        for (_, _, chunks) in ground_sample() {
+            for chunk in chunks {
+                seen.extend(chunk.blocks.iter().map(|&b| block_kind(b)));
+            }
+        }
+        for id in crate::ground::SOILS.into_iter().chain(crate::ground::GRASSES) {
+            assert!(seen.contains(&id), "no {} anywhere in six chunks of every biome", crate::types::block_name(id));
+        }
+        for id in [crate::types::BLOCK_PINE_LOG, crate::types::BLOCK_WILLOW_LOG, crate::types::BLOCK_WILLOW_TWIG, crate::types::BLOCK_FIR_TWIG, crate::types::BLOCK_SAXAUL_BOUGH] {
+            let grown = seen.contains(&id) || (id == crate::types::BLOCK_WILLOW_LOG && seen.contains(&crate::types::BLOCK_WILLOW_BOUGH));
+            assert!(grown, "no {} grows anywhere", crate::types::block_name(id));
+        }
+    }
+
+    #[test]
+    fn moss_grows_only_in_wet_country_and_does_grow_there() {
+        let (mut wet, mut dry) = (0usize, Vec::new());
+        for (_, gen, chunks) in ground_sample() {
+            for chunk in chunks {
+                for (index, &block) in chunk.blocks.iter().enumerate() {
+                    if !crate::ground::is_mossy(block) {
+                        continue;
+                    }
+                    let (lx, lz) = (index % CHUNK_SIZE_X, (index / CHUNK_SIZE_X) % CHUNK_SIZE_Z);
+                    let (gx, gz) = (chunk.pos.x * CHUNK_SIZE_X as i32 + lx as i32, chunk.pos.z * CHUNK_SIZE_Z as i32 + lz as i32);
+                    // A tree or a boulder rooted a column over a border is
+                    // its root's; asked of the cell and the ring round it.
+                    let wet_here = (-2..=2).any(|dx| (-2..=2).any(|dz| gen.biome_at(gx + dx, gz + dz).grows_moss()));
+                    if wet_here {
+                        wet += 1;
+                    } else {
+                        dry.push((crate::types::block_name(block), gx, gz, gen.biome_at(gx, gz).name()));
+                    }
+                }
+            }
+        }
+        assert!(dry.is_empty(), "moss in dry country: {:?}", &dry[..dry.len().min(8)]);
+        assert!(wet > 20, "only {wet} mossy blocks in six chunks of every wet biome");
+    }
+
+    /// How much of each zone's land is dead wood and swamp, how much of a
+    /// swamp is pool, and how many palm roots a tropical coast has, over a
+    /// square twelve kilometres a side on four seeds.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --lib -- --ignored --nocapture rare_places_share
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn rare_places_share() {
+        for &zone in Zone::ALL {
+            for seed in [1u32, 7, 1234, 99_999] {
+                let gen = WorldGen::with_zone(seed, Preset::Normal, zone);
+                let (mut land, mut dead, mut swamp, mut pool, mut beach, mut palms) = (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+                for gx in (-6000..6000).step_by(48) {
+                    for gz in (-6000..6000).step_by(48) {
+                        let height = gen.height_at(gx, gz);
+                        let biome = gen.biome_from(gx, gz, height);
+                        match biome {
+                            Biome::Ocean => continue,
+                            Biome::Beach => beach += 1,
+                            _ => {}
+                        }
+                        if biome != Biome::Beach {
+                            land += 1;
+                        }
+                        dead += u32::from(biome == Biome::DeadForest);
+                        if biome == Biome::Swamp {
+                            swamp += 1;
+                            let around = [
+                                gen.height_at(gx + 1, gz),
+                                gen.height_at(gx - 1, gz),
+                                gen.height_at(gx, gz + 1),
+                                gen.height_at(gx, gz - 1),
+                            ];
+                            pool += u32::from(gen.swamp_pool(gx, gz, height, gen.water_level_at(gx, gz), around) > 0);
+                        }
+                        if biome == Biome::Beach && gen.warmth(gx, gz) > TROPICAL {
+                            palms += 1;
+                        }
+                    }
+                }
+                let share = |n: u32| f64::from(n) * 100.0 / f64::from(land.max(1));
+                println!(
+                    "{} seed {seed}: dead forest {:.2}% of land, swamp {:.2}% (pools {:.0}% of it), \
+                     beach {beach} samples of which {palms} tropical",
+                    zone.name(),
+                    share(dead),
+                    share(swamp),
+                    f64::from(pool) * 100.0 / f64::from(swamp.max(1)),
+                );
+            }
+        }
+    }
+
+    /// **A dead wood is a find, not a region.** It was the second commonest
+    /// land in the world -- measured, a tenth to a sixth of all land on seeds
+    /// 1, 7, 1234 and 99 999 -- and a place that common is a colour. It is now
+    /// where the dry temperate band meets a slow field of burn scars
+    /// (`WorldGen::burnt`), measured by `rare_places_share` at 0.68 to 1.00 per
+    /// cent of a temperate world's land on the same seeds.
+    ///
+    /// Both ends are asserted, because both are the bug: over two per cent is
+    /// the region it was, and under two tenths is a biome deleted by a
+    /// threshold nobody meant to move that far. **And a patch, not a speckle**:
+    /// the burnt ground has to come in stretches wide enough to walk into, so
+    /// some sample of it must have most of its neighbours forty-eight blocks
+    /// away burnt too.
+    #[test]
+    fn a_dead_forest_is_a_rare_patch_and_not_a_region() {
+        for seed in [1u32, 7, 1234, 99_999] {
+            let gen = WorldGen::new(seed);
+            const STEP: i32 = 48;
+            let dead_at = |gx: i32, gz: i32| gen.biome_at(gx, gz) == Biome::DeadForest;
+            let (mut land, mut dead, mut patch) = (0u32, 0u32, false);
+            for gx in (-6000..6000).step_by(STEP as usize) {
+                for gz in (-6000..6000).step_by(STEP as usize) {
+                    let height = gen.height_at(gx, gz);
+                    let biome = gen.biome_from(gx, gz, height);
+                    if matches!(biome, Biome::Ocean | Biome::Beach) {
+                        continue;
+                    }
+                    land += 1;
+                    if biome != Biome::DeadForest {
+                        continue;
+                    }
+                    dead += 1;
+                    if !patch {
+                        let around = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
+                            .iter()
+                            .filter(|&&(dx, dz)| dead_at(gx + dx * STEP, gz + dz * STEP))
+                            .count();
+                        patch = around >= 5;
+                    }
+                }
+            }
+            let share = f64::from(dead) * 100.0 / f64::from(land.max(1));
+            assert!(
+                (0.2..2.0).contains(&share),
+                "seed {seed}: dead forest is {share:.2}% of a temperate world's land"
+            );
+            assert!(patch, "seed {seed}: the dead wood is scattered columns, not a burnt stretch");
+        }
+    }
+
+    /// Chunks along a world's coast: every chunk within a few hundred blocks
+    /// of the origin whose middle is beach. The origin is on a coast in every
+    /// world (`spawn_column`), so a tropical world's palms are here.
+    fn beach_chunks(gen: &WorldGen, want: usize) -> Vec<ChunkPos> {
+        // **A hundred chunks, not twenty-four.** A world's origin is
+        // wherever the planet had low dry ground at its latitude with the
+        // sea within `sea_within`'s reach, which is a walk rather than a
+        // doorstep (`WorldGen::meridian_with_land`); the neutral origin
+        // that used to put a beach inside twenty-four chunks of every
+        // world is the planet's alone now.
+        let mut found = Vec::new();
+        for cz in -100..100 {
+            for cx in -100..100 {
+                if gen.biome_at(cx * 16 + 8, cz * 16 + 8) == Biome::Beach {
+                    found.push(ChunkPos::new(cx, cz));
+                    if found.len() == want {
+                        return found;
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// A chunk and its eight neighbours, read by world coordinates.
+    struct Around {
+        centre: ChunkPos,
+        chunks: Vec<Chunk>,
+    }
+
+    impl Around {
+        fn new(gen: &WorldGen, centre: ChunkPos) -> Self {
+            let mut chunks = Vec::with_capacity(9);
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    chunks.push(gen.generate_chunk(ChunkPos::new(centre.x + dx, centre.z + dz)));
+                }
+            }
+            Around { centre, chunks }
+        }
+
+        /// The block at a world cell, if it is inside the nine chunks.
+        fn at(&self, gx: i32, gy: i32, gz: i32) -> Option<BlockId> {
+            let (cx, cz) = (gx.div_euclid(16) - self.centre.x + 1, gz.div_euclid(16) - self.centre.z + 1);
+            if !(0..3).contains(&cx) || !(0..3).contains(&cz) || !(0..CHUNK_SIZE_Y as i32).contains(&gy) {
+                return None;
+            }
+            let chunk = &self.chunks[(cz * 3 + cx) as usize];
+            Some(chunk.get(gx.rem_euclid(16) as usize, gy as usize, gz.rem_euclid(16) as usize))
+        }
+    }
+
+    /// Every palm rooted in the middle chunk, as its root column and the
+    /// world cells the generator meant for it (`palm_cells` from the root's
+    /// own hash and lean), found by the trunk piece standing on its ground.
+    #[allow(clippy::type_complexity)]
+    fn palms_rooted_in(gen: &WorldGen, centre: ChunkPos, around: &Around) -> Vec<(i32, i32, Vec<((i32, i32, i32), BlockId)>)> {
+        let (ox, oz) = (centre.x * 16, centre.z * 16);
+        // Two coordinates for one chunk: the world's, which is what a
+        // generated chunk is labelled with and what `around` is read by,
+        // and the planet's, which is where the generator's own tools --
+        // the column cache and the palm's hash -- read the ground. See
+        // `WorldGen::on_planet`.
+        let (px, pz) = gen.on_planet(ox, oz);
+        let columns = ColumnCache::build(gen, px, pz);
+        let mut found = Vec::new();
+        for lz in 0..16 {
+            for lx in 0..16 {
+                let (gx, gz) = (ox + lx, oz + lz);
+                let ground = columns.at(lx, lz).height;
+                if !around.at(gx, ground + 1, gz).is_some_and(|b| block_kind(b) == crate::types::BLOCK_PALM_TRUNK) {
+                    continue;
+                }
+                let variant = hash2(px + lx, pz + lz, gen.seed.wrapping_add(0x9A1B));
+                let lean = palm_lean(variant, |dx, dz| columns.at(lx + dx, lz + dz).height);
+                let cells = palm_cells(variant, lean)
+                    .into_iter()
+                    .map(|((dx, dy, dz), id)| ((gx + dx, ground + dy, gz + dz), id))
+                    .collect();
+                found.push((gx, gz, cells));
+            }
+        }
+        found
+    }
+
+    /// What is wrong in and round one palm's cells, as counts of cells:
+    /// hanging moss, another tree's leaf, another tree's wood, and a cell of
+    /// another palm. Asked of every cell the palm was meant to have and every
+    /// cell touching one, edges and corners included -- the mesher reads a
+    /// crown cell's heading and a trunk's lean off exactly that ring
+    /// (`mesh::crown_part`, `palm::palm_course`), so a stranger in it is a
+    /// frond turned the wrong way or a trunk bent towards nothing.
+    fn palm_trouble(around: &Around, cells: &[((i32, i32, i32), BlockId)]) -> [usize; 4] {
+        // Another tree's leaf is `is_canopy`, not `is_leafy`: a bush at a
+        // palm's foot is undergrowth on the dune, not a leaf on the palm.
+        use crate::types::{is_branch, is_canopy, is_palm_crown, BLOCK_HANGING_MOSS, BLOCK_PALM_TRUNK, BLOCK_STRIPPED_LOG};
+        let own: std::collections::HashSet<(i32, i32, i32)> = cells.iter().map(|&(c, _)| c).collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut trouble = [0usize; 4];
+        for &((x, y, z), _) in cells {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    for dx in -1..=1 {
+                        let at = (x + dx, y + dy, z + dz);
+                        if !seen.insert(at) {
+                            continue;
+                        }
+                        let Some(block) = around.at(at.0, at.1, at.2) else {
+                            continue;
+                        };
+                        let kind = block_kind(block);
+                        let palm = kind == BLOCK_PALM_TRUNK || is_palm_crown(block);
+                        trouble[0] += usize::from(kind == BLOCK_HANGING_MOSS);
+                        trouble[1] += usize::from(is_canopy(block) && !palm);
+                        trouble[2] += usize::from(
+                            (is_branch(block) && kind != BLOCK_PALM_TRUNK) || crate::wood::is_log(kind) || kind == BLOCK_STRIPPED_LOG,
+                        );
+                        trouble[3] += usize::from(palm && !own.contains(&at));
+                    }
+                }
+            }
+        }
+        trouble
+    }
+
+    #[test]
+    fn every_palm_is_whole_across_every_chunk_border_and_carries_two_to_four_clusters_of_coconuts() {
+        // **The palm the generator meant, cell by cell, in whichever chunk
+        // each cell landed.** Every palm rooted in the middle chunk of a
+        // three-by-three is drawn again from its root's own hash and lean
+        // (`palm_cells`), and each of its cells is looked up in the chunk
+        // that holds it -- so a crown cut off at a seam, a trunk piece one
+        // chunk forgot, or a lean the two sides of a border disagreed about
+        // is a cell that does not match. A frond or a cluster may have been
+        // refused by something already there (a crown fills only air); a
+        // trunk piece may not, unless wood or ground was in its way.
+        use crate::types::{is_branch, BLOCK_PALM_COCONUTS, BLOCK_PALM_TRUNK};
+        let gen = WorldGen::with_zone(1337, Preset::Normal, Zone::Tropics);
+        let mut palms = 0;
+        for centre in beach_chunks(&gen, 10) {
+            let around = Around::new(&gen, centre);
+            let (ox, oz) = (centre.x * 16, centre.z * 16);
+            // The column cache the generator leaned the palm by, not
+            // `height_at`: beside a swamp pool the two differ by the pool.
+            // Read on the planet, like everything private here; the chunks
+            // are read in the world's own coordinates. See `on_planet`.
+            let (px, pz) = gen.on_planet(ox, oz);
+            let columns = ColumnCache::build(&gen, px, pz);
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    let (gx, gz) = (ox + lx, oz + lz);
+                    let ground = columns.at(lx, lz).height;
+                    let root = around.at(gx, ground + 1, gz);
+                    if !root.is_some_and(|b| block_kind(b) == BLOCK_PALM_TRUNK) {
+                        continue;
+                    }
+                    let variant = hash2(px + lx, pz + lz, gen.seed.wrapping_add(0x9A1B));
+                    let lean = palm_lean(variant, |dx, dz| columns.at(lx + dx, lz + dz).height);
+                    let cells = palm_cells(variant, lean);
+                    let clusters = cells.iter().filter(|(_, id)| *id == BLOCK_PALM_COCONUTS).count();
+                    assert!((2..=4).contains(&clusters), "a palm drawn with {clusters} clusters");
+                    for ((dx, dy, dz), id) in cells {
+                        let Some(here) = around.at(gx + dx, ground + dy, gz + dz) else {
+                            continue;
+                        };
+                        // A trunk piece grows only into soft cells, so ground
+                        // can keep one from it; another palm's trunk cannot,
+                        // since no two palms share a column any more
+                        // (`palm_stands`). What a trunk cell must never be is
+                        // air, a leaf or other wood. A crown cell must never
+                        // be air.
+                        let kept = if is_branch(id) {
+                            here == id || (here != BLOCK_AIR && !is_branch(here) && !crate::types::is_leafy(here))
+                        } else {
+                            here != BLOCK_AIR
+                        };
+                        assert!(
+                            kept,
+                            "the palm at {gx},{gz} should have {id} at {:?} and has {here}",
+                            (gx + dx, ground + dy, gz + dz)
+                        );
+                    }
+                    palms += 1;
+                }
+            }
+        }
+        assert!(palms >= 3, "only {palms} palms on ten tropical beach chunks to check");
+    }
+
+    #[test]
+    fn palms_grow_on_warm_coasts_and_not_on_a_temperate_one() {
+        // A palm is a claim about the climate: the tropics' beaches have
+        // them, and a temperate world's -- whose weather at the origin is
+        // the latitude and nothing else -- has none.
+        let feet = |zone: Zone| -> usize {
+            let gen = WorldGen::with_zone(7, Preset::Normal, zone);
+            beach_chunks(&gen, 8)
+                .into_iter()
+                .map(|pos| {
+                    let chunk = gen.generate_chunk(pos);
+                    chunk
+                        .blocks
+                        .iter()
+                        .filter(|&&b| block_kind(b) == crate::types::BLOCK_PALM_TRUNK)
+                        .count()
+                })
+                .sum()
+        };
+        assert!(feet(Zone::Tropics) > 0, "eight tropical beach chunks with no palm in them");
+        assert!(feet(Zone::DryBelt) > 0, "eight beach chunks of the dry belt with no palm in them");
+        assert_eq!(feet(Zone::Temperate), 0, "palms on a temperate beach");
+    }
+
+    /// What stands in and round every palm of a tropical coast: moss, another
+    /// tree's leaves or wood, and another palm's cells.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --lib -- --ignored --nocapture palm_neighbours_census
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn palm_neighbours_census() {
+        for seed in [1337u32, 7, 42, 2024] {
+            let gen = WorldGen::with_zone(seed, Preset::Normal, Zone::Tropics);
+            let (mut palms, mut crown_cells, mut worst) = (0usize, 0usize, (0usize, (0, 0)));
+            let mut counts = [0usize; 4];
+            for centre in beach_chunks(&gen, 40) {
+                let around = Around::new(&gen, centre);
+                for (gx, gz, cells) in palms_rooted_in(&gen, centre, &around) {
+                    let trouble = palm_trouble(&around, &cells);
+                    for (count, found) in counts.iter_mut().zip(trouble) {
+                        *count += usize::from(found > 0);
+                    }
+                    let total: usize = trouble.iter().sum();
+                    if total > worst.0 {
+                        worst = (total, (gx, gz));
+                    }
+                    crown_cells += cells
+                        .iter()
+                        .filter(|&&(c, _)| around.at(c.0, c.1, c.2).is_some_and(crate::types::is_palm_crown))
+                        .count();
+                    palms += 1;
+                }
+            }
+            println!(
+                "seed {seed}: {palms} palms, {:.1} crown cells each; with moss {}, foreign leaf {}, foreign wood {}, \
+                 another palm {}; the worst at {:?} ({} cells)",
+                crown_cells as f64 / palms.max(1) as f64,
+                counts[0],
+                counts[1],
+                counts[2],
+                counts[3],
+                worst.1,
+                worst.0
+            );
+            // What each rule takes, over the same chunks' own columns: rolled,
+            // clear of trees, and standing after one round and after
+            // `PALM_ROUNDS`.
+            let column = |x: i32, z: i32| gen.column_anywhere(x, z);
+            let mut clear = std::collections::HashMap::new();
+            let mut stages = [0usize; 4];
+            for centre in beach_chunks(&gen, 40) {
+                for lz in 0..16 {
+                    for lx in 0..16 {
+                        let (gx, gz) = (centre.x * 16 + lx, centre.z * 16 + lz);
+                        let Some(root) = gen.palm_root(gx, gz, &column) else {
+                            continue;
+                        };
+                        stages[0] += 1;
+                        for (stage, rounds) in [(1, 0), (2, 1), (3, PALM_ROUNDS)] {
+                            stages[stage] += usize::from(gen.palm_stands(gx, gz, &root, rounds, &column, &mut clear));
+                        }
+                    }
+                }
+            }
+            println!(
+                "seed {seed}: {} rolled, {} clear of trees, {} standing after one round, {} after {PALM_ROUNDS}",
+                stages[0], stages[1], stages[2], stages[3]
+            );
+        }
+    }
+
+    #[test]
+    fn no_palm_on_a_tropical_coast_touches_another_palm_or_a_tree_or_carries_moss() {
+        // **"пальмы прорастают в друг друга" and "на пальмах растет лишай".**
+        // Before `palm_stands`, `palm_neighbours_census` found four palms in
+        // five on forty tropical beach chunks with a cell of another palm in
+        // or against their own, and one in eight with moss or another tree's
+        // leaf there. Every palm rooted on the beaches round two tropical
+        // origins, every cell it was meant to have and every cell touching
+        // one, edges and corners: nothing in them but the palm itself.
+        let mut palms = 0;
+        for seed in [1337u32, 2024] {
+            let gen = WorldGen::with_zone(seed, Preset::Normal, Zone::Tropics);
+            for centre in beach_chunks(&gen, 20) {
+                let around = Around::new(&gen, centre);
+                for (gx, gz, cells) in palms_rooted_in(&gen, centre, &around) {
+                    assert_eq!(
+                        palm_trouble(&around, &cells),
+                        [0; 4],
+                        "seed {seed}: the palm at {gx},{gz} has [moss, another tree's leaf, another tree's wood, \
+                         another palm's cells] in or against it"
+                    );
+                    palms += 1;
+                }
+            }
+        }
+        assert!(palms >= 20, "only {palms} palms on forty tropical beach chunks: keeping them apart left the coast bare");
+    }
+
+    #[test]
+    fn moss_hangs_under_a_swamp_trees_leaves_and_never_under_a_palms_fronds() {
+        // **"на пальмах растет лишай".** `place_swamp_growth` hung moss under
+        // anything `is_canopy` over a swamp column, and a palm's fronds and
+        // coconuts are canopy. Asked of the pass itself on a real swamp chunk,
+        // so it holds wherever a palm's crown ends up over a swamp -- a coast
+        // palm rooted on one, or a beach palm leaning over its edge -- and not
+        // only on the coasts a test happens to find one on.
+        use crate::types::{BLOCK_HANGING_MOSS, BLOCK_PALM_COCONUTS, BLOCK_PALM_FRONDS};
+        let gen = WorldGen::new(7);
+        let pos = chunks_in(&gen, Biome::Swamp, 1).first().expect("a swamp chunk near the origin").pos;
+        let (ox, oz) = (pos.x * 16, pos.z * 16);
+        let columns = ColumnCache::build(&gen, ox, oz);
+        let moss_under = |leaf: BlockId| {
+            let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    put_block(&mut blocks, lx, columns.at(lx, lz).height + 6, lz, leaf, true);
+                }
+            }
+            gen.place_swamp_growth(&mut blocks, ox, oz, &columns);
+            blocks.iter().filter(|&&b| b == BLOCK_HANGING_MOSS).count()
+        };
+        assert!(moss_under(BLOCK_LEAVES) > 0, "no moss under a swamp's own leaves, so the rest proves nothing");
+        assert_eq!(moss_under(BLOCK_PALM_FRONDS), 0, "moss hangs under a palm's fronds");
+        assert_eq!(moss_under(BLOCK_PALM_COCONUTS), 0, "moss hangs under a palm's coconuts");
+    }
+
+    /// What the palm pass costs a tropical beach chunk: the chunk whole, the
+    /// palms written as they were rolled with nothing asked round them, and
+    /// the pass as it is. Over the same chunks, with every tile remembered.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --lib -- --ignored --nocapture what_the_palm_pass_costs
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn what_the_palm_pass_costs() {
+        use std::time::Instant;
+        let gen = WorldGen::with_zone(1337, Preset::Normal, Zone::Tropics);
+        let chunks = beach_chunks(&gen, 40);
+        for &pos in &chunks {
+            gen.generate_chunk(pos);
+        }
+        let (mut whole, mut rolled, mut standing) = (0f64, 0f64, 0f64);
+        for _ in 0..3 {
+            for &pos in &chunks {
+                let clock = Instant::now();
+                let chunk = gen.generate_chunk(pos);
+                whole += clock.elapsed().as_secs_f64();
+                let (ox, oz) = (pos.x * 16, pos.z * 16);
+                let columns = ColumnCache::build(&gen, ox, oz);
+                let mut blocks = chunk.blocks.to_vec();
+                let clock = Instant::now();
+                for lz in -PALM_REACH..16 + PALM_REACH {
+                    for lx in -PALM_REACH..16 + PALM_REACH {
+                        if let Some(root) = gen.palm_root(ox + lx, oz + lz, &|x, z| columns.at(x - ox, z - oz)) {
+                            for ((dx, dy, dz), id) in palm_cells(root.variant, root.lean) {
+                                put_block(&mut blocks, lx + dx, root.ground + dy, lz + dz, id, false);
+                            }
+                        }
+                    }
+                }
+                rolled += clock.elapsed().as_secs_f64();
+                let clock = Instant::now();
+                gen.place_palms(&mut blocks, ox, oz, &columns);
+                standing += clock.elapsed().as_secs_f64();
+            }
+        }
+        let per = |s: f64| s * 1000.0 / (3 * chunks.len()) as f64;
+        println!(
+            "{} tropical beach chunks: the chunk whole {:.3} ms, palms as rolled {:.3} ms, palms that stand {:.3} ms",
+            chunks.len(),
+            per(whole),
+            per(rolled),
+            per(standing)
+        );
+    }
+
+    #[test]
+    fn a_swamp_tree_holds_its_crown_over_a_standing_player() {
+        // **"A solid wall of leaf texture right in front of the camera."**
+        // Photographed at eye height on the edge of a swamp: a slab of
+        // leaves standing on the mud. A swamp tree's trunk was three to five
+        // long and `place_tree` hangs the canopy's widest layers two and one
+        // below its top, so the shortest tree's crown started one cell over
+        // the ground -- a hedge seven across that a player walked into
+        // rather than under.
+        //
+        // Asked of the cells right beside each trunk, which are this tree's
+        // and nobody else's: a neighbour's crown reaching over a hummock one
+        // lower would say nothing about this one.
+        let gen = WorldGen::new(7);
+        let swamps = chunks_in(&gen, Biome::Swamp, 6);
+        assert!(!swamps.is_empty(), "no swamp chunks near the origin");
+        let (mut trees, mut low) = (0, Vec::new());
+        for chunk in &swamps {
+            let (ox, oz) = (chunk.pos.x * 16, chunk.pos.z * 16);
+            for lz in 1..15usize {
+                for lx in 1..15usize {
+                    if gen.biome_at(ox + lx as i32, oz + lz as i32) != Biome::Swamp {
+                        continue;
+                    }
+                    for y in 1..CHUNK_SIZE_Y - 3 {
+                        let under = chunk.get(lx, y - 1, lz);
+                        let here = chunk.get(lx, y, lz);
+                        // A grown tree's foot: a log, or -- now that the
+                        // ordinary world builds its broadleaf out of branches
+                        // -- a piece at least as wide as a grown trunk. Not a
+                        // sapling's thinner stem, whose leaves are meant to be
+                        // at a player's knee.
+                        let foot = here == crate::types::BLOCK_LOG
+                            || crate::types::branch_width(here).is_some_and(|w| w >= crate::worldgen::GROWN_FOOT);
+                        if !foot
+                            || !crate::types::has_full_top(under)
+                            || block_kind(under) == crate::types::BLOCK_LOG
+                            || crate::types::is_branch(under)
+                        {
+                            continue;
+                        }
+                        trees += 1;
+                        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (1, -1), (-1, 1)] {
+                            let (x, z) = ((lx as i32 + dx) as usize, (lz as i32 + dz) as usize);
+                            for rise in 0..2 {
+                                if crate::types::is_canopy(chunk.get(x, y + rise, z)) {
+                                    low.push((ox + x as i32, y + rise, oz + z as i32));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(trees > 0, "no swamp trees in {} swamp chunks", swamps.len());
+        assert!(low.is_empty(), "{} leaves of {trees} swamp trees hang at head height: {low:?}", low.len());
+    }
+
+    #[test]
+    fn a_swamp_holds_its_water_in_pools_between_hummocks_of_mud() {
+        // **The water stays where it was put**: every cell of water above the
+        // sea in a swamp has water, ground or something standing in it on all
+        // four sides -- never air, which is a pool that spills the first time
+        // the water simulation looks at it. Across the nine chunks, so a pool
+        // on a seam is asked from both sides.
+        //
+        // **And it is a swamp**: over a handful of swamp chunks there are
+        // pools, mud, lily pads, drowned snags and moss under the crowns --
+        // each of the things that makes the place recognisable from its
+        // edge, and slow to cross.
+        use crate::types::{BLOCK_HANGING_MOSS, BLOCK_LILY_PAD, BLOCK_MUD};
+        let gen = WorldGen::new(7);
+        let swamps = chunks_in(&gen, Biome::Swamp, 6);
+        assert!(swamps.len() >= 3, "only {} swamp chunks near the origin", swamps.len());
+        let (mut pools, mut mud, mut lilies, mut snags, mut moss) = (0, 0, 0, 0, 0);
+        for chunk in &swamps {
+            let around = Around::new(&gen, chunk.pos);
+            let (ox, oz) = (chunk.pos.x * 16, chunk.pos.z * 16);
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    let (gx, gz) = (ox + lx, oz + lz);
+                    for y in SEA_LEVEL + 1..SEA_LEVEL + 8 {
+                        let here = chunk.get(lx as usize, y as usize, lz as usize);
+                        if here == BLOCK_WATER && gen.biome_at(gx, gz) == Biome::Swamp {
+                            pools += 1;
+                            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                                if let Some(side) = around.at(gx + dx, y, gz + dz) {
+                                    assert_ne!(side, BLOCK_AIR, "swamp water at {gx},{y},{gz} runs out to the side");
+                                }
+                            }
+                        }
+                    }
+                    for y in 1..CHUNK_SIZE_Y - 1 {
+                        let block = chunk.get(lx as usize, y, lz as usize);
+                        mud += usize::from(block == BLOCK_MUD);
+                        lilies += usize::from(block == BLOCK_LILY_PAD);
+                        moss += usize::from(block == BLOCK_HANGING_MOSS);
+                        // The foot of a snag: a bough standing on the pool's
+                        // bed, which no ordinary world grows anywhere else --
+                        // drowned, since it stands under the surface
+                        // (`types::BLOCK_DROWNED_BOUGH`) -- counted by what it
+                        // stands on.
+                        let under = chunk.get(lx as usize, y - 1, lz as usize);
+                        snags += usize::from(
+                            matches!(block_kind(block), crate::types::BLOCK_BOUGH | crate::types::BLOCK_DROWNED_BOUGH)
+                                && !crate::types::is_branch(under),
+                        );
+                    }
+                }
+            }
+        }
+        assert!(pools > 20, "{pools} cells of pool in {} swamp chunks", swamps.len());
+        assert!(mud > 20, "{mud} mud in {} swamp chunks", swamps.len());
+        assert!(lilies > 0, "no lily pad in {} swamp chunks", swamps.len());
+        assert!(moss > 0, "no hanging moss in {} swamp chunks", swamps.len());
+        assert!(snags > 0, "no drowned snag in {} swamp chunks", swamps.len());
+    }
+
+    #[test]
+    fn a_snag_in_a_swamp_pool_is_drowned_wood_with_no_air_round_it_under_the_surface() {
+        // **"болотные ветки не заполнены водой и вытесняют ее"**: a snag's
+        // pieces were dry wood written over the pool's cells, so every snag
+        // stood in a square hole of air as deep as its pool. Every piece of
+        // branch in a pool column at or under the surface has to hold its
+        // water (`types::stands_in_water`), with nothing but water or ground
+        // on its four sides -- and over the surface it is dry wood again,
+        // or the snag wears a column of water up into the air.
+        use crate::types::{is_branch, is_liquid, stands_in_water};
+        let gen = WorldGen::new(7);
+        let swamps = chunks_in(&gen, Biome::Swamp, 6);
+        let (mut under, mut over) = (0, 0);
+        for chunk in &swamps {
+            let around = Around::new(&gen, chunk.pos);
+            let (ox, oz) = (chunk.pos.x * 16, chunk.pos.z * 16);
+            let columns = ColumnCache::build(&gen, ox, oz);
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    let Column { height, water, .. } = columns.at(lx, lz);
+                    if height >= water {
+                        continue;
+                    }
+                    let (gx, gz) = (ox + lx, oz + lz);
+                    for y in height + 1..(water + 8).min(CHUNK_SIZE_Y as i32) {
+                        let here = chunk.get(lx as usize, y as usize, lz as usize);
+                        if !is_branch(here) {
+                            continue;
+                        }
+                        if y > water {
+                            over += 1;
+                            assert!(!is_liquid(here), "the snag at {gx},{y},{gz} holds water over its pool's surface");
+                            continue;
+                        }
+                        under += 1;
+                        assert!(stands_in_water(here), "the snag at {gx},{y},{gz} is dry wood under its pool's surface");
+                        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                            if let Some(side) = around.at(gx + dx, y, gz + dz) {
+                                assert_ne!(side, BLOCK_AIR, "air beside the snag at {gx},{y},{gz}, under its pool's surface");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(under > 0 && over > 0, "{under} drowned and {over} dry pieces of snag in {} swamp chunks", swamps.len());
+    }
+
+    #[test]
+    fn every_shape_an_apple_tree_grows_in_carries_five_to_seven_apples_on_its_outside() {
+        // **The count, on every tree the world can draw one as**: the
+        // broadleaf of the forest and the plain, the birch of the birch
+        // wood, the old tree, and the tree of branches on flat ground and
+        // on a slope. Each apple has to be a leaf of that tree, with open
+        // air beside it -- an apple buried in the crown is an apple nobody
+        // finds -- and no cell may be counted twice.
+        use crate::types::{is_branch, BLOCK_APPLE_LEAVES};
+        use std::collections::HashSet;
+        let wood = (BLOCK_LOG, BLOCK_APPLE_LEAVES);
+        fn check(name: &str, salt: u32, draw: impl Fn(&mut [BlockId], i32, i32, i32)) {
+            let fruit = fruit_cells(salt, |b, x, y, z| draw(b, x, y, z));
+            let (ax, ag, az) = ALONE;
+            let mut alone = vec![BLOCK_AIR; CHUNK_VOLUME];
+            draw(&mut alone, ax, ag, az);
+            let at = |x: i32, y: i32, z: i32| {
+                if x < 0 || z < 0 || x >= CHUNK_SIZE_X as i32 || z >= CHUNK_SIZE_Z as i32 {
+                    return BLOCK_AIR;
+                }
+                alone[Chunk::index(x as usize, y as usize, z as usize)]
+            };
+            assert!(
+                (FRUIT_FEWEST..=FRUIT_MOST).contains(&fruit.len()),
+                "{name} (salt {salt:#x}) carries {} apples",
+                fruit.len()
+            );
+            assert_eq!(fruit.iter().collect::<HashSet<_>>().len(), fruit.len(), "{name}: an apple counted twice");
+            for &(dx, dy, dz) in &fruit {
+                let (x, y, z) = (ax + dx, ag + dy, az + dz);
+                assert_eq!(
+                    block_kind(at(x, y, z)),
+                    BLOCK_APPLE_LEAVES,
+                    "{name} (salt {salt:#x}): an apple at {:?} where the tree has no leaf",
+                    (dx, dy, dz)
+                );
+                assert!(
+                    [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(ox, oz)| at(x + ox, y, z + oz) == BLOCK_AIR),
+                    "{name} (salt {salt:#x}): the apple at {:?} is buried inside the crown",
+                    (dx, dy, dz)
+                );
+            }
+        }
+        let salts: Vec<u32> = (0..24).map(|i| hash2(i, 91, 0xA991)).collect();
+        for &salt in &salts {
+            for trunk in 4..=7 {
+                check("a broadleaf", salt, |b, x, y, z| place_tree(b, x, y, z, trunk, 2, wood));
+            }
+            for trunk in 6..=10 {
+                check("a birch", salt, |b, x, y, z| place_birch(b, x, y, z, trunk, 2, wood));
+            }
+            for variant in (0..64u32).map(|i| hash2(i as i32, 5, salt)) {
+                check("an old tree", salt, |b, x, y, z| place_old_tree(b, x, y, z, variant, wood));
+            }
+            for trunk in 4..=7 {
+                for (ground, rise) in [("flat", 0), ("a slope", 1)] {
+                    let variant = salt.rotate_left(7);
+                    check(&format!("a tree of branches on {ground}"), salt, |b, x, y, z| {
+                        let slope = |dx: i32, _dz: i32| rise * dx;
+                        for ((dx, dy, dz), id) in branches::branch_tree_cells(trunk, 2, variant, wood.1, slope, |_, _| false) {
+                            put_block(b, x + dx, y + dy, z + dz, id, is_branch(id));
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_apple_tree_the_generator_grows_carries_five_to_seven_apples() {
+        // **The same count in the world, across chunk seams, in both kinds
+        // of wood.** Squares of generated plain -- where trees stand apart,
+        // so one tree is one lump of leaves and wood -- are walked, and
+        // every lump that holds apple leaves, stands on one trunk and lies
+        // clear of the square's edge is counted. A tree whose two halves
+        // disagreed, or whose apples were chosen on a shape the world does
+        // not draw it in, comes out short.
+        use crate::types::{has_full_top, is_branch, is_leafy};
+        use std::collections::{HashMap, HashSet, VecDeque};
+        const HALF: i32 = 2;
+        for generator in [WorldGen::new(2024)] {
+            // Squares until six trees have been counted. A plain found on
+            // the transect is often the edge of one, with a wood or a rise
+            // beside it, and four squares were measured to leave a single
+            // tree clear to count.
+            let (mut trees, mut at_the_edge, mut sharing) = (0, 0, 0);
+            for centre in chunks_in(&generator, Biome::Plains, 16) {
+                if trees >= 6 {
+                    break;
+                }
+                let mut chunks = HashMap::new();
+                for dz in -HALF..=HALF {
+                    for dx in -HALF..=HALF {
+                        let pos = ChunkPos::new(centre.pos.x + dx, centre.pos.z + dz);
+                        chunks.insert((dx, dz), generator.generate_chunk(pos));
+                    }
+                }
+                let size = CHUNK_SIZE_X as i32;
+                let look = |x: i32, y: i32, z: i32| -> Option<BlockId> {
+                    if !(0..CHUNK_SIZE_Y as i32).contains(&y) {
+                        return None;
+                    }
+                    let chunk = chunks.get(&(x.div_euclid(size), z.div_euclid(size)))?;
+                    Some(chunk.get(x.rem_euclid(size) as usize, y as usize, z.rem_euclid(size) as usize))
+                };
+                let tree_part = |b: BlockId| is_leafy(b) || is_branch(b) || block_kind(b) == BLOCK_LOG;
+                let span = -HALF * size..(HALF + 1) * size;
+                let mut seen = HashSet::new();
+                for y in 1..CHUNK_SIZE_Y as i32 {
+                    for z in span.clone() {
+                        for x in span.clone() {
+                            let start = (x, y, z);
+                            if seen.contains(&start) || look(x, y, z).map(block_kind) != Some(BLOCK_APPLE_LEAVES) {
+                                continue;
+                            }
+                            let (mut apples, mut edge) = (0, false);
+                            let mut feet = HashSet::new();
+                            let mut queue = VecDeque::from([start]);
+                            seen.insert(start);
+                            while let Some((cx, cy, cz)) = queue.pop_front() {
+                                let here = look(cx, cy, cz).unwrap_or(BLOCK_AIR);
+                                edge |= cx.div_euclid(size).abs() == HALF || cz.div_euclid(size).abs() == HALF;
+                                if block_kind(here) == BLOCK_APPLE_LEAVES_FRUIT {
+                                    apples += 1;
+                                }
+                                let under = look(cx, cy - 1, cz).unwrap_or(BLOCK_AIR);
+                                if (is_branch(here) || block_kind(here) == BLOCK_LOG) && !tree_part(under) && has_full_top(under) {
+                                    feet.insert((cx, cz));
+                                }
+                                // **By faces and by edges.** The torn rim of a
+                                // mass of leaves (`branches::blob`) can leave one
+                                // leaf joined to its crown along an edge, which is
+                                // on the tree to anyone looking at it. Counted by
+                                // faces alone it was a lump of its own: since the
+                                // Earth's scale spread a tree's limbs over a taller
+                                // trunk, an apple landed on one such leaf and a
+                                // tree carrying five read as four.
+                                for (dx, dy, dz) in [
+                                    (1, 0, 0),
+                                    (-1, 0, 0),
+                                    (0, 1, 0),
+                                    (0, -1, 0),
+                                    (0, 0, 1),
+                                    (0, 0, -1),
+                                    (1, 1, 0),
+                                    (1, -1, 0),
+                                    (-1, 1, 0),
+                                    (-1, -1, 0),
+                                    (1, 0, 1),
+                                    (1, 0, -1),
+                                    (-1, 0, 1),
+                                    (-1, 0, -1),
+                                    (0, 1, 1),
+                                    (0, 1, -1),
+                                    (0, -1, 1),
+                                    (0, -1, -1),
+                                ] {
+                                    let next = (cx + dx, cy + dy, cz + dz);
+                                    if !seen.contains(&next) && look(next.0, next.1, next.2).is_some_and(tree_part) {
+                                        seen.insert(next);
+                                        queue.push_back(next);
+                                    }
+                                }
+                            }
+                            // One trunk: one column, or an old tree's bole
+                            // of two by two.
+                            let one_trunk = feet.len() == 1
+                                || (feet.len() == 4 && {
+                                    let (mx, mz) = feet.iter().copied().min().unwrap();
+                                    [(0, 0), (1, 0), (0, 1), (1, 1)].iter().all(|&(dx, dz)| feet.contains(&(mx + dx, mz + dz)))
+                                });
+                            if edge {
+                                at_the_edge += 1;
+                                continue;
+                            }
+                            if !one_trunk {
+                                sharing += 1;
+                                continue;
+                            }
+                            assert!(
+                                (FRUIT_FEWEST..=FRUIT_MOST).contains(&apples),
+                                "the apple tree at {start:?} near {:?} ({:?}) carries {apples} apples",
+                                centre.pos,
+                                generator.preset
+                            );
+                            trees += 1;
+                        }
+                    }
+                }
+            }
+            assert!(
+                trees >= 3,
+                "only {trees} apple trees stood clear to count in {:?}: {at_the_edge} ran off the \
+                 square, {sharing} shared a lump of leaves with another trunk",
+                generator.preset
+            );
+        }
+    }
+
+    /// Up to `want` chunks that are *entirely* `wanted`, rather than
+    /// merely centred on it.
+    ///
+    /// **The difference is the whole of every "and none here" test.** A
+    /// chunk whose middle column is desert can be half savanna at its
+    /// edge, and the savanna half grows scrub and berries perfectly
+    /// correctly three columns from a middle made of sand. Counting
+    /// those and calling them "berries in a desert" is the test lying
+    /// about the generator, and it is a lie that only shows up when a
+    /// threshold moves and the sweep lands on a different chunk --
+    /// which is exactly what happened when the climate fields were
+    /// slowed to kilometres.
+    ///
+    /// A second function rather than a stricter `chunks_in`, because
+    /// not every biome comes in pieces bigger than a chunk: a river is
+    /// at most sixteen columns wide and a beach is a strip, so neither
+    /// will ever fill one, and the tests that go looking for them need
+    /// the loose search.
+    pub(super) fn solid_chunks_in(gen: &WorldGen, wanted: Biome, want: usize) -> Vec<Chunk> {
+        let mut out = Vec::new();
+        for cz in (-360..360).step_by(4) {
+            for cx in (-160..160).step_by(5) {
+                let (origin_x, origin_z) =
+                    (cx * CHUNK_SIZE_X as i32, cz * CHUNK_SIZE_Z as i32);
+                // The middle column first, so the two hundred and
+                // fifty-six-column check is only paid for by the
+                // handful of chunks that could pass it.
+                if gen.biome_at(origin_x + 8, origin_z + 8) != wanted {
+                    continue;
+                }
+                let solid = (0..CHUNK_SIZE_Z as i32).all(|lz| {
+                    (0..CHUNK_SIZE_X as i32)
+                        .all(|lx| gen.biome_at(origin_x + lx, origin_z + lz) == wanted)
+                });
+                if !solid {
+                    continue;
+                }
+                out.push(gen.generate_chunk(ChunkPos::new(cx, cz)));
+                if out.len() == want {
+                    return out;
+                }
+            }
+        }
+        out
     }
 
     /// How many cells of the chunk hold this *material*.
@@ -3265,14 +14274,862 @@ mod tests {
     }
 
     #[test]
+    fn temperate_country_feeds_a_player_and_the_far_north_does_not() {
+        // The claim hunger rests on: a world has food lying in it, in
+        // the places a player would look, and *not* everywhere. A tundra
+        // with bushes in it would make walking into one a free lunch;
+        // temperate country with none would make the first evening a
+        // hunt or a death.
+        //
+        // Counted over a spread of chunks rather than one, because a
+        // single chunk of forest can honestly hold none at this spacing
+        // -- one bush per thirty-eight columns over two hundred and
+        // fifty-six of them is a handful, and a handful sometimes rounds
+        // to zero.
+        let gen = WorldGen::new(4242);
+        // Along the transect: a desert is in the tropics and a tundra
+        // at the pole, and neither is within a square of spawn any
+        // more. See `chunks_in`.
+        let feeding = |wanted: Biome| -> usize {
+            chunks_in(&gen, wanted, 12)
+                .iter()
+                .map(|chunk| count_of(chunk, BLOCK_BERRY_BUSH))
+                .sum()
+        };
+        assert!(feeding(Biome::Forest) > 0, "a forest with nothing to eat in it");
+        assert!(feeding(Biome::Plains) > 0, "a meadow with nothing to eat in it");
+        // **Asked of chunks that are desert all the way to their
+        // corners.** Ground cover is written column by column from the
+        // column's own biome, so a berry in a chunk *centred* on desert
+        // is a berry in the savanna at its edge -- correct behaviour,
+        // and a false failure here. See `solid_chunks_in`.
+        let barren = |wanted: Biome| -> usize {
+            solid_chunks_in(&gen, wanted, 12)
+                .iter()
+                .map(|chunk| count_of(chunk, BLOCK_BERRY_BUSH))
+                .sum()
+        };
+        assert_eq!(barren(Biome::Desert), 0, "berries in a desert");
+        assert_eq!(barren(Biome::Tundra), 0, "berries in a tundra");
+    }
+
+    #[test]
+    fn the_woods_with_no_grass_in_them_are_the_woods_with_tinder_on_the_ground() {
+        // The whole argument for the bracket fungus, checked where it
+        // matters. A torch wants a wad, a wad is fibre, fibre is grass
+        // -- and the dead forest and the bog have no grass at all (see
+        // `Biome::grass_spacing`). So the one place a player cannot make
+        // a light is the one place they most need one, and this is the
+        // test that says the fungus closes that hole rather than merely
+        // existing somewhere.
+        // Each wood asked in the zone it grows in: the bog in the north.
+        let tinder = |wanted: Biome| -> usize {
+            chunks_in(&world_for(20250907, wanted), wanted, 16)
+                .iter()
+                .map(|chunk| count_of(chunk, crate::types::BLOCK_BRACKET_FUNGUS))
+                .sum()
+        };
+        assert_eq!(
+            gen_biome_grass(Biome::DeadForest),
+            None,
+            "a dead forest with grass in it would not need the fungus"
+        );
+        assert!(
+            tinder(Biome::DeadForest) > 0,
+            "a dead forest with no tinder in it"
+        );
+        assert!(tinder(Biome::Bog) > 0, "a bog with no tinder in it");
+        // ...and not in the open country, because it grows on fallen
+        // trees and a meadow has none. A fungus in a meadow would be a
+        // fungus nobody has to walk into a wood for.
+        //
+        // **Asked of chunks that are meadow to their corners**, the
+        // berry test's remedy two tests up and for the same reason: a
+        // chunk whose *middle* is plains has forest in its corners, and
+        // a fallen trunk rooted in that forest is correct behaviour. It
+        // passed on the middle column alone only while a live wood's
+        // deadfall was one trunk per four hundred and twenty columns
+        // (`Biome::deadfall_spacing`); at one per hundred and fifty the
+        // edges of a meadow chunk started catching real forest trunks,
+        // and the test that went red was measuring the wrong square
+        // rather than a fungus in a field.
+        let open = |wanted: Biome| -> usize {
+            solid_chunks_in(&world_for(20250907, wanted), wanted, 16)
+                .iter()
+                .map(|chunk| count_of(chunk, crate::types::BLOCK_BRACKET_FUNGUS))
+                .sum()
+        };
+        assert_eq!(open(Biome::Plains), 0, "tinder in an open meadow");
+    }
+
+    /// What `Biome::grass_spacing` says, reachable from a test.
+    fn gen_biome_grass(biome: Biome) -> Option<u32> {
+        biome.grass_spacing()
+    }
+
+
+    /// The ground of a column in a generated chunk: the highest cell that is
+    /// neither air nor a plant, leaf or piece of wood.
+    fn floor_of(chunk: &Chunk, x: usize, z: usize) -> Option<usize> {
+        (1..CHUNK_SIZE_Y).rev().find(|&y| {
+            let b = chunk.get(x, y, z);
+            b != BLOCK_AIR
+                && !crate::types::is_cross(b)
+                && !crate::types::is_flat(b)
+                && !crate::types::is_leafy(b)
+                && !crate::types::is_branch(b)
+                && !crate::types::is_liquid(b)
+        })
+    }
+
+    #[test]
+    fn a_wood_has_no_grass_under_its_crowns_and_a_floor_of_ferns_there_instead() {
+        // "предлагаю убрать траву везде в лесах": under a crown no tuft of the
+        // meadow's grass and no meadow flower, and the forest's own cover
+        // instead -- while the clearings keep their grass.
+        let generator = WorldGen::new(2024);
+        for biome in [Biome::Forest, Biome::BirchForest, Biome::Taiga] {
+            let (mut shaded_grass, mut open_grass, mut ferns) = (0, 0, 0);
+            for chunk in chunks_in(&generator, biome, 6) {
+                for z in 0..CHUNK_SIZE_Z {
+                    for x in 0..CHUNK_SIZE_X {
+                        // A wood's own columns. The edge of a chunk found in a
+                        // forest is often a meadow, and a crown hanging over a
+                        // meadow keeps the meadow's grass under it -- a lone
+                        // oak in a field stands in grass, and should.
+                        let (gx, gz) = (chunk.pos.x * CHUNK_SIZE_X as i32 + x as i32, chunk.pos.z * CHUNK_SIZE_Z as i32 + z as i32);
+                        if !generator.biome_at(gx, gz).has_forest_floor() {
+                            continue;
+                        }
+                        let Some(ground) = floor_of(&chunk, x, z) else { continue };
+                        let plant = chunk.get(x, ground + 1, z);
+                        let shaded = under_canopy(&chunk.blocks, x as i32, ground as i32, z as i32);
+                        match block_kind(plant) {
+                            BLOCK_TALL_GRASS | BLOCK_FLOWER if shaded => shaded_grass += 1,
+                            BLOCK_TALL_GRASS => open_grass += 1,
+                            crate::types::BLOCK_FERN => {
+                                assert!(shaded, "a fern in the open sun of a {}", biome.name());
+                                ferns += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            assert_eq!(shaded_grass, 0, "{shaded_grass} tufts of meadow under the crowns of a {}", biome.name());
+            assert!(ferns > 0, "a {} with no ferns on its floor", biome.name());
+            assert!(open_grass > 0, "a {} with no grass in its clearings either", biome.name());
+        }
+    }
+
+    #[test]
+    fn every_tall_plant_the_generator_grows_is_two_whole_cells_on_its_own_ground() {
+        use crate::types::{is_plant_shoot, is_plant_top, is_tall_plant, PLANT_TOP};
+        let generator = WorldGen::new(2024);
+        let mut kinds = std::collections::HashSet::new();
+        let mut chunks = Vec::new();
+        for biome in [Biome::Forest, Biome::BirchForest, Biome::Taiga, Biome::Swamp, Biome::Plains, Biome::River] {
+            chunks.extend(chunks_in(&generator, biome, 4));
+        }
+        for chunk in &chunks {
+            for y in 1..CHUNK_SIZE_Y - 1 {
+                for z in 0..CHUNK_SIZE_Z {
+                    for x in 0..CHUNK_SIZE_X {
+                        let here = chunk.get(x, y, z);
+                        if !is_tall_plant(here) {
+                            continue;
+                        }
+                        assert!(!is_plant_shoot(here), "the generator planted a shoot at ({x},{y},{z})");
+                        if is_plant_top(here) {
+                            assert_eq!(chunk.get(x, y - 1, z), block_kind(here), "an upper half with no stalk under it");
+                        } else {
+                            kinds.insert(block_kind(here));
+                            assert_eq!(chunk.get(x, y + 1, z), here | PLANT_TOP, "a stalk with no upper half on it");
+                            assert!(crate::types::can_grow_on(here, chunk.get(x, y - 1, z)), "a tall plant on the wrong ground");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(kinds.len() >= 3, "only {} kinds of tall plant in two dozen chunks of wood, swamp and plain", kinds.len());
+    }
+
+    #[test]
+    fn a_sundew_grows_on_a_bogs_turf_and_nowhere_else() {
+        let north = world_for(20250907, Biome::Bog);
+        let bog: usize = chunks_in(&north, Biome::Bog, 8).iter().map(|c| count_of(c, crate::types::BLOCK_SUNDEW)).sum();
+        assert!(bog > 0, "eight chunks of bog and not one sundew");
+        let generator = WorldGen::new(2024);
+        for biome in [Biome::Plains, Biome::Forest, Biome::Swamp] {
+            for chunk in solid_chunks_in(&generator, biome, 3) {
+                assert_eq!(count_of(&chunk, crate::types::BLOCK_SUNDEW), 0, "a sundew in a {}", biome.name());
+            }
+        }
+    }
+
+    #[test]
+    fn the_floor_under_a_wood_is_darker_than_the_open_ground_beside_it() {
+        // **"сделай леса темнее", as a number.** The sky light on the cell a
+        // player stands in, averaged over the columns under a crown and over
+        // the open columns of the same woods, lit as the chunk alone (the
+        // middle of each chunk, where its neighbours' light changes nothing).
+        //
+        //
+        // **What darkens a wood is how much of it is closed.** The floor's
+        // light floods in sideways through the open trunks from the gaps a
+        // column or two away, so a thicker leaf changes nothing here -- two
+        // was tried and read the same to the hundredth (see `BLOCK_LEAVES`).
+        // So this asks the two numbers density moves: how much of the floor
+        // is under a crown, and how bright the floor is on average, crowns
+        // and clearings together.
+        let generator = WorldGen::new(2024);
+        for biome in [Biome::Forest, Biome::BirchForest, Biome::Taiga] {
+            let (mut shade, mut shade_n, mut open, mut open_n) = (0u32, 0u32, 0u32, 0u32);
+            for chunk in chunks_in(&generator, biome, 6) {
+                let light = crate::lighting::compute_isolated(&chunk.blocks);
+                for z in 4..CHUNK_SIZE_Z - 4 {
+                    for x in 4..CHUNK_SIZE_X - 4 {
+                        let Some(ground) = floor_of(&chunk, x, z) else { continue };
+                        let sky = u32::from(light[Chunk::index(x, ground + 1, z)] & 0x0F);
+                        if under_canopy(&chunk.blocks, x as i32, ground as i32, z as i32) {
+                            (shade, shade_n) = (shade + sky, shade_n + 1);
+                        } else {
+                            (open, open_n) = (open + sky, open_n + 1);
+                        }
+                    }
+                }
+            }
+            let mean = |sum: u32, n: u32| sum as f32 / n.max(1) as f32;
+            let closed = shade_n as f32 / (shade_n + open_n).max(1) as f32;
+            let floor = mean(shade + open, shade_n + open_n);
+            let (shade, open) = (mean(shade, shade_n), mean(open, open_n));
+            println!(
+                "{}: {:.0}% of the floor under crowns, lit {shade:.2} there and {open:.2} in the open, {floor:.2} on average",
+                biome.name(),
+                closed * 100.0
+            );
+            assert!(shade_n > 0 && open_n > 0, "a {} with no crowns or no clearings to compare", biome.name());
+            assert!(shade < open, "the floor under a {}'s crowns is as bright as its clearings", biome.name());
+            // The closed woods, and not the birch wood, which is light by
+            // design (`Biome::tree_spacing`).
+            if biome != Biome::BirchForest {
+                assert!(
+                    closed >= CLOSED_WOOD,
+                    "only {:.0}% of a {}'s floor is under its crowns",
+                    closed * 100.0,
+                    biome.name()
+                );
+            }
+        }
+    }
+
+    /// How much of a closed wood's floor -- an oak wood's, a taiga's -- has to
+    /// stand under a crown. See `Biome::tree_spacing` and
+    /// `the_floor_under_a_wood_is_darker_than_the_open_ground_beside_it`.
+    ///
+    /// **Half.** At a tree in twenty-two columns (the oak wood) and twenty-
+    /// eight (the taiga) both measured forty-six per cent; closed up to
+    /// fourteen and eighteen they measured fifty-two and fifty-nine, and the
+    /// floor averaged 13.84 and 13.45 levels of sky against 14.06 and 13.94.
+    const CLOSED_WOOD: f32 = 0.5;
+
+    /// **A ruin has to be findable and has to stand up.**
+    ///
+    /// Two properties and they pull against each other: rare enough to
+    /// be an event, common enough that a player who walks meets one.
+    /// The sweep below is about two and a half kilometres square, which
+    /// is an hour of walking, and it wants a handful -- not one (which
+    /// would make the number a coincidence) and not dozens.
+    ///
+    /// The standing-up half is the one that would go wrong quietly: a
+    /// building laid across a slope has its floor in the air at one end,
+    /// and nothing downstream would complain -- the chunk is valid, the
+    /// blocks are real, and the fault is only visible to somebody
+    /// standing there.
+    #[test]
+    fn a_ruin_is_rare_and_stands_on_ground_that_can_hold_it() {
+        use crate::types::{BLOCK_AIR, BLOCK_BRICKS};
+        let gen = WorldGen::new(1337);
+        let mut found = 0usize;
+        for cx in -80..80 {
+            for cz in -80..80 {
+                let pos = ChunkPos::new(cx, cz);
+                // The roll is the whole cost of the check: only chunks
+                // that carry one are generated.
+                if !hash2(cx * CHUNK_SIZE_X as i32, cz * CHUNK_SIZE_Z as i32,
+                          gen.seed.wrapping_add(0x0DEC))
+                    .is_multiple_of(2000)
+                {
+                    continue;
+                }
+                let chunk = gen.generate_chunk(pos);
+                let bricks = (0..CHUNK_SIZE_Y)
+                    .flat_map(|y| {
+                        (0..CHUNK_SIZE_Z).flat_map(move |z| {
+                            (0..CHUNK_SIZE_X).map(move |x| (x, y, z))
+                        })
+                    })
+                    .filter(|&(x, y, z)| {
+                        crate::types::block_kind(chunk.get(x, y, z)) == BLOCK_BRICKS
+                    })
+                    .count();
+                if bricks == 0 {
+                    continue; // the site was refused: water, beach or slope
+                }
+                found += 1;
+
+                // Every brick stands on something. A column or a wall
+                // with air under it is the slope fault, photographed as
+                // an assertion.
+                for y in 1..CHUNK_SIZE_Y {
+                    for z in 0..CHUNK_SIZE_Z {
+                        for x in 0..CHUNK_SIZE_X {
+                            if crate::types::block_kind(chunk.get(x, y, z)) != BLOCK_BRICKS {
+                                continue;
+                            }
+                            if chunk.get(x, y - 1, z) != BLOCK_AIR {
+                                continue;
+                            }
+                            // **Air under a brick is a span, or it is a
+                            // fault, and the difference is whether
+                            // anything holds it sideways.** The
+                            // aqueduct's deck is exactly this: a course
+                            // over a hole, which is the one shape in
+                            // this world that is *meant* to hang. A
+                            // brick with nothing under it and nothing
+                            // beside it is the slope fault -- a building
+                            // laid across a bank with its footing in the
+                            // air -- and that is what this catches.
+                            let held = [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)].iter().any(
+                                |(dx, dz)| {
+                                    let (nx, nz) = (x as i32 + dx, z as i32 + dz);
+                                    (0..CHUNK_SIZE_X as i32).contains(&nx)
+                                        && (0..CHUNK_SIZE_Z as i32).contains(&nz)
+                                        && crate::types::block_kind(
+                                            chunk.get(nx as usize, y, nz as usize),
+                                        ) == BLOCK_BRICKS
+                                },
+                            );
+                            assert!(
+                                held,
+                                "a brick with nothing under it and nothing beside it                                  at {x},{y},{z} of chunk {cx},{cz}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            (1..=20).contains(&found),
+            "{found} ruins in a 2560-block square -- very rare means a handful, not this"
+        );
+        println!("{found} ruins in 160x160 chunks");
+    }
+
+    #[test]
+    fn every_bracket_in_the_world_is_hanging_on_wood() {
+        // The support rule, checked against what the generator actually
+        // laid rather than against itself. A shelf fungus floating over
+        // the gap where a deadfall stopped -- the trunk breaks at a
+        // step in the ground and at a cave mouth, see `place_deadfall`
+        // -- is exactly the sort of thing a player finds from ten
+        // blocks away, and it is what this catches.
+        //
+        // It asks `support_at` rather than looking one cell down: a
+        // bracket hangs off the *side* of the wood, and the direction
+        // it hangs from is the direction it faces. Reading the cell
+        // below would now pass on a shelf attached to nothing, since
+        // what is under one is usually the ground.
+        let gen = WorldGen::new(7);
+        let mut seen = 0usize;
+        // **Where the fungus grows, not around the origin.** A bracket is a
+        // plant of damp woods (see `place_deadfall`), and the sixteen chunks
+        // around spawn were a dead forest only while the country was small;
+        // widened, they are meadow and there was nothing to check. Measured:
+        // no damp chunk at all within eight of the origin, three hundred and
+        // twenty-six within twenty-four. So the sweep goes to the woods.
+        let damp: Vec<(i32, i32)> = (-40..40)
+            .flat_map(|cx| (-40..40).map(move |cz| (cx, cz)))
+            .filter(|&(cx, cz)| {
+                matches!(
+                    gen.biome_at(cx * CHUNK_SIZE_X as i32 + 8, cz * CHUNK_SIZE_Z as i32 + 8),
+                    Biome::Bog | Biome::DeadForest | Biome::Taiga
+                )
+            })
+            .take(48)
+            .collect();
+        for (cx, cz) in damp {
+            {
+                let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                for y in 1..CHUNK_SIZE_Y {
+                    for z in 0..CHUNK_SIZE_Z {
+                        for x in 0..CHUNK_SIZE_X {
+                            if crate::types::block_kind(chunk.get(x, y, z))
+                                != crate::types::BLOCK_BRACKET_FUNGUS
+                            {
+                                continue;
+                            }
+                            seen += 1;
+                            let here = chunk.get(x, y, z);
+                            let (dx, dy, dz) = crate::types::support_at(here);
+                            let (hx, hy, hz) =
+                                (x as i32 + dx, y as i32 + dy, z as i32 + dz);
+                            // A trunk one cell outside this chunk is a
+                            // real answer the array cannot give: the
+                            // deadfall that laid this shelf may have
+                            // ended on the far side of the seam.
+                            if !(0..CHUNK_SIZE_X as i32).contains(&hx)
+                                || !(0..CHUNK_SIZE_Z as i32).contains(&hz)
+                            {
+                                continue;
+                            }
+                            let holding = chunk.get(hx as usize, hy as usize, hz as usize);
+                            assert!(
+                                crate::types::can_grow_on(
+                                    crate::types::BLOCK_BRACKET_FUNGUS,
+                                    holding
+                                ),
+                                "a bracket at {x},{y},{z} of chunk {cx},{cz} is hanging on {}",
+                                crate::types::block_name(holding)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(seen > 0, "the sweep found no tinder at all");
+    }
+
+    #[test]
+    fn seed_grows_wild_in_open_country_and_a_meadow_no_longer_hands_it_out() {
+        // **Where farming starts.** Seed used to fall out of one tuft
+        // of grass in four, which made a field free and invisible; it
+        // comes off wild wheat now, and wild wheat is a plant of warm,
+        // dry, open country. So this test is the map of where a player
+        // can become a farmer at all: the steppe and the meadow yes,
+        // the tundra and the bog no.
+        // **Each country in a world laid where it lives**, since the Earth's
+        // scale: a temperate world holds no savanna, tundra or bog near
+        // enough to search, and the claim is about the ground of each. See
+        // `world_for`.
+        //
+        // **Counted per column, not per chunk.** `chunks_in` picks a
+        // chunk by the biome at its *centre*, and a chunk is sixteen
+        // cells across: a tundra chunk with a warm corner is a normal
+        // thing, and one stand of wheat in that corner used to read as
+        // "wheat on the tundra". It said so first when the relief was
+        // widened and the altitude cooling moved a boundary by a few
+        // cells -- a sentence about climate, failing about a world that
+        // was right. The question is whether wheat grows on tundra
+        // *ground*, so the ground under each stand is what is asked.
+        let stands = |wanted: Biome| -> usize {
+            let mut total = 0usize;
+            let gen = world_for(31337, wanted);
+            for chunk in chunks_in(&gen, wanted, 14) {
+                let origin = (
+                    chunk.pos.x * CHUNK_SIZE_X as i32,
+                    chunk.pos.z * CHUNK_SIZE_Z as i32,
+                );
+                for y in 0..CHUNK_SIZE_Y {
+                    for lz in 0..CHUNK_SIZE_Z {
+                        for lx in 0..CHUNK_SIZE_X {
+                            if crate::types::block_kind(chunk.get(lx, y, lz))
+                                != crate::types::BLOCK_WILD_WHEAT
+                            {
+                                continue;
+                            }
+                            let here = gen.biome_at(origin.0 + lx as i32, origin.1 + lz as i32);
+                            total += (here == wanted) as usize;
+                        }
+                    }
+                }
+            }
+            total
+        };
+        assert!(stands(Biome::Savanna) > 0, "a savanna with no cereal in it");
+        assert!(stands(Biome::Plains) > 0, "a meadow with no cereal in it");
+        assert_eq!(stands(Biome::Tundra), 0, "wheat on the tundra");
+        assert_eq!(stands(Biome::Bog), 0, "wheat in a bog");
+        // ...and it gives seed, which is the whole of what it is for.
+        assert_eq!(
+            crate::blocks::definition(crate::types::BLOCK_WILD_WHEAT).drop,
+            Some(crate::types::BLOCK_SEEDS)
+        );
+    }
+
+    #[test]
+    fn good_ground_is_a_place_you_can_stand_on_rather_than_a_lucky_block() {
+        // **The property fertility has to have to be worth anything.**
+        // If it were rolled per block, a field would be a lottery and
+        // nobody would ever look at the land; because it comes off the
+        // climate fields, two cells beside each other nearly always
+        // agree, and a player who finds rich ground can put a field on
+        // it. Neighbours are checked rather than eyeballed, over a
+        // thousand columns: at most a few percent may differ, and those
+        // are the edges of patches.
+        let gen = WorldGen::new(4242);
+        let mut edges = 0;
+        let mut total = 0;
+        for gz in (-500..500).step_by(7) {
+            for gx in (-140..140).step_by(7) {
+                let here = gen.fertility_at(gx, gz);
+                for (dx, dz) in [(1, 0), (0, 1)] {
+                    total += 1;
+                    if gen.fertility_at(gx + dx, gz + dz) != here {
+                        edges += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            edges * 20 < total,
+            "{edges} of {total} neighbouring columns disagree: this is noise, not country"
+        );
+
+        // ...and the grades are not all one grade. A world that is
+        // uniformly ordinary has the mechanic switched off.
+        //
+        // **Swept both ways and wide**, since the climate stopped changing
+        // along z: at real scale a line north through a world crosses no
+        // latitude, so the grades come from the weather and the rain, whose
+        // lobes are kilometres across in x and z alike.
+        let mut seen = std::collections::HashSet::new();
+        for gz in (-12_000..12_000).step_by(397) {
+            for gx in (-12_000..12_000).step_by(401) {
+                seen.insert(gen.fertility_at(gx, gz));
+            }
+        }
+        assert_eq!(seen.len(), 3, "not every grade of soil exists: {seen:?}");
+
+        // ...and the ground itself has the last word where it is not
+        // soil at all: sand is poor however wet the sky is, and a marsh
+        // is rich however cold.
+        // Each asked in the zone it lives in: the desert in the dry belt.
+        let sample = |wanted: Biome| -> Vec<Fertility> {
+            let gen = world_for(4242, wanted);
+            let mut out = Vec::new();
+            for cz in (-360..360).step_by(4) {
+                for cx in -16..16 {
+                    let (gx, gz) = (cx * CHUNK_SIZE_X as i32 + 8, cz * CHUNK_SIZE_Z as i32 + 8);
+                    if gen.biome_at(gx, gz) == wanted {
+                        out.push(gen.fertility_at(gx, gz));
+                        if out.len() == 12 {
+                            return out;
+                        }
+                    }
+                }
+            }
+            out
+        };
+        let desert = sample(Biome::Desert);
+        assert!(!desert.is_empty(), "no desert on the transect");
+        assert!(desert.iter().all(|&f| f == Fertility::Poor), "fertile sand");
+        let marsh = sample(Biome::Swamp);
+        assert!(!marsh.is_empty(), "no marsh on the transect");
+        assert!(marsh.iter().all(|&f| f == Fertility::Rich), "thin silt");
+    }
+
+    #[test]
+    fn a_wood_has_undergrowth_in_it_and_the_desert_has_none() {
+        // Bushes are what makes a wood a place you push through rather
+        // than a room with pillars in it. They are made of the same
+        // leaf block the trees are (see `place_bushes`), so what this
+        // checks is that they are *there*, in the right country, in
+        // more than one shape.
+        let gen = WorldGen::new(555);
+        // **Counted by its own block**, which is why it has one: while
+        // a bush was built out of the canopy's leaf this test had to
+        // guess -- "a leaf standing on turf" -- and a canopy whose
+        // lowest layer touches a slope answers that too. See
+        // `types::BLOCK_BUSH_LEAVES`.
+        let undergrowth = |wanted: Biome| -> usize {
+            chunks_in(&gen, wanted, 10)
+                .iter()
+                .map(|chunk| count_of(chunk, crate::types::BLOCK_BUSH_LEAVES))
+                .sum()
+        };
+        assert!(undergrowth(Biome::Forest) > 0, "a wood with no scrub in it");
+        // **The desert is asked of the rule, not of the chunks.** A
+        // bush is rooted up to a block outside the chunk it lands in
+        // (see `place_bush`), so a chunk whose *centre* is desert can
+        // still hold a cell of a bush that grew in the savanna next to
+        // it -- which is correct, and which counted as "bushes in a
+        // desert" the first time this was written. What the desert
+        // promises is that nothing is planted there.
+        assert!(
+            Biome::Desert.bush_spacing().is_none(),
+            "the desert grows scrub"
+        );
+        // ...and the count is taken over chunks that are desert to
+        // their corners, so the only scrub that can reach one is a bush
+        // rooted in the savanna a block outside it. That is the
+        // tolerance below, and nothing else is allowed to fit inside
+        // it. See `solid_chunks_in`.
+        let planted: usize = solid_chunks_in(&gen, Biome::Desert, 10)
+            .iter()
+            .map(|chunk| count_of(chunk, crate::types::BLOCK_BUSH_LEAVES))
+            .sum();
+        assert!(
+            planted < 4,
+            "a desert full of bushes is more than a bush leaning over the border"
+        );
+
+        // ...and the shapes differ. Four bushes written at four places
+        // with the four values of the shape bits must not come out as
+        // four copies of one thing.
+        let mut shapes = std::collections::HashSet::new();
+        for shape in 0..4 {
+            let mut blocks = vec![BLOCK_AIR; CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z];
+            place_bush(&mut blocks, 8, 40, 8, shape, BLOCK_LEAVES);
+            let cells = blocks.iter().filter(|&&b| b == BLOCK_LEAVES).count();
+            let tallest = (0..CHUNK_SIZE_Y)
+                .filter(|&y| {
+                    (0..CHUNK_SIZE_Z).any(|z| {
+                        (0..CHUNK_SIZE_X).any(|x| blocks[Chunk::index(x, y, z)] == BLOCK_LEAVES)
+                    })
+                })
+                .count();
+            assert!(cells >= 4, "shape {shape} is barely a bush: {cells} cells");
+            shapes.insert((cells, tallest));
+        }
+        assert!(shapes.len() >= 3, "the four bush shapes are the same shape: {shapes:?}");
+    }
+
+    #[test]
+    fn a_nest_sits_on_a_branch_with_the_sky_over_it() {
+        // The nest is placed by a formula rather than by a search, for
+        // the chunk-border reason written at the site. What that has to
+        // buy is this: every nest in the world is standing on a leaf,
+        // with air above it, and no tree carries two.
+        let gen = WorldGen::new(2024);
+        let mut nests = 0;
+        for cx in -8..8 {
+            for cz in -8..8 {
+                let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                for y in 1..CHUNK_SIZE_Y - 1 {
+                    for z in 0..CHUNK_SIZE_Z {
+                        for x in 0..CHUNK_SIZE_X {
+                            if crate::types::block_kind(chunk.get(x, y, z))
+                                != crate::types::BLOCK_NEST_EGGS
+                            {
+                                continue;
+                            }
+                            nests += 1;
+                            let under = chunk.get(x, y - 1, z);
+                            assert!(
+                                crate::types::can_grow_on(crate::types::BLOCK_NEST_EGGS, under),
+                                "a nest at {x},{y},{z} of chunk {cx},{cz} is sitting on {}",
+                                crate::types::block_name(under)
+                            );
+                            assert!(
+                                crate::types::is_air(chunk.get(x, y + 1, z)),
+                                "a nest at {x},{y},{z} has a block on top of it"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(nests > 0, "the sweep found no nests at all");
+    }
+
+    #[test]
+    fn what_grows_stands_on_ground_that_can_hold_it() {
+        // The same rule the tufts have, applied to the four plants added
+        // in 1.5. A bush hanging over a cave mouth or a stand of reeds
+        // rooted in stone is the sort of thing that gets noticed
+        // precisely because it is wrong -- and the check is cheap,
+        // because `can_grow_on` is the same function the generator used
+        // to place them.
+        let gen = WorldGen::new(99);
+        for cx in -6..6 {
+            for cz in -6..6 {
+                let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                for y in 1..CHUNK_SIZE_Y {
+                    for z in 0..CHUNK_SIZE_Z {
+                        for x in 0..CHUNK_SIZE_X {
+                            let block = chunk.get(x, y, z);
+                            if !matches!(
+                                block,
+                                BLOCK_BERRY_BUSH | BLOCK_FLOWER | BLOCK_MUSHROOM | BLOCK_REEDS
+                            ) {
+                                continue;
+                            }
+                            let under = chunk.get(x, y - 1, z);
+                            assert!(
+                                crate::types::can_grow_on(block, under),
+                                "{} at {x},{y},{z} is standing on {}",
+                                crate::types::block_name(block),
+                                crate::types::block_name(under)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mushrooms_are_underground_and_bushes_are_not() {
+        // Where a thing grows is most of what it *is* here: the mushroom
+        // is the reason a tunnel is worth walking, and a mushroom in a
+        // meadow would make the tunnel pointless.
+        //
+        // **...except in a ring in a dark wood** (`features`), which is
+        // the one surface place a cap grows, a quarter of it the toadstool
+        // -- daylight food that costs knowing the flecks.
+        //
+        // **...and at the foot of a fallen trunk** (`place_deadfall`),
+        // which is the second and last one: a log lying on turf kills the
+        // grass under it, and bare rotting earth in shade is the one
+        // thing a fungus wants. It is still a place a player has to walk
+        // to and still a thing they have to notice, which is the property
+        // this test is really about -- a cap in the open middle of a
+        // meadow, with no wood anywhere near it, remains the mistake it
+        // was written for. Checked by looking for the log rather than by
+        // trusting the pass: the cell beside the cap must hold timber.
+        let gen = WorldGen::new(7);
+        let reach = FeatureKind::MushroomRing.reach();
+        let rings: Vec<Feature> = features_in(&gen, (-8 * 16 - reach, -8 * 16 - reach), (8 * 16 + reach, 8 * 16 + reach))
+            .into_iter()
+            .filter(|f| f.kind == FeatureKind::MushroomRing)
+            .collect();
+        let mut mushrooms_below = 0;
+        for cx in -8..8 {
+            for cz in -8..8 {
+                let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                for y in 0..CHUNK_SIZE_Y {
+                    for z in 0..CHUNK_SIZE_Z {
+                        for x in 0..CHUNK_SIZE_X {
+                            if chunk.get(x, y, z) != BLOCK_MUSHROOM {
+                                continue;
+                            }
+                            let (gx, gz) = (cx * 16 + x as i32, cz * 16 + z as i32);
+                            if rings.iter().any(|r| (r.x - gx).abs() <= reach && (r.z - gz).abs() <= reach) {
+                                continue;
+                            }
+                            // Beside a fallen trunk: one of the four cells
+                            // it shares a face with holds a log lying down.
+                            // The log may sit a step above or below the cap:
+                            // both lie on their own column's ground, and the
+                            // trunk walks a slope a step at a time.
+                            let by_a_log = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| {
+                                let (nx, nz) = (x as i32 + dx, z as i32 + dz);
+                                (0..CHUNK_SIZE_X as i32).contains(&nx)
+                                    && (0..CHUNK_SIZE_Z as i32).contains(&nz)
+                                    && (y.saturating_sub(1)..=(y + 1).min(CHUNK_SIZE_Y - 1)).any(|ny| {
+                                        crate::wood::is_log(chunk.get(nx as usize, ny, nz as usize))
+                                    })
+                            });
+                            if by_a_log {
+                                continue;
+                            }
+                            assert!(
+                                (y as i32) < SEA_LEVEL,
+                                "a mushroom at y={y}, which is daylight, in no ring and beside no fallen trunk"
+                            );
+                            mushrooms_below += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(mushrooms_below > 0, "no mushroom anywhere underground");
+    }
+
+    #[test]
+    fn reeds_stand_in_the_water_rather_than_up_the_bank() {
+        // The narrowest placement rule in the generator, and the one
+        // most likely to be broken by a later edit: reeds have to be at
+        // the waterline *and* have water against them.
+        let gen = WorldGen::new(31337);
+        let mut seen = 0;
+        for cx in -20..20 {
+            for cz in -20..20 {
+                let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                for y in 0..CHUNK_SIZE_Y {
+                    for z in 0..CHUNK_SIZE_Z {
+                        for x in 0..CHUNK_SIZE_X {
+                            if chunk.get(x, y, z) != BLOCK_REEDS {
+                                continue;
+                            }
+                            seen += 1;
+                            // At the sea's waterline, or at a lake's:
+                            // the cell under the reeds is level with
+                            // the top of some water beside it. The
+                            // sea's line is checked by number because
+                            // the water beside a shore column can be
+                            // in the next chunk; a lake's by looking,
+                            // because a lake and its shore are always
+                            // in the same few chunks and its level is
+                            // its own.
+                            // **Asked of the generator, not of the
+                            // chunk.** The first version looked at the
+                            // four neighbouring *cells of this chunk*
+                            // for water, which is right until the reed
+                            // is on the seam: the lake it stands in is
+                            // then in the chunk next door and the test
+                            // reported a reed up a bank. What the rule
+                            // actually says is "at the waterline of
+                            // whatever water this column has", and
+                            // `water_level_at` is that number for the
+                            // sea and for a lake alike.
+                            let (gx, gz) = (
+                                cx * CHUNK_SIZE_X as i32 + x as i32,
+                                cz * CHUNK_SIZE_Z as i32 + z as i32,
+                            );
+                            // `lake_near` rather than `water_level_at`:
+                            // the latter answers "is this column *under*
+                            // the lake", and a reed is by definition on
+                            // the rim, which is the ring where the lake
+                            // has a level and the column is not flooded.
+                            // That ring is the whole of where a reed
+                            // belongs -- see `Column::water`.
+                            // ...and a swamp pool's, which is neither the
+                            // sea nor a lake: read off the column cache the
+                            // pool was dug in, the level of the pool beside
+                            // the reed.
+                            let columns = ColumnCache::build(
+                                &gen,
+                                cx * CHUNK_SIZE_X as i32,
+                                cz * CHUNK_SIZE_Z as i32,
+                            );
+                            let pool = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                                .iter()
+                                .map(|&(dx, dz)| columns.at(x as i32 + dx, z as i32 + dz))
+                                .filter(|c| c.height < c.water && c.water > SEA_LEVEL)
+                                .map(|c| c.water)
+                                .max();
+                            let waterline = match (pool, gen.lake_near(gx, gz)) {
+                                (Some(pool), _) => pool,
+                                (None, Some((lake, _))) => lake.water,
+                                (None, None) => SEA_LEVEL,
+                            };
+                            assert_eq!(
+                                y as i32,
+                                waterline + 1,
+                                "reeds at y={y} with the waterline at {waterline}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(seen > 0, "no reeds anywhere in sixteen hundred chunks of world");
+    }
+
+    #[test]
     fn grass_grows_in_a_field_and_nowhere_it_should_not() {
         let gen = WorldGen::new(1234);
-        let plains = chunk_in(&gen, Biome::Plains).expect("no plains anywhere");
-        assert!(
-            count_of(&plains, BLOCK_TALL_GRASS) > 20,
-            "a field with {} tufts in it",
-            count_of(&plains, BLOCK_TALL_GRASS)
-        );
+        // Three chunks rather than the first one. A chunk sits across a
+        // biome boundary as often as not, and the first meadow the
+        // sweep finds is usually one of those -- so counting one chunk
+        // measures where the boundary fell rather than how thick the
+        // grass is.
+        let plains = chunks_in(&gen, Biome::Plains, 3);
+        assert!(!plains.is_empty(), "no plains anywhere");
+        let tufts: usize = plains.iter().map(|c| count_of(c, BLOCK_TALL_GRASS)).sum();
+        assert!(tufts > 20, "three fields with {tufts} tufts between them");
 
         // ...and nothing grows on sand, on snow, or in a dead wood.
         //
@@ -3343,28 +15200,56 @@ mod tests {
         // one chunk. (This used to also count a single desert chunk into
         // a variable nothing read -- `chunk_in` is deterministic, so the
         // "wider sample" it built was the same chunk eight times.)
-        let sampled: usize = (-30..30)
-            .flat_map(|cx| (-30..30).map(move |cz| (cx, cz)))
-            .filter(|&(cx, cz)| {
-                gen.biome_at(cx * 16 + 8, cz * 16 + 8) == Biome::Desert
-            })
-            .take(12)
-            .map(|(cx, cz)| count_of(&gen.generate_chunk(ChunkPos::new(cx, cz)), BLOCK_CACTUS))
+        // **In a dry-belt world, since the Earth's scale.** A temperate
+        // world's nearest desert is a province hundreds of kilometres off
+        // or none at all, and a dozen chunks of it were a dozen chunks of
+        // nothing -- which read as "not one cactus". See `world_for`.
+        let desert = world_for(7, Biome::Desert);
+        let sampled: usize = chunks_in(&desert, Biome::Desert, 12)
+            .iter()
+            .map(|chunk| count_of(chunk, BLOCK_CACTUS))
             .sum();
         assert!(sampled > 0, "a dozen desert chunks and not one cactus");
 
+        // **Counted on meadow ground, not in a meadow chunk.** A chunk
+        // is picked by the biome at its centre and is sixteen cells
+        // across, so one with a dry corner is an ordinary thing -- and
+        // two cacti in that corner used to read as "a cactus in a
+        // meadow". The claim is about the ground a cactus stands on.
         let plains = chunk_in(&gen, Biome::Plains).expect("no plains anywhere");
-        assert_eq!(count_of(&plains, BLOCK_CACTUS), 0, "a cactus in a meadow");
+        let origin = (
+            plains.pos.x * CHUNK_SIZE_X as i32,
+            plains.pos.z * CHUNK_SIZE_Z as i32,
+        );
+        let mut in_the_meadow = 0usize;
+        for y in 0..CHUNK_SIZE_Y {
+            for lz in 0..CHUNK_SIZE_Z {
+                for lx in 0..CHUNK_SIZE_X {
+                    if crate::types::block_kind(plains.get(lx, y, lz)) != BLOCK_CACTUS {
+                        continue;
+                    }
+                    let here = gen.biome_at(origin.0 + lx as i32, origin.1 + lz as i32);
+                    in_the_meadow += (here == Biome::Plains) as usize;
+                }
+            }
+        }
+        assert_eq!(in_the_meadow, 0, "a cactus on meadow ground");
     }
 
     #[test]
     fn a_dead_forest_is_trunks_without_leaves() {
         let gen = WorldGen::new(7);
-        let dead = chunk_in(&gen, Biome::DeadForest).expect("no dead forest anywhere");
+        // **Eight chunks, not one.** How many trunks land in any single
+        // chunk is a roll, and a chunk that is half dead forest and half
+        // something else is a low roll rather than a fault -- which is
+        // what this said when the relief was widened and the first dead
+        // forest it found came out at eight trunks. A wood is a thing
+        // you measure over a wood.
+        let dead = chunks_in(&gen, Biome::DeadForest, 8);
+        let trunks: usize = dead.iter().map(|chunk| count_of(chunk, BLOCK_LOG)).sum();
         assert!(
-            count_of(&dead, BLOCK_LOG) > 10,
-            "a wood with {} logs in it",
-            count_of(&dead, BLOCK_LOG)
+            trunks > 80,
+            "eight dead-forest chunks with {trunks} trunks between them"
         );
         // A live forest still has a canopy...
         let alive = chunk_in(&gen, Biome::Forest).expect("no forest anywhere");
@@ -3539,7 +15424,7 @@ mod tests {
         // Generated as real chunks rather than sampled from the height
         // field, so what is drawn is what the game would serve: caves,
         // trees, water and all.
-        const SLICE_SCALE: u32 = 6; // the world is 64 tall; make it visible
+        const SLICE_SCALE: u32 = 6; // a column is tall and thin; make it visible
         let mut slice = image::RgbImage::new(
             SPAN as u32,
             CHUNK_SIZE_Y as u32 * SLICE_SCALE,
@@ -3642,6 +15527,10 @@ mod tests {
             Biome::DeadForest => [124, 104, 78],
             Biome::BirchForest => [146, 178, 118],
             Biome::Swamp => [78, 110, 84],
+            // Browner and greyer than the marsh, and darker than
+            // either the taiga or the tundra it sits between. Peat and
+            // standing water rather than moss.
+            Biome::Bog => [84, 88, 72],
             Biome::Taiga => [70, 116, 104],
             Biome::Tundra => [178, 190, 186],
             Biome::Mountains => [128, 124, 120],
@@ -3663,13 +15552,22 @@ mod tests {
             BLOCK_SNOW => [238, 242, 248],
             BLOCK_LOG => [150, 96, 34],
             BLOCK_LEAVES => [52, 120, 56],
-            BLOCK_GLOWSTONE => [246, 214, 120],
+            // The orchard reads as a warmer green on the map, fruit or
+            // no fruit: a canopy a player is looking for should be
+            // findable in the picture they are looking at.
+            BLOCK_APPLE_LEAVES_FRUIT | crate::types::BLOCK_APPLE_LEAVES => [78, 132, 52],
+            crate::types::BLOCK_GLOWSTONE => [246, 214, 120],
             BLOCK_TALL_GRASS => [74, 138, 58],
             BLOCK_CACTUS => [54, 112, 58],
             crate::types::BLOCK_STICK => [110, 80, 46],
             BLOCK_PEBBLE => [150, 148, 144],
             BLOCK_FLINT => [46, 46, 54],
             BLOCK_ASH => [132, 128, 124],
+            crate::types::BLOCK_SANDSTONE => [204, 180, 130],
+            crate::types::BLOCK_LIMESTONE => [198, 192, 174],
+            crate::types::BLOCK_GRANITE => [154, 142, 140],
+            crate::types::BLOCK_PEAT => [70, 52, 36],
+            crate::types::BLOCK_SANDY_SOIL => [176, 136, 92],
             // Magenta is the missing-texture colour, and it is here for
             // the same reason: a block this palette has not been told
             // about should be *loud* in the picture rather than quietly
@@ -3729,6 +15627,179 @@ mod cost_tests {
             columns,
         );
     }
+
+    /// **What a chunk with a river bank in it costs**, which is not what
+    /// `where_the_time_goes` measures: its twelve chunks at the origin are
+    /// whatever country the seed put there, and a change to the banks of
+    /// rivers moves nothing in a square with no river in it.
+    ///
+    /// Forty-eight chunks of seed 1337 that have river water in their
+    /// middle, found by a sweep that is not timed, each generated cold on a
+    /// thread of its own -- a fresh thread has no tiles remembered, which is
+    /// what a player walking into new country costs the server.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --release --lib -- --ignored --nocapture what_a_riverbank_costs
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn what_a_riverbank_costs() {
+        let gen = WorldGen::new(1337);
+        let mut chunks = Vec::new();
+        'sweep: for step_z in 0..400 {
+            for step_x in 0..400 {
+                let (gx, gz) = (step_x * 64 - 12_800 + 8, step_z * 64 - 12_800 + 8);
+                if gen.height_at(gx, gz) < SEA_LEVEL && gen.biome_at(gx, gz) == Biome::River {
+                    chunks.push(ChunkPos::new(gx.div_euclid(CHUNK_SIZE_X as i32), gz.div_euclid(CHUNK_SIZE_Z as i32)));
+                    if chunks.len() == 48 {
+                        break 'sweep;
+                    }
+                }
+            }
+        }
+        assert!(chunks.len() >= 16, "only {} river chunks found", chunks.len());
+        let started = Instant::now();
+        for &pos in &chunks {
+            let gen = &gen;
+            std::thread::scope(|scope| {
+                scope.spawn(move || std::hint::black_box(gen.generate_chunk(pos)));
+            });
+        }
+        let total = started.elapsed();
+        println!(
+            "river chunks, cold: {:.2} ms/chunk over {}",
+            total.as_secs_f64() * 1000.0 / chunks.len() as f64,
+            chunks.len()
+        );
+    }
+
+    /// The same chunks, pass by pass.
+    ///
+    /// `generate_chunk` is seven passes over one array, and a number for
+    /// the whole says nothing about which of them a change moved. This
+    /// runs the passes the way `generate_chunk` does, with a clock
+    /// between each, over the same chunks twice -- the second time with
+    /// every tile and lake already remembered, which is the steady
+    /// state a player walking sees.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --release --lib -- --ignored --nocapture which_pass_the_time_goes_to
+    /// ```
+    /// **What `ground` costs a chunk**: the passes of
+    /// `which_pass_the_time_goes_to`, with the ground's work off and on in
+    /// turn (`GROUND_OFF`), on a fresh generator each round so the column
+    /// tiles are built every time rather than read back.
+    ///
+    /// ```text
+    /// cargo test --release -p primitive_shared --lib -- --ignored --nocapture what_the_ground_costs
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn what_the_ground_costs_a_chunk() {
+        const CHUNKS: i32 = 12;
+        let mut totals = [[0f64; 3]; 2];
+        for round in 0..6 {
+            let off = round % 2 == 0;
+            GROUND_OFF.store(off, std::sync::atomic::Ordering::Relaxed);
+            let gen = WorldGen::new(1337);
+            let mut spent = [0f64; 3];
+            for cx in 0..CHUNKS {
+                for cz in 0..CHUNKS {
+                    let (origin_x, origin_z) = (cx * CHUNK_SIZE_X as i32 - 96, cz * CHUNK_SIZE_Z as i32 - 96);
+                    let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+                    let clock = Instant::now();
+                    let columns = ColumnCache::build(&gen, origin_x, origin_z);
+                    spent[0] += clock.elapsed().as_secs_f64();
+                    let clock = Instant::now();
+                    for lz in 0..CHUNK_SIZE_Z as i32 {
+                        for lx in 0..CHUNK_SIZE_X as i32 {
+                            gen.fill_column(&mut blocks, lx, lz, origin_x + lx, origin_z + lz, columns.at(lx, lz));
+                        }
+                    }
+                    gen.place_trees(&mut blocks, origin_x, origin_z, &columns);
+                    gen.place_boulders(&mut blocks, origin_x, origin_z, &columns);
+                    spent[1] += clock.elapsed().as_secs_f64();
+                    let clock = Instant::now();
+                    gen.place_ground_cover(&mut blocks, origin_x, origin_z, &columns);
+                    spent[2] += clock.elapsed().as_secs_f64();
+                    std::hint::black_box(&blocks);
+                }
+            }
+            for (slot, s) in spent.iter().enumerate() {
+                totals[usize::from(!off)][slot] += s;
+            }
+        }
+        GROUND_OFF.store(false, std::sync::atomic::Ordering::Relaxed);
+        let n = (3 * CHUNKS * CHUNKS) as f64;
+        for (name, t) in [("without the ground", totals[0]), ("with the ground", totals[1])] {
+            println!(
+                "{name}: columns {:.3} | fill+trees+boulders {:.3} | cover {:.3} | total {:.3} ms/chunk",
+                t[0] * 1000.0 / n,
+                t[1] * 1000.0 / n,
+                t[2] * 1000.0 / n,
+                t.iter().sum::<f64>() * 1000.0 / n
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn which_pass_the_time_goes_to() {
+        let gen = WorldGen::new(1337);
+        const CHUNKS: i32 = 12;
+        let names = ["columns", "fill", "trees", "deadfall", "boulders", "seabed", "cover", "caves", "cave water"];
+        for round in ["cold", "warm"] {
+            let mut spent = [0f64; 9];
+            for cx in 0..CHUNKS {
+                for cz in 0..CHUNKS {
+                    let origin_x = cx * CHUNK_SIZE_X as i32;
+                    let origin_z = cz * CHUNK_SIZE_Z as i32;
+                    let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+                    let mut clock = Instant::now();
+                    let mut lap = |slot: usize, clock: &mut Instant| {
+                        spent[slot] += clock.elapsed().as_secs_f64();
+                        *clock = Instant::now();
+                    };
+                    let columns = ColumnCache::build(&gen, origin_x, origin_z);
+                    lap(0, &mut clock);
+                    for lz in 0..CHUNK_SIZE_Z as i32 {
+                        for lx in 0..CHUNK_SIZE_X as i32 {
+                            let column = columns.at(lx, lz);
+                            gen.fill_column(&mut blocks, lx, lz, origin_x + lx, origin_z + lz, column);
+                        }
+                    }
+                    lap(1, &mut clock);
+                    gen.place_trees(&mut blocks, origin_x, origin_z, &columns);
+                    lap(2, &mut clock);
+                    gen.place_deadfall(&mut blocks, origin_x, origin_z, &columns);
+                    lap(3, &mut clock);
+                    gen.place_boulders(&mut blocks, origin_x, origin_z, &columns);
+                    lap(4, &mut clock);
+                    gen.place_seabed(&mut blocks, origin_x, origin_z, &columns);
+                    lap(5, &mut clock);
+                    gen.place_ground_cover(&mut blocks, origin_x, origin_z, &columns);
+                    lap(6, &mut clock);
+                    gen.scatter_in_caves(&mut blocks, origin_x, origin_z);
+                    lap(7, &mut clock);
+                    // Timed after the scatter here, which is not where
+                    // `generate_chunk` runs it -- the cost of the fill is the
+                    // same either way, and it keeps the slots above comparable
+                    // with measurements taken before cave water existed.
+                    gen.flood_caves(&mut blocks, origin_x, origin_z);
+                    lap(8, &mut clock);
+                    std::hint::black_box(&blocks);
+                }
+            }
+            let n = (CHUNKS * CHUNKS) as f64;
+            let total: f64 = spent.iter().sum();
+            let line: Vec<String> = names
+                .iter()
+                .zip(spent)
+                .map(|(name, s)| format!("{name} {:.3}", s * 1000.0 / n))
+                .collect();
+            println!("{round}: {:.2} ms/chunk = {}", total * 1000.0 / n, line.join(" | "));
+        }
+    }
 }
 
 /// What range the climate fields actually cover.
@@ -3747,16 +15818,43 @@ mod cost_tests {
 mod climate_tests {
     use super::*;
 
-    fn spread(gen: &WorldGen) -> (f32, f32, f32, f32) {
+    /// The climate's range over **every zone a world can be laid in**.
+    ///
+    /// **Across zones rather than across one world**, since the globe went
+    /// to real scale (`BLOCKS_PER_DEGREE`). One world is one latitude with
+    /// the weather moving about in it, and asking one world to reach the
+    /// palette's corners is asking a temperate meadow to be a desert
+    /// somewhere in it -- which is the stripe the climate was slowed down to
+    /// get rid of. The palette is the planet's, so the planet is what has to
+    /// reach its corners: every zone, each sampled wide.
+    ///
+    /// **The steps are sized to the weather**, which is all x or z has left
+    /// to say inside one world. Its lobes are seven and a half thousand
+    /// blocks (`CLIMATE_NOISE_FREQUENCY`); at eight blocks a step a sweep
+    /// once sampled a single warm patch four hundred times over and reported
+    /// that the world never gets cold. Two hundred and twenty blocks a step
+    /// over two hundred steps is forty-four kilometres a side, several lobes
+    /// both ways.
+    ///
+    /// **Four kilometres a step since the Earth's scale**, for the same
+    /// reason one scale up. The local lobes keep only a share of the weather
+    /// now, and the rest is provinces hundreds of kilometres across
+    /// (`scale::WEATHER_SPACING`): forty-four kilometres of one of them is
+    /// one warm patch sampled forty thousand times. Eight hundred kilometres
+    /// a side is the country a world's players can reach.
+    fn spread(seed: u32) -> (f32, f32, f32, f32) {
         let (mut t_lo, mut t_hi) = (1.0f32, 0.0f32);
         let (mut h_lo, mut h_hi) = (1.0f32, 0.0f32);
-        for x in -200..200 {
-            for z in -200..200 {
-                let (t, h) = gen.climate_column(x * 8, z * 8);
-                t_lo = t_lo.min(t);
-                t_hi = t_hi.max(t);
-                h_lo = h_lo.min(h);
-                h_hi = h_hi.max(h);
+        for &zone in Zone::ALL {
+            let gen = WorldGen::with_zone(seed, Preset::Normal, zone);
+            for x in -100..100 {
+                for z in -100..100 {
+                    let (t, h) = gen.climate_column(x * 4_000, z * 4_000);
+                    t_lo = t_lo.min(t);
+                    t_hi = t_hi.max(t);
+                    h_lo = h_lo.min(h);
+                    h_hi = h_hi.max(h);
+                }
             }
         }
         (t_lo, t_hi, h_lo, h_hi)
@@ -3766,7 +15864,7 @@ mod climate_tests {
     #[ignore = "a measurement, not an assertion"]
     fn climate_spread() {
         for seed in [1337u32, 7, 99] {
-            let (t_lo, t_hi, h_lo, h_hi) = spread(&WorldGen::new(seed));
+            let (t_lo, t_hi, h_lo, h_hi) = spread(seed);
             println!(
                 "seed {seed}: temperature {t_lo:.3}..{t_hi:.3}, humidity {h_lo:.3}..{h_hi:.3}"
             );
@@ -3776,10 +15874,11 @@ mod climate_tests {
     #[test]
     fn the_climate_reaches_most_of_its_own_range() {
         // The palette the client paints from spans the whole 0..1
-        // square. If the world only ever visits the middle of it, every
+        // square. If the game only ever visits the middle of it, every
         // plant comes out the same colour and the palette is an
-        // expensive way to multiply by a constant.
-        let (t_lo, t_hi, h_lo, h_hi) = spread(&WorldGen::new(1337));
+        // expensive way to multiply by a constant. Asked of the zones
+        // together -- see `spread` for why not of one world.
+        let (t_lo, t_hi, h_lo, h_hi) = spread(1337);
         assert!(
             t_hi - t_lo > 0.75,
             "temperature only spans {:.2}..{:.2}",
@@ -3793,6 +15892,439 @@ mod climate_tests {
             h_hi
         );
     }
+
+    // ---- how big a climate zone is, measured ----
+    //
+    // "The taiga is five hundred metres from the desert" is a claim
+    // about a *distance*, and the only way to answer it is to walk the
+    // world and count. Everything below is that walk, and the numbers
+    // it prints are what `CLIMATE_NOISE_FREQUENCY` and
+    // `HUMIDITY_NOISE_FREQUENCY` were chosen against -- see their
+    // doc comments for the results.
+
+    /// The height every climate probe is taken at.
+    ///
+    /// Eight above the waterline: over the four the swamp and bog rules
+    /// want, under the twenty-two the mountain rule wants. So
+    /// `land_biome` at this height answers with temperature and
+    /// humidity and nothing else -- which is the point. A transect of
+    /// `biome_at` would be measuring the *relief*: a river, a lake
+    /// shore and a hilltop all change the answer without the climate
+    /// moving an inch, and folding them in would make a smooth world
+    /// look choppy and a choppy one look fine.
+    const PROBE_HEIGHT: i32 = SEA_LEVEL + 8;
+
+    /// How far apart the probes on a transect are. Four blocks: fine
+    /// enough that no zone worth the name is stepped over, coarse
+    /// enough that a twelve-kilometre walk is three thousand samples.
+    const PROBE_STEP: i32 = 4;
+
+    /// The two things a transect can be classified by, and the reason
+    /// there have to be two.
+    ///
+    /// **A biome boundary is not a climate boundary.** Forest, plains
+    /// and dead wood are one climate at three rainfalls: meeting all
+    /// three on one afternoon's walk is what a temperate country looks
+    /// like, and counting those changes as "the climate turned over"
+    /// would say a world was mottled when it was merely varied. What
+    /// the scale question is about is the *band* -- cold, temperate,
+    /// hot -- because that is the pair that cannot be neighbours:
+    /// taiga and desert.
+    ///
+    /// So the band is measured for the scale and the biome for the
+    /// variety, and the two numbers are read together. A world where
+    /// both are large is boring; where both are small it is the
+    /// barcode the player complained about; the wanted answer is a
+    /// large band holding small biomes.
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    enum Band {
+        Cold,
+        Temperate,
+        Hot,
+    }
+
+    fn band_at(gen: &WorldGen, gx: i32, gz: i32) -> Band {
+        // The same two thresholds `land_biome` splits on, read from
+        // there rather than copied -- see `FREEZING`.
+        let t = gen.surface_temperature(gx, gz, PROBE_HEIGHT);
+        if t < FREEZING {
+            Band::Cold
+        } else if t > HOT {
+            Band::Hot
+        } else {
+            Band::Temperate
+        }
+    }
+
+    /// Where a transect starts. Lines a long way apart, so no two of
+    /// them are looking at the same lobe of the same noise field.
+    fn line_start(along_x: bool, line: i32) -> (i32, i32) {
+        if along_x {
+            (-6_000, line * 900)
+        } else {
+            (line * 900, -6_000)
+        }
+    }
+
+    /// One straight walk, sampled by whatever `probe` asks of a column.
+    fn transect<T>(
+        gen: &WorldGen,
+        from: (i32, i32),
+        along_x: bool,
+        blocks: i32,
+        probe: impl Fn(&WorldGen, i32, i32) -> T,
+    ) -> Vec<T> {
+        (0..blocks / PROBE_STEP)
+            .map(|step| {
+                let along = step * PROBE_STEP;
+                let (gx, gz) = if along_x {
+                    (from.0 + along, from.1)
+                } else {
+                    (from.0, from.1 + along)
+                };
+                probe(gen, gx, gz)
+            })
+            .collect()
+    }
+
+    /// Mean length in blocks of an unbroken run of one answer along a
+    /// walk -- the characteristic size of whatever `probe` classifies.
+    fn mean_run<T: PartialEq>(
+        gen: &WorldGen,
+        along_x: bool,
+        probe: impl Fn(&WorldGen, i32, i32) -> T + Copy,
+    ) -> f64 {
+        let mut blocks = 0i64;
+        let mut runs = 0i64;
+        for line in -6..6 {
+            let walk = transect(gen, line_start(along_x, line), along_x, 12_000, probe);
+            runs += 1 + walk.windows(2).filter(|w| w[0] != w[1]).count() as i64;
+            blocks += 12_000;
+        }
+        blocks as f64 / runs as f64
+    }
+
+    /// How many blocks a climate band runs for, taken the hard way:
+    /// the *smaller* of the two directions, because a band that is
+    /// kilometres long and hundreds of blocks wide is still a stripe.
+    fn band_size(gen: &WorldGen) -> f64 {
+        mean_run(gen, false, band_at).min(mean_run(gen, true, band_at))
+    }
+
+    fn biome_size(gen: &WorldGen) -> f64 {
+        let probe = |gen: &WorldGen, gx, gz| gen.land_biome(gx, gz, PROBE_HEIGHT);
+        mean_run(gen, false, probe).min(mean_run(gen, true, probe))
+    }
+
+    /// How far a player walks before the country under them changes --
+    /// the *whole* answer, relief included.
+    ///
+    /// This is the one the "do not make the world boring" half of the
+    /// ask is about, and it is deliberately not `biome_size`: the
+    /// climate fields are only one of the things that decide what you
+    /// are standing on. A river, a lake shore, a hill that crosses the
+    /// mountain line and the low ground a marsh needs all change the
+    /// answer without the climate moving at all, and every one of them
+    /// turns over in hundreds of blocks rather than thousands. Slowing
+    /// the climate down is allowed to make a *band* kilometres wide; it
+    /// is not allowed to make the walk across one featureless.
+    fn country_size(gen: &WorldGen) -> f64 {
+        let probe = |gen: &WorldGen, gx, gz| gen.biome_at(gx, gz);
+        mean_run(gen, false, probe).max(mean_run(gen, true, probe))
+    }
+
+    /// The shortest walk, anywhere on the sampled transects, from a
+    /// column of `a` to a column of `b`.
+    ///
+    /// Along a line rather than over an area, because that is the
+    /// player's complaint verbatim: they walked, and the world changed
+    /// under them too soon.
+    fn closest_approach(gen: &WorldGen, a: Biome, b: Biome) -> Option<i32> {
+        let mut best: Option<i32> = None;
+        for along_x in [false, true] {
+            for line in -6..6 {
+                let start = line_start(along_x, line);
+                let walk = transect(gen, start, along_x, 12_000, |gen: &WorldGen, gx, gz| {
+                    gen.land_biome(gx, gz, PROBE_HEIGHT)
+                });
+                let (mut last_a, mut last_b) = (None::<i32>, None::<i32>);
+                for (step, biome) in walk.iter().enumerate() {
+                    let at = step as i32 * PROBE_STEP;
+                    if *biome == a {
+                        last_a = Some(at);
+                        if let Some(other) = last_b {
+                            best = Some(best.map_or(at - other, |b| b.min(at - other)));
+                        }
+                    }
+                    if *biome == b {
+                        last_b = Some(at);
+                        if let Some(other) = last_a {
+                            best = Some(best.map_or(at - other, |b| b.min(at - other)));
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// ```text
+    /// cargo test -p primitive_shared --release --lib -- --ignored --nocapture how_big_a_climate_zone_is
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn how_big_a_climate_zone_is() {
+        for seed in [1337u32, 7, 99] {
+            let gen = WorldGen::new(seed);
+            println!(
+                "seed {seed}: band {:.0} blocks, biome {:.0} blocks, country {:.0} blocks; \
+                 taiga to desert {:?}, taiga to savanna {:?}, tundra to savanna {:?}",
+                band_size(&gen),
+                biome_size(&gen),
+                country_size(&gen),
+                closest_approach(&gen, Biome::Taiga, Biome::Desert),
+                closest_approach(&gen, Biome::Taiga, Biome::Savanna),
+                closest_approach(&gen, Biome::Tundra, Biome::Savanna),
+            );
+        }
+    }
+
+    /// The seeds every assertion below is made against. Three, because
+    /// one seed is an anecdote and the fields being measured are noise.
+    const SEEDS: [u32; 3] = [1337, 7, 99];
+
+    #[test]
+    fn crossing_a_climate_band_is_a_journey_of_kilometres() {
+        // Three thousand against a measured four thousand: the margin
+        // is there because this is a mean over noise and a seed is
+        // allowed to be unlucky, not because three is the number that
+        // matters. What matters is the order of magnitude -- kilometres
+        // rather than the eighteen hundred blocks this replaced.
+        for seed in SEEDS {
+            let size = band_size(&WorldGen::new(seed));
+            assert!(
+                size >= 3_000.0,
+                "seed {seed}: a climate band is only {size:.0} blocks across"
+            );
+        }
+    }
+
+    #[test]
+    fn no_walk_leads_from_a_taiga_to_a_desert_inside_a_kilometre() {
+        // The player's complaint, as a test. A conifer forest and a
+        // sand sea are the two ends of the temperature range, and
+        // nothing on a map puts them within sight of each other -- the
+        // one honest exception being height, which this probe excludes
+        // by asking every column at the same lowland altitude.
+        //
+        // Fifteen hundred against a measured eighteen hundred at the
+        // worst of three seeds. The pairs are checked in both
+        // directions of the transect and for the neighbouring hot
+        // biome too, because a desert is only half the hot band and a
+        // savanna beside a taiga is the same mistake.
+        for seed in SEEDS {
+            let gen = WorldGen::new(seed);
+            for (cold, hot) in [
+                (Biome::Taiga, Biome::Desert),
+                (Biome::Taiga, Biome::Savanna),
+                (Biome::Tundra, Biome::Savanna),
+            ] {
+                if let Some(gap) = closest_approach(&gen, cold, hot) {
+                    assert!(
+                        gap >= 1_500,
+                        "seed {seed}: {} comes within {gap} blocks of {}",
+                        cold.name(),
+                        hot.name()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_slower_climate_did_not_make_the_ground_underfoot_slower() {
+        // The other half of the ask, and the one a scale change is most
+        // likely to break: a world whose climate is measured in
+        // kilometres must not be a world you walk across for kilometres
+        // without anything changing.
+        //
+        // Two hundred blocks against a measured hundred and seven, and
+        // against ninety-five before the climate was slowed down at all
+        // -- so this asserts that the change cost the world essentially
+        // none of its variety, not merely that some is left. See
+        // `country_size` for what is being counted and why it is not
+        // the climate classification.
+        for seed in SEEDS {
+            let size = country_size(&WorldGen::new(seed));
+            assert!(
+                size <= 200.0,
+                "seed {seed}: the country only changes every {size:.0} blocks"
+            );
+        }
+    }
+
+    #[test]
+    fn one_temperate_country_still_holds_several_kinds_of_ground() {
+        // Run length is a mean, and a mean can be held down by a few
+        // frantic stretches while the rest of the world is one colour.
+        // So this asks the question the other way round: pick the walks
+        // that stay inside the temperate band the whole way, and count
+        // how many *different* biomes each one meets. Woods, meadows
+        // and marshes are one climate at three rainfalls, and a walk
+        // through temperate country that meets only one of them is the
+        // boring world this change was warned against.
+        for seed in SEEDS {
+            let gen = WorldGen::new(seed);
+            let mut checked = 0;
+            for along_x in [false, true] {
+                for line in -6..6 {
+                    let start = line_start(along_x, line);
+                    let bands = transect(&gen, start, along_x, 3_000, band_at);
+                    if bands.iter().any(|b| *b != Band::Temperate) {
+                        continue;
+                    }
+                    let walk = transect(&gen, start, along_x, 3_000, |gen: &WorldGen, gx, gz| gen.biome_at(gx, gz));
+                    // **A walk on land.** The claim is about temperate
+                    // *country*, and at the Earth's scale an ocean is
+                    // thousands of kilometres of water that is temperate by
+                    // its latitude and one biome by its nature: a line laid
+                    // out over it is a swim, and it told the test that seed 7
+                    // held only the sea.
+                    if walk.iter().filter(|b| **b == Biome::Ocean).count() * 2 > walk.len() {
+                        continue;
+                    }
+                    let kinds: std::collections::HashSet<Biome> = walk.into_iter().collect();
+                    assert!(
+                        kinds.len() >= 4,
+                        "seed {seed}: three kilometres of temperate country hold only {kinds:?}"
+                    );
+                    checked += 1;
+                }
+            }
+            assert!(checked > 0, "seed {seed}: no walk stayed temperate throughout");
+        }
+    }
+
+    /// Where a new player wakes up, over a hundred seeds of each zone:
+    /// which biome, which band, and how far from the origin.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --release --lib -- --ignored --nocapture where_a_new_player_wakes_up
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn where_a_new_player_wakes_up() {
+        use std::collections::BTreeMap;
+        for &zone in Zone::ALL {
+            let mut by_biome: BTreeMap<&str, u32> = BTreeMap::new();
+            let mut by_band: BTreeMap<&str, u32> = BTreeMap::new();
+            let (mut z_lo, mut z_hi) = (i32::MAX, i32::MIN);
+            let (mut t_lo, mut t_hi, mut t_sum) = (f64::MAX, f64::MIN, 0.0);
+            let seeds = 0..100u32;
+            let count = seeds.len();
+            for seed in seeds {
+                let gen = WorldGen::with_zone(seed, Preset::Normal, zone);
+                let (gx, gz) = gen.spawn_column();
+                let height = gen.height_at(gx, gz);
+                *by_biome.entry(gen.biome_at(gx, gz).name()).or_default() += 1;
+                let t = gen.surface_temperature(gx, gz, height);
+                let band = if t < FREEZING {
+                    "cold"
+                } else if t > HOT {
+                    "hot"
+                } else {
+                    "temperate"
+                };
+                *by_band.entry(band).or_default() += 1;
+                z_lo = z_lo.min(gz);
+                z_hi = z_hi.max(gz);
+                t_lo = t_lo.min(t);
+                t_hi = t_hi.max(t);
+                t_sum += t;
+            }
+            println!("{}: {count} seeds, spawn z {z_lo}..{z_hi}", zone.name());
+            println!(
+                "  surface temperature at spawn {t_lo:.2}..{t_hi:.2}, mean {:.2}",
+                t_sum / count as f64
+            );
+            println!("  bands: {by_band:?}");
+            println!("  biomes: {by_biome:?}");
+        }
+    }
+
+    /// What each latitude is made of: a world laid every ten degrees from
+    /// the equator to the pole, and for each the share of its land that is
+    /// hot, temperate and cold country, and its commonest biomes.
+    ///
+    /// **A world per latitude rather than one world walked**, because at
+    /// real scale the walk is ten thousand kilometres and no world holds it
+    /// (`BLOCKS_PER_DEGREE`). What a world at a latitude is made of is the
+    /// honest question now: it is what a player who chose that place lives
+    /// among.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --release --lib -- --ignored --nocapture what_each_latitude_is_made_of
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn what_each_latitude_is_made_of() {
+        use std::collections::HashMap;
+        for seed in SEEDS {
+            let mut buckets: Vec<HashMap<Biome, u32>> = vec![HashMap::new(); 10];
+            let mut whole: HashMap<Biome, u32> = HashMap::new();
+            for (bucket, degrees) in (0..90).step_by(10).enumerate() {
+                let gen = WorldGen::at_latitude(seed, degrees + 5);
+                for gz in (-12_000..12_000).step_by(480) {
+                    for gx in (-24_000..24_000).step_by(480) {
+                        let height = gen.height_at(gx, gz);
+                        let biome = gen.biome_from(gx, gz, height);
+                        if matches!(biome, Biome::Ocean | Biome::Beach) {
+                            continue;
+                        }
+                        *buckets[bucket].entry(biome).or_default() += 1;
+                        *whole.entry(biome).or_default() += 1;
+                    }
+                }
+            }
+            let describe = |counts: &HashMap<Biome, u32>| {
+                let land: u32 = counts.values().sum();
+                let share = |pick: &dyn Fn(Biome) -> bool| {
+                    counts.iter().filter(|(b, _)| pick(**b)).map(|(_, n)| *n).sum::<u32>() as f32
+                        / land.max(1) as f32
+                        * 100.0
+                };
+                let hot = share(&|b| matches!(b, Biome::Savanna | Biome::Desert));
+                let cold = share(&|b| {
+                    matches!(b, Biome::Tundra | Biome::Taiga | Biome::Bog | Biome::SnowyPeaks)
+                });
+                let temperate = share(&|b| {
+                    matches!(
+                        b,
+                        Biome::Forest
+                            | Biome::BirchForest
+                            | Biome::Plains
+                            | Biome::DeadForest
+                            | Biome::Swamp
+                    )
+                });
+                let mut top: Vec<(Biome, u32)> = counts.iter().map(|(b, n)| (*b, *n)).collect();
+                top.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+                let top: Vec<String> = top
+                    .iter()
+                    .take(4)
+                    .map(|(b, n)| format!("{} {:.0}%", b.name(), *n as f32 / land.max(1) as f32 * 100.0))
+                    .collect();
+                format!(
+                    "hot {hot:.0}% temperate {temperate:.0}% cold {cold:.0}% | {}",
+                    top.join(", ")
+                )
+            };
+            println!("seed {seed}, every latitude: {}", describe(&whole));
+            for (tenth, counts) in buckets.iter().enumerate() {
+                println!("  {:>2}5 degrees: {}", tenth, describe(counts));
+            }
+        }
+    }
 }
 
 /// What the *shape* of the ground decides, on top of what its climate
@@ -3802,10 +16334,19 @@ mod relief_tests {
     use super::*;
 
     /// Every column of a wide sweep, with its slope.
+    /// **The sweep has to be several continents across, or it is a
+    /// sample of one hillside.**
+    ///
+    /// It was 1800 blocks square, which was three continent lobes while
+    /// a lobe was six hundred blocks and *less than one* once they were
+    /// widened. The abyss check then came back with almost no deep water
+    /// and reported a broken ocean about a world that had simply got
+    /// bigger than the ruler. Widened with the world, and the strides
+    /// widened with it so the number of samples stayed about the same.
     fn sweep(gen: &WorldGen) -> Vec<(i32, i32, i32, f32)> {
         let mut out = Vec::new();
-        for gx in (-900..900).step_by(3) {
-            for gz in (-900..900).step_by(7) {
+        for gx in (-3200..3200).step_by(11) {
+            for gz in (-3200..3200).step_by(23) {
                 let height = gen.height_at(gx, gz);
                 out.push((gx, gz, height, gen.slope_at(gx, gz, height)));
             }
@@ -3824,6 +16365,48 @@ mod relief_tests {
     /// ```text
     /// cargo test -p primitive_shared --lib -- --ignored --nocapture terrain_numbers
     /// ```
+    /// How much of the land is flat, how much is cliff and how much stands
+    /// above the mountain line, over four seeds -- the numbers "fewer
+    /// mountains, more plain" is measured in. Flat and cliff are the cliff
+    /// test's own lines (`slope < 0.5`, `ROCK_SLOPE`), so the two cannot
+    /// drift apart.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --lib -- --ignored --nocapture how_much_of_the_land_is_flat
+    /// ```
+    #[test]
+    #[ignore = "diagnostic: prints the share of flat, cliff and mountain land"]
+    fn how_much_of_the_land_is_flat() {
+        for seed in [1u32, 7, 1234, 99999] {
+            let gen = WorldGen::new(seed);
+            let (mut land, mut flat, mut cliff, mut mountain) = (0u32, 0u32, 0u32, 0u32);
+            let mut above = 0i64;
+            for gx in (-3000..3000).step_by(23) {
+                for gz in (-3000..3000).step_by(29) {
+                    let h = gen.height_at(gx, gz);
+                    if h < SEA_LEVEL {
+                        continue;
+                    }
+                    land += 1;
+                    above += (h - SEA_LEVEL) as i64;
+                    let slope = gen.slope_at(gx, gz, h);
+                    flat += (slope < 0.5) as u32;
+                    cliff += (slope >= ROCK_SLOPE) as u32;
+                    mountain += (h > SEA_LEVEL + 42) as u32;
+                }
+            }
+            let pct = |n: u32| n * 100 / land.max(1);
+            println!(
+                "seed {seed}: of the land, flat {}%, cliff {}%, above the mountain line {}%, \
+                 mean height over the sea {:.1}",
+                pct(flat),
+                pct(cliff),
+                pct(mountain),
+                above as f64 / land.max(1) as f64
+            );
+        }
+    }
+
     #[test]
     #[ignore = "diagnostic: prints terrain percentiles"]
     fn terrain_numbers() {
@@ -3868,8 +16451,12 @@ mod relief_tests {
         let mut flat = 0;
         for (gx, gz, height, slope) in sweep(&gen) {
             // Above the shore band, which is deliberately sand however
-            // steep it is -- see `surface_for`.
-            if height <= SEA_LEVEL + 2 {
+            // steep it is -- see `surface_for` -- and out of the lakes, for
+            // the same reason: a pond's bed is silt and sand on whatever
+            // slope it has (`WorldGen::lake_bed`). That was always true of
+            // the chunks; this only started seeing it when `surface_at`
+            // learned to ask about lakes too.
+            if height <= SEA_LEVEL + 2 || height < gen.water_level_at(gx, gz) {
                 continue;
             }
             let top = gen.surface_at(gx, gz, height).top;
@@ -3878,8 +16465,16 @@ mod relief_tests {
                 steep_rock += (top == BLOCK_COBBLESTONE) as i32;
             } else if slope < 0.5 {
                 flat += 1;
-                flat_soil += matches!(top, BLOCK_GRASS | BLOCK_DIRT | BLOCK_SAND | BLOCK_SNOW)
-                    as i32;
+                // Dry turf is the savanna's grass; the sweep only started
+                // meeting enough of it to notice when the savanna grew.
+                flat_soil += matches!(
+                    top,
+                    BLOCK_GRASS
+                        | crate::types::BLOCK_DRY_TURF
+                        | BLOCK_DIRT
+                        | BLOCK_SAND
+                        | BLOCK_SNOW
+                ) as i32;
             }
         }
         assert!(steep > 200, "only {steep} steep columns in the sweep -- nowhere is a cliff");
@@ -3949,6 +16544,266 @@ mod relief_tests {
         }
         assert!(shelf * 5 > wet, "only {shelf} of {wet} wet columns are shelf");
         assert!(deep * 14 > wet, "only {deep} of {wet} wet columns are deep water");
+    }
+
+    // ---- the sea floor ----
+
+    /// Chunks whose middle column is open sea with a depth in `depths`,
+    /// nearest the origin first, up to `wanted` of them. Sampled every four
+    /// chunks out to three kilometres, so a coast is found in any seed.
+    fn sea_chunks(gen: &WorldGen, depths: std::ops::RangeInclusive<i32>, wanted: usize) -> Vec<ChunkPos> {
+        let mut candidates = Vec::new();
+        for cx in (-200..=200).step_by(4) {
+            for cz in (-200..=200).step_by(4) {
+                candidates.push((cx * cx + cz * cz, cx, cz));
+            }
+        }
+        candidates.sort_unstable();
+        let mut found = Vec::new();
+        for (_, cx, cz) in candidates {
+            let (gx, gz) = (cx * CHUNK_SIZE_X as i32 + 8, cz * CHUNK_SIZE_Z as i32 + 8);
+            let height = gen.height_at(gx, gz);
+            if !depths.contains(&(SEA_LEVEL - height)) || gen.biome_from(gx, gz, height) != Biome::Ocean {
+                continue;
+            }
+            found.push(ChunkPos::new(cx, cz));
+            if found.len() >= wanted {
+                break;
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn everything_growing_on_the_sea_bed_stands_on_ground_that_holds_it_under_open_water() {
+        use crate::types::{block_kind, block_name, can_grow_on, is_liquid, stands_in_water, BLOCK_KELP, BLOCK_KELP_TOP};
+        let mut grown = 0;
+        for gen in [WorldGen::at_latitude(1337, 5), WorldGen::new(1337), WorldGen::at_latitude(7, 60)] {
+            for pos in sea_chunks(&gen, 3..=40, 8) {
+                let chunk = gen.generate_chunk(pos);
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        for y in 1..CHUNK_SIZE_Y - 1 {
+                            let id = chunk.get(lx, y, lz);
+                            // Growing, not standing: a swamp snag's drowned
+                            // foot stands in water too, in a pool over the sea
+                            // at the edge of a coast chunk, and it is not a
+                            // plant of the sea bed.
+                            if !stands_in_water(id) || crate::types::is_branch(id) {
+                                continue;
+                            }
+                            grown += 1;
+                            let (below, above) = (chunk.get(lx, y - 1, lz), chunk.get(lx, y + 1, lz));
+                            let here = format!("{} at {pos:?} ({lx}, {y}, {lz})", block_name(id));
+                            assert!(can_grow_on(id, below), "{here} stands on {}", block_name(below));
+                            assert!((y as i32) < SEA_LEVEL, "{here} stands up through the waterline");
+                            if id == BLOCK_KELP {
+                                assert!(matches!(above, BLOCK_KELP | BLOCK_KELP_TOP), "{here} ends without a top");
+                            } else {
+                                assert!(
+                                    is_liquid(above) || block_kind(above) == BLOCK_ICE,
+                                    "{here} has {} over it",
+                                    block_name(above)
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(grown > 200, "only {grown} things grow on twenty-four chunks of sea bed");
+    }
+
+    #[test]
+    fn a_reef_grows_only_in_warm_shallow_sea_and_kelp_only_in_a_cool_one() {
+        use crate::types::{
+            block_kind, BLOCK_BRAIN_CORAL, BLOCK_FIRE_CORAL, BLOCK_KELP, BLOCK_KELP_TOP, BLOCK_SEA_FAN,
+            BLOCK_STAGHORN_CORAL,
+        };
+        let count = |gen: &WorldGen| -> (usize, usize) {
+            let (mut reef, mut kelp) = (0, 0);
+            for pos in sea_chunks(gen, 3..=30, 16) {
+                let chunk = gen.generate_chunk(pos);
+                let (ox, oz) = (pos.x * CHUNK_SIZE_X as i32, pos.z * CHUNK_SIZE_Z as i32);
+                let (px, pz) = gen.on_planet(ox, oz);
+                let corners = gen.sea_warmth_corners(px, pz);
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let warmth = sea_warmth(corners, lx as i32, lz as i32);
+                        let depth = SEA_LEVEL - gen.height_at(ox + lx as i32, oz + lz as i32);
+                        for y in 0..CHUNK_SIZE_Y {
+                            match block_kind(chunk.get(lx, y, lz)) {
+                                BLOCK_BRAIN_CORAL | BLOCK_FIRE_CORAL | BLOCK_SEA_FAN | BLOCK_STAGHORN_CORAL => {
+                                    reef += 1;
+                                    assert!(warmth >= REEF_WARMTH, "a reef in water of warmth {warmth:.2}");
+                                    assert!(REEF_DEPTHS.contains(&depth), "a reef under {depth} blocks of sea");
+                                }
+                                BLOCK_KELP | BLOCK_KELP_TOP => {
+                                    kelp += 1;
+                                    assert!(
+                                        (KELP_COLDEST..KELP_WARMEST).contains(&warmth),
+                                        "kelp in water of warmth {warmth:.2}"
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            (reef, kelp)
+        };
+        let (tropical_reef, _) = count(&WorldGen::at_latitude(1337, 5));
+        assert!(tropical_reef > 0, "no reef anywhere in a tropical sea");
+        let (temperate_reef, temperate_kelp) = count(&WorldGen::new(1337));
+        assert!(temperate_kelp > 0, "no kelp in a temperate sea");
+        let (northern_reef, _) = count(&WorldGen::at_latitude(1337, 65));
+        assert_eq!(northern_reef, 0, "a reef in the northern sea");
+        println!("reef: tropics {tropical_reef}, temperate {temperate_reef}; kelp temperate {temperate_kelp}");
+    }
+
+    #[test]
+    fn a_boulder_on_the_sea_bed_is_whole_where_a_chunk_border_cuts_through_it() {
+        // Every column the boulder rule names is stone in the chunk that
+        // holds it -- read from the chunk, the one to its east and the one
+        // to its south, so a boulder a border runs through is checked from
+        // both sides of the border.
+        let gen = WorldGen::new(1337);
+        let (mut columns, mut on_a_border) = (0, 0);
+        for pos in sea_chunks(&gen, 6..=40, 10) {
+            for (dx, dz) in [(0, 0), (1, 0), (0, 1)] {
+                let pos = ChunkPos::new(pos.x + dx, pos.z + dz);
+                let chunk = gen.generate_chunk(pos);
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let (gx, gz) = (pos.x * CHUNK_SIZE_X as i32 + lx as i32, pos.z * CHUNK_SIZE_Z as i32 + lz as i32);
+                        let floor = gen.height_at(gx, gz);
+                        if floor >= SEA_LEVEL - 1 || gen.biome_from(gx, gz, floor) != Biome::Ocean {
+                            continue;
+                        }
+                        let Some(tall) = gen.sea_boulder(gx, gz, SEA_LEVEL - floor) else {
+                            continue;
+                        };
+                        for y in floor + 1..=floor + tall {
+                            let id = chunk.get(lx, y as usize, lz);
+                            assert!(
+                                matches!(crate::ground::as_common(id), BLOCK_COBBLESTONE | BLOCK_GRANITE),
+                                "a boulder cell at ({gx}, {y}, {gz}) holds {}",
+                                crate::types::block_name(id)
+                            );
+                        }
+                        columns += 1;
+                        on_a_border += (lx == 0 || lx == CHUNK_SIZE_X - 1 || lz == 0 || lz == CHUNK_SIZE_Z - 1) as usize;
+                    }
+                }
+            }
+        }
+        assert!(columns > 20, "only {columns} boulder columns to check");
+        println!("{columns} boulder columns checked, {on_a_border} of them on a chunk border");
+    }
+
+    #[test]
+    fn the_same_seed_lays_the_same_sea_bed_every_time() {
+        let positions = sea_chunks(&WorldGen::at_latitude(99, 20), 3..=40, 4);
+        assert!(!positions.is_empty(), "no sea near the origin of seed 99");
+        for pos in positions {
+            let first = WorldGen::at_latitude(99, 20).generate_chunk(pos);
+            let second = WorldGen::at_latitude(99, 20).generate_chunk(pos);
+            assert!(first.blocks == second.blocks, "the sea bed at {pos:?} came out two ways");
+        }
+    }
+
+    #[test]
+    fn the_shelf_is_a_patchwork_rather_than_one_material() {
+        use crate::types::{block_kind, block_name};
+        let gen = WorldGen::new(1234);
+        let mut tops: std::collections::HashMap<crate::types::BlockId, usize> = Default::default();
+        let mut shelf = 0;
+        for pos in sea_chunks(&gen, 4..=10, 16) {
+            let chunk = gen.generate_chunk(pos);
+            for lz in 0..CHUNK_SIZE_Z {
+                for lx in 0..CHUNK_SIZE_X {
+                    let (gx, gz) = (pos.x * CHUNK_SIZE_X as i32 + lx as i32, pos.z * CHUNK_SIZE_Z as i32 + lz as i32);
+                    let floor = gen.height_at(gx, gz);
+                    if !(4..=10).contains(&(SEA_LEVEL - floor)) || gen.biome_from(gx, gz, floor) != Biome::Ocean {
+                        continue;
+                    }
+                    shelf += 1;
+                    *tops.entry(block_kind(chunk.get(lx, floor as usize, lz))).or_default() += 1;
+                }
+            }
+        }
+        assert!(shelf > 500, "only {shelf} shelf columns sampled");
+        let mut shares: Vec<(usize, &str)> =
+            tops.iter().map(|(&id, &n)| (n * 100 / shelf, block_name(id))).collect();
+        shares.sort_unstable_by(|a, b| b.cmp(a));
+        println!("the shelf, of {shelf} columns: {shares:?}");
+        assert!(shares[0].0 < 70, "the shelf is {}% {}", shares[0].0, shares[0].1);
+        assert!(
+            shares.iter().filter(|(share, _)| *share >= 5).count() >= 3,
+            "the shelf is fewer than three materials: {shares:?}"
+        );
+    }
+
+    /// What the sea floor is made of and what grows on it, by depth band and
+    /// by latitude, as shares of the sea columns sampled.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --lib -- --ignored --nocapture what_the_sea_floor_is_made_of
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn what_the_sea_floor_is_made_of() {
+        use crate::types::{
+            block_kind, block_name, BLOCK_BRAIN_CORAL, BLOCK_FIRE_CORAL, BLOCK_KELP, BLOCK_KELP_TOP,
+            BLOCK_SEAGRASS, BLOCK_SEA_FAN, BLOCK_SHELL, BLOCK_STAGHORN_CORAL,
+        };
+        for degrees in [5, 25, 45, 65] {
+            let gen = WorldGen::at_latitude(1337, degrees);
+            let mut bands: [std::collections::HashMap<&str, usize>; 3] = Default::default();
+            let mut totals = [0usize; 3];
+            let (mut sea, mut kelp, mut reef, mut grass, mut shells, mut boulders) = (0, 0, 0, 0, 0, 0);
+            for pos in sea_chunks(&gen, 1..=40, 24) {
+                let chunk = gen.generate_chunk(pos);
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let (gx, gz) = (pos.x * CHUNK_SIZE_X as i32 + lx as i32, pos.z * CHUNK_SIZE_Z as i32 + lz as i32);
+                        let floor = gen.height_at(gx, gz);
+                        let depth = SEA_LEVEL - floor;
+                        if depth < 1 || gen.biome_from(gx, gz, floor) != Biome::Ocean {
+                            continue;
+                        }
+                        sea += 1;
+                        let band = if depth <= 3 { 0 } else if depth <= 10 { 1 } else { 2 };
+                        totals[band] += 1;
+                        *bands[band].entry(block_name(chunk.get(lx, floor as usize, lz))).or_default() += 1;
+                        let over = block_kind(chunk.get(lx, floor as usize + 1, lz));
+                        match over {
+                            BLOCK_KELP | BLOCK_KELP_TOP => kelp += 1,
+                            BLOCK_BRAIN_CORAL | BLOCK_FIRE_CORAL | BLOCK_SEA_FAN | BLOCK_STAGHORN_CORAL => reef += 1,
+                            BLOCK_SEAGRASS => grass += 1,
+                            BLOCK_SHELL => shells += 1,
+                            BLOCK_COBBLESTONE | BLOCK_GRANITE => boulders += 1,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let pct = |n: usize| n as f64 * 100.0 / sea.max(1) as f64;
+            println!(
+                "{degrees}N: {sea} sea columns -- kelp {:.1}% reef {:.1}% seagrass {:.1}% shells {:.1}% boulders {:.1}%",
+                pct(kelp),
+                pct(reef),
+                pct(grass),
+                pct(shells),
+                pct(boulders)
+            );
+            for (name, (band, total)) in ["surf", "shelf", "deep"].iter().zip(bands.iter().zip(totals)) {
+                let mut shares: Vec<(usize, &str)> = band.iter().map(|(&b, &n)| (n * 100 / total.max(1), b)).collect();
+                shares.sort_unstable_by(|a, b| b.cmp(a));
+                println!("    {name} ({total}): {shares:?}");
+            }
+        }
     }
 
     #[test]
@@ -4067,29 +16922,44 @@ mod ore_tests {
     use super::*;
     use crate::types::{block_kind, BlockId};
 
-    /// Every ore cell in a wide sample, with the height it was found at.
-    fn ore_cells(seed: u32, radius: i32) -> Vec<(BlockId, i32)> {
+    /// Every ore cell in a sample of the world, with the height it was
+    /// found at.
+    ///
+    /// **Chunks spread out rather than a solid block of them**, and that
+    /// is the whole reason this takes a step. Ore is in *places* now:
+    /// copper under high ground, tin in districts a few hundred blocks
+    /// across. A solid block of chunks small enough to generate inside a
+    /// test is about three hundred blocks across, which is one place --
+    /// so it measures whatever happens to be at the origin of that seed
+    /// and calls it the world. Two of the three seeds these tests use
+    /// have low country round their origin, and a solid sample of either
+    /// reports that copper does not exist.
+    ///
+    /// The same number of chunks, laid out a `step` apart, costs the
+    /// same and sees a footprint `step` times wider.
+    fn ore_cells(seed: u32, across: i32, step: i32) -> Vec<(BlockId, i32)> {
+        let gen = WorldGen::new(seed);
         let mut found = Vec::new();
-        for chunk in sample_chunks(seed, radius) {
-            for y in 0..CHUNK_SIZE_Y {
-                for z in 0..CHUNK_SIZE_Z {
-                    for x in 0..CHUNK_SIZE_X {
-                        let id = block_kind(chunk.get(x, y, z));
-                        if matches!(
-                            id,
-                            BLOCK_COAL_ORE | BLOCK_COPPER_ORE | BLOCK_TIN_ORE | BLOCK_IRON_ORE
-                        ) {
-                            found.push((id, y as i32));
+        for cx in 0..across {
+            for cz in 0..across {
+                let pos = ChunkPos::new((cx - across / 2) * step, (cz - across / 2) * step);
+                let chunk = gen.generate_chunk(pos);
+                for y in 0..CHUNK_SIZE_Y {
+                    for z in 0..CHUNK_SIZE_Z {
+                        for x in 0..CHUNK_SIZE_X {
+                            let id = block_kind(chunk.get(x, y, z));
+                            if matches!(
+                                id,
+                                BLOCK_COAL_ORE | BLOCK_COPPER_ORE | BLOCK_TIN_ORE | BLOCK_IRON_ORE
+                            ) {
+                                found.push((id, y as i32));
+                            }
                         }
                     }
                 }
             }
         }
         found
-    }
-
-    fn count(cells: &[(BlockId, i32)], ore: BlockId) -> usize {
-        cells.iter().filter(|&&(id, _)| id == ore).count()
     }
 
     fn mean_depth(cells: &[(BlockId, i32)], ore: BlockId) -> f32 {
@@ -4101,30 +16971,425 @@ mod ore_tests {
         heights.iter().sum::<i32>() as f32 / heights.len().max(1) as f32
     }
 
+    /// The four, in the order the ages meet them.
+    const ORES: [(BlockId, &str); 4] = [
+        (BLOCK_COAL_ORE, "coal"),
+        (BLOCK_COPPER_ORE, "copper"),
+        (BLOCK_TIN_ORE, "tin"),
+        (BLOCK_IRON_ORE, "iron"),
+    ];
+
+    /// How far along one level a miner walks between veins.
+    ///
+    /// A straight tunnel at a fixed height, which is what a player
+    /// actually digs once they are down: they do not sample the world
+    /// uniformly, they follow a level and look at the walls. Counted in
+    /// *rock* traversed rather than blocks of distance, because a
+    /// tunnel that crosses a cave or the open air has not been dug.
+    ///
+    /// Returns, per ore, the mean rock walked per vein met and the mean
+    /// number of cells of it the tunnel then cut through -- the road and
+    /// the reward. `None` where the level held none of that ore at all,
+    /// which is itself the answer.
+    fn walk_a_level(gen: &WorldGen, y: i32) -> [Option<(f32, f32)>; 4] {
+        /// How long a tunnel, and how many of them. Long enough to cross
+        /// several of anything the generator draws at region scale --
+        /// a hundred blocks of tunnel would measure one hillside.
+        const SPAN: i32 = 3000;
+        const LINES: i32 = 16;
+        /// How much barren rock ends a vein. Two cells of one ore either
+        /// side of a gap this wide are two finds, not one; without it a
+        /// blob the tunnel clips twice counts as two veins and every
+        /// road comes out half as long as it is.
+        const APART: i32 = 8;
+
+        let mut rock = 0u64;
+        let mut veins = [0u64; 4];
+        let mut cells = [0u64; 4];
+        for line in 0..LINES {
+            // Prime-ish stride so the lines are not all through the same
+            // stripe of every low-frequency field in the generator.
+            let gz = line * 373 - 3000;
+            let mut gap = [i32::MAX; 4];
+            for gx in -SPAN / 2..SPAN / 2 {
+                let height = gen.height_at(gx, gz);
+                let surface = gen.surface_at(gx, gz, height);
+                if y <= BEDROCK_TOP || y > height - surface.soil || gen.is_cave(gx, y, gz) {
+                    continue; // not rock: there is nothing to dig here
+                }
+                rock += 1;
+                let here = gen.ore_at(gx, y, gz, height);
+                for (i, &(ore, _)) in ORES.iter().enumerate() {
+                    if here == Some(ore) {
+                        if gap[i] >= APART {
+                            veins[i] += 1;
+                        }
+                        cells[i] += 1;
+                        gap[i] = 0;
+                    } else {
+                        gap[i] = gap[i].saturating_add(1);
+                    }
+                }
+            }
+        }
+        std::array::from_fn(|i| {
+            (veins[i] > 0).then(|| {
+                (
+                    rock as f32 / veins[i] as f32,
+                    cells[i] as f32 / veins[i] as f32,
+                )
+            })
+        })
+    }
+
+    /// Ore over a wide, sparse sample of the world.
+    ///
+    /// Returns the rock walked and how much of each ore was in it.
+    ///
+    /// Columns every `step` blocks out to `reach`, rather than every
+    /// cell of a solid block of chunks -- and that is not a shortcut,
+    /// it is the only honest way to count this world. Ore is in
+    /// *places* now: a block of chunks small enough to generate inside
+    /// a test is about three hundred blocks across, which is one place,
+    /// and counting ore in it answers "what is under this hill" rather
+    /// than "what is in this world". Ask it of a seed whose origin
+    /// happens to be a plain and it reports that copper does not exist.
+    /// The sparse grid gives up the vein structure -- which no count
+    /// needs -- and buys a footprint four thousand blocks across.
+    fn ore_over_the_world(seed: u32, reach: i32, step: i32) -> (u64, [u64; 4]) {
+        let gen = WorldGen::new(seed);
+        let mut rock = 0u64;
+        let mut found = [0u64; 4];
+        let mut gz = -reach;
+        while gz <= reach {
+            let mut gx = -reach;
+            while gx <= reach {
+                let height = gen.height_at(gx, gz);
+                let surface = gen.surface_at(gx, gz, height);
+                for y in (BEDROCK_TOP + 1)..=(height - surface.soil) {
+                    if gen.is_cave(gx, y, gz) {
+                        continue; // a hole is not rock, and holds no ore
+                    }
+                    rock += 1;
+                    let Some(ore) = gen.ore_at(gx, y, gz, height) else {
+                        continue;
+                    };
+                    if let Some(i) = ORES.iter().position(|&(id, _)| id == ore) {
+                        found[i] += 1;
+                    }
+                }
+                gx += step;
+            }
+            gz += step;
+        }
+        (rock, found)
+    }
+
+    /// How far from where a player wakes up the nearest cell of each ore
+    /// is, in blocks.
+    ///
+    /// Columns every `step` blocks, so it is the nearest *sampled*
+    /// column and reads a little long -- a vein missed by the grid is a
+    /// vein this says is further away than it is. That bias is the safe
+    /// direction for both the measurement and the test that uses it.
+    fn how_far_from_home(gen: &WorldGen, reach: i32, step: i32) -> [Option<i32>; 4] {
+        let (home_x, home_z) = gen.spawn_column();
+        let mut nearest = [i32::MAX; 4];
+        let mut dz = -reach;
+        while dz <= reach {
+            let mut dx = -reach;
+            while dx <= reach {
+                let away = ((dx * dx + dz * dz) as f64).sqrt() as i32;
+                // Nothing further out than the reach, so a square grid
+                // does not report a corner as a find at `reach`.
+                if away > reach || nearest.iter().all(|&n| n <= away) {
+                    dx += step;
+                    continue;
+                }
+                let (gx, gz) = (home_x + dx, home_z + dz);
+                let height = gen.height_at(gx, gz);
+                let surface = gen.surface_at(gx, gz, height);
+                for y in (BEDROCK_TOP + 1)..=(height - surface.soil) {
+                    if gen.is_cave(gx, y, gz) {
+                        continue;
+                    }
+                    let Some(ore) = gen.ore_at(gx, y, gz, height) else {
+                        continue;
+                    };
+                    if let Some(i) = ORES.iter().position(|&(id, _)| id == ore) {
+                        nearest[i] = nearest[i].min(away);
+                    }
+                }
+                dx += step;
+            }
+            dz += step;
+        }
+        std::array::from_fn(|i| (nearest[i] < i32::MAX).then_some(nearest[i]))
+    }
+
+    /// **What the rock actually holds.**
+    ///
+    /// Three numbers per ore, because those are the three a player
+    /// feels: how much of it there is per thousand blocks of stone, how
+    /// deep it lies, and how far they walk along a level before meeting
+    /// a vein of it.
+    ///
+    /// It asserts nothing on purpose. Ore rarity is the one setting in
+    /// this generator that everybody has an opinion about and nobody can
+    /// see: one lucky chamber reads as "ore everywhere" and one barren
+    /// shaft as "there is no tin in this world". Every argument about it
+    /// that was settled by looking at a cave wall was settled wrongly.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --release --lib -- --ignored --nocapture ore_numbers
+    /// ```
     #[test]
-    fn all_four_ores_are_actually_in_the_ground() {
-        // The failure this exists for is a threshold tuned one point too
-        // high, which does not break anything -- it just quietly ships a
-        // world with no tin in it, and a bronze age nobody can enter.
-        let cells = ore_cells(1337, 3);
-        for ore in [
-            BLOCK_COAL_ORE,
-            BLOCK_COPPER_ORE,
-            BLOCK_TIN_ORE,
-            BLOCK_IRON_ORE,
-        ] {
-            assert!(
-                count(&cells, ore) > 0,
-                "no {} in 49 chunks",
-                crate::types::block_name(ore)
+    #[ignore = "a measurement, not an assertion"]
+    fn ore_numbers() {
+        /// Chunks each side of the origin. 17x17 is a quarter of a
+        /// million columns, which is the smallest sample where a feature
+        /// covering a tenth of the world is reliably in it.
+        const RADIUS: i32 = 8;
+
+        for seed in [1337u32, 7, 99_999] {
+            let mut stone = 0u64;
+            let mut found = [0u64; 4];
+            let mut depth_sum = [0i64; 4];
+            let mut bands = [[0u64; 4]; 4];
+            for chunk in sample_chunks(seed, RADIUS) {
+                for y in 0..CHUNK_SIZE_Y {
+                    for z in 0..CHUNK_SIZE_Z {
+                        for x in 0..CHUNK_SIZE_X {
+                            let id = block_kind(chunk.get(x, y, z));
+                            if id == BLOCK_STONE {
+                                stone += 1;
+                            }
+                            let Some(i) = ORES.iter().position(|&(ore, _)| ore == id) else {
+                                continue;
+                            };
+                            // Ore was written over stone, so it counts as
+                            // stone as well: "per thousand blocks of
+                            // rock" has to mean the rock a miner breaks.
+                            stone += 1;
+                            found[i] += 1;
+                            depth_sum[i] += y as i64;
+                            bands[i][(y / 16).min(3)] += 1;
+                        }
+                    }
+                }
+            }
+            println!("--- seed {seed}, {} chunks, {stone} blocks of rock", (RADIUS * 2 + 1).pow(2));
+            for (i, (_, name)) in ORES.iter().enumerate() {
+                let n = found[i];
+                let per_mille = n as f64 * 1000.0 / stone.max(1) as f64;
+                let mean = depth_sum[i] as f64 / n.max(1) as f64;
+                let share = |b: usize| bands[i][b] as f64 * 100.0 / n.max(1) as f64;
+                println!(
+                    "{name:>7}: {per_mille:6.3} per 1000 rock  mean y {mean:5.1}  \
+                     y0-15 {:3.0}%  16-31 {:3.0}%  32-47 {:3.0}%  48+ {:3.0}%",
+                    share(0),
+                    share(1),
+                    share(2),
+                    share(3),
+                );
+            }
+        }
+
+        // ...and the same question asked of a whole world rather than of
+        // one place in it. This is the number to quote: the sweep above
+        // is a single 272-block window, and the whole point of the
+        // change is that one window is no longer the world.
+        for seed in [1337u32, 7, 99_999] {
+            let (rock, found) = ore_over_the_world(seed, 2500, 23);
+            let per = |i: usize| found[i] as f64 * 1000.0 / rock.max(1) as f64;
+            println!(
+                "world {seed}: {rock} rock sampled -- per 1000: coal {:.3}, copper {:.3}, tin {:.3}, iron {:.3}",
+                per(0),
+                per(1),
+                per(2),
+                per(3),
             );
         }
-        // ...and the opposite failure: rock that is more ore than rock.
-        let total: usize = cells.len();
-        assert!(
-            total * 40 < 49 * CHUNK_VOLUME,
-            "{total} ore cells in 49 chunks -- the underground is a jewellery box"
+
+        // **The country the ore is in**, which is the half of this that
+        // moved: how high the land stands (copper reads that) and how
+        // much of the map is tin country (tin reads that). Without these
+        // two lines a copper number that has collapsed looks like a bug
+        // in `ore_at` when it is really a sample window with no hills in
+        // it.
+        let gen = WorldGen::new(1337);
+        let mut heights: Vec<i32> = Vec::new();
+        let mut tin_country = 0u32;
+        let mut columns = 0u32;
+        for gx in (-3000..3000).step_by(29) {
+            for gz in (-3000..3000).step_by(29) {
+                columns += 1;
+                if gen.tin_country(gx, gz) > 0.0 {
+                    tin_country += 1;
+                }
+                let height = gen.height_at(gx, gz);
+                if height > SEA_LEVEL {
+                    heights.push(height);
+                }
+            }
+        }
+        heights.sort_unstable();
+        let at = |p: usize| heights[heights.len() * p / 100];
+        println!(
+            "land: {:.0}% of the map, height p10 {} p50 {} p90 {} p99 {} max {}",
+            heights.len() as f64 * 100.0 / columns as f64,
+            at(10),
+            at(50),
+            at(90),
+            at(99),
+            heights[heights.len() - 1],
         );
+        println!(
+            "copper country: p50 land {:.2}, p90 land {:.2}, peak {:.2} of a body",
+            WorldGen::copper_country(at(50)),
+            WorldGen::copper_country(at(90)),
+            WorldGen::copper_country(heights[heights.len() - 1]),
+        );
+        println!(
+            "tin country: {:.0}% of the map",
+            tin_country as f64 * 100.0 / columns as f64,
+        );
+
+        // ...and the number that decides whether all of this is a
+        // journey or a wall: how far the first of each is from the spot
+        // the game puts the player down on.
+        for seed in [1337u32, 7, 99_999, 4242, 1] {
+            let far = how_far_from_home(&WorldGen::new(seed), 1500, 7);
+            let line: Vec<String> = ORES
+                .iter()
+                .enumerate()
+                .map(|(i, (_, name))| match far[i] {
+                    Some(blocks) => format!("{name} {blocks}"),
+                    None => format!("{name} beyond 1500"),
+                })
+                .collect();
+            println!("seed {seed}: blocks from spawn to the first -- {}", line.join(", "));
+        }
+
+        // ...and the road, on the two levels a player actually drives:
+        // one in the shallow rock a stone pick can reach, one down in
+        // the deep band where the iron is.
+        for y in [SEA_LEVEL - 2, SEA_LEVEL - 12] {
+            let road = walk_a_level(&gen, y);
+            let line: Vec<String> = ORES
+                .iter()
+                .enumerate()
+                .map(|(i, (_, name))| match road[i] {
+                    Some((blocks, size)) => format!("{name} {blocks:.0} ({size:.1} cells)"),
+                    None => format!("{name} none"),
+                })
+                .collect();
+            println!("y={y}: rock walked per vein -- {}", line.join(", "));
+        }
+    }
+
+    #[test]
+    fn all_four_ores_are_actually_in_the_ground() {
+        // **The failure this exists for is silent.** A threshold tuned
+        // one point too high does not break anything -- it ships a world
+        // with no tin in it, and a bronze age nobody can enter. That was
+        // a remote possibility while every ore was thinly everywhere. It
+        // is a live one now that each of them is somewhere: "rare" is
+        // one bad constant away from "absent", and nothing in the game
+        // says which of the two it got.
+        //
+        // So: floors, per ore, over a four-thousand-block square of
+        // three different worlds. The floors are about a fifth of what
+        // was measured, because this is a guard against a mechanism that
+        // stopped working, not a second copy of the tuning -- see
+        // `ore_numbers` for the numbers themselves.
+        for seed in [1337u32, 7, 99_999] {
+            let (rock, found) = ore_over_the_world(seed, 2000, 31);
+            let per = |i: usize| found[i] as f64 * 1000.0 / rock.max(1) as f64;
+            println!(
+                "seed {seed}: {rock} rock -- coal {:.3}, copper {:.3}, tin {:.3}, iron {:.3} \
+                 per 1000",
+                per(0),
+                per(1),
+                per(2),
+                per(3),
+            );
+            // Copper's floor is 0.10, and it was 0.20. The measure is per
+            // thousand of *all* rock, and the 256-block world put forty-four
+            // more blocks of deep stone under every column, where copper
+            // never forms (`copper_country` reads the surface): the same
+            // copper, divided by a bigger number. Coal, tin and iron did
+            // not move because they live where the new rock is.
+            //
+            // **0.05 now, for the same kind of reason.** Copper is the metal
+            // of the hills, and when the land was worn flatter (`unworn` in
+            // `terrain_height`) the mountain line went from fourteen per
+            // cent of the land to six: less upland, so less copper in the
+            // whole world, with the copper *per upland rock* unchanged
+            // (`copper_is_in_the_hills_and_the_meadow_under_them_has_none`
+            // reads 1.8 per thousand). Measured after: 0.103, 0.111 and
+            // 0.075 on these three seeds, the last being the flattest world
+            // of the four the biome tests use. Thinning the field further to
+            // hold the old floor was tried (0.57 for 0.62) and moved the
+            // flattest seed by four thousandths: it is a fact about the map,
+            // not the mineral field.
+            //
+            // **Tin's 0.015, and it was 0.02**, for the matching reason: tin
+            // is district times shallow rock, and the shallow band is seven
+            // layers thinner. The flattest seed read 0.017 with the district
+            // threshold at 0.50 and exactly 0.017 again at 0.45 -- its
+            // districts were already saturated, so what it lacks is shallow
+            // rock under them, not a looser field.
+            //
+            // **And 0.010, from 0.015**, when the land was reshaped again
+            // (`worldgen::scale`) and the same three seeds read 0.026, 0.053
+            // and 0.014 for tin (copper 0.083, 0.177, 0.131). The field did
+            // not move; the flattest seed lost a little more shallow rock
+            // under its districts. 0.014 is rare, and this test is for
+            // absent.
+            for (i, floor) in [0.40, 0.05, 0.010, 0.25].into_iter().enumerate() {
+                assert!(
+                    per(i) >= floor,
+                    "{} is at {:.3} per 1000 rock in world {seed}, under the floor of {floor}",
+                    ORES[i].1,
+                    per(i),
+                );
+            }
+            // ...and the opposite failure: rock that is more ore than
+            // rock. One in twenty-five was what the world used to hold
+            // per *hundred*; this is the line past which the underground
+            // is a jewellery box again.
+            let total: u64 = found.iter().sum();
+            assert!(
+                total * 100 < rock,
+                "{total} ore cells in {rock} of rock -- the underground is a jewellery box"
+            );
+        }
+    }
+
+    #[test]
+    fn all_four_are_within_a_walk_of_where_a_player_wakes_up() {
+        // **Rare has to mean far, not absent.** Every rule in `ore_at`
+        // is a gate -- a depth, a height of ground, a district -- and
+        // gates multiply: three of them tuned a little tight is a world
+        // where the nearest tin is over the horizon and the game has no
+        // bronze age in it, with nothing anywhere saying so.
+        //
+        // Six hundred blocks is the bound because it is a walk a player
+        // takes: minutes, not an expedition, and well inside the ground
+        // one world's chunks cover. The measured distances are a third
+        // of it (see `ore_numbers`), so this fails when a gate has shut
+        // rather than when a seed was unlucky.
+        for seed in [1337u32, 7, 99_999, 4242, 1] {
+            let far = how_far_from_home(&WorldGen::new(seed), 600, 11);
+            for (i, (_, name)) in ORES.iter().enumerate() {
+                assert!(
+                    far[i].is_some(),
+                    "no {name} within 600 blocks of where world {seed} puts a player down"
+                );
+            }
+            println!("seed {seed}: {far:?}");
+        }
     }
 
     #[test]
@@ -4134,18 +17399,16 @@ mod ore_tests {
         // it is deep and hard; copper is the metal you meet first; tin
         // is scarce, and that scarcity is what makes bronze mean
         // something.
+        //
         // Over several worlds, because one seed agreeing with the
         // weights is not the same as the weights being right -- a
         // mountainous world has far more shallow rock than an ocean one,
-        // and the ordering has to survive both.
+        // and the ordering has to survive both. Coal against iron is the
+        // pair that nearly goes: an ocean world is almost all deep rock,
+        // which is the one band where iron competes.
         for seed in [1337u32, 7, 99_999] {
-            let cells = ore_cells(seed, 3);
-            let (coal, iron, copper, tin) = (
-                count(&cells, BLOCK_COAL_ORE),
-                count(&cells, BLOCK_IRON_ORE),
-                count(&cells, BLOCK_COPPER_ORE),
-                count(&cells, BLOCK_TIN_ORE),
-            );
+            let (_, found) = ore_over_the_world(seed, 2000, 31);
+            let [coal, copper, tin, iron] = found;
             println!("seed {seed}: coal {coal}, iron {iron}, copper {copper}, tin {tin}");
             assert!(coal > iron, "coal {coal} is not the commonest ({iron} iron)");
             assert!(iron > copper, "iron {iron} is rarer than copper {copper}");
@@ -4157,8 +17420,37 @@ mod ore_tests {
     fn iron_is_deep_and_copper_is_not() {
         // The reason the progression is a journey rather than a menu: a
         // player working the top of the rock finds copper and tin, and
-        // has to go *down* for the next age.
-        let cells = ore_cells(1337, 3);
+        // has to go *down* for the next age -- carrying the copper pick
+        // that is the only thing that opens iron ore.
+        // **Twenty-one chunks at a stride of three, not seven at
+        // eleven.** This is a statistic, and halving how much ore the
+        // world holds (`ore_at`'s `BODY`) halved the sample under it:
+        // the old sweep came back with no copper and no tin, and a mean
+        // depth over nothing is zero -- which reads as "copper is at the
+        // surface" and failed the test with a sentence about depth that
+        // was really about sample size.
+        //
+        // Denser rather than merely wider, and that is the part worth
+        // knowing: at a stride of eleven the sweep reads scattered
+        // chunks 176 blocks apart, and a vein is thirty across, so
+        // widening it caught more *country* and not more ore. Tin, the
+        // scarcest thing in the ground, is what says so first.
+        let cells = ore_cells(1337, 21, 3);
+        // **A mean over nothing is zero, and zero reads as "at the
+        // surface".** Tin is the scarcest thing in the ground, so it is
+        // the one that empties out of a sweep first -- and when it did,
+        // this test failed with a sentence about depth that was really
+        // a sentence about sample size. Say which it is.
+        for (ore, name) in [
+            (BLOCK_IRON_ORE, "iron"),
+            (BLOCK_COPPER_ORE, "copper"),
+            (BLOCK_TIN_ORE, "tin"),
+        ] {
+            assert!(
+                cells.iter().any(|(id, _)| *id == ore),
+                "no {name} in the sweep at all -- widen it before reading a depth off it"
+            );
+        }
         let iron = mean_depth(&cells, BLOCK_IRON_ORE);
         let copper = mean_depth(&cells, BLOCK_COPPER_ORE);
         let tin = mean_depth(&cells, BLOCK_TIN_ORE);
@@ -4177,6 +17469,154 @@ mod ore_tests {
     }
 
     #[test]
+    fn copper_is_in_the_hills_and_the_meadow_under_them_has_none() {
+        // **The first journey the game asks for.** Copper used to be in
+        // the rock under wherever the player happened to be standing,
+        // which made the answer to "where do I mine" the word "here" and
+        // the first age a wait rather than a walk.
+        //
+        // Measured as a ratio rather than as two numbers, because the
+        // absolute density is a tuning knob and this is a test of the
+        // *mechanism*: whatever the knob says, the rock under a hill has
+        // to hold copper the rock under a plain does not.
+        let gen = WorldGen::new(1337);
+        let (mut hill, mut hill_rock) = (0u64, 0u64);
+        let (mut flat, mut flat_rock) = (0u64, 0u64);
+        // **Four kilometres out rather than two, at the same number of
+        // samples**, since the Earth's scale: the origin is a mainland coast
+        // now, and a coast is low country for a kilometre or two before the
+        // hills begin -- two kilometres of it held too little upland rock to
+        // compare.
+        for gx in (-4000..4000).step_by(62) {
+            for gz in (-4000..4000).step_by(62) {
+                let height = gen.height_at(gx, gz);
+                if height <= SEA_LEVEL {
+                    continue; // the sea floor is neither
+                }
+                let surface = gen.surface_at(gx, gz, height);
+                // Scaled with the relief (it was +18 and +6): the upland
+                // and the low country are fractions of how high the land
+                // goes, and the land goes two and a half times higher.
+                let uplands = height >= SEA_LEVEL + 40;
+                if !uplands && height > SEA_LEVEL + 15 {
+                    continue; // the ramp itself, which is neither one thing nor the other
+                }
+                for y in (SEA_LEVEL - 5)..=(height - surface.soil) {
+                    if gen.is_cave(gx, y, gz) {
+                        continue;
+                    }
+                    let copper = gen.ore_at(gx, y, gz, height) == Some(BLOCK_COPPER_ORE);
+                    if uplands {
+                        hill_rock += 1;
+                        hill += u64::from(copper);
+                    } else {
+                        flat_rock += 1;
+                        flat += u64::from(copper);
+                    }
+                }
+            }
+        }
+        let per = |n: u64, rock: u64| n as f64 * 1000.0 / rock.max(1) as f64;
+        println!(
+            "copper per 1000 shallow rock: uplands {:.2}, low country {:.2}",
+            per(hill, hill_rock),
+            per(flat, flat_rock),
+        );
+        assert!(hill_rock > 10_000 && flat_rock > 10_000, "not enough of either country sampled");
+        assert!(
+            per(hill, hill_rock) > per(flat, flat_rock) * 5.0,
+            "the hills hold {:.2} per 1000 and the low country {:.2} -- copper is not a journey",
+            per(hill, hill_rock),
+            per(flat, flat_rock),
+        );
+    }
+
+    #[test]
+    fn a_vein_of_tin_is_something_you_go_looking_for() {
+        // **Tin is the one ore with no clue on the surface.** It is not
+        // at a depth and not in a landform: it is in districts, and the
+        // only way to know where one is is to have been there. That is
+        // what makes the two halves of bronze two expeditions instead of
+        // two lines on a shopping list, and it is why this is a test
+        // rather than a comment -- a district field that quietly stopped
+        // being read would leave tin thinly everywhere, which looks fine
+        // and deletes the whole mechanic.
+        //
+        // Two things have to hold at once: outside the districts there
+        // is none, and inside them there is enough to be worth the walk.
+        let gen = WorldGen::new(1337);
+        let (mut inside, mut inside_rock) = (0u64, 0u64);
+        let (mut outside, mut outside_rock) = (0u64, 0u64);
+        for gx in (-2000..2000).step_by(31) {
+            for gz in (-2000..2000).step_by(31) {
+                let height = gen.height_at(gx, gz);
+                if height <= SEA_LEVEL {
+                    continue;
+                }
+                let surface = gen.surface_at(gx, gz, height);
+                let district = gen.tin_country(gx, gz) > 0.0;
+                for y in (SEA_LEVEL - 5)..=(height - surface.soil) {
+                    if gen.is_cave(gx, y, gz) {
+                        continue;
+                    }
+                    let tin = gen.ore_at(gx, y, gz, height) == Some(BLOCK_TIN_ORE);
+                    if district {
+                        inside_rock += 1;
+                        inside += u64::from(tin);
+                    } else {
+                        outside_rock += 1;
+                        outside += u64::from(tin);
+                    }
+                }
+            }
+        }
+        println!(
+            "tin: {inside} in {inside_rock} of district rock, {outside} in {outside_rock} outside"
+        );
+        assert_eq!(outside, 0, "there is tin outside the districts, so there is no looking for it");
+        assert!(
+            inside as f64 * 1000.0 / inside_rock.max(1) as f64 > 0.3,
+            "only {inside} tin in {inside_rock} of district rock -- a district with no tin in it \
+             is a walk with nothing at the end"
+        );
+    }
+
+    #[test]
+    fn a_deeper_shaft_finds_more_iron() {
+        // The decision the deep band is for: another eight blocks of
+        // stair is another eight blocks of hauling, and it has to buy
+        // something. A flat share through the band would make the choice
+        // of depth arbitrary, which is the same as not having it.
+        let gen = WorldGen::new(1337);
+        let mut iron = [0u64; 2];
+        let mut rock = [0u64; 2];
+        for gx in (-2000..2000).step_by(31) {
+            for gz in (-2000..2000).step_by(31) {
+                let height = gen.height_at(gx, gz);
+                let surface = gen.surface_at(gx, gz, height);
+                for y in (BEDROCK_TOP + 1)..=(height - surface.soil).min(SEA_LEVEL - 6) {
+                    if gen.is_cave(gx, y, gz) {
+                        continue;
+                    }
+                    // The deep band, split in half by depth.
+                    let half = usize::from(y > (BEDROCK_TOP + SEA_LEVEL - 6) / 2);
+                    rock[half] += 1;
+                    iron[half] += u64::from(gen.ore_at(gx, y, gz, height) == Some(BLOCK_IRON_ORE));
+                }
+            }
+        }
+        let per = |i: usize| iron[i] as f64 * 1000.0 / rock[i].max(1) as f64;
+        println!("iron per 1000 rock: roots {:.2}, upper deep {:.2}", per(0), per(1));
+        assert!(
+            per(0) > per(1) * 1.5,
+            "the roots hold {:.2} per 1000 and the top of the deep band {:.2} -- sinking the \
+             shaft further buys nothing",
+            per(0),
+            per(1),
+        );
+    }
+
+    #[test]
     fn ore_is_always_in_rock_and_never_in_a_hole() {
         // Ore is written where stone was, so every cell of it has to be
         // somewhere stone belonged: under the soil, above the bedrock,
@@ -4187,6 +17627,20 @@ mod ore_tests {
         for cx in -1..=1 {
             for cz in -1..=1 {
                 let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                // **The columns the chunk was built from**, not a surface
+                // worked out again beside it. `surface_at` knows the slope
+                // rule, the lakes and the peat, but the cache also lays
+                // clay and gravel on the banks of standing water, two and
+                // three deep -- and a bank the flatter country put in these
+                // nine chunks had its ore, rightly, three blocks under a
+                // gravel bank that `surface_at` said was four blocks of
+                // sand. A second copy of every such rule here would be a
+                // second place for them to drift apart.
+                let columns = ColumnCache::build(
+                    &gen,
+                    cx * CHUNK_SIZE_X as i32,
+                    cz * CHUNK_SIZE_Z as i32,
+                );
                 for y in 0..CHUNK_SIZE_Y as i32 {
                     for lz in 0..CHUNK_SIZE_Z as i32 {
                         for lx in 0..CHUNK_SIZE_X as i32 {
@@ -4203,11 +17657,14 @@ mod ore_tests {
                             let gx = cx * CHUNK_SIZE_X as i32 + lx;
                             let gz = cz * CHUNK_SIZE_Z as i32 + lz;
                             assert!(y > BEDROCK_TOP, "ore inside the bedrock at y={y}");
-                            let column = gen.height_at(gx, gz);
-                            let surface = gen.surface_at(gx, gz, column);
+                            let column = columns.at(lx, lz);
                             assert!(
-                                y <= column - surface.soil,
-                                "ore at y={y} is in the soil of a column {column} high"
+                                y <= column.height - column.surface.soil,
+                                "ore at y={y} is in the soil of a column {} high, at ({gx}, {gz}): \
+                                 {} with {} of soil",
+                                column.height,
+                                column.biome.name(),
+                                column.surface.soil,
                             );
                             assert!(!gen.is_cave(gx, y, gz), "ore hanging in a cave at y={y}");
                         }
@@ -4219,12 +17676,12 @@ mod ore_tests {
 
     #[test]
     fn the_same_seed_puts_the_same_ore_in_the_same_place() {
-        let first = ore_cells(4242, 1);
-        let second = ore_cells(4242, 1);
+        let first = ore_cells(4242, 4, 7);
+        let second = ore_cells(4242, 4, 7);
         assert_eq!(first, second);
         assert!(!first.is_empty());
         // ...and a different world is a different mine.
-        assert_ne!(first, ore_cells(4243, 1));
+        assert_ne!(first, ore_cells(4243, 4, 7));
     }
 }
 
@@ -4238,8 +17695,13 @@ mod ash_tests {
         // What makes a dead forest read as a *burnt* one rather than as
         // a wood somebody forgot to put leaves on.
         let gen = WorldGen::new(7);
-        let dead = chunk_in(&gen, Biome::DeadForest).expect("no dead forest anywhere");
-        let ash = super::tests::count_of(&dead, BLOCK_ASH);
+        // Six chunks rather than the first one: ash lies in drifts (see
+        // `ashy`), and a single dead-forest chunk can honestly fall
+        // between two of them -- which is the drifting doing its job
+        // and not the ash being missing.
+        let dead = super::tests::chunks_in(&gen, Biome::DeadForest, 6);
+        assert!(!dead.is_empty(), "no dead forest anywhere");
+        let ash: usize = dead.iter().map(|c| super::tests::count_of(c, BLOCK_ASH)).sum();
         assert!(ash > 0, "a burnt wood with no ash in it");
 
         for biome in [Biome::Forest, Biome::Plains, Biome::Taiga] {
@@ -4386,16 +17848,43 @@ mod flint_tests {
 
     #[test]
     fn it_is_commonest_where_the_rock_is_bare() {
-        assert!(flint_spacing(BLOCK_STONE) < flint_spacing(BLOCK_SAND));
-        assert!(flint_spacing(BLOCK_SAND) < flint_spacing(BLOCK_GRASS));
-        assert_eq!(flint_spacing(BLOCK_COBBLESTONE), flint_spacing(BLOCK_STONE));
+        assert!(flint_spacing(BLOCK_STONE, BLOCK_STONE) < flint_spacing(BLOCK_SAND, BLOCK_STONE));
+        assert!(flint_spacing(BLOCK_SAND, BLOCK_STONE) < flint_spacing(BLOCK_GRASS, BLOCK_STONE));
+        assert_eq!(
+            flint_spacing(BLOCK_COBBLESTONE, BLOCK_STONE),
+            flint_spacing(BLOCK_STONE, BLOCK_STONE)
+        );
+    }
+
+    #[test]
+    fn a_limestone_outcrop_has_two_to_three_times_the_flint_of_any_other_rock() {
+        // The mechanic in one comparison: the same bared slope, cobble
+        // on top either way, and the rock under it decides. Two to
+        // three times rather than "more", because less than two is a
+        // difference nobody would learn from and more than three makes
+        // every other cliff not worth walking.
+        let over_limestone = flint_spacing(BLOCK_COBBLESTONE, BLOCK_LIMESTONE) as f64;
+        for other in [BLOCK_STONE, BLOCK_GRANITE, BLOCK_SANDSTONE] {
+            let ratio = flint_spacing(BLOCK_COBBLESTONE, other) as f64 / over_limestone;
+            assert!(
+                (2.0..=3.0).contains(&ratio),
+                "limestone has {ratio:.2}x the flint of {}",
+                crate::types::block_name(other)
+            );
+        }
+        // ...and the rock only counts when the ground is bare. Turf over
+        // limestone hides its nodules like turf over anything else.
+        assert_eq!(
+            flint_spacing(BLOCK_GRASS, BLOCK_LIMESTONE),
+            flint_spacing(BLOCK_GRASS, BLOCK_STONE)
+        );
     }
 }
 
 /// Loose stones, which are the one thing the ground has in every biome.
 #[cfg(test)]
 mod pebble_tests {
-    use super::tests::{chunk_in, count_of};
+    use super::tests::{chunk_in, count_of, solid_chunks_in, world_for};
     use super::*;
 
     fn stones_in(gen: &WorldGen, biome: Biome) -> Option<usize> {
@@ -4465,23 +17954,472 @@ mod pebble_tests {
     }
 
     #[test]
-    fn a_stone_never_lands_where_a_tuft_already_is() {
-        // One thing per cell, and grass is the one worth keeping.
+    fn the_flat_world_answers_flat_when_it_is_asked_how_high_the_ground_is() {
+        // Every other question about a column already knows which world
+        // it is being asked about -- `biome_at`, `climate_column`,
+        // `spawn_y`, `spawn_column`, `generate_chunk` all branch on the
+        // preset. `height_at` did not, so on the test world it kept
+        // answering out of the noise field: anywhere in `MIN_HEIGHT` to
+        // `MAX_HEIGHT` for ground that is at one height everywhere.
+        //
+        // It reaches outside this crate -- a mod asks it through
+        // `GenerationApi::height_at` -- so what it cost was a mod that
+        // placed something on the surface and put it thirty blocks under
+        // the floor.
+        let gen = WorldGen::with_preset(1337, Preset::Test);
+        for (gx, gz) in [(0, 0), (7, -3), (400, 400), (-1200, 900), (i32::MIN / 4, 17)] {
+            assert_eq!(
+                gen.height_at(gx, gz),
+                crate::showcase::GROUND_Y,
+                "the flat world is not flat at ({gx}, {gz})"
+            );
+        }
+        // ...and the answer is the world's rather than merely a
+        // constant: the topmost solid cell of a chunk well away from
+        // anything built is exactly where this says the ground is.
+        let far = ChunkPos::new(40, -40);
+        let chunk = gen.generate_chunk(far);
+        let (gx, gz) = (far.x * CHUNK_SIZE_X as i32, far.z * CHUNK_SIZE_Z as i32);
+        let top = (0..CHUNK_SIZE_Y)
+            .rev()
+            .find(|&y| chunk.get(0, y, 0) != BLOCK_AIR)
+            .expect("the test world has ground in it");
+        assert_eq!(top as i32, gen.height_at(gx, gz));
+        // And `spawn_y` stands a player on it, which is the pair that
+        // was already consistent and had to stay so.
+        assert_eq!(gen.spawn_y(gx, gz), (gen.height_at(gx, gz) + 1) as f32);
+    }
+
+    #[test]
+    fn a_fallen_trunk_lies_on_the_ground_rather_than_over_a_hole() {
+        // A deadfall reads the *terrain* height out of the column cache
+        // and lays a trunk on it. What the terrain height does not know
+        // about is a cave that reached the surface: `fill_column` takes
+        // the top block of such a column away, so the log went down
+        // across the mouth of the hole with nothing underneath it.
+        //
+        // `place_trees` has refused to root a tree on a breached column
+        // since it was written. `place_deadfall` never asked, and over
+        // this sweep that was 85 cells of floating timber against 1,831
+        // lying on something -- one fallen tree in twenty, and a long
+        // horizontal one, which is the shape that is obvious from a
+        // distance.
+        //
+        // Fallen trunks are the only logs with an axis on them: a
+        // standing tree is upright, so the axis is what tells the two
+        // apart in a finished chunk.
         let gen = WorldGen::new(1337);
-        for (cx, cz) in [(0, 0), (12, 7), (-20, -3)] {
-            let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
-            for y in 0..CHUNK_SIZE_Y {
-                for z in 0..CHUNK_SIZE_Z {
-                    for x in 0..CHUNK_SIZE_X {
-                        let block = chunk.get(x, y, z);
-                        assert!(
-                            block != BLOCK_PEBBLE || block != BLOCK_TALL_GRASS,
-                            "a cell holding two things"
-                        );
+        let mut lying = 0;
+        let mut floating = 0;
+        // Twenty-eight chunks a side: the dead wood that lays most of the
+        // deadfall is a rare burnt patch now (`WorldGen::burnt`), and
+        // twenty-four a side found ninety-two cells -- too few to trust a
+        // count of none floating.
+        //
+        // **Thirty-four a side since the Earth's scale**, for the same
+        // reason again: the origin lies in the forest-steppe of its zone, and
+        // the dry, burnt country a deadfall mostly lies in is rarer there
+        // than it was in the old mottle. Twenty-eight found a hundred cells,
+        // on the bar rather than over it.
+        for cx in -17..17 {
+            for cz in -17..17 {
+                let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                for y in 1..CHUNK_SIZE_Y {
+                    for lz in 0..CHUNK_SIZE_Z {
+                        for lx in 0..CHUNK_SIZE_X {
+                            let block = chunk.get(lx, y, lz);
+                            // Any wood's: a fir wood's deadfall is fir.
+                            if !crate::wood::is_log(block)
+                                || crate::types::block_axis(block) == crate::types::Axis::Y
+                            {
+                                continue;
+                            }
+                            // **A lying log is at the ground, and a log in
+                            // the air is a branch.** The old trees grow limbs
+                            // (`place_old_tree`), and a limb is a horizontal
+                            // log with air under it by design. Counting those
+                            // as fallen trunks reported logs hanging in the
+                            // air about branches five to eight blocks up a
+                            // trunk -- measured, every one of them -- once the
+                            // taller world put more old trees in this sweep.
+                            let terrain = gen.terrain_height(
+                                chunk.pos.x * CHUNK_SIZE_X as i32 + lx as i32,
+                                chunk.pos.z * CHUNK_SIZE_Z as i32 + lz as i32,
+                            );
+                            if y as i32 > terrain + 2 {
+                                continue;
+                            }
+                            lying += 1;
+                            if chunk.get(lx, y - 1, lz) == BLOCK_AIR {
+                                floating += 1;
+                            }
+                        }
                     }
                 }
             }
         }
+        assert!(lying > 100, "the sweep found no deadfall at all: {lying}");
+        assert_eq!(floating, 0, "{floating} of {lying} fallen log cells hang in the air");
+    }
+
+    /// Every cell of a chunk that holds a fallen trunk: a log whose axis
+    /// is not upright, standing on the terrain rather than out on a limb.
+    ///
+    /// The same two questions `a_fallen_trunk_lies_on_the_ground_rather_
+    /// than_over_a_hole` asks, factored out because three tests now want
+    /// the answer -- an old tree's limb is a horizontal log five blocks up
+    /// a trunk, and counting one as deadfall is the mistake that test
+    /// records.
+    fn fallen_trunks(gen: &WorldGen, chunk: &Chunk) -> Vec<(usize, usize, usize)> {
+        let mut out = Vec::new();
+        for y in 1..CHUNK_SIZE_Y {
+            for lz in 0..CHUNK_SIZE_Z {
+                for lx in 0..CHUNK_SIZE_X {
+                    let block = chunk.get(lx, y, lz);
+                    if !crate::wood::is_log(block)
+                        || crate::types::block_axis(block) == crate::types::Axis::Y
+                    {
+                        continue;
+                    }
+                    let terrain = gen.terrain_height(
+                        chunk.pos.x * CHUNK_SIZE_X as i32 + lx as i32,
+                        chunk.pos.z * CHUNK_SIZE_Z as i32 + lz as i32,
+                    );
+                    if y as i32 > terrain + 2 {
+                        continue;
+                    }
+                    out.push((lx, y, lz));
+                }
+            }
+        }
+        out
+    }
+
+    /// **"Добавь в леса больше палок", and the limit that keeps it a
+    /// wood rather than a woodpile.**
+    ///
+    /// A stick falls off a branch, so the density that matters is the
+    /// density *under a crown* -- and that is exactly the number a single
+    /// spacing per biome could not say. The test states both halves,
+    /// because either one alone is a bug: too few under the crowns and
+    /// the first tool is a hunt; too many anywhere and the forest floor
+    /// is a carpet of twigs, which is what the old wood looked like in
+    /// the one place it was dense (the bog).
+    ///
+    /// Counted per *column* against its own shade
+    /// (`under_canopy`, the same question `place_ground_cover` asks), so
+    /// the comparison is between the two kinds of ground inside one
+    /// wood and not between two biomes.
+    #[test]
+    fn an_oak_wood_floor_is_brown_with_fallen_leaves_under_its_crowns_and_not_in_its_clearings() {
+        let gen = world_for(20250907, Biome::Forest);
+        let (mut shaded, mut shaded_litter, mut open_litter) = (0usize, 0usize, 0usize);
+        for chunk in solid_chunks_in(&gen, Biome::Forest, 12) {
+            for lz in 0..CHUNK_SIZE_Z {
+                for lx in 0..CHUNK_SIZE_X {
+                    let (gx, gz) = (
+                        chunk.pos.x * CHUNK_SIZE_X as i32 + lx as i32,
+                        chunk.pos.z * CHUNK_SIZE_Z as i32 + lz as i32,
+                    );
+                    let height = gen.terrain_height(gx, gz);
+                    if height + 2 >= CHUNK_SIZE_Y as i32 {
+                        continue;
+                    }
+                    let litter = block_kind(chunk.get(lx, (height + 1) as usize, lz)) == crate::types::BLOCK_LEAF_LITTER;
+                    if under_canopy(&chunk.blocks, lx as i32, height, lz as i32) {
+                        shaded += 1;
+                        shaded_litter += usize::from(litter);
+                    } else {
+                        open_litter += usize::from(litter);
+                    }
+                }
+            }
+        }
+        assert!(shaded > 200, "only {shaded} shaded columns");
+        let share = shaded_litter as f32 / shaded as f32;
+        assert!(share > 0.15, "fallen leaves on {:.0}% of the floor under the crowns", share * 100.0);
+        assert_eq!(open_litter, 0, "fallen leaves lie in a clearing with no crown over it");
+        assert_eq!(crate::blocks::definition(crate::types::BLOCK_LEAF_LITTER).drop, Some(crate::types::BLOCK_LEAF_HANDFUL));
+        assert!(crate::wildfire::fuel(crate::types::BLOCK_LEAF_LITTER).is_some(), "fallen leaves do not burn");
+    }
+
+    #[test]
+    fn a_wood_is_thick_with_sticks_under_its_crowns_and_not_a_carpet_of_them() {
+        let gen = world_for(20250907, Biome::Forest);
+        let (mut shaded, mut shaded_sticks) = (0usize, 0usize);
+        let (mut open, mut open_sticks) = (0usize, 0usize);
+        for chunk in solid_chunks_in(&gen, Biome::Forest, 12) {
+            for lz in 0..CHUNK_SIZE_Z {
+                for lx in 0..CHUNK_SIZE_X {
+                    let (gx, gz) = (
+                        chunk.pos.x * CHUNK_SIZE_X as i32 + lx as i32,
+                        chunk.pos.z * CHUNK_SIZE_Z as i32 + lz as i32,
+                    );
+                    let height = gen.terrain_height(gx, gz);
+                    if height + 2 >= CHUNK_SIZE_Y as i32 {
+                        continue;
+                    }
+                    let stick = block_kind(chunk.get(lx, (height + 1) as usize, lz))
+                        == crate::types::BLOCK_STICK;
+                    if under_canopy(&chunk.blocks, lx as i32, height, lz as i32) {
+                        shaded += 1;
+                        shaded_sticks += usize::from(stick);
+                    } else {
+                        open += 1;
+                        open_sticks += usize::from(stick);
+                    }
+                }
+            }
+        }
+        assert!(shaded > 200 && open > 200, "a wood of {shaded} shaded and {open} open columns is not a sample");
+        let under = shaded_sticks as f32 / shaded as f32;
+        let between = open_sticks as f32 / open as f32;
+        // The measurement, printed: a number in a report is worth more
+        // than a bound in an assertion when somebody comes to move it.
+        println!(
+            "oak wood: {shaded_sticks} sticks over {shaded} shaded columns ({:.1}%), \
+             {open_sticks} over {open} open ones ({:.1}%)",
+            under * 100.0,
+            between * 100.0
+        );
+        assert!(
+            under > 2.0 * between,
+            "{under:.3} of the shaded floor against {between:.3} of the open: the sticks are not under the trees"
+        );
+        // ...and not a carpet. One column in eight is a stick in sight
+        // wherever you stand and still four fifths of the floor left for
+        // the forest floor itself -- the ferns, the bilberry, the
+        // bracken. The shaded roll is one in four before those take their
+        // cells, which is why the number that lands is half of it.
+        assert!(
+            under < 0.2,
+            "{:.0}% of a shaded forest floor is sticks, which is a woodpile",
+            under * 100.0
+        );
+    }
+
+    /// **A birch wood is a wood.** It had neither `stick_spacing` nor
+    /// `deadfall_spacing`: the rows were simply never written when the
+    /// biome was added, so a player who woke in a birch stand had
+    /// standing timber on every side, no axe, and not one stick or fallen
+    /// trunk to start with. The two rows are the fix and this is what
+    /// they have to buy.
+    #[test]
+    fn a_birch_wood_has_sticks_and_fallen_trunks_in_it_like_any_other_wood() {
+        let gen = world_for(20250907, Biome::BirchForest);
+        let chunks = solid_chunks_in(&gen, Biome::BirchForest, 12);
+        assert!(!chunks.is_empty(), "no birch wood anywhere to check");
+        let sticks: usize = chunks.iter().map(|c| count_of(c, crate::types::BLOCK_STICK)).sum();
+        let trunks: usize = chunks.iter().map(|c| fallen_trunks(&gen, c).len()).sum();
+        assert!(sticks > 0, "a birch wood with not one stick on its floor");
+        assert!(trunks > 0, "a birch wood with not one fallen trunk in it");
+        // ...and what is lying down wears the bark of what is standing:
+        // a birch stand whose deadfall was oak would hand a player the
+        // wrong timber for the planks they walked there to make.
+        for chunk in &chunks {
+            for (lx, y, lz) in fallen_trunks(&gen, chunk) {
+                let block = chunk.get(lx, y, lz);
+                assert_eq!(
+                    block_kind(block),
+                    crate::types::BLOCK_BIRCH_LOG,
+                    "a {} lying in a birch wood",
+                    crate::types::block_name(block)
+                );
+            }
+        }
+    }
+
+    /// **"Сделай поваленные деревья которые легко рубить": the choice,
+    /// stated as the two numbers it is made of.**
+    ///
+    /// A standing trunk does not open to bare hands at all -- it wants an
+    /// axe, and the axe is several evenings away -- while the same log
+    /// lying down comes apart in four and a half seconds with nothing in
+    /// hand, and in half a standing trunk's time with the axe once there
+    /// is one. That difference is the whole reason to walk into a wood
+    /// looking for deadfall rather than to stand in front of the nearest
+    /// tree, and the density that makes the walk worth it is
+    /// `Biome::deadfall_spacing`.
+    #[test]
+    fn a_fallen_trunk_is_the_wood_a_player_without_an_axe_can_take() {
+        use crate::types::{break_seconds_with, oriented, Axis, BLOCK_WEDGED_AXE};
+        let lying = oriented(BLOCK_LOG, Axis::X);
+        let standing = oriented(BLOCK_LOG, Axis::Y);
+        assert_eq!(
+            break_seconds_with(standing, None),
+            None,
+            "a standing trunk came apart in bare hands"
+        );
+        let by_hand = break_seconds_with(lying, None).expect("deadfall refused bare hands");
+        let axed_standing =
+            break_seconds_with(standing, Some(BLOCK_WEDGED_AXE)).expect("an axe cannot fell a tree");
+        let axed_lying =
+            break_seconds_with(lying, Some(BLOCK_WEDGED_AXE)).expect("an axe cannot cut deadfall");
+        assert!(
+            axed_lying * 2.0 <= axed_standing + 0.01,
+            "a fallen trunk is {axed_lying:.2}s against a standing one's {axed_standing:.2}s, which is not a choice"
+        );
+        assert!(by_hand <= axed_standing + 0.01, "deadfall by hand is slower than felling by axe");
+        // ...and a live wood actually has them, which is the half that
+        // was missing: the number above has been true for as long as
+        // `BlockDef::felled` has existed and it bought nothing while a
+        // fallen trunk was one roll in four hundred and twenty columns.
+        let gen = world_for(20250907, Biome::Forest);
+        let chunks = solid_chunks_in(&gen, Biome::Forest, 12);
+        let trunks: usize = chunks.iter().map(|c| fallen_trunks(&gen, c).len()).sum();
+        println!("oak wood: {trunks} cells of deadfall over {} chunks", chunks.len());
+        assert!(
+            trunks >= chunks.len(),
+            "{trunks} cells of deadfall over {} chunks of oak wood is not something to go and find",
+            chunks.len()
+        );
+    }
+
+    /// **A trunk lies along the slope it fell down, not across it.**
+    ///
+    /// `place_deadfall` measured every cell of a trunk against the height
+    /// of the cell it was *rooted* in, so a hillside of one in two -- an
+    /// ordinary wooded slope -- stopped it after two cells: the third was
+    /// already two below the root. Every long trunk in the world was
+    /// therefore on flat ground and every slope had stubs on it, which is
+    /// the opposite of where wind actually throws a tree. Measured
+    /// against the cell before it instead, a trunk walks a slope for its
+    /// whole length and still stops dead at a step of two.
+    ///
+    /// The claim, and it is stated as the thing the old rule made
+    /// *impossible* rather than merely unlikely: somewhere in this sweep
+    /// there is a fallen trunk of at least four cells whose highest and
+    /// lowest cells are three apart. Measured against the root, a trunk
+    /// could only ever occupy the root's height and one either side of
+    /// it, so its whole span was two -- a claim of three cannot pass by
+    /// luck, and it went red on this sweep before the change.
+    #[test]
+    fn a_fallen_trunk_lies_along_a_slope_rather_than_stopping_at_the_first_step() {
+        let gen = WorldGen::new(1337);
+        let (mut longest, mut deepest) = (0, 0);
+        let mut found = false;
+        for cx in -12..12 {
+            for cz in -12..12 {
+                let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                let cells = fallen_trunks(&gen, &chunk);
+                // A run along x or along z, at whatever height each cell
+                // sits: the trunk's own shape, read back off the world.
+                for &(lx, y, lz) in &cells {
+                    for (dx, dz) in [(1usize, 0usize), (0, 1)] {
+                        let mut run = 1;
+                        let (mut low, mut high) = (y, y);
+                        let (mut nx, mut nz, mut ny) = (lx, lz, y);
+                        while let Some(&(_, next_y, _)) = cells.iter().find(|&&(cx2, cy, cz2)| {
+                            cx2 == nx + dx && cz2 == nz + dz && cy.abs_diff(ny) <= 1
+                        }) {
+                            low = low.min(next_y);
+                            high = high.max(next_y);
+                            (nx, nz, ny) = (nx + dx, nz + dz, next_y);
+                            run += 1;
+                        }
+                        if run >= 4 && high - low >= 3 {
+                            found = true;
+                        }
+                        longest = longest.max(run);
+                        deepest = deepest.max(high - low);
+                    }
+                }
+            }
+        }
+        assert!(longest >= 4, "the longest fallen trunk in the sweep is {longest} cells");
+        assert!(
+            found,
+            "the steepest trunk in the sweep falls {deepest} blocks over its length, \
+             which is what a trunk measured against its own root could already do"
+        );
+    }
+
+    /// **What a fallen tree leaves lying beside it.** "Палки логично
+    /// лежат под деревьями и у поваленных стволов": a tree that came down
+    /// shed its crown where it landed, so the ground along a trunk is
+    /// where the firewood is -- which is what turns finding one into a
+    /// find rather than into one log.
+    #[test]
+    fn a_fallen_trunk_has_its_own_firewood_lying_beside_it() {
+        let gen = world_for(20250907, Biome::Forest);
+        let mut beside = 0;
+        for chunk in solid_chunks_in(&gen, Biome::Forest, 16) {
+            for (lx, y, lz) in fallen_trunks(&gen, &chunk) {
+                for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                    let (nx, nz) = (lx as i32 + dx, lz as i32 + dz);
+                    if !(0..CHUNK_SIZE_X as i32).contains(&nx)
+                        || !(0..CHUNK_SIZE_Z as i32).contains(&nz)
+                    {
+                        continue;
+                    }
+                    for ny in y.saturating_sub(1)..=(y + 1).min(CHUNK_SIZE_Y - 1) {
+                        if block_kind(chunk.get(nx as usize, ny, nz as usize))
+                            == crate::types::BLOCK_STICK
+                        {
+                            beside += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(beside > 0, "not one stick lying beside a fallen trunk in a whole wood");
+    }
+
+    #[test]
+    fn a_stone_never_lands_where_a_tuft_already_is() {
+        // One thing per cell, and grass is the one worth keeping.
+        // Stones are scattered last in `place_ground_cover` and every
+        // branch above them leaves the loop, so a cell that already grew
+        // something keeps it.
+        //
+        // **This test used to assert nothing at all.** It read
+        // `block != BLOCK_PEBBLE || block != BLOCK_TALL_GRASS`, which is
+        // true of every value there is -- one cell cannot hold two
+        // blocks, so one side of the disjunction was always satisfied
+        // and the ordering it was named for was never looked at.
+        //
+        // What it checks now is the ordering itself: every column the
+        // stone hash fires on ends up holding *something*, and the
+        // columns are split between stones and the plants that got there
+        // first. Both counts have to be non-zero, or the sweep found no
+        // contested cell and proved nothing again.
+        let gen = WorldGen::new(1337);
+        let mut stones = 0;
+        let mut yielded_to_a_plant = 0;
+        for (cx, cz) in [(0, 0), (12, 7), (-20, -3)] {
+            let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+            for lz in 0..CHUNK_SIZE_Z {
+                for lx in 0..CHUNK_SIZE_X {
+                    let gx = cx * CHUNK_SIZE_X as i32 + lx as i32;
+                    let gz = cz * CHUNK_SIZE_Z as i32 + lz as i32;
+                    if !hash2(gx, gz, gen.seed.wrapping_add(0x570E))
+                        .is_multiple_of(PEBBLE_SPACING)
+                    {
+                        continue;
+                    }
+                    let height = gen.height_at(gx, gz);
+                    if height <= SEA_LEVEL || height + 1 >= CHUNK_SIZE_Y as i32 {
+                        continue;
+                    }
+                    let ground = chunk.get(lx, height as usize, lz);
+                    if !crate::types::can_grow_on(BLOCK_PEBBLE, ground) {
+                        continue;
+                    }
+                    match chunk.get(lx, height as usize + 1, lz) {
+                        BLOCK_PEBBLE => stones += 1,
+                        BLOCK_AIR => panic!(
+                            "the stone at ({gx}, {gz}) was neither laid nor displaced"
+                        ),
+                        _ => yielded_to_a_plant += 1,
+                    }
+                }
+            }
+        }
+        assert!(stones > 0, "no stone was laid anywhere");
+        assert!(
+            yielded_to_a_plant > 0,
+            "no cell was ever contested, so the ordering went unchecked"
+        );
     }
 }
 
@@ -4520,7 +18458,11 @@ mod climate_gradient_tests {
             // whatever country it is in, so it may touch any of them.
             Biome::Ocean | Biome::River | Biome::Beach | Biome::Mountains => return None,
             Biome::SnowyPeaks => 0,
-            Biome::Tundra | Biome::Taiga => 1,
+            // A bog is cold country, and belongs on the step with the
+            // taiga and the tundra it borders. This scale is four
+            // coarse bands and exists to catch sand touching snow, not
+            // to rank the cold biomes against each other.
+            Biome::Tundra | Biome::Taiga | Biome::Bog => 1,
             // Birch shares the temperate step with the oaks it stands
             // beside. The scale is four coarse bands and exists to catch
             // sand touching snow, not to rank the temperate biomes
@@ -4567,18 +18509,558 @@ mod climate_gradient_tests {
         worst
     }
 
+    /// **The planet has latitude, and the bands are in order.** The
+    /// player asked for biomes "как в жизни", and this is what that
+    /// means in one test: it is hot at the equator, cold at the pole,
+    /// temperate where a temperate world wakes its player, and the
+    /// latitudes between them pass through the middle rather than jumping.
+    ///
+    /// **One planet read row by row**, since a seed became one globe
+    /// (`PLANET_ORIGIN_DEGREES`). It used to lay a world at each latitude
+    /// and read every one of them at z = 0, because that was the only way
+    /// a world's origin could be anywhere but forty-five north. A row of
+    /// the planet *is* a latitude now, so the fields are asked where they
+    /// actually are -- which is also what would notice if they stopped
+    /// being, since two rows of one generator cannot quietly share a
+    /// number the way two generators could.
+    #[test]
+    fn it_is_hot_at_the_equator_cold_at_the_pole_and_temperate_where_a_player_starts() {
+        let planet = WorldGen::new(1337);
+        // Averaged across x, because the weather noise is still a third
+        // of the answer: what is being asserted is the *band*, not any
+        // one column of it.
+        // **Thirty thousand kilometres of row, not six.** The old form
+        // sampled three kilometres either side of x = 0 and got away with
+        // it because every world was read at z = 0, where the weather is
+        // zero by construction. A row of the planet has real weather on it:
+        // a province is about eight hundred kilometres across
+        // (`scale::WEATHER_SPACING`), so three kilometres of one is a lobe
+        // of noise and not a latitude.
+        //
+        // The length is set by the *flattest* part of the profile rather
+        // than by the steepest. Two degrees of latitude near the pole is
+        // twelve thousandths of temperature (`WARMTH_BY_LATITUDE`: -0.85 at
+        // sixty-six, -1.0 at ninety), so the weather left in the mean has to
+        // be under that or the bands read out of order for no reason but
+        // noise -- measured at 0.023 over six thousand kilometres of row and
+        // under 0.01 over thirty thousand.
+        let band = |degrees: i32| -> f64 {
+            let row = planet_row(f64::from(degrees));
+            let samples: Vec<f64> =
+                (-15_000_000..15_000_000).step_by(9_973).map(|gx| planet.temperature(gx, row)).collect();
+            samples.iter().sum::<f64>() / samples.len() as f64
+        };
+        let equator = band(0);
+        let home = band(PLANET_ORIGIN_DEGREES);
+        let pole = band(90);
+        assert!(
+            equator > home && home > pole,
+            "the bands are out of order: equator {equator:.2}, home {home:.2}, pole {pole:.2}"
+        );
+        assert!(equator > 0.4, "the tropics are not hot: {equator:.2}");
+        assert!(pole < -0.4, "the pole is not cold: {pole:.2}");
+        assert!(
+            (FREEZING..=HOT).contains(&home),
+            "a temperate world starts its player in {home:.2}, not in temperate country"
+        );
+
+        // ...and the whole way between them is ordered: two degrees further
+        // from the equator is never warmer, and never colder by more than a
+        // tenth -- a quarter of the temperate band.
+        //
+        // **Two hundredths of slack on "never warmer", and it is the
+        // weather's.** The profile is nearly flat over the first ten degrees
+        // (`WARMTH_BY_LATITUDE`: 0.95 at the equator, 0.92 at twelve), so two
+        // degrees of it is three thousandths of temperature -- less than what
+        // is left of the weather after six thousand kilometres of row have
+        // been averaged. The exact form of this property is asked of the
+        // latitude term alone, degree by degree, in
+        // `the_country_cools_the_same_way_on_both_sides_of_the_equator`;
+        // what is asked here is that the *ground's* temperature follows it.
+        let mut previous = equator;
+        for degrees in (2..=90).step_by(2) {
+            let here = band(degrees);
+            assert!(
+                here <= previous + 0.02 && previous - here < 0.10,
+                "{degrees} degrees is {here:.3} after {previous:.3} two degrees nearer the equator"
+            );
+            previous = here;
+        }
+    }
+
+    /// **An equator, not the warm end of a slope.** Latitude was described
+    /// -- in the guide as well as in the code -- as "north is colder and
+    /// south is warmer, everywhere on the map", and a player who took that
+    /// at its word would walk south past the equator expecting heat for
+    /// ever. The far side cools again, through the same bands, and this is
+    /// the property that makes the equator an equator.
+    ///
+    /// **Asked of the latitude term, degree by degree, and then of the
+    /// ground.** At real scale the rows either side of an equator are a
+    /// hundred and eleven kilometres a degree apart, so the weather at them
+    /// is unrelated and an average of it is a lobe of noise; the latitude
+    /// term is what the property is about, and it has to be the same on both
+    /// sides exactly. The rows averaged over twenty-four kilometres then say
+    /// the same of what grows: forty-five degrees north and south are one
+    /// climate, both far cooler than the equator.
+    #[test]
+    fn the_country_cools_the_same_way_on_both_sides_of_the_equator() {
+        for seed in [1337u32, 7, 99] {
+            let gen = WorldGen::new(seed);
+            // Rows of the planet, counted from its equator: a generator is
+            // one globe now, so a latitude is a place in it rather than a
+            // world of its own. See `PLANET_ORIGIN_DEGREES`.
+            let degree = |d: i32| planet_row(f64::from(d));
+            let mut before = gen.latitude(degree(0));
+            for d in 1..=90 {
+                let (north, south) = (gen.latitude(degree(d)), gen.latitude(degree(-d)));
+                assert!(
+                    (north - south).abs() < 1e-9,
+                    "seed {seed}: {d} degrees north is {north:.4} and {d} south is {south:.4}"
+                );
+                assert!(
+                    north <= before + 1e-9,
+                    "seed {seed}: {d} degrees from the equator is warmer ({north:.4}) than one \
+                     degree nearer ({before:.4})"
+                );
+                before = north;
+            }
+            // **Six thousand kilometres of row, not twenty-four**, since the
+            // Earth's scale. A weather province is about eight hundred
+            // kilometres across (`scale::WEATHER_SPACING`), and twenty-four
+            // of one at forty-five north against twenty-four of another at
+            // forty-five south compared two unrelated provinces -- 0.15
+            // apart in seed 1337, which says nothing about the equator. Seven
+            // or eight provinces a row is what an average of the weather is.
+            let row = |gz: i32| -> f64 {
+                let samples: Vec<f64> =
+                    (-3_000_000..3_000_000).step_by(9_973).map(|gx| gen.temperature(gx, gz)).collect();
+                samples.iter().sum::<f64>() / samples.len() as f64
+            };
+            let (equator, north, south, pole) =
+                (row(degree(0)), row(degree(45)), row(degree(-45)), row(degree(90)));
+            assert!(equator > 0.4, "seed {seed}: the equator is only {equator:.2}");
+            assert!(
+                (north - south).abs() < 0.15,
+                "seed {seed}: forty-five north is {north:.2} and forty-five south is {south:.2}"
+            );
+            assert!(north < equator - 0.4, "seed {seed}: forty-five north is {north:.2} beside {equator:.2}");
+            assert!(pole < -0.4, "seed {seed}: the pole is only {pole:.2}");
+        }
+    }
+
+    /// **The bands in order, in the biomes a player actually walks on.**
+    /// The test above is about the temperature field; this one is about
+    /// the ground. A world is laid in the middle of each fifth of the way
+    /// from the equator to the pole, and fifth by fifth the hot biomes
+    /// have to fall away and the cold ones rise, with temperate country
+    /// the commonest climate in the middle fifth -- the temperate zone's.
+    ///
+    /// The bounds are well inside what `what_each_latitude_is_made_of`
+    /// measures. Mountains and rivers count as land but belong to no band:
+    /// they are the relief's, and a range crosses every latitude.
+    #[test]
+    fn walking_from_the_equator_to_the_pole_goes_through_hot_then_temperate_then_cold_country() {
+        const FIFTHS: usize = 5;
+        const HOT_BAND: usize = 0;
+        const TEMPERATE: usize = 1;
+        const COLD: usize = 2;
+        const LAND: usize = 3;
+        for seed in [1337u32, 7, 99] {
+            let mut counts = [[0u32; 4]; FIFTHS];
+            let gen = WorldGen::new(seed);
+            for (fifth, degrees) in [9, 27, 45, 63, 81].into_iter().enumerate() {
+                // The planet's own row for that latitude, for the reason
+                // `it_is_hot_at_the_equator...` gives.
+                let row = planet_row(f64::from(degrees));
+                // **Across the globe along x, not twenty-four kilometres of
+                // it.** A latitude of a real planet is mostly ocean at most
+                // meridians: at nine degrees north this seed has no land
+                // within twenty-four kilometres of x = 0 at all, and the
+                // first form of this measured a tropics that was 0% hot
+                // because it was 100% sea. Six thousand kilometres crosses
+                // several continents.
+                for gz in (row - 12_000..row + 12_000).step_by(600) {
+                    for gx in (-3_000_000..3_000_000).step_by(59_999) {
+                        let height = gen.height_on_planet(gx, gz);
+                        // Every biome by name, so a new one is a compile
+                        // error here rather than a silent "no band".
+                        let band = match gen.biome_from(gx, gz, height) {
+                            Biome::Ocean | Biome::Beach => continue,
+                            Biome::Mountains | Biome::River => None,
+                            Biome::Savanna | Biome::Desert => Some(HOT_BAND),
+                            Biome::Forest
+                            | Biome::BirchForest
+                            | Biome::Plains
+                            | Biome::DeadForest
+                            | Biome::Swamp => Some(TEMPERATE),
+                            Biome::Tundra | Biome::Taiga | Biome::Bog | Biome::SnowyPeaks => {
+                                Some(COLD)
+                            }
+                        };
+                        if let Some(band) = band {
+                            counts[fifth][band] += 1;
+                        }
+                        counts[fifth][LAND] += 1;
+                    }
+                }
+            }
+            let share = |fifth: usize, band: usize| {
+                counts[fifth][band] as f64 / counts[fifth][LAND].max(1) as f64
+            };
+            let last = FIFTHS - 1;
+            assert!(share(0, HOT_BAND) > 0.6, "seed {seed}: the tropics are {:.0}% hot", share(0, HOT_BAND) * 100.0);
+            assert!(share(0, COLD) < 0.01, "seed {seed}: {:.1}% of the tropics is cold", share(0, COLD) * 100.0);
+            assert!(share(last, COLD) > 0.85, "seed {seed}: the pole is {:.0}% cold", share(last, COLD) * 100.0);
+            assert!(share(last, HOT_BAND) < 0.01, "seed {seed}: {:.1}% of the pole is hot", share(last, HOT_BAND) * 100.0);
+            assert!(
+                share(2, TEMPERATE) > share(2, HOT_BAND) && share(2, TEMPERATE) > share(2, COLD),
+                "seed {seed}: the middle latitudes are {:.0}% hot, {:.0}% temperate, {:.0}% cold",
+                share(2, HOT_BAND) * 100.0,
+                share(2, TEMPERATE) * 100.0,
+                share(2, COLD) * 100.0
+            );
+            // Two points of slack: a fifth is a mean over noise, and what
+            // is being asserted is the direction, not the step.
+            for fifth in 1..FIFTHS {
+                assert!(
+                    share(fifth, HOT_BAND) <= share(fifth - 1, HOT_BAND) + 0.02
+                        && share(fifth, COLD) + 0.02 >= share(fifth - 1, COLD),
+                    "seed {seed}: fifth {fifth} is {:.0}% hot and {:.0}% cold after {:.0}% and {:.0}%",
+                    share(fifth, HOT_BAND) * 100.0,
+                    share(fifth, COLD) * 100.0,
+                    share(fifth - 1, HOT_BAND) * 100.0,
+                    share(fifth - 1, COLD) * 100.0
+                );
+            }
+        }
+    }
+
+    /// **Spawn is the zone's country by construction, and this is what
+    /// notices if the construction goes.** See `WorldGen::spawn_column`: the
+    /// weather is zero at the origin in every world, so the temperature there
+    /// is the zone's latitude and the search for flat dry land near it finds
+    /// the promised climate without asking for it. That rests on the noise
+    /// being sampled unshifted, and a seed-dependent offset added one day for
+    /// any good reason would put some temperate players' first night in a
+    /// desert or on the ice -- and, now that a player *chooses* the tropics,
+    /// some tropical players' first night in the snow, which is worse: it is
+    /// the game breaking a promise the form made.
+    ///
+    /// Ten seeds a zone. If the origin stopped being neutral, a third of the
+    /// temperature would be weather again at spawn and a good share of forty
+    /// would land in the wrong band.
+    #[test]
+    fn every_new_world_wakes_its_player_in_the_climate_its_zone_promised() {
+        for &zone in Zone::ALL {
+            for seed in 0..10u32 {
+                let gen = WorldGen::with_zone(seed, Preset::Normal, zone);
+                let (gx, gz) = gen.spawn_column();
+                let height = gen.height_at(gx, gz);
+                // The climate is a fact about the planet, and the spawn a
+                // column of the world: see `WorldGen::on_planet`.
+                let (px, pz) = gen.on_planet(gx, gz);
+                let temperature = gen.surface_temperature(px, pz, height);
+                let biome = gen.biome_at(gx, gz);
+                let hot = matches!(biome, Biome::Savanna | Biome::Desert);
+                let cold = matches!(biome, Biome::Tundra | Biome::Taiga | Biome::Bog | Biome::SnowyPeaks);
+                let kept = match zone {
+                    Zone::Tropics | Zone::DryBelt => temperature > HOT && !cold,
+                    Zone::Temperate => (FREEZING..=HOT).contains(&temperature) && !hot && !cold,
+                    Zone::North => temperature < FREEZING && !hot,
+                };
+                assert!(
+                    kept,
+                    "a {} world of seed {seed} wakes its player in {} at {gx},{gz}, temperature {temperature:.2}",
+                    zone.name(),
+                    biome.name()
+                );
+            }
+        }
+    }
+
+    /// **A seed is one planet, and two zones of it are two places on that
+    /// planet.** The player's report was "the choice changes the world
+    /// rather than where I wake up": the same seed in two zones used to be
+    /// the same hills and the same coastline with a different climate
+    /// painted over them, because every field was read at the world's own z
+    /// and only the latitude term knew about the zone.
+    ///
+    /// **Chunk for chunk, not a sample of columns.** The bridge between a
+    /// world's coordinates and the planet's is crossed in a dozen places
+    /// (`WorldGen::on_planet`), and a private caller that reaches for a
+    /// public wrapper by mistake offsets twice -- which shows up as a
+    /// handful of wrong cells in a chunk that is otherwise right. Whole
+    /// chunks compared block for block is the only form of this that
+    /// catches that, and it is why `planet_origin_z` rounds to a chunk.
+    #[test]
+    fn two_worlds_of_one_seed_are_two_places_on_one_planet() {
+        let home = WorldGen::new(1337);
+        for &zone in Zone::ALL {
+            let away = WorldGen::with_zone(1337, Preset::Normal, zone);
+            let (ox, oz) = away.planet_origin();
+            assert_eq!(
+                (ox.rem_euclid(CHUNK_SIZE_X as i32), oz.rem_euclid(CHUNK_SIZE_Z as i32)),
+                (0, 0),
+                "a {} world is laid at {ox},{oz}, which is not a chunk boundary",
+                zone.name()
+            );
+            // The same patch of planet, read once as a chunk of the far
+            // world and once as a chunk of the world laid at the planet's
+            // own origin.
+            let shift = (ox.div_euclid(CHUNK_SIZE_X as i32), oz.div_euclid(CHUNK_SIZE_Z as i32));
+            for (cx, cz) in [(0, 0), (3, -2), (-7, 5)] {
+                let there = away.generate_chunk(ChunkPos::new(cx, cz));
+                let here = home.generate_chunk(ChunkPos::new(cx + shift.0, cz + shift.1));
+                let mut wrong = 0;
+                for y in 0..CHUNK_SIZE_Y {
+                    for lz in 0..CHUNK_SIZE_Z {
+                        for lx in 0..CHUNK_SIZE_X {
+                            wrong += usize::from(there.get(lx, y, lz) != here.get(lx, y, lz));
+                        }
+                    }
+                }
+                assert_eq!(
+                    wrong, 0,
+                    "the {} world's chunk {cx},{cz} differs from the planet under it in {wrong} cells",
+                    zone.name()
+                );
+            }
+        }
+        // ...and the zones are not all the same patch: a tropical world has
+        // to be somewhere else, or none of the above proves anything.
+        let places: std::collections::BTreeSet<(i32, i32)> = Zone::ALL
+            .iter()
+            .map(|&zone| WorldGen::with_zone(1337, Preset::Normal, zone).planet_origin())
+            .collect();
+        assert_eq!(places.len(), Zone::ALL.len(), "two zones were laid in the same place: {places:?}");
+    }
+
+    /// **Nothing that already stands on a disk moves a block.** The planet's
+    /// own row is forty-five degrees north (`PLANET_ORIGIN_DEGREES`), which
+    /// is where every world made before the zones existed was laid and
+    /// where every temperate world is laid now -- so a temperate world's
+    /// offset is exactly zero and its columns are read at exactly the
+    /// coordinates they were read at before any of this.
+    ///
+    /// Zero is not a special case anywhere in the code, which is the point:
+    /// there is no recorded flag saying "this is an old world", because
+    /// there is nothing for one to say.
+    #[test]
+    fn the_planets_origin_is_where_every_old_world_was_laid() {
+        assert_eq!(planet_origin_z(PLANET_ORIGIN_DEGREES), 0);
+        assert_eq!(Zone::Temperate.degrees(), PLANET_ORIGIN_DEGREES);
+        for scale in [Scale::Regional, Scale::Earth] {
+            let gen = WorldGen::with_scale(7, Preset::Normal, Zone::Temperate, scale);
+            assert_eq!(gen.planet_origin(), (0, 0), "a temperate world at {scale:?} moved");
+            assert_eq!(gen.latitude_degrees(0), Some(PLANET_ORIGIN_DEGREES as f32));
+        }
+        // A world of no zone at all -- which is what `WorldGen::new` is, and
+        // what the menu backdrop and most of the tests here use.
+        assert_eq!(WorldGen::new(7).planet_origin(), (0, 0));
+    }
+
+    /// **Why the zone moves the world's frame rather than the player.**
+    ///
+    /// The obvious way to wake a player in the tropics is to put them at
+    /// the tropics: one frame for the whole planet, the equator at z = 0,
+    /// and a spawn at the zone's latitude times `BLOCKS_PER_DEGREE`. A
+    /// player's position is an `f32`, and this is what that costs -- the
+    /// measurement, not the argument, because the argument had already been
+    /// written down once and the question was asked again.
+    ///
+    /// No anchoring of a single frame gets out of it. The zones span
+    /// fifty-two degrees, which is five and three quarter million blocks,
+    /// so wherever the frame's zero is put at least one zone is two million
+    /// blocks away from it -- and two million is already past the point
+    /// where a walking step is smaller than the gap between two `f32`s.
+    #[test]
+    fn a_single_latitude_frame_would_put_a_walking_player_on_a_grid() {
+        /// The gap to the next `f32` at this distance from the origin.
+        fn step_of(z: f32) -> f32 {
+            f32::from_bits(z.to_bits() + 1) - z
+        }
+        // A second of walking, integrated at the tick rate the server runs
+        // at, exactly as the client integrates a player.
+        fn walked(from: f32, speed: f32) -> f32 {
+            let mut z = from;
+            for _ in 0..20 {
+                z += speed / 20.0;
+            }
+            z - from
+        }
+        // Where each zone would be with the equator at z = 0, and where it
+        // would be with the temperate zone there -- the two anchorings
+        // worth trying.
+        for anchor in [0, PLANET_ORIGIN_DEGREES] {
+            for &zone in Zone::ALL {
+                let out = (f64::from(zone.degrees() - anchor) * BLOCKS_PER_DEGREE) as f32;
+                if out == 0.0 {
+                    continue; // the anchor's own zone is exact, and only it
+                }
+                let step = step_of(out.abs());
+                let crouch = walked(out, 1.3);
+                println!(
+                    "[f32] anchored at {anchor}N, the {} zone is at z {out:.0}: \
+                     an f32 steps {step}, a second of crouching moves {crouch:.3} of 1.3",
+                    zone.name()
+                );
+                assert!(
+                    step > 0.06 || (crouch - 1.3).abs() > 0.05,
+                    "{} at {out} would have been fine after all: step {step}, crouch {crouch}",
+                    zone.name()
+                );
+            }
+        }
+        // ...and the frame that was chosen: a player's own coordinates stay
+        // near zero whichever zone they picked, because the *world* is what
+        // moved. An `f32` is exact to a millimetre out to eight kilometres,
+        // which is further than a spawn search ever walks.
+        for &zone in Zone::ALL {
+            let gen = WorldGen::with_zone(1337, Preset::Normal, zone);
+            let (sx, sz) = gen.spawn_column();
+            assert!(
+                sx.abs() < 8_192 && sz.abs() < 8_192,
+                "a {} world wakes its player at {sx},{sz}",
+                zone.name()
+            );
+            assert!(
+                (walked(sz as f32, 1.3) - 1.3).abs() < 0.001,
+                "crouching at the {} spawn moves {}",
+                zone.name(),
+                walked(sz as f32, 1.3)
+            );
+        }
+    }
+
+    /// Where each zone actually wakes its player, and on what: the numbers
+    /// the report asks for, and the one place they are written down.
+    #[test]
+    fn every_zone_wakes_its_player_on_dry_land_at_the_latitude_it_promised() {
+        for &zone in Zone::ALL {
+            for seed in [1337u32, 7, 99] {
+                let gen = WorldGen::with_zone(seed, Preset::Normal, zone);
+                let (sx, sz) = gen.spawn_column();
+                let (px, pz) = gen.on_planet(sx, sz);
+                let height = gen.height_on_planet(px, pz);
+                let degrees = gen.latitude_degrees(sz).expect("an ordinary world has a latitude");
+                println!(
+                    "[spawn] {} seed {seed}: world {sx},{sz} = planet {px},{pz}, ground {height}, \
+                     {degrees:.3}N, {}",
+                    zone.name(),
+                    gen.biome_at(sx, sz).name()
+                );
+                assert!(height > SEA_LEVEL + 2, "a {} spawn stands at {height}", zone.name());
+                assert!(
+                    (degrees - zone.degrees() as f32).abs() < 0.1,
+                    "a {} world wakes its player at {degrees}N",
+                    zone.name()
+                );
+            }
+        }
+    }
+
+    /// **The number on the panel and the climate underfoot are one fact.**
+    /// `latitude` is the warmth the world is generated from and
+    /// `latitude_degrees` is the readout a player sees; they are written
+    /// separately, and this is what holds them together. Let either drift
+    /// and a player reading 45N is standing in the savanna.
+    ///
+    /// Across three thousand kilometres either way of a temperate origin,
+    /// which is every latitude from the equator to the pole and back once --
+    /// asked of `degrees_north` by row, the way a mod asks it, since no
+    /// `f32` player gets there.
+    #[test]
+    fn the_latitude_on_the_panel_is_the_latitude_the_climate_is_made_of() {
+        let gen = WorldGen::new(1337);
+        let at = |gz: i32| gen.latitude_degrees(gz).expect("an ordinary world has a latitude");
+        for gz in (-15_000_000..15_000_000).step_by(9_973) {
+            let degrees = f64::from(at(gz));
+            assert!((-90.0..=90.0).contains(&degrees), "at z {gz} the panel reads {degrees}");
+            let from_degrees = along_latitude(&WARMTH_BY_LATITUDE, degrees);
+            assert!(
+                (from_degrees - gen.latitude(gz)).abs() < 1e-3,
+                "at z {gz} the panel reads {degrees:.2} but the climate is {:.3}",
+                gen.latitude(gz)
+            );
+        }
+        let degree = |d: f64| (d * BLOCKS_PER_DEGREE) as i32;
+        assert!((at(0) - 45.0).abs() < 0.01, "a temperate spawn reads {}", at(0));
+        assert!(at(degree(-45.0)).abs() < 0.01, "the equator reads {}", at(degree(-45.0)));
+        assert!((at(degree(45.0)) - 90.0).abs() < 0.01, "the pole north of spawn reads {}", at(degree(45.0)));
+        assert!((at(degree(-135.0)) + 90.0).abs() < 0.01, "the south pole reads {}", at(degree(-135.0)));
+        // Over a pole the latitude falls again rather than jumping to the
+        // other hemisphere's 90.
+        assert!(at(degree(44.1)) > 89.0 && at(degree(45.9)) > 89.0);
+        // Every zone's origin reads the zone's own latitude -- to within
+        // the eight blocks `planet_origin_z` rounds to a chunk boundary,
+        // which is seven hundred-thousandths of a degree.
+        for &zone in Zone::ALL {
+            let world = WorldGen::with_zone(1337, Preset::Normal, zone);
+            let here = world.latitude_degrees(0).expect("an ordinary world has a latitude");
+            assert!(
+                (here - zone.degrees() as f32).abs() < 1e-3,
+                "a {} world wakes at {here} and not at {}",
+                zone.name(),
+                zone.degrees()
+            );
+        }
+        assert_eq!(WorldGen::with_preset(1337, Preset::Test).latitude_degrees(0), None);
+    }
+
+    /// **Rain comes off the sea.** The other half of the realism ask:
+    /// the deep interior of a continent is drier than its shore, which
+    /// is what puts the deserts inland. See `WorldGen::humidity`.
+    #[test]
+    fn the_middle_of_a_continent_is_drier_than_its_coast() {
+        let gen = WorldGen::new(4242);
+        let (mut coastal, mut coastal_n) = (0.0f64, 0.0f64);
+        let (mut inland, mut inland_n) = (0.0f64, 0.0f64);
+        for gx in (-6000..6000).step_by(53) {
+            for gz in (-3000..3000).step_by(101) {
+                let continent = gen.continent(gx, gz);
+                let humidity = gen.humidity(gx, gz);
+                // Just inland of the waterline against the deep
+                // interior: the two ends of the same field, which runs
+                // -1 (deep ocean) to +1 (middle of a continent).
+                if (0.0..0.2).contains(&continent) {
+                    coastal += humidity;
+                    coastal_n += 1.0;
+                } else if continent > 0.6 {
+                    inland += humidity;
+                    inland_n += 1.0;
+                }
+            }
+        }
+        assert!(coastal_n > 100.0 && inland_n > 100.0, "not enough of either to compare");
+        let (coastal, inland) = (coastal / coastal_n, inland / inland_n);
+        assert!(
+            coastal > inland + 0.12,
+            "the coast is {coastal:.2} and the interior {inland:.2} -- rain does not come off the sea"
+        );
+    }
+
     #[test]
     fn the_cold_end_of_the_world_still_exists() {
         // The other half of the fix. Making snow harder to reach must
         // not make it unreachable: a colder threshold that quietly
         // deleted every snowfield would pass the gradient test above
         // for the worst possible reason.
+        //
+        // **Across the zones, since the globe went to real scale.** One
+        // world is one latitude, and a temperate world rightly holds no
+        // snowfield in its lowlands and no desert at all; what must still be
+        // true is that the *planet* has both, and that a player who chooses
+        // the north or the dry belt finds them. So every zone of every seed
+        // goes into the one set.
         let mut seen = std::collections::BTreeSet::new();
         for seed in [1337u32, 7, 2024, 99] {
-            let generator = WorldGen::new(seed);
-            for gz in (-400..400).step_by(7) {
-                for gx in (-400..400).step_by(7) {
-                    seen.insert(generator.biome_at(gx, gz).name());
+            for &zone in Zone::ALL {
+                let generator = WorldGen::with_zone(seed, Preset::Normal, zone);
+                for gz in (-6000..6000).step_by(23) {
+                    for gx in (-200..200).step_by(23) {
+                        seen.insert(generator.biome_at(gx, gz).name());
+                    }
                 }
             }
         }
@@ -4606,8 +19088,8 @@ mod climate_gradient_tests {
 ///
 /// A height field made of smooth octaves cannot produce a vertical
 /// face, and `height_at` adds one on purpose: `terracing` pulls the
-/// ground toward multiples of four so a hillside is a stack of shelves
-/// rather than a ramp. That is a deliberate look, and this is what
+/// ground toward multiples of `BENCH` so a hillside is a stack of
+/// shelves rather than a ramp. That is a deliberate look, and this is what
 /// keeps it from becoming a staircase of walls.
 #[cfg(test)]
 mod slope_tests {
@@ -4615,6 +19097,29 @@ mod slope_tests {
 
     /// Height differences between horizontally adjacent columns, as a
     /// histogram indexed by the difference.
+    /// `steps`, but only for land up to `ceiling` blocks above the sea.
+    fn steps_below(seed: u32, radius: i32, ceiling: i32) -> Vec<usize> {
+        let generator = WorldGen::new(seed);
+        let mut histogram = vec![0usize; 32];
+        for gz in -radius..radius {
+            for gx in -radius..radius {
+                let here = generator.height_at(gx, gz);
+                if here <= SEA_LEVEL + 2 || here > SEA_LEVEL + ceiling {
+                    continue;
+                }
+                for (dx, dz) in [(1, 0), (0, 1)] {
+                    let next = generator.height_at(gx + dx, gz + dz);
+                    if next <= SEA_LEVEL + 2 {
+                        continue;
+                    }
+                    let step = (here - next).unsigned_abs() as usize;
+                    histogram[step.min(31)] += 1;
+                }
+            }
+        }
+        histogram
+    }
+
     fn steps(seed: u32, radius: i32) -> Vec<usize> {
         let generator = WorldGen::new(seed);
         let mut histogram = vec![0usize; 32];
@@ -4623,7 +19128,15 @@ mod slope_tests {
                 let here = generator.height_at(gx, gz);
                 // Only on land: the sea floor is not something anybody
                 // walks over, and the coast spline is steep by design.
-                if here <= SEA_LEVEL + 2 {
+                //
+                // **And not up a mountain.** When the relief was made two
+                // and a half times taller for the 256-block world, the
+                // share of seams too tall to step over went to 5.4 per
+                // cent -- almost all of it on peaks, which is where a
+                // cliff belongs and where a player goes on purpose. The
+                // claim this measures is that the country you *cross* is
+                // walkable; a mountain being a climb is the point of it.
+                if here <= SEA_LEVEL + 2 || here > SEA_LEVEL + 42 {
                     continue;
                 }
                 for (dx, dz) in [(1, 0), (0, 1)] {
@@ -4647,12 +19160,29 @@ mod slope_tests {
         // meant to stay; what is bounded is how tall one may be and how
         // much of the ground is made of them.
         for seed in [1337u32, 7, 2024] {
+            // **Two bands, because the world has two kinds of country.** One
+            // ceiling of three per cent over all the land held while the
+            // hills were twenty blocks tall. Measured on the 256-block world,
+            // the share of seams too tall to step over climbs with the
+            // ground: 1.1 per cent in the lowland, 3.5 in the low hills, five
+            // to six in the high foothills -- and easing the benches from
+            // 0.30 to 0.20 moved it by a tenth, because it is the slope and
+            // not the shelves. The lowland is where people walk and keeps the
+            // old bound; the hill country gets the bound foothills have.
+            let lowland = steps_below(seed, 200, 20);
+            let lowland_total: usize = lowland.iter().sum();
+            let lowland_steep: usize = lowland.iter().skip(2).sum();
+            assert!(
+                lowland_steep * 100 / lowland_total.max(1) <= 3,
+                "seed {seed}: {:.1}% of lowland seams need more than a jump",
+                lowland_steep as f32 / lowland_total as f32 * 100.0
+            );
             let histogram = steps(seed, 200);
             let total: usize = histogram.iter().sum();
             let steep: usize = histogram.iter().skip(2).sum();
             let worst = histogram.iter().rposition(|n| *n > 0).unwrap_or(0);
             assert!(
-                steep * 100 / total.max(1) <= 3,
+                steep * 100 / total.max(1) <= 6,
                 "seed {seed}: {:.1}% of land seams need more than a jump",
                 steep as f32 / total as f32 * 100.0
             );
@@ -4688,3 +19218,1238 @@ mod slope_tests {
     }
 }
 
+/// The rock under the soil, in three kinds. See `WorldGen::stratum`.
+#[cfg(test)]
+mod strata_tests {
+    use super::tests::chunk_in;
+    use super::*;
+
+    /// The first rock cell under the surface of every dry column of a
+    /// chunk that is in `wanted`, with the column's coordinates. Columns
+    /// a cave has opened before the rock is reached are skipped: what
+    /// is being asked is what the rock *is*, not whether it is there.
+    fn first_rock_under(gen: &WorldGen, chunk: &Chunk, wanted: Biome) -> Vec<(i32, i32, BlockId)> {
+        let mut out = Vec::new();
+        let origin_x = chunk.pos.x * CHUNK_SIZE_X as i32;
+        let origin_z = chunk.pos.z * CHUNK_SIZE_Z as i32;
+        for lz in 0..CHUNK_SIZE_Z {
+            for lx in 0..CHUNK_SIZE_X {
+                let (gx, gz) = (origin_x + lx as i32, origin_z + lz as i32);
+                if gen.biome_at(gx, gz) != wanted {
+                    continue;
+                }
+                let height = gen.height_at(gx, gz);
+                if height <= SEA_LEVEL + 2 || height < gen.water_level_at(gx, gz) {
+                    continue;
+                }
+                let mut y = height;
+                while y > BEDROCK_TOP {
+                    let id = block_kind(chunk.get(lx, y as usize, lz));
+                    if id == BLOCK_AIR {
+                        break;
+                    }
+                    if is_rock(id) {
+                        out.push((gx, gz, id));
+                        break;
+                    }
+                    y -= 1;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_meadow_lies_on_limestone_or_chalk_a_desert_on_sandstone_and_a_mountain_on_its_hard_rocks() {
+        // The world used to be one stone from the beach to the summit,
+        // and a dig told you nothing about where you were. Each of the
+        // three is checked in the biome it belongs to, on every dry
+        // column of a chunk there, and the bar is "every one of them"
+        // rather than "most": a plain with a patch of granite under it
+        // is a plain whose rock lies about where you are.
+        // ...and since `ground`, each country's rock is one of a few: a
+        // meadow may lie on chalk, a desert on quartzite, a mountain on
+        // gneiss, marble or diorite -- never a rock of another country.
+        use crate::types::{BLOCK_CHALK, BLOCK_DIORITE, BLOCK_GNEISS, BLOCK_MARBLE, BLOCK_QUARTZITE};
+        for (biome, rocks) in [
+            (Biome::Plains, &[BLOCK_LIMESTONE, BLOCK_CHALK][..]),
+            (Biome::Forest, &[BLOCK_LIMESTONE, BLOCK_CHALK][..]),
+            (Biome::Desert, &[BLOCK_SANDSTONE, BLOCK_QUARTZITE][..]),
+            (Biome::Mountains, &[BLOCK_GRANITE, BLOCK_GNEISS, BLOCK_MARBLE, BLOCK_DIORITE][..]),
+        ] {
+            // Each biome in the zone it is at home in: the desert in the
+            // dry belt.
+            let gen = super::tests::world_for(1337, biome);
+            let chunk = chunk_in(&gen, biome).unwrap_or_else(|| panic!("no {} to dig in", biome.name()));
+            let found = first_rock_under(&gen, &chunk, biome);
+            assert!(found.len() > 20, "only {} columns of {} to check", found.len(), biome.name());
+            for (gx, gz, id) in found {
+                assert!(
+                    rocks.contains(&id),
+                    "the rock under {} at {gx},{gz} is {}",
+                    biome.name(),
+                    crate::types::block_name(id)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_new_rock_is_the_upper_rock_of_some_country() {
+        // Each of `ground`'s ten rocks has a country (`stratum`), and a rock
+        // with none would be a block the world never lays. Gabbro is the
+        // root of a basalt dyke rather than a country's skin, and is asked
+        // of the line that makes it.
+        let gen = WorldGen::new(1337);
+        let mut seen = std::collections::HashSet::new();
+        for &biome in Biome::ALL {
+            for gx in (-6000..6000).step_by(97) {
+                for gz in (-6000..6000).step_by(89) {
+                    seen.insert(gen.stratum(gx, gz, biome, biome.surface()).0);
+                }
+            }
+        }
+        for rock in crate::ground::NEW_ROCKS {
+            if rock == crate::types::BLOCK_GABBRO {
+                const { assert!(WorldGen::GABBRO_BELOW > BEDROCK_TOP && WorldGen::GABBRO_BELOW < WorldGen::DEEP) };
+                continue;
+            }
+            assert!(seen.contains(&rock), "no country lies on {}", crate::types::block_name(rock));
+        }
+    }
+
+    #[test]
+    fn the_upper_rock_is_a_skin_and_the_stone_under_it_is_still_stone() {
+        // The upper rock is a skin of at most fourteen layers, and
+        // everything under it is the stone it always was -- which is
+        // what keeps the iron and coal of the deep band in the rock
+        // the ore tests measured them in. Measured from each column's
+        // own rock top rather than from the bedrock, because a sea
+        // shelf or a river bed is low enough that its skin reaches the
+        // floor of the world, and that is the skin doing what it says.
+        let gen = WorldGen::new(4242);
+        let (mut stone, mut other) = (0usize, 0usize);
+        for cx in -3..3 {
+            for cz in -3..3 {
+                let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        // The first rock down from the top of the column.
+                        let mut y = CHUNK_SIZE_Y as i32 - 1;
+                        while y > BEDROCK_TOP && !is_rock(block_kind(chunk.get(lx, y as usize, lz))) {
+                            y -= 1;
+                        }
+                        let rock_top = y;
+                        // Fifteen layers under it -- past the deepest
+                        // skin and past the granite line's reach -- to
+                        // the bedrock.
+                        // The basalt under `BASALT_FROM` is counted as
+                        // neither: it is the floor of the world rather
+                        // than an upper rock (see `BLOCK_BASALT`), and
+                        // the `_` arm below drops it. What this test is
+                        // about is that a *skin* of sandstone or
+                        // limestone does not reach down here.
+                        for y in (BEDROCK_TOP + 1)..(rock_top - 14).min(SEA_LEVEL + 20) {
+                            match block_kind(chunk.get(lx, y as usize, lz)) {
+                                BLOCK_STONE => stone += 1,
+                                BLOCK_SANDSTONE | BLOCK_LIMESTONE | BLOCK_GRANITE => other += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(stone > 1000, "hardly any rock deep enough to check: stone={stone}");
+        assert_eq!(other, 0, "{other} cells of upper rock fifteen layers or more under the rock top");
+    }
+
+    /// **The basalt is a wall to go round, not a floor to be stopped
+    /// by.** Two numbers say so: there is enough of it in the deep rock
+    /// to meet while mining, and it takes only a small share of that
+    /// rock -- so the iron in the roots of the world is still reachable
+    /// with the pick that finds it. See `WorldGen::is_basalt`.
+    #[test]
+    fn basalt_stands_in_the_deep_rock_without_sealing_it_off() {
+        let gen = WorldGen::new(90210);
+        let (mut basalt, mut deep_rock, mut shallow_basalt) = (0usize, 0usize, 0usize);
+        for cx in -2..2 {
+            for cz in -2..2 {
+                let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        for y in (BEDROCK_TOP + 1)..=SEA_LEVEL {
+                            let block = block_kind(chunk.get(lx, y as usize, lz));
+                            if block == BLOCK_BASALT {
+                                basalt += 1;
+                                if y > WorldGen::DEEP {
+                                    shallow_basalt += 1;
+                                }
+                            }
+                            if is_rock(block) && y <= WorldGen::DEEP {
+                                deep_rock += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(shallow_basalt, 0, "basalt outcropped above the deep rock");
+        let share = basalt as f64 / deep_rock.max(1) as f64;
+        assert!(
+            share > 0.01,
+            "only {:.2}% of the deep rock is basalt -- a dyke nobody meets is not a mechanic",
+            share * 100.0
+        );
+        assert!(
+            share < 0.25,
+            "{:.0}% of the deep rock is basalt -- that is a floor, not a dyke",
+            share * 100.0
+        );
+    }
+
+    #[test]
+    fn granite_caps_the_high_country_whatever_the_climate_says() {
+        // The granite line: above it every rock cell is granite, in a
+        // tundra or a taiga as much as under a peak. A ridge is one
+        // rock however its top is painted, and a taiga hill that turned
+        // to limestone thirty blocks up would be a boundary drawn by
+        // the climate through the inside of a mountain.
+        //
+        // The high columns are found by sweeping the height field,
+        // because a chunk whose middle is merely "mountains" -- which
+        // starts twenty-two over the sea -- rarely has ground above the
+        // line in it.
+        let gen = WorldGen::new(1337);
+        let mut chunks = std::collections::BTreeSet::new();
+        for gx in (-1500..1500).step_by(23) {
+            for gz in (-1500..1500).step_by(29) {
+                if gen.height_at(gx, gz) >= SEA_LEVEL + 66 {
+                    chunks.insert((gx.div_euclid(TILE), gz.div_euclid(TILE)));
+                }
+            }
+        }
+        let mut checked = 0;
+        for (cx, cz) in chunks.into_iter().take(8) {
+            let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+            let (origin_x, origin_z) = (cx * TILE, cz * TILE);
+            for lz in 0..CHUNK_SIZE_Z {
+                for lx in 0..CHUNK_SIZE_X {
+                    let height = gen.height_at(origin_x + lx as i32, origin_z + lz as i32);
+                    // Over the highest the line can wander (`granite_from`
+                    // is fifty-five above the sea, give or take six).
+                    for y in (SEA_LEVEL + 62)..=height {
+                        let id = block_kind(chunk.get(lx, y as usize, lz));
+                        if is_rock(id) {
+                            checked += 1;
+                            assert_eq!(
+                                id,
+                                BLOCK_GRANITE,
+                                "{} at y={y}, above the granite line",
+                                crate::types::block_name(id)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 50, "only {checked} rock cells above the granite line");
+    }
+
+    #[test]
+    fn a_stratum_boundary_wanders_rather_than_lying_flat() {
+        // The point of the noise: a bed of limestone eleven layers
+        // thick everywhere is a sheet, and a sheet is the one thing a
+        // stratum must not look like from inside a mine. Over a stretch
+        // of one biome the thickness has to take several values, and
+        // all of them inside the range the doc comment promises.
+        let gen = WorldGen::new(7);
+        let turf = Biome::Plains.surface();
+        let mut thicknesses = std::collections::BTreeSet::new();
+        for gx in (-600..600).step_by(9) {
+            for gz in (-600..600).step_by(11) {
+                let (rock, depth, _) = gen.stratum(gx, gz, Biome::Plains, turf);
+                assert!(matches!(rock, BLOCK_LIMESTONE | crate::types::BLOCK_CHALK), "a meadow on {}", crate::types::block_name(rock));
+                assert!((8..=14).contains(&depth), "limestone {depth} layers thick");
+                thicknesses.insert(depth);
+            }
+        }
+        assert!(
+            thicknesses.len() >= 4,
+            "the limestone was only ever {thicknesses:?} layers thick -- a sheet"
+        );
+        let (rock, depth, _) = gen.stratum(0, 0, Biome::Desert, Biome::Desert.surface());
+        assert!(matches!(rock, BLOCK_SANDSTONE | crate::types::BLOCK_QUARTZITE));
+        assert!((6..=10).contains(&depth), "sandstone {depth} layers thick");
+    }
+
+    #[test]
+    fn ore_still_reaches_the_top_of_the_rock() {
+        // Copper is a shallow ore -- `copper_country` puts it in the
+        // top of the rock -- and the top of the rock is limestone or
+        // granite now. Ore that only replaced stone would have moved
+        // the first metal in the game a dozen layers down without
+        // anybody deciding to; this pins it where it was.
+        let gen = WorldGen::new(1337);
+        let mut in_upper_rock = 0;
+        for cx in -6..6 {
+            for cz in -6..6 {
+                let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                for y in (SEA_LEVEL as usize)..CHUNK_SIZE_Y {
+                    for lz in 0..CHUNK_SIZE_Z {
+                        for lx in 0..CHUNK_SIZE_X {
+                            if matches!(
+                                block_kind(chunk.get(lx, y, lz)),
+                                BLOCK_COPPER_ORE | BLOCK_COAL_ORE | BLOCK_TIN_ORE
+                            ) {
+                                in_upper_rock += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(in_upper_rock > 0, "no ore at all above sea level in 144 chunks");
+    }
+}
+
+/// Lakes: standing water above the sea, in basins that hold it. See
+/// `WorldGen::lake_site`.
+#[cfg(test)]
+mod lake_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// **A pond is not a coin.**
+    ///
+    /// The shape was `d2 <= radius * radius`, which is a compass circle,
+    /// and a player looking at a valley with three of them in it said so
+    /// in as many words. Nothing else in this generator is a circle --
+    /// coasts come off a warped field, rivers wander -- and this was the
+    /// one body of water drawn with a pair of dividers.
+    ///
+    /// Measured the way an eye judges it: walk out from the middle along
+    /// sixteen headings and see how far the water goes each way. A
+    /// circle answers the same number sixteen times; a shore does not.
+    #[test]
+    fn a_lake_has_a_shore_rather_than_a_circumference() {
+        let gen = WorldGen::new(1337);
+        let lakes = lakes_in(&gen, 6);
+        assert!(!lakes.is_empty(), "no lakes to look at");
+        let mut ragged = 0usize;
+        for lake in &lakes {
+            let mut reaches = Vec::new();
+            for step in 0..16 {
+                let angle = step as f64 / 16.0 * std::f64::consts::TAU;
+                let (sx, sz) = (angle.cos(), angle.sin());
+                let mut last = 0.0f64;
+                for out in 1..=(gen.pond_radii().end() + 4) {
+                    let gx = lake.centre_x + (sx * out as f64).round() as i32;
+                    let gz = lake.centre_z + (sz * out as f64).round() as i32;
+                    if gen.water_level_at(gx, gz) == lake.water {
+                        last = out as f64;
+                    }
+                }
+                reaches.push(last);
+            }
+            let widest = reaches.iter().cloned().fold(f64::MIN, f64::max);
+            let narrowest = reaches.iter().cloned().fold(f64::MAX, f64::min);
+            ragged += (widest - narrowest >= 2.0) as usize;
+        }
+        // Not every one: a small lake in a tight bowl can come out
+        // nearly round, and that is a lake rather than a fault. Most of
+        // them have to be shaped, which is the claim.
+        assert!(
+            ragged * 2 >= lakes.len(),
+            "only {ragged} of {} lakes have a shore worth the name",
+            lakes.len()
+        );
+    }
+
+    /// Every accepted lake whose cell lies within `cells` of the origin.
+    pub(super) fn lakes_in(gen: &WorldGen, cells: i32) -> Vec<Lake> {
+        let mut out = Vec::new();
+        for cell_z in -cells..=cells {
+            for cell_x in -cells..=cells {
+                if let Some(lake) = gen.lake_site(cell_x, cell_z) {
+                    out.push(lake);
+                }
+            }
+        }
+        out
+    }
+
+    /// The generated world around a lake, as one lookup.
+    struct Around {
+        chunks: HashMap<(i32, i32), Chunk>,
+    }
+
+    impl Around {
+        fn new(gen: &WorldGen, lake: &Lake) -> Self {
+            let reach = lake.radius + gen.pond_wobble(lake.radius).ceil() as i32 + 2;
+            let mut chunks = HashMap::new();
+            // Every chunk the square touches, not its four corners: an Earth
+            // pond and its rim are forty blocks across, and a square that wide
+            // has a row of chunks between its corners.
+            for tz in (lake.centre_z - reach).div_euclid(TILE)..=(lake.centre_z + reach).div_euclid(TILE) {
+                for tx in (lake.centre_x - reach).div_euclid(TILE)..=(lake.centre_x + reach).div_euclid(TILE) {
+                    chunks.entry((tx, tz)).or_insert_with(|| gen.generate_chunk(ChunkPos::new(tx, tz)));
+                }
+            }
+            Self { chunks }
+        }
+
+        fn get(&self, gx: i32, y: i32, gz: i32) -> Option<BlockId> {
+            let chunk = self.chunks.get(&(gx.div_euclid(TILE), gz.div_euclid(TILE)))?;
+            Some(chunk.get(
+                gx.rem_euclid(TILE) as usize,
+                y as usize,
+                gz.rem_euclid(TILE) as usize,
+            ))
+        }
+    }
+
+    #[test]
+    fn there_are_lakes_and_none_of_them_lies_below_the_sea() {
+        // Both halves. A lake that no combination of the fields ever
+        // accepts is a feature in the source and not in the game; a
+        // lake at or under the sea's level is the sea, or a river, and
+        // both already exist.
+        for seed in [1337u32, 42, 7, 2024] {
+            let gen = WorldGen::new(seed);
+            let lakes = lakes_in(&gen, 20);
+            assert!(!lakes.is_empty(), "seed {seed}: not one lake in a 1,900-block square");
+            for lake in &lakes {
+                assert!(
+                    lake.water >= LAKE_MIN_WATER,
+                    "seed {seed}: a lake at {},{} with its surface at {}, which is the sea's country",
+                    lake.centre_x,
+                    lake.centre_z,
+                    lake.water
+                );
+                assert!(gen.pond_radii().contains(&lake.radius));
+                assert!((2..=5).contains(&lake.depth));
+            }
+            // ...and they are in the blocks, not only in the bookkeeping:
+            // water above the sea's level in a generated chunk.
+            let lake = &lakes[0];
+            let around = Around::new(&gen, lake);
+            let bed = gen.height_at(lake.centre_x, lake.centre_z);
+            assert!(bed < lake.water, "the middle of the lake is dry");
+            assert!(bed > SEA_LEVEL, "seed {seed}: a lake bed at {bed}, below the sea");
+            for y in (bed + 1)..=lake.water {
+                let id = around.get(lake.centre_x, y, lake.centre_z).expect("generated");
+                assert!(
+                    matches!(block_kind(id), BLOCK_WATER | BLOCK_ICE),
+                    "seed {seed}: {} at y={y} in the middle of a lake",
+                    crate::types::block_name(id)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_lake_is_a_closed_basin_or_it_would_drain_on_the_first_tick() {
+        // **The property that makes a lake possible at all.** Water is
+        // conserved and flows: a cell of it with air beside it at its
+        // own level, or under it, runs out. So every cell of lake water
+        // has to have ground or water on all four sides at its own
+        // height and under it -- which is also what "the rim is at or
+        // above the surface on every side" means, cell by cell.
+        //
+        // Checked in the generated blocks rather than in the heights,
+        // because the heights are not the world: a cave that opened a
+        // bank one cell under the surface would pass any test on the
+        // height field and drain the lake into the hill all the same.
+        let mut cells_checked = 0usize;
+        let mut lakes_checked = 0usize;
+        for seed in [1337u32, 42, 7, 2024] {
+            let gen = WorldGen::new(seed);
+            for lake in lakes_in(&gen, 10).iter().take(12) {
+                let around = Around::new(&gen, lake);
+                lakes_checked += 1;
+                let reach = lake.radius + gen.pond_wobble(lake.radius).ceil() as i32 + 1;
+                for gz in (lake.centre_z - reach)..=(lake.centre_z + reach) {
+                    for gx in (lake.centre_x - reach)..=(lake.centre_x + reach) {
+                        for y in (SEA_LEVEL + 1)..=lake.water {
+                            if around.get(gx, y, gz) != Some(BLOCK_WATER) {
+                                continue;
+                            }
+                            cells_checked += 1;
+                            for (dx, dy, dz) in [(1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (0, -1, 0)] {
+                                let beside = around
+                                    .get(gx + dx, y + dy, gz + dz)
+                                    .expect("the lake and its rim are inside the generated chunks");
+                                assert_ne!(
+                                    beside,
+                                    BLOCK_AIR,
+                                    "seed {seed}: lake water at {gx},{y},{gz} has air at \
+                                     {},{},{} -- it drains on the first tick",
+                                    gx + dx,
+                                    y + dy,
+                                    gz + dz
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(lakes_checked >= 8, "only {lakes_checked} lakes to check");
+        assert!(cells_checked > 500, "only {cells_checked} cells of lake water in {lakes_checked} lakes");
+    }
+
+    #[test]
+    fn a_lake_bed_is_silt_or_sand_and_never_turf() {
+        // A pond over grass is the thing a player looks straight down
+        // at from the bank. The bed gets what the sea's shallows get --
+        // sand at the edge, silt in the middle, clay or gravel where
+        // the deposit field says -- and never the meadow's own turf.
+        let gen = WorldGen::new(2024);
+        let mut checked = 0;
+        for lake in lakes_in(&gen, 10).iter().take(10) {
+            let around = Around::new(&gen, lake);
+            for gz in (lake.centre_z - lake.radius)..=(lake.centre_z + lake.radius) {
+                for gx in (lake.centre_x - lake.radius)..=(lake.centre_x + lake.radius) {
+                    let height = gen.height_at(gx, gz);
+                    if height >= lake.water {
+                        continue;
+                    }
+                    // Any rock's gravel or sand is gravel or sand (`ground`).
+                    let bed = crate::ground::as_common(around.get(gx, height, gz).expect("generated"));
+                    checked += 1;
+                    assert!(
+                        matches!(bed, BLOCK_SAND | BLOCK_DIRT | BLOCK_CLAY | BLOCK_GRAVEL),
+                        "a lake bed of {} at {gx},{height},{gz}",
+                        crate::types::block_name(bed)
+                    );
+                }
+            }
+        }
+        assert!(checked > 100, "only {checked} cells of lake bed to look at");
+    }
+
+    #[test]
+    fn a_lake_is_the_same_lake_from_a_cold_thread_as_from_a_warm_one() {
+        // A lake spans up to four chunks, and each of them decides its
+        // own cells from the shared judgement. A cold thread -- a fresh
+        // memo -- has to arrive at the same blocks as a warm one, or a
+        // lake regenerated after eviction would come back with a
+        // different rim and pour out.
+        let gen = WorldGen::new(1337);
+        let lake = lakes_in(&gen, 10)[0];
+        let pos = ChunkPos::new(lake.centre_x.div_euclid(TILE), lake.centre_z.div_euclid(TILE));
+        let warm = gen.generate_chunk(pos);
+        let cold = std::thread::spawn(move || WorldGen::new(1337).generate_chunk(pos))
+            .join()
+            .expect("cold generation panicked");
+        assert_eq!(warm.blocks, cold.blocks, "the lake memo changed the world");
+    }
+
+    /// How common lakes actually are.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --lib -- --ignored --nocapture how_many_lakes_there_are
+    /// ```
+    #[test]
+    #[ignore = "a measurement, not an assertion -- run it explicitly"]
+    fn how_many_lakes_there_are() {
+        for seed in [1337u32, 42, 7, 2024] {
+            let gen = WorldGen::new(seed);
+            let cells = 20;
+            let candidates = (2 * cells + 1) * (2 * cells + 1);
+            let lakes = lakes_in(&gen, cells);
+            let chunks = candidates as f64 * (gen.pond_cell() * gen.pond_cell()) as f64 / (TILE * TILE) as f64;
+            let mut radii = vec![0usize; *gen.pond_radii().end() as usize + 1];
+            for lake in &lakes {
+                radii[lake.radius as usize] += 1;
+            }
+            println!(
+                "seed {seed}: {} lakes of {candidates} cells ({:.1}%), one per {:.0} chunks; radii {:?}",
+                lakes.len(),
+                lakes.len() as f64 * 100.0 / candidates as f64,
+                chunks / lakes.len().max(1) as f64,
+                &radii[3..]
+            );
+        }
+    }
+}
+
+/// Boulders and scree: what a slope sheds. See `WorldGen::place_boulders`.
+#[cfg(test)]
+mod boulder_tests {
+    use super::tests::sample_chunks;
+    use super::*;
+
+    /// Whether a column, by the height field alone, is ground a boulder
+    /// may lie on: the rule of `boulder_ground` re-derived from
+    /// `height_at` so the test does not trust the cache it is checking.
+    fn justified(gen: &WorldGen, gx: i32, gz: i32) -> bool {
+        let height = gen.height_at(gx, gz);
+        if height <= SEA_LEVEL + 2 || height < gen.water_level_at(gx, gz) {
+            return false;
+        }
+        gen.slope_at(gx, gz, height) >= BANK_SLOPE
+            || [(2, 0), (-2, 0), (0, 2), (0, -2)]
+                .iter()
+                .any(|&(dx, dz)| gen.height_at(gx + dx, gz + dz) - height >= CLIFF_STEP)
+    }
+
+    #[test]
+    fn a_boulder_lies_on_a_bank_or_under_a_cliff_and_never_in_a_meadow() {
+        // The first question a player asks about a rock in a field is
+        // how it got there, and the generator has to have an answer:
+        // it rolled, or it fell. Every solid rock block sitting on the
+        // surface has to be within one column of ground that says which.
+        let seed = 1337;
+        let gen = WorldGen::new(seed);
+        let mut boulders = 0;
+        for chunk in sample_chunks(seed, 6) {
+            let origin_x = chunk.pos.x * CHUNK_SIZE_X as i32;
+            let origin_z = chunk.pos.z * CHUNK_SIZE_Z as i32;
+            for lz in 0..CHUNK_SIZE_Z {
+                for lx in 0..CHUNK_SIZE_X {
+                    let (gx, gz) = (origin_x + lx as i32, origin_z + lz as i32);
+                    let height = gen.height_at(gx, gz);
+                    let above = height + 1;
+                    if above >= CHUNK_SIZE_Y as i32 {
+                        continue;
+                    }
+                    // The sea floor's boulders answer to a rule of their own
+                    // -- deep enough not to be a step out of the surf -- and
+                    // their own test beside `sea_boulder`. This one is about
+                    // what a slope sheds onto dry ground.
+                    if height < SEA_LEVEL - 1 && gen.biome_from(gx, gz, height) == Biome::Ocean {
+                        continue;
+                    }
+                    // ...and so do the stones standing in a river's rapids,
+                    // which the water broke loose rather than a slope: see
+                    // `banks::place_rapid_stones`.
+                    if height < SEA_LEVEL && gen.biome_from(gx, gz, height) == Biome::River {
+                        continue;
+                    }
+                    if !matches!(
+                        block_kind(chunk.get(lx, above as usize, lz)),
+                        BLOCK_COBBLESTONE | BLOCK_GRANITE
+                    ) {
+                        continue;
+                    }
+                    boulders += 1;
+                    let mut explained = false;
+                    for dz in -1..=1 {
+                        for dx in -1..=1 {
+                            explained |= justified(&gen, gx + dx, gz + dz);
+                        }
+                    }
+                    assert!(explained, "a boulder at {gx},{above},{gz} with nothing to explain it");
+                }
+            }
+        }
+        assert!(boulders > 20, "only {boulders} boulders in 169 chunks");
+    }
+
+    #[test]
+    fn granite_country_sheds_granite_and_the_lowlands_shed_cobble() {
+        // A boulder is the rock it came off. Both kinds have to exist,
+        // and a granite boulder has to be somewhere granite is the rock.
+        let mut granite = 0;
+        let mut cobble = 0;
+        for seed in [1337u32, 42] {
+            let gen = WorldGen::new(seed);
+            for chunk in sample_chunks(seed, 7) {
+                let origin_x = chunk.pos.x * CHUNK_SIZE_X as i32;
+                let origin_z = chunk.pos.z * CHUNK_SIZE_Z as i32;
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let (gx, gz) = (origin_x + lx as i32, origin_z + lz as i32);
+                        let above = gen.height_at(gx, gz) + 1;
+                        if above >= CHUNK_SIZE_Y as i32 {
+                            continue;
+                        }
+                        match block_kind(chunk.get(lx, above as usize, lz)) {
+                            BLOCK_GRANITE => {
+                                granite += 1;
+                                let biome = gen.biome_at(gx, gz);
+                                let high = gen.height_at(gx, gz) >= SEA_LEVEL + 20;
+                                assert!(
+                                    matches!(biome, Biome::Mountains | Biome::SnowyPeaks) || high,
+                                    "a granite boulder in a {} at {gx},{gz}",
+                                    biome.name()
+                                );
+                            }
+                            BLOCK_COBBLESTONE => cobble += 1,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        assert!(cobble > 0, "no cobble boulders anywhere");
+        assert!(granite > 0, "no granite boulders anywhere");
+    }
+
+    #[test]
+    fn scree_lies_under_a_face_and_never_in_the_open() {
+        // Rubble on dry ground away from water has to be scree, and scree
+        // has to have a face over it. (Scree was gravel until the gravel
+        // came off the mountains; see the surface pass.)
+        // The other direction too: some of it exists, or the rule is
+        // dead code that reads as a feature.
+        let seed = 1337;
+        let gen = WorldGen::new(seed);
+        let mut scree = 0;
+        for chunk in sample_chunks(seed, 6) {
+            let origin_x = chunk.pos.x * CHUNK_SIZE_X as i32;
+            let origin_z = chunk.pos.z * CHUNK_SIZE_Z as i32;
+            for lz in 0..CHUNK_SIZE_Z {
+                for lx in 0..CHUNK_SIZE_X {
+                    let (gx, gz) = (origin_x + lx as i32, origin_z + lz as i32);
+                    let height = gen.height_at(gx, gz);
+                    let top = block_kind(chunk.get(lx, height as usize, lz));
+                    // ...and gravel is the water's alone: none on a dry
+                    // hillside, which is where the player found it.
+                    if top == BLOCK_GRAVEL && height > gen.water_level_at(gx, gz) + 2 {
+                        let wet = (-1..=1).any(|dz| {
+                            (-1..=1).any(|dx| gen.height_at(gx + dx, gz + dz) <= gen.water_level_at(gx + dx, gz + dz) + 2)
+                        });
+                        assert!(wet, "gravel on dry ground at {gx},{height},{gz}");
+                    }
+                    // Scree is laid top and filler both; a single cobble at
+                    // the surface is something else's (a ruin's floor).
+                    if top != BLOCK_COBBLESTONE || block_kind(chunk.get(lx, height as usize - 1, lz)) != BLOCK_COBBLESTONE {
+                        continue;
+                    }
+                    // Not a river bed, not near any water, and not a
+                    // gravel deposit -- the deposit field puts gravel on
+                    // a bank below `GRAVEL_DEPOSIT` wherever the bank
+                    // is: what is left is scree.
+                    let beside_water = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| {
+                        gen.height_at(gx + dx, gz + dz) < gen.water_level_at(gx + dx, gz + dz)
+                    });
+                    if height <= SEA_LEVEL + 2
+                        || height < gen.water_level_at(gx, gz)
+                        || beside_water
+                    {
+                        continue;
+                    }
+                    scree += 1;
+                    let under_a_face = [(2, 0), (-2, 0), (0, 2), (0, -2)]
+                        .iter()
+                        .any(|&(dx, dz)| gen.height_at(gx + dx, gz + dz) - height >= CLIFF_STEP);
+                    assert!(under_a_face, "scree at {gx},{height},{gz} with no face over it");
+                }
+            }
+        }
+        assert!(scree > 10, "only {scree} columns of scree in 169 chunks");
+    }
+}
+
+/// Peat, in the bogs. See `Biome::surface`.
+#[cfg(test)]
+mod peat_tests {
+    use super::tests::{chunk_in, chunks_in, count_of, world_for};
+    use super::*;
+
+    /// A chunk with a bog in the middle of it, from whichever of a few
+    /// seeds has one near the origin.
+    fn a_bog() -> (WorldGen, Chunk) {
+        for seed in [1337u32, 42, 7, 2024, 99] {
+            let gen = super::tests::world_for(seed, Biome::Bog);
+            if let Some(chunk) = chunk_in(&gen, Biome::Bog) {
+                return (gen, chunk);
+            }
+        }
+        panic!("no bog near the origin of five seeds");
+    }
+
+    #[test]
+    fn a_savanna_shows_bare_sandy_ground_between_its_grass_and_a_forest_does_not() {
+        let gen = WorldGen::new(1337);
+        // The savanna asked of a world laid where it lives, the forest of the
+        // temperate one: at the Earth's scale neither world holds the other's
+        // country near enough to search. See `world_for`.
+        let savanna = chunks_in(&world_for(1337, Biome::Savanna), Biome::Savanna, 24);
+        let sandy: usize = savanna.iter().map(|c| count_of(c, crate::types::BLOCK_SANDY_SOIL)).sum();
+        let turf: usize = savanna.iter().map(|c| count_of(c, crate::types::BLOCK_DRY_TURF)).sum();
+        let share = sandy as f32 / (sandy + turf).max(1) as f32;
+        // Wide bounds on purpose, as the bog's: the claim is "patches of
+        // bare ground, and still grassland", not a number -- a savanna
+        // that is mostly sand is a desert with trees in it.
+        assert!(
+            (0.1..0.6).contains(&share),
+            "{:.0}% of the savanna floor is bare sandy soil",
+            share * 100.0
+        );
+        // **Per column, not per chunk.** `chunks_in` picks a chunk by the
+        // biome at its centre, and a forest chunk with a savanna corner is
+        // an ordinary thing: the first run of this test counted that
+        // corner's hundred and twenty cells as sandy soil in a forest.
+        for chunk in chunks_in(&gen, Biome::Forest, 12) {
+            let origin = (chunk.pos.x * CHUNK_SIZE_X as i32, chunk.pos.z * CHUNK_SIZE_Z as i32);
+            for y in 0..CHUNK_SIZE_Y {
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        if chunk.get(lx, y, lz) != crate::types::BLOCK_SANDY_SOIL {
+                            continue;
+                        }
+                        let here = gen.biome_at(origin.0 + lx as i32, origin.1 + lz as i32);
+                        assert_eq!(here, Biome::Savanna, "sandy soil on {} ground", here.name());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_savanna_has_sticks_lying_in_its_grass() {
+        // "в саванне нету палок" -- counted off the real generator, on the
+        // columns that really are savanna, lying on the ground and not in
+        // a ruin's pile. The bound is loose on purpose: the claim is "a
+        // player waking here finds sticks", not the spacing.
+        // In a savanna world: see `world_for`.
+        let gen = world_for(1337, Biome::Savanna);
+        let (mut columns, mut sticks) = (0usize, 0usize);
+        for chunk in chunks_in(&gen, Biome::Savanna, 24) {
+            let origin = (chunk.pos.x * CHUNK_SIZE_X as i32, chunk.pos.z * CHUNK_SIZE_Z as i32);
+            for lz in 0..CHUNK_SIZE_Z {
+                for lx in 0..CHUNK_SIZE_X {
+                    if gen.biome_at(origin.0 + lx as i32, origin.1 + lz as i32) != Biome::Savanna {
+                        continue;
+                    }
+                    columns += 1;
+                    for y in 1..CHUNK_SIZE_Y {
+                        if chunk.get(lx, y, lz) == BLOCK_STICK
+                            && crate::types::can_grow_on(BLOCK_STICK, chunk.get(lx, y - 1, lz))
+                        {
+                            sticks += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(columns > 2_000, "only {columns} columns of savanna to count in");
+        assert!(
+            sticks * 80 >= columns,
+            "{sticks} sticks on {columns} columns of savanna: one in {}",
+            columns / sticks.max(1)
+        );
+    }
+
+    #[test]
+    fn dry_grass_grows_on_the_savannas_dry_ground_and_nowhere_else() {
+        // In a savanna world: see `world_for`.
+        let gen = world_for(1337, Biome::Savanna);
+        let mut tufts = 0;
+        for chunk in chunks_in(&gen, Biome::Savanna, 24) {
+            for y in 1..CHUNK_SIZE_Y {
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        if crate::types::block_kind(chunk.get(lx, y, lz)) != crate::types::BLOCK_DRY_GRASS {
+                            continue;
+                        }
+                        // Both of the savanna's dry grounds: the bare sandy
+                        // soil and the dry turf round it.
+                        let under = chunk.get(lx, y - 1, lz);
+                        assert!(
+                            under == crate::types::BLOCK_SANDY_SOIL || under == crate::types::BLOCK_DRY_TURF,
+                            "dry grass at ({lx},{y},{lz}) on block {under}, not on dry ground"
+                        );
+                        tufts += 1;
+                    }
+                }
+            }
+        }
+        assert!(tufts > 0, "twenty-four chunks of savanna and no dry grass on its bare ground");
+        assert!(crate::types::can_grow_on(crate::types::BLOCK_DRY_GRASS, crate::types::BLOCK_SANDY_SOIL));
+        assert!(!crate::types::can_grow_on(crate::types::BLOCK_DRY_GRASS, BLOCK_GRASS));
+        assert!(!crate::types::can_grow_on(BLOCK_TALL_GRASS, crate::types::BLOCK_SANDY_SOIL));
+    }
+
+    #[test]
+    fn a_bog_has_peat_under_its_turf_and_a_meadow_has_none() {
+        // The soil of a bog is peat, which is what makes a bog worth a
+        // shovel (see `types::BLOCK_PEAT`); the soil of a meadow is
+        // dirt, which is what keeps the fuel somewhere you have to go.
+        let (gen, bog) = a_bog();
+        assert!(count_of(&bog, BLOCK_PEAT) > 0, "a bog with no peat in it");
+        let plains = chunk_in(&gen, Biome::Plains)
+            .or_else(|| chunk_in(&WorldGen::new(1337), Biome::Plains))
+            .expect("no plains anywhere");
+        assert_eq!(count_of(&plains, BLOCK_PEAT), 0, "peat under a meadow");
+    }
+
+    #[test]
+    fn the_peat_of_a_bog_is_two_to_four_layers_and_reaches_the_surface_where_it_is_wet() {
+        // Two to four layers of it under the turf, not the soil depth
+        // the slope would have given. And where the bog is wet the
+        // turf is gone and the peat runs to the top -- a third to a
+        // fifth cell -- which is the brown that tells a bog from a
+        // marsh at a glance and the place a player digs it without
+        // lifting turf first.
+        let (gen, bog) = a_bog();
+        let origin_x = bog.pos.x * CHUNK_SIZE_X as i32;
+        let origin_z = bog.pos.z * CHUNK_SIZE_Z as i32;
+        let (mut columns, mut bare) = (0, 0);
+        for lz in 0..CHUNK_SIZE_Z {
+            for lx in 0..CHUNK_SIZE_X {
+                let (gx, gz) = (origin_x + lx as i32, origin_z + lz as i32);
+                if gen.biome_at(gx, gz) != Biome::Bog {
+                    continue;
+                }
+                let height = gen.height_at(gx, gz);
+                if height < gen.water_level_at(gx, gz) {
+                    continue;
+                }
+                let top = block_kind(bog.get(lx, height as usize, lz));
+                if !matches!(top, BLOCK_GRASS | BLOCK_PEAT) {
+                    // Clay, gravel, a cave mouth: not the bog's own
+                    // surface, and not this test's business.
+                    continue;
+                }
+                let mut run = 0;
+                let mut y = if top == BLOCK_PEAT { height } else { height - 1 };
+                while y > BEDROCK_TOP && block_kind(bog.get(lx, y as usize, lz)) == BLOCK_PEAT {
+                    run += 1;
+                    y -= 1;
+                }
+                if block_kind(bog.get(lx, y as usize, lz)) == BLOCK_AIR {
+                    continue; // a cave took the rest
+                }
+                columns += 1;
+                bare += (top == BLOCK_PEAT) as i32;
+                let expected = if top == BLOCK_PEAT { 3..=5 } else { 2..=4 };
+                assert!(
+                    expected.contains(&run),
+                    "{run} layers of peat under a top of {} at {gx},{gz}",
+                    crate::types::block_name(top)
+                );
+            }
+        }
+        assert!(columns > 20, "only {columns} bog columns to look at");
+        assert!(bare > 0, "no bare peat anywhere in a bog chunk");
+        assert!(bare < columns, "the whole bog is bare peat -- the turf is gone everywhere");
+    }
+}
+
+/// Bog iron: rusty stones on the banks and in the bogs. See
+/// `RUSTY_STONE_SPACING_ON_A_BANK`.
+#[cfg(test)]
+mod bog_iron_tests {
+    use super::tests::{chunk_in, count_of};
+    use super::*;
+
+    /// A few chunks of one country, from whichever seeds have one near
+    /// the origin.
+    ///
+    /// Several rather than one, and deliberately: a river chunk found by
+    /// its centre column may be mostly channel, and a spacing of twenty
+    /// over the strip of bank that is left is a handful of stones that
+    /// a single unlucky chunk could hold none of. Three chunks of bank
+    /// is enough bank that "none at all" means the rule is broken.
+    fn chunks_of(wanted: Biome) -> Vec<Chunk> {
+        let mut found = Vec::new();
+        for seed in [1337u32, 42, 7, 2024, 99, 5, 11] {
+            if let Some(chunk) = chunk_in(&super::tests::world_for(seed, wanted), wanted) {
+                found.push(chunk);
+            }
+            if found.len() == 3 {
+                break;
+            }
+        }
+        assert!(!found.is_empty(), "no {wanted:?} near the origin of seven seeds");
+        found
+    }
+
+    fn rusty_stones_in(chunks: &[Chunk]) -> usize {
+        chunks.iter().map(|c| count_of(c, BLOCK_RUSTY_STONE)).sum()
+    }
+
+    #[test]
+    fn rusty_stones_lie_on_riverbanks_and_in_bogs_and_nowhere_else() {
+        // The iron a people without a mine has, and it has to be *where
+        // the water is* or the walk the recipe charges for is a walk to
+        // nowhere: a bank has them, a bog has more, and a meadow -- the
+        // biome a player spawns in -- has none, so the first bloom is a
+        // reason to leave home.
+        assert!(rusty_stones_in(&chunks_of(Biome::River)) > 0, "a riverbank with no bog iron on it");
+        assert!(rusty_stones_in(&chunks_of(Biome::Bog)) > 0, "a bog with no bog iron in it");
+        // "Nowhere else" cannot be "no meadow chunk has one", because a
+        // river runs *through* meadows and its banks are meadow columns
+        // -- the first draft of this line said zero and was wrong about
+        // every plains chunk with a river in it. What is true is that a
+        // meadow chunk with no river within a bank's width of it has
+        // none, and that is what is checked: dry country, well away from
+        // water, across two seeds.
+        let mut dry_chunks = 0;
+        for seed in [1337u32, 42] {
+            let gen = WorldGen::new(seed);
+            for cx in -12..12 {
+                for cz in -12..12 {
+                    let ox = cx * CHUNK_SIZE_X as i32;
+                    let oz = cz * CHUNK_SIZE_Z as i32;
+                    let mut wet = false;
+                    for gz in (oz - BANK_WIDTH)..(oz + CHUNK_SIZE_Z as i32 + BANK_WIDTH) {
+                        for gx in (ox - BANK_WIDTH)..(ox + CHUNK_SIZE_X as i32 + BANK_WIDTH) {
+                            if matches!(gen.biome_at(gx, gz), Biome::River | Biome::Bog) {
+                                wet = true;
+                            }
+                        }
+                    }
+                    if wet || !matches!(gen.biome_at(ox + 8, oz + 8), Biome::Plains | Biome::Forest) {
+                        continue;
+                    }
+                    let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+                    assert_eq!(
+                        count_of(&chunk, BLOCK_RUSTY_STONE),
+                        0,
+                        "rusty stones in a dry chunk at ({cx},{cz}) of seed {seed}: iron without the walk"
+                    );
+                    dry_chunks += 1;
+                    if dry_chunks >= 6 {
+                        return;
+                    }
+                }
+            }
+        }
+        assert!(dry_chunks > 0, "no dry meadow anywhere to check");
+    }
+
+    #[test]
+    fn every_rusty_stone_on_a_bank_is_within_the_bank_of_river_water() {
+        // The rule the first draft got wrong, checked against the
+        // finished chunk: a stone outside a bog stands within
+        // `BANK_WIDTH` of a flooded river column. A stone further from
+        // the water than that is a stone a beach or a lakeside could
+        // have, and bog iron is what a *river* drops.
+        let mut checked = 0;
+        for seed in [1337u32, 42, 7] {
+            let gen = WorldGen::new(seed);
+            let Some(chunk) = chunk_in(&gen, Biome::River) else { continue };
+            let ox = chunk.pos.x * CHUNK_SIZE_X as i32;
+            let oz = chunk.pos.z * CHUNK_SIZE_Z as i32;
+            for lz in 0..CHUNK_SIZE_Z {
+                for lx in 0..CHUNK_SIZE_X {
+                    for y in 1..CHUNK_SIZE_Y {
+                        if block_kind(chunk.get(lx, y, lz)) != BLOCK_RUSTY_STONE {
+                            continue;
+                        }
+                        let (gx, gz) = (ox + lx as i32, oz + lz as i32);
+                        if gen.biome_at(gx, gz) == Biome::Bog {
+                            continue;
+                        }
+                        let river_near = (-BANK_WIDTH..=BANK_WIDTH).any(|dz| {
+                            (-BANK_WIDTH..=BANK_WIDTH).any(|dx| {
+                                let (nx, nz) = (gx + dx, gz + dz);
+                                gen.biome_at(nx, nz) == Biome::River
+                                    && gen.height_at(nx, nz) < SEA_LEVEL
+                            })
+                        });
+                        assert!(river_near, "a rusty stone at ({gx},{y},{gz}) is not on a bank");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 0, "no bank stone to check");
+    }
+
+    #[test]
+    fn a_rusty_stone_never_lies_under_water_or_in_the_air() {
+        // Placed by the ground-cover pass, which skips a flooded column
+        // and asks the pebble's floor rule -- so every stone stands on a
+        // whole dry floor. A stone on the riverbed would be a stone the
+        // player has to dive for and cannot see.
+        for chunk in chunks_of(Biome::River).iter().chain(chunks_of(Biome::Bog).iter()) {
+            for lz in 0..CHUNK_SIZE_Z {
+                for lx in 0..CHUNK_SIZE_X {
+                    for y in 1..CHUNK_SIZE_Y - 1 {
+                        if block_kind(chunk.get(lx, y, lz)) != BLOCK_RUSTY_STONE {
+                            continue;
+                        }
+                        let under = chunk.get(lx, y - 1, lz);
+                        assert!(
+                            crate::types::can_grow_on(BLOCK_PEBBLE, under),
+                            "a rusty stone at ({lx},{y},{lz}) lies on {under}, which no stone lies on"
+                        );
+                        assert!(
+                            !crate::types::is_liquid(chunk.get(lx, y + 1, lz)),
+                            "a rusty stone at ({lx},{y},{lz}) is under water"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Whether this chunk is even offered a ruin.
+///
+/// Public so a tool can find one without generating a world: the roll is
+/// two integers and a hash, and generating a chunk to ask the question
+/// is four orders of magnitude dearer. See `place_ruin`, which asks the
+/// same question and then checks the site.
+pub fn ruin_offered(gen: &WorldGen, pos: ChunkPos) -> bool {
+    hash2(
+        pos.x * CHUNK_SIZE_X as i32,
+        pos.z * CHUNK_SIZE_Z as i32,
+        gen.seed.wrapping_add(0x0DEC),
+    )
+    .is_multiple_of(2000)
+}
+
+
+#[cfg(test)]
+mod hanging_moss_tests {
+    use super::tests::{chunks_in, world_for};
+    use super::*;
+    use crate::types::{is_cross, BLOCK_HANGING_MOSS};
+
+    #[test]
+    fn swamp_moss_hangs_one_cell_deep_and_never_down_onto_the_plants_below() {
+        // "на болотах под листвой деревьев есть странная трава": moss hung
+        // two cells deep, and from a low crown straight onto a fern, and
+        // both read as a grass growing on itself.
+        let mut moss = 0;
+        for seed in [1337u32, 42, 7] {
+            let gen = world_for(seed, Biome::Swamp);
+            for chunk in chunks_in(&gen, Biome::Swamp, 6) {
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        for y in 1..CHUNK_SIZE_Y {
+                            if chunk.get(lx, y, lz) != BLOCK_HANGING_MOSS {
+                                continue;
+                            }
+                            moss += 1;
+                            let under = chunk.get(lx, y - 1, lz);
+                            assert!(
+                                under != BLOCK_HANGING_MOSS && !is_cross(under),
+                                "moss at {lx},{y},{lz} of {:?} hangs onto {under}",
+                                chunk.pos
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(moss > 0, "no moss hangs in any swamp at all");
+    }
+}
+
+#[cfg(test)]
+mod dripstone_tests {
+    use super::*;
+    use crate::dripstone::{grows_from, hangs, is_dripstone};
+    use crate::types::{block_kind, BLOCK_STALACTITE, BLOCK_STALAGMITE};
+
+    /// A block of chunks with caves under lowland limestone in it, generated
+    /// once for every test here: a debug build takes seconds a chunk.
+    fn sample() -> &'static [Chunk] {
+        static SAMPLE: std::sync::OnceLock<Vec<Chunk>> = std::sync::OnceLock::new();
+        SAMPLE.get_or_init(|| {
+            let gen = WorldGen::new(2024);
+            (-3..3).flat_map(|cx| (-3..3).map(move |cz| (cx, cz))).map(|(cx, cz)| gen.generate_chunk(ChunkPos::new(cx, cz))).collect()
+        })
+    }
+
+    #[test]
+    fn caves_grow_stalactites_and_stalagmites() {
+        let (mut hanging, mut standing) = (0, 0);
+        for chunk in sample() {
+            for &block in chunk.blocks.iter() {
+                match block_kind(block) {
+                    BLOCK_STALACTITE => hanging += 1,
+                    BLOCK_STALAGMITE => standing += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(hanging > 0 && standing > 0, "{hanging} stalactites and {standing} stalagmites in thirty-six chunks");
+        // Most of the floor's spikes stand under a drip, so there are fewer
+        // of them than there are drips -- but not a handful.
+        assert!(standing * 4 >= hanging, "{standing} stalagmites under {hanging} stalactites: the drips land nowhere");
+    }
+
+    #[test]
+    fn no_dripstone_hangs_in_the_air_or_stands_on_anything_but_rock() {
+        for chunk in sample() {
+            for y in 1..CHUNK_SIZE_Y - 1 {
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let block = chunk.get(lx, y, lz);
+                        if !is_dripstone(block) {
+                            continue;
+                        }
+                        let root = if hangs(block) { chunk.get(lx, y + 1, lz) } else { chunk.get(lx, y - 1, lz) };
+                        assert!(grows_from(root), "{block:#x} at {lx},{y},{lz} of {:?} grows from {root:#x}", chunk.pos);
+                        assert!(crate::types::can_grow_on(block, root), "the collapse pass would take {block:#x} down");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dripstone_is_only_ever_underground() {
+        for chunk in sample() {
+            for y in 1..CHUNK_SIZE_Y - 1 {
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let block = chunk.get(lx, y, lz);
+                        if !is_dripstone(block) {
+                            continue;
+                        }
+                        assert!(y as i32 <= SEA_LEVEL - 4, "{block:#x} at {y}, where a cave is a hollow in a hill");
+                        // Rock somewhere straight over it: under a roof,
+                        // never under the open sky.
+                        let roofed = (y + 1..CHUNK_SIZE_Y).any(|up| is_rock(block_kind(chunk.get(lx, up, lz))));
+                        assert!(roofed, "{block:#x} at {lx},{y},{lz} of {:?} is under the sky", chunk.pos);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_limestone_roof_is_hung_with_more_dripstone_than_any_other_rock() {
+        // Per roof cell, so a sample with more stone than limestone in it
+        // does not decide the answer.
+        //
+        // **Its own, wider sample**: limestone is the lowland's upper rock, a
+        // few courses thick, and a cave under it is a find -- the shared
+        // block of chunks has a hundred such roof cells against thousands of
+        // stone. Several worlds are walked until both kinds are plentiful.
+        let (mut lime_roof, mut lime_hung, mut other_roof, mut other_hung) = (0u32, 0u32, 0u32, 0u32);
+        let chunks = [2024u32, 7, 42, 1337].into_iter().flat_map(|seed| {
+            let gen = WorldGen::new(seed);
+            (-5..5).flat_map(|cx| (-5..5).map(move |cz| (cx, cz))).map(move |(cx, cz)| gen.generate_chunk(ChunkPos::new(cx, cz)))
+        });
+        for chunk in chunks {
+            if lime_roof > 1000 && other_roof > 1000 {
+                break;
+            }
+            for y in (BEDROCK_TOP + 1) as usize..=(SEA_LEVEL - 4) as usize {
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let here = chunk.get(lx, y, lz);
+                        let above = chunk.get(lx, y + 1, lz);
+                        if !grows_from(above) || !(here == BLOCK_AIR || hangs(here)) {
+                            continue;
+                        }
+                        let hung = u32::from(hangs(here));
+                        if block_kind(above) == BLOCK_LIMESTONE {
+                            lime_roof += 1;
+                            lime_hung += hung;
+                        } else {
+                            other_roof += 1;
+                            other_hung += hung;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(lime_roof > 200 && other_roof > 200, "too few roofs to compare: {lime_roof} of limestone, {other_roof} of other rock");
+        let lime = f64::from(lime_hung) / f64::from(lime_roof);
+        let other = f64::from(other_hung) / f64::from(other_roof);
+        assert!(lime > other * 2.0, "limestone {lime:.3} a roof cell against {other:.3} for the rest");
+    }
+}

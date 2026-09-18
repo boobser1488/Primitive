@@ -1,0 +1,45 @@
+// The greeter mod: a worked example of the native mod API.
+//
+// RON rather than TOML, and the reason is `settings` below: a mod
+// declares values whose types the host does not know, and RON is a
+// notation with types in it. See `primitive_modapi::manifest`.
+(
+    name: "greeter",
+    version: "1.0.0",
+
+    // The API this library was built against, declared here as well as
+    // returned by the entry point. Declared here so the server can
+    // refuse an incompatible mod **without loading its code** -- opening
+    // a library runs its initialisers, and a mod built against a
+    // different major version of the contract is exactly the one you do
+    // not want to have run anything before you find out.
+    //
+    // It said 1.0 until 2.0, and nothing this mod calls changed. What
+    // changed is what `PlayerVitals::temperature_c` meant; see the note
+    // beside `primitive_modapi::API_VERSION` for why that is a major
+    // rather than something a mod is left to notice on its own.
+    api: (major: 2, minor: 0),
+
+    description: "Greets arrivals, counts them, and keeps the bedrock where it is",
+    authors: ["Primitive"],
+    enabled: true,
+
+    // `Auto` works out the filename from the mod's name and the platform
+    // it is running on: greeter.dll, libgreeter.so, libgreeter.dylib.
+    // A mod ships one library per platform and they are named
+    // differently; a manifest that spelled one out would be wrong on two
+    // platforms out of three.
+    library: Auto,
+
+    dependencies: [],
+    load_after: [],
+    resources: [],
+
+    // Whatever the mod wants to configure, in the mod's own vocabulary.
+    // The host carries these across intact and has no opinion about
+    // them.
+    settings: {
+        "greeting": Text("welcome to the world"),
+        "guard_bedrock": Bool(true),
+    },
+)

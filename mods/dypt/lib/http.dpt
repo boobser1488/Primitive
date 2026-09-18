@@ -1,0 +1,738 @@
+// http — запросы к сети на dypt.
+//
+// Подключение:
+//     import "http" as http
+//     ответ = http.fetch("https://example.com")
+//     print(ответ["status"])
+//     print(ответ["body"])
+//
+// Работа идёт через wininet.dll — ту же библиотеку, которой пользуется
+// проводник Windows. Отсюда и её свойства: https работает сразу, никаких
+// сертификатов ставить не нужно, настройки прокси берутся системные.
+// Windows обязательна; на другой ОС модуль не подключится.
+//
+// Ответ — словарь:
+//     ok       — true, если запрос дошёл и код ответа меньше 400
+//     status   — код ответа, 0 при неудаче на уровне соединения
+//     headers  — словарь заголовков, имена приведены к строчным буквам
+//     body     — тело ответа строкой (считается как UTF-8)
+//     error    — пояснение к неудаче, иначе пустая строка
+//     url      — тот адрес, по которому ходили
+//
+// Тело собирается по байту, поэтому мегабайтные ответы читаются заметно
+// медленнее самой передачи. Файлы качайте через download: он пишет прямо
+// из приёмного буфера в файл, не переводя данные в строку.
+
+import "crypto" as hcrypto
+import "json" as hjson
+
+extern "wininet.dll" {
+    function InternetOpenA(agent: string, вид: int, proxy: int, обход: int, flags: int): int
+    function InternetConnectA(net: int, host: string, port: int, имя: int, пароль: int, служба: int, flags: int, ctx: int): int
+    function InternetSetOptionA(h: int, option: int, buf: int, len: int): int
+    function InternetCloseHandle(h: int): int
+    function InternetReadFile(req: int, buf: int, сколько: int, прочитано: int): int
+    function HttpOpenRequestA(conn: int, метод: string, путь: string, версия: int, откуда: int, виды: int, flags: int, ctx: int): int
+    function HttpSendRequestA(req: int, заголовки: int, длина: int, тело: int, длина_тела: int): int
+    function HttpQueryInfoA(req: int, что: int, buf: int, len: int, номер: int): int
+}
+
+extern "kernel32.dll" {
+    function GetLastError(): int
+    function CreateFileW(имя: int, доступ: int, общий: int, охрана: int, как: int, свойства: int, образец: int): int
+    function WriteFile(файл: int, buf: int, сколько: int, записано: int, нахлёст: int): int
+    function CloseHandle(h: int): int
+}
+
+// Значения из wininet.h — числами, потому что шестнадцатеричной записи
+// в языке нет.
+_H_RELOAD = 2147483648
+_H_NO_CACHE_WRITE = 67108864
+_H_NO_UI = 512
+_H_SECURE = 8388608
+_H_IGNORE_CN = 4096
+_H_IGNORE_DATE = 8192
+_H_QUERY_NUMBER = 536870912
+
+_h_agent = "dypt/1.0"
+_h_timeout = 30000
+_h_insecure = false
+_h_last_error = ""
+
+/// Как программа представляется службе (заголовок User-Agent).
+function set_agent(имя) {
+    _h_agent = имя
+    return null
+}
+
+/// Сколько ждать соединения, отправки и ответа — в миллисекундах.
+function set_timeout(мс) {
+    _h_timeout = мс
+    return null
+}
+
+/// Не проверять имя и срок в сертификате. Нужно для служб с самодельным
+/// сертификатом — и только для них: с этим ключом подслушать разговор
+/// становится возможно.
+function set_insecure(да) {
+    _h_insecure = да
+    return null
+}
+
+/// Пояснение к последней неудаче.
+function last_error() {
+    return _h_last_error
+}
+
+// ------------------------------------------------------------------ адрес
+
+/// Разбор адреса: словарь со scheme, host, port, path и secure.
+function parse_url(url) {
+    остаток = url
+    схема = "http"
+    защита = false
+    if _h_starts(остаток, "https://") {
+        схема = "https"
+        защита = true
+        остаток = _h_after(остаток, 8)
+    } elif _h_starts(остаток, "http://") {
+        остаток = _h_after(остаток, 7)
+    }
+    косая = _h_find(остаток, "/")
+    узел = остаток
+    путь = "/"
+    if косая >= 0 {
+        узел = _h_cut(остаток, 0, косая)
+        путь = _h_after(остаток, косая)
+    }
+    порт = 80
+    if защита {
+        порт = 443
+    }
+    двоеточие = _h_find(узел, ":")
+    if двоеточие >= 0 {
+        // Порт нужен целым: tonumber отдаёт дробное, а его нельзя
+        // передать во внешний вызов доводом.
+        число = _h_int(_h_after(узел, двоеточие + 1))
+        узел = _h_cut(узел, 0, двоеточие)
+        if число != null {
+            порт = число
+        }
+    }
+    return {"scheme": схема, "host": узел, "port": порт, "path": путь, "secure": защита}
+}
+
+/// Знаки, которые нельзя ставить в адрес, — заменяются на %XX.
+function url_encode(s) {
+    байты = hcrypto.utf8_bytes(s)
+    цифры = "0123456789ABCDEF"
+    out = ""
+    i = 0
+    n = length(байты)
+    while i < n {
+        b = байты[i]
+        if (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 45 or b == 46 or b == 95 or b == 126 {
+            out = out + chr(b)
+        } else {
+            out = out + "%" + цифры[b / 16] + цифры[b % 16]
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// Обратное превращение: %XX и «+» становятся знаками.
+function url_decode(s) {
+    байты = []
+    n = length(s)
+    i = 0
+    while i < n {
+        c = s[i]
+        if c == "%" and i + 2 < n {
+            пара = hcrypto.hex_decode(s[i + 1] + s[i + 2])
+            if пара == null {
+                push(байты, ord(c))
+                i = i + 1
+            } else {
+                push(байты, пара[0])
+                i = i + 3
+            }
+        } elif c == "+" {
+            push(байты, 32)
+            i = i + 1
+        } else {
+            куски = hcrypto.utf8_bytes(c)
+            k = 0
+            while k < length(куски) {
+                push(байты, куски[k])
+                k = k + 1
+            }
+            i = i + 1
+        }
+    }
+    return hcrypto.utf8_text(байты)
+}
+
+/// Словарь в строку запроса: {"q": "кто", "n": 2} — «q=%D0%BA%D1%82%D0%BE&n=2».
+function query_string(поля) {
+    out = ""
+    имена = keys(поля)
+    i = 0
+    while i < length(имена) {
+        if i > 0 {
+            out = out + "&"
+        }
+        out = out + url_encode(имена[i]) + "=" + url_encode("" + поля[имена[i]])
+        i = i + 1
+    }
+    return out
+}
+
+/// Заголовок Authorization для входа по имени и паролю.
+function basic_auth(имя, пароль) {
+    return "Basic " + hcrypto.base64_encode(hcrypto.utf8_bytes(имя + ":" + пароль))
+}
+
+// ------------------------------------------------------------- сам запрос
+
+/// Запрос любым способом. headers — словарь или null, body — строка или null.
+function request(метод, url, headers, body) {
+    адрес = parse_url(url)
+    ответ = {"ok": false, "status": 0, "headers": {}, "body": "", "error": "", "url": url}
+    if адрес["host"] == "" {
+        ответ["error"] = "в адресе нет узла"
+        _h_last_error = ответ["error"]
+        return ответ
+    }
+
+    net = InternetOpenA(_h_agent, 0, 0, 0, 0)
+    if net == 0 {
+        return _h_fail(ответ, "не удалось начать работу с сетью")
+    }
+    _h_set_timeouts(net)
+
+    conn = InternetConnectA(net, адрес["host"], адрес["port"], 0, 0, 3, 0, 0)
+    if conn == 0 {
+        InternetCloseHandle(net)
+        return _h_fail(ответ, "не удалось соединиться с " + адрес["host"])
+    }
+
+    флаги = _H_RELOAD + _H_NO_CACHE_WRITE + _H_NO_UI
+    if адрес["secure"] {
+        флаги = флаги + _H_SECURE
+        if _h_insecure {
+            флаги = флаги + _H_IGNORE_CN + _H_IGNORE_DATE
+        }
+    }
+    req = HttpOpenRequestA(conn, метод, адрес["path"], 0, 0, 0, флаги, 0)
+    if req == 0 {
+        InternetCloseHandle(conn)
+        InternetCloseHandle(net)
+        return _h_fail(ответ, "не удалось составить запрос")
+    }
+
+    строка_заголовков = _h_headers_text(headers)
+    тело_буфер = 0
+    длина_тела = 0
+    if body != null and body != "" {
+        байты = hcrypto.utf8_bytes(body)
+        длина_тела = length(байты)
+        тело_буфер = raw_alloc(длина_тела)
+        i = 0
+        while i < длина_тела {
+            raw_set8(тело_буфер, i, байты[i])
+            i = i + 1
+        }
+    }
+
+    ушло = 0
+    if строка_заголовков == "" {
+        ушло = HttpSendRequestA(req, 0, 0, тело_буфер, длина_тела)
+    } else {
+        ушло = _h_send_with_headers(req, строка_заголовков, тело_буфер, длина_тела)
+    }
+    if тело_буфер != 0 {
+        raw_free(тело_буфер)
+    }
+    if ушло == 0 {
+        код = GetLastError()
+        InternetCloseHandle(req)
+        InternetCloseHandle(conn)
+        InternetCloseHandle(net)
+        return _h_fail(ответ, _h_error_text(код))
+    }
+
+    ответ["status"] = _h_status(req)
+    ответ["headers"] = _h_headers(req)
+    if метод != "HEAD" {
+        ответ["body"] = hcrypto.utf8_text(_h_read_body(req))
+    }
+    ответ["ok"] = ответ["status"] > 0 and ответ["status"] < 400
+    InternetCloseHandle(req)
+    InternetCloseHandle(conn)
+    InternetCloseHandle(net)
+    _h_last_error = ответ["error"]
+    return ответ
+}
+
+/// GET по адресу.
+function fetch(url) {
+    return request("GET", url, null, null)
+}
+
+/// GET с заголовками.
+function fetch_with(url, headers) {
+    return request("GET", url, headers, null)
+}
+
+/// GET, из которого нужно только тело; null, если запрос не удался.
+function get_text(url) {
+    ответ = fetch(url)
+    if ответ["ok"] {
+        return ответ["body"]
+    }
+    return null
+}
+
+/// GET с разбором ответа как JSON; null, если не вышло ни то, ни другое.
+function get_json(url) {
+    ответ = request("GET", url, {"Accept": "application/json"}, null)
+    if ответ["ok"] == false {
+        return null
+    }
+    return hjson.decode(ответ["body"])
+}
+
+/// POST с указанием вида тела.
+function post(url, body, вид) {
+    return request("POST", url, {"Content-Type": вид}, body)
+}
+
+/// POST значением dypt, переведённым в JSON. Ответ тоже разбирается как
+/// JSON, если служба его так отдала.
+function post_json(url, значение) {
+    ответ = request("POST", url, {"Content-Type": "application/json", "Accept": "application/json"}, hjson.encode(значение))
+    ответ["json"] = null
+    if ответ["body"] != "" {
+        try {
+            ответ["json"] = hjson.decode(ответ["body"])
+        } catch (e) {
+            ответ["json"] = null
+        }
+    }
+    return ответ
+}
+
+/// POST полями формы: словарь уходит как application/x-www-form-urlencoded.
+function post_form(url, поля) {
+    return request("POST", url, {"Content-Type": "application/x-www-form-urlencoded"}, query_string(поля))
+}
+
+/// PUT с указанием вида тела.
+function put(url, body, вид) {
+    return request("PUT", url, {"Content-Type": вид}, body)
+}
+
+/// PATCH с указанием вида тела.
+function patch(url, body, вид) {
+    return request("PATCH", url, {"Content-Type": вид}, body)
+}
+
+/// DELETE по адресу.
+function delete(url) {
+    return request("DELETE", url, null, null)
+}
+
+/// HEAD: только заголовки, без тела.
+function head(url) {
+    return request("HEAD", url, null, null)
+}
+
+/// Заголовок ответа по имени; имя можно писать как угодно.
+function header(ответ, имя) {
+    h = ответ["headers"]
+    ключ = lower(имя)
+    if has(h, ключ) {
+        return h[ключ]
+    }
+    return null
+}
+
+/// Сохранение по адресу прямо в файл: данные идут из приёмного буфера
+/// в файл, минуя строки, поэтому картинки и архивы доходят целыми.
+/// Ответ — число записанных байтов или -1.
+function download(url, путь) {
+    адрес = parse_url(url)
+    net = InternetOpenA(_h_agent, 0, 0, 0, 0)
+    if net == 0 {
+        _h_last_error = "не удалось начать работу с сетью"
+        return -1
+    }
+    _h_set_timeouts(net)
+    conn = InternetConnectA(net, адрес["host"], адрес["port"], 0, 0, 3, 0, 0)
+    if conn == 0 {
+        InternetCloseHandle(net)
+        _h_last_error = "не удалось соединиться с " + адрес["host"]
+        return -1
+    }
+    флаги = _H_RELOAD + _H_NO_CACHE_WRITE + _H_NO_UI
+    if адрес["secure"] {
+        флаги = флаги + _H_SECURE
+        if _h_insecure {
+            флаги = флаги + _H_IGNORE_CN + _H_IGNORE_DATE
+        }
+    }
+    req = HttpOpenRequestA(conn, "GET", адрес["path"], 0, 0, 0, флаги, 0)
+    if req == 0 {
+        InternetCloseHandle(conn)
+        InternetCloseHandle(net)
+        _h_last_error = "не удалось составить запрос"
+        return -1
+    }
+    if HttpSendRequestA(req, 0, 0, 0, 0) == 0 {
+        код = GetLastError()
+        InternetCloseHandle(req)
+        InternetCloseHandle(conn)
+        InternetCloseHandle(net)
+        _h_last_error = _h_error_text(код)
+        return -1
+    }
+    код_ответа = _h_status(req)
+    if код_ответа >= 400 {
+        InternetCloseHandle(req)
+        InternetCloseHandle(conn)
+        InternetCloseHandle(net)
+        _h_last_error = "ответ " + код_ответа + " " + status_text(код_ответа)
+        return -1
+    }
+    широкий = _h_wide(путь)
+    файл = CreateFileW(широкий, 1073741824, 0, 0, 2, 128, 0)
+    raw_free(широкий)
+    if файл == -1 {
+        InternetCloseHandle(req)
+        InternetCloseHandle(conn)
+        InternetCloseHandle(net)
+        _h_last_error = "не удалось создать файл " + путь
+        return -1
+    }
+    буфер = raw_alloc(32768)
+    счётчик = raw_alloc(4)
+    записано = raw_alloc(4)
+    всего = 0
+    while true {
+        raw_set32(счётчик, 0, 0)
+        if InternetReadFile(req, буфер, 32768, счётчик) == 0 {
+            всего = -1
+            _h_last_error = "обрыв при чтении"
+            break
+        }
+        сколько = raw_get32(счётчик, 0)
+        if сколько == 0 {
+            break
+        }
+        WriteFile(файл, буфер, сколько, записано, 0)
+        всего = всего + сколько
+    }
+    raw_free(буфер)
+    raw_free(счётчик)
+    raw_free(записано)
+    CloseHandle(файл)
+    InternetCloseHandle(req)
+    InternetCloseHandle(conn)
+    InternetCloseHandle(net)
+    return всего
+}
+
+/// Словесное пояснение к коду ответа.
+function status_text(код) {
+    if код == 200 { return "OK" }
+    if код == 201 { return "создано" }
+    if код == 202 { return "принято" }
+    if код == 204 { return "без содержимого" }
+    if код == 301 { return "переехало навсегда" }
+    if код == 302 { return "переехало временно" }
+    if код == 304 { return "не изменилось" }
+    if код == 307 { return "временно по другому адресу" }
+    if код == 308 { return "навсегда по другому адресу" }
+    if код == 400 { return "негодный запрос" }
+    if код == 401 { return "нужен вход" }
+    if код == 403 { return "запрещено" }
+    if код == 404 { return "не найдено" }
+    if код == 405 { return "способ не поддержан" }
+    if код == 408 { return "запрос не дождались" }
+    if код == 409 { return "разлад" }
+    if код == 413 { return "слишком большой запрос" }
+    if код == 415 { return "вид тела не поддержан" }
+    if код == 429 { return "слишком часто" }
+    if код == 500 { return "ошибка на стороне службы" }
+    if код == 502 { return "плохой ответ от посредника" }
+    if код == 503 { return "служба недоступна" }
+    if код == 504 { return "посредник не дождался" }
+    return "код " + код
+}
+
+// ------------------------------------------------------------ внутреннее
+
+function _h_fail(ответ, пояснение) {
+    ответ["error"] = пояснение
+    _h_last_error = пояснение
+    return ответ
+}
+
+function _h_set_timeouts(net) {
+    буфер = raw_alloc(4)
+    raw_set32(буфер, 0, _h_timeout)
+    InternetSetOptionA(net, 2, буфер, 4)
+    InternetSetOptionA(net, 5, буфер, 4)
+    InternetSetOptionA(net, 6, буфер, 4)
+    raw_free(буфер)
+    return null
+}
+
+function _h_headers_text(headers) {
+    if headers == null {
+        return ""
+    }
+    имена = keys(headers)
+    out = ""
+    i = 0
+    while i < length(имена) {
+        out = out + имена[i] + ": " + headers[имена[i]] + "\r\n"
+        i = i + 1
+    }
+    return out
+}
+
+function _h_send_with_headers(req, строка, тело, длина_тела) {
+    return HttpSendRequestA(req, _h_c_string(строка), byte_length(строка), тело, длина_тела)
+}
+
+// Строка dypt отдаётся во внешнюю библиотеку сама, но HttpSendRequestA
+// ждёт указатель и длину порознь, поэтому строка кладётся в свой буфер.
+_h_scratch = 0
+_h_scratch_size = 0
+
+function _h_c_string(s) {
+    байты = hcrypto.utf8_bytes(s)
+    n = length(байты)
+    if _h_scratch_size < n + 1 {
+        if _h_scratch != 0 {
+            raw_free(_h_scratch)
+        }
+        _h_scratch = raw_alloc(n + 64)
+        _h_scratch_size = n + 64
+    }
+    i = 0
+    while i < n {
+        raw_set8(_h_scratch, i, байты[i])
+        i = i + 1
+    }
+    raw_set8(_h_scratch, n, 0)
+    return _h_scratch
+}
+
+function _h_status(req) {
+    буфер = raw_alloc(4)
+    длина = raw_alloc(4)
+    raw_set32(длина, 0, 4)
+    raw_set32(буфер, 0, 0)
+    код = 0
+    if HttpQueryInfoA(req, 19 + _H_QUERY_NUMBER, буфер, длина, 0) != 0 {
+        код = raw_get32(буфер, 0)
+    }
+    raw_free(буфер)
+    raw_free(длина)
+    return код
+}
+
+function _h_headers(req) {
+    размер = 8192
+    буфер = raw_alloc(размер)
+    длина = raw_alloc(4)
+    raw_set32(длина, 0, размер)
+    out = {}
+    вышло = HttpQueryInfoA(req, 22, буфер, длина, 0)
+    if вышло == 0 {
+        // Не поместилось: wininet кладёт в длину нужный размер, берём его.
+        нужно = raw_get32(длина, 0)
+        if нужно > размер and нужно < 1048576 {
+            raw_free(буфер)
+            буфер = raw_alloc(нужно + 1)
+            raw_set32(длина, 0, нужно + 1)
+            вышло = HttpQueryInfoA(req, 22, буфер, длина, 0)
+        }
+    }
+    if вышло != 0 {
+        n = raw_get32(длина, 0)
+        байты = []
+        i = 0
+        while i < n {
+            push(байты, raw_get8(буфер, i))
+            i = i + 1
+        }
+        out = _h_parse_headers(hcrypto.utf8_text(байты))
+    }
+    raw_free(буфер)
+    raw_free(длина)
+    return out
+}
+
+function _h_parse_headers(текст) {
+    out = {}
+    строки = split(текст, "\r\n")
+    i = 0
+    while i < length(строки) {
+        строка = строки[i]
+        i = i + 1
+        двоеточие = _h_find(строка, ":")
+        if двоеточие <= 0 {
+            continue
+        }
+        имя = lower(_h_cut(строка, 0, двоеточие))
+        значение = _h_trim(_h_after(строка, двоеточие + 1))
+        if has(out, имя) {
+            out[имя] = out[имя] + ", " + значение
+        } else {
+            out[имя] = значение
+        }
+    }
+    return out
+}
+
+function _h_read_body(req) {
+    буфер = raw_alloc(32768)
+    счётчик = raw_alloc(4)
+    байты = []
+    while true {
+        raw_set32(счётчик, 0, 0)
+        if InternetReadFile(req, буфер, 32768, счётчик) == 0 {
+            break
+        }
+        n = raw_get32(счётчик, 0)
+        if n == 0 {
+            break
+        }
+        i = 0
+        while i < n {
+            push(байты, raw_get8(буфер, i))
+            i = i + 1
+        }
+    }
+    raw_free(буфер)
+    raw_free(счётчик)
+    return байты
+}
+
+function _h_error_text(код) {
+    if код == 12002 { return "не дождались ответа" }
+    if код == 12007 { return "узел не найден" }
+    if код == 12029 { return "не удалось соединиться" }
+    if код == 12030 { return "соединение оборвано" }
+    if код == 12031 { return "соединение сброшено" }
+    if код == 12045 { return "сертификат не признан" }
+    if код == 12055 { return "ошибка проверки сертификата" }
+    if код == 12157 { return "ошибка защищённого канала" }
+    if код == 12175 { return "ошибка защиты соединения" }
+    return "ошибка сети " + код
+}
+
+// Мелкие действия над строками — чтобы модуль не тянул за собой ещё один.
+
+function _h_starts(s, начало) {
+    n = length(начало)
+    if length(s) < n {
+        return false
+    }
+    return _h_cut(s, 0, n) == начало
+}
+
+function _h_cut(s, начало, конец) {
+    out = ""
+    i = начало
+    n = length(s)
+    if конец < n {
+        n = конец
+    }
+    while i < n {
+        out = out + s[i]
+        i = i + 1
+    }
+    return out
+}
+
+function _h_after(s, место) {
+    return _h_cut(s, место, length(s))
+}
+
+function _h_find(s, что) {
+    n = length(s)
+    m = length(что)
+    i = 0
+    while i + m <= n {
+        if _h_cut(s, i, i + m) == что {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Имя файла для Windows: у CreateFileA знаки читаются по кодовой
+// странице, а не как UTF-8, поэтому кириллица в пути до него не
+// доходит. Широкий вариант принимает UTF-16 — его и складываем.
+function _h_wide(s) {
+    n = length(s)
+    буфер = raw_alloc(n * 4 + 4)
+    место = 0
+    i = 0
+    while i < n {
+        код = ord(s[i])
+        if код >= 65536 {
+            остаток = код - 65536
+            место = _h_put16(буфер, место, 55296 + shr(остаток, 10))
+            место = _h_put16(буфер, место, 56320 + and(остаток, 1023))
+        } else {
+            место = _h_put16(буфер, место, код)
+        }
+        i = i + 1
+    }
+    _h_put16(буфер, место, 0)
+    return буфер
+}
+
+function _h_put16(буфер, место, значение) {
+    raw_set8(буфер, место, and(значение, 255))
+    raw_set8(буфер, место + 1, and(shr(значение, 8), 255))
+    return место + 2
+}
+
+function _h_int(s) {
+    n = length(s)
+    if n == 0 {
+        return null
+    }
+    v = 0
+    i = 0
+    while i < n {
+        k = ord(s[i])
+        if k < 48 or k > 57 {
+            return null
+        }
+        v = v * 10 + (k - 48)
+        i = i + 1
+    }
+    return v
+}
+
+function _h_trim(s) {
+    n = length(s)
+    начало = 0
+    while начало < n and (s[начало] == " " or s[начало] == "\t") {
+        начало = начало + 1
+    }
+    конец = n
+    while конец > начало and (s[конец - 1] == " " or s[конец - 1] == "\t" or s[конец - 1] == "\r") {
+        конец = конец - 1
+    }
+    return _h_cut(s, начало, конец)
+}

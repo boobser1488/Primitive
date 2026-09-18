@@ -260,7 +260,9 @@ mod tests {
         let mut mechanics = Mechanics::new();
         mechanics.register(Box::new(FallingBlocks::new()));
         mechanics.on_block_changed(0, 6, 0);
-        assert_eq!(mechanics.pending(), vec![("falling blocks", 2)]);
+        // The cell, the cell above it, and the cell again as a possible
+        // hole with rock over it -- see `FallingBlocks::on_block_changed`.
+        assert_eq!(mechanics.pending(), vec![("falling blocks", 3)]);
 
         for _ in 0..200 {
             mechanics.step(&world, 1.0 / 20.0);

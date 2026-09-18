@@ -1,5 +1,29 @@
-© 2026 Primitive. All Rights Reserved.
+Primitive is licensed in two halves, and they say different things.
 
-All textures, sprites, models, sounds, and other assets in this project
-are proprietary and may not be copied, modified, redistributed, or used
-in other projects without explicit written permission from Primitive.
+| | licence | in one line |
+|---|---|---|
+| **Code** | Apache License 2.0 — `LICENSE-APACHE` | take it, keep the notice, name the author |
+| **Art** | all rights reserved — `LICENSE-ASSETS` | do not take it |
+
+**The code** — `primitive_shared/`, `primitive_server/`, `primitive_client/`,
+`primitive_modapi/`, `mods/`, the build and packaging scripts — is yours to
+use, change and ship, in free work and in paid work. What Apache 2.0 asks
+for is that you keep the licence and the `NOTICE` file with it and say what
+you changed; what this project asks on top of that is nothing.
+
+**The art** — textures, models (both the `.bbmodel` files and the shapes
+written in the source as numbers), the font, the icons, the music and the
+name — stays the author's own and may not be copied into another project.
+
+A fork with the code and its own art is a new game, and that is what the
+code licence is for. A fork with the same art is this game wearing someone
+else's name, which is what the art licence is against.
+
+The sound recordings are neither: they are Creative Commons Zero, listed
+with their sources in `assets/sounds/SOURCES.md`.
+
+---
+
+Код — Apache 2.0 (`LICENSE-APACHE`): бери, оставь уведомление, укажи
+автора. Картинки и модели — `LICENSE-ASSETS`: не бери. Звуки — CC0,
+источники в `assets/sounds/SOURCES.md`.

@@ -18,7 +18,11 @@
 //! binding that silently does nothing.
 
 use serde::{Deserialize, Serialize};
-use winit::keyboard::KeyCode;
+// The game's own key type, not the window library's. Aliased to the
+// name the table below already used, because every entry means exactly
+// what it did before -- a physical position -- and renaming sixty rows
+// to say so would be churn. See `crate::platform::Key`.
+use crate::platform::Key as KeyCode;
 
 use crate::ui::lang::{Language, Msg};
 
@@ -35,16 +39,50 @@ pub enum Action {
     /// whole block. See `types::layer_placement`.
     Inventory,
     Drop,
+    /// Eat whatever is in the selected hotbar slot.
+    ///
+    /// A key rather than a gesture on the food itself, and that is the
+    /// decision worth writing down. The alternatives were right-click
+    /// while holding it -- which collides with placing a block, and
+    /// every food here is unplaceable but *some future one might not
+    /// be* -- and a button on the inventory screen, which means opening
+    /// a screen to do the most ordinary thing in the game. A key you
+    /// press while walking is what eating actually is.
+    Eat,
     Respawn,
     ToggleFog,
     ToggleStats,
     /// Borderless fullscreen, on and off.
     ToggleFullscreen,
+    /// The journal, open at the map.
+    Map,
+    /// The journal, open at the recipe book.
+    ///
+    /// Two keys for one screen, because the two pages are asked for by
+    /// two different questions -- "where am I" and "how do I make this"
+    /// -- and a player should not have to open the map to reach the book.
+    /// Tab turns between them once either is open.
+    Recipes,
+    /// The journal, open at the give menu.
+    ///
+    /// Its own key for the same reason the book has one: a screen only
+    /// reachable by opening another and turning the page is a screen
+    /// nobody opens. See `ui::give_screen` for why the menu is a page of
+    /// the journal at all.
+    Give,
+    /// The whole heads-up display off and on: hotbar, gauges, notices.
+    ///
+    /// Tab, and outside the journal only -- inside it Tab turns the page, as
+    /// it always has. A player taking a picture, or just looking at the
+    /// world, wants the world with nothing over it; a key that does the same
+    /// thing the pause menu would need three clicks for is what the request
+    /// ("скрытие и открытие hud на tab") was for.
+    ToggleHud,
 }
 
 impl Action {
     /// Every action, in the order the controls screen lists them.
-    pub const ALL: [Action; 12] = [
+    pub const ALL: [Action; 17] = [
         Action::Forward,
         Action::Back,
         Action::Left,
@@ -53,10 +91,15 @@ impl Action {
         Action::Sprint,
         Action::Inventory,
         Action::Drop,
+        Action::Eat,
         Action::Respawn,
         Action::ToggleFog,
         Action::ToggleStats,
         Action::ToggleFullscreen,
+        Action::Map,
+        Action::Recipes,
+        Action::Give,
+        Action::ToggleHud,
     ];
 
     /// What the controls screen calls this action, in the language the
@@ -77,10 +120,15 @@ impl Action {
             Action::Sprint => Msg::Sprint,
             Action::Inventory => Msg::Inventory,
             Action::Drop => Msg::DropItem,
+            Action::Eat => Msg::Eat,
             Action::Respawn => Msg::Respawn,
             Action::ToggleFog => Msg::ToggleFog,
             Action::ToggleStats => Msg::ToggleStats,
             Action::ToggleFullscreen => Msg::Fullscreen,
+            Action::Map => Msg::MapTab,
+            Action::Recipes => Msg::RecipesTab,
+            Action::Give => Msg::GiveTab,
+            Action::ToggleHud => Msg::ToggleHud,
         }
     }
 
@@ -95,10 +143,15 @@ impl Action {
             Action::Sprint => "sprint",
             Action::Inventory => "inventory",
             Action::Drop => "drop",
+            Action::Eat => "eat",
             Action::Respawn => "respawn",
             Action::ToggleFog => "toggle_fog",
             Action::ToggleStats => "toggle_stats",
             Action::ToggleFullscreen => "toggle_fullscreen",
+            Action::Map => "map",
+            Action::Recipes => "recipes",
+            Action::Give => "give",
+            Action::ToggleHud => "toggle_hud",
         }
     }
 
@@ -112,10 +165,22 @@ impl Action {
             Action::Sprint => KeyCode::ShiftLeft,
             Action::Inventory => KeyCode::KeyI,
             Action::Drop => KeyCode::KeyQ,
+            // Next to the drop key, because the two are the same
+            // gesture aimed at opposite ends: get rid of this, or use
+            // it up.
+            Action::Eat => KeyCode::KeyE,
             Action::Respawn => KeyCode::KeyR,
             Action::ToggleFog => KeyCode::KeyF,
             Action::ToggleStats => KeyCode::F3,
             Action::ToggleFullscreen => KeyCode::F11,
+            // M for the map because every game with one uses it, and B
+            // for the book beside it on the bottom row.
+            Action::Map => KeyCode::KeyM,
+            Action::Recipes => KeyCode::KeyB,
+            // G for give, which is the word the command has always used
+            // and the letter nothing else on the board wanted.
+            Action::Give => KeyCode::KeyG,
+            Action::ToggleHud => KeyCode::Tab,
         }
     }
 }
@@ -268,6 +333,20 @@ pub fn is_bindable(key: KeyCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_bindable_key_is_one_a_backend_can_actually_produce() {
+        // The failure this guards against: a row on the controls screen
+        // offering a key that no platform backend ever emits, so the
+        // binding takes and then never fires. The table below is the
+        // game's promise; the backend has to be able to keep it.
+        for (key, label) in KEYS {
+            assert!(
+                crate::platform::winit_backend::can_produce(*key),
+                "{label} ({key:?}) is offered as a binding but winit never reports it",
+            );
+        }
+    }
 
     #[test]
     fn the_defaults_are_the_layout_the_game_shipped_with() {

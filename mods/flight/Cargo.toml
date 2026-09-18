@@ -1,0 +1,21 @@
+[package]
+name = "flight"
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0 AND LicenseRef-Primitive-Assets"
+publish = false
+
+# A C dynamic library, like every native mod -- see the note in
+# `mods/greeter/Cargo.toml`. `flight.dll` on Windows, `libflight.so` on
+# Linux, `libflight.dylib` on macOS.
+[lib]
+name = "flight"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+# The contract, and nothing else. This mod does not link the server, the
+# shared crate, or anything the server happens to use -- if it did, "the
+# API is stable" would be a promise about a hundred thousand lines of
+# game code instead of about one file.
+primitive_modapi = { path = "../../primitive_modapi", default-features = false }

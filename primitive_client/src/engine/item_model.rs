@@ -43,7 +43,15 @@ use crate::engine::mesh::pack_light;
 /// One texel: enough to read as an object rather than as a decal,
 /// little enough to still read as flat. Thicker and a dropped twig
 /// looks like a plank of itself; thinner and it disappears edge-on.
-const THICKNESS: f32 = 1.0 / 16.0;
+///
+/// Public because the flame on a held torch is drawn at the *middle* of
+/// this slab and then slid toward the eye far enough to clear the front
+/// of it -- see `hand::drawn_in_front_of_the_plate`, which reads this
+/// through the transform rather than writing a number of its own. A
+/// second copy of it there would be a copy that could drift, and the
+/// drift would show as the fire and the fibre z-fighting through a
+/// swing.
+pub const THICKNESS: f32 = 1.0 / 16.0;
 
 /// A texel counts as part of the shape at or above this alpha. The same
 /// cutoff the shader uses, so what is modelled and what is drawn agree.
@@ -85,14 +93,21 @@ impl ItemVertex {
 
 /// One rectangle of the model, in the sprite's own space.
 ///
-/// x and y run -0.5..0.5 across the sprite, z is ±`THICKNESS`/2, and the
-/// face index is the terrain's, purely so the shader can pick a normal
-/// and light it the same way it lights everything else.
+/// x and y run -0.5..0.5 across the sprite and z is ±`THICKNESS`/2.
+///
+/// **No face index.** Every quad used to carry one -- the terrain's
+/// 0..5 -- and `append_transformed` wrote it into the light word for
+/// the shader to turn into a normal. That is correct exactly once, at
+/// the identity transform, and a dropped item spins: see the comment in
+/// `append_transformed` for what a whole world of items lit by a
+/// model-space normal looked like. The direction a rectangle points is
+/// a fact about where its corners ended up, so it is worked out there
+/// and nowhere else, and the winding below is the only thing that
+/// decides it.
 #[derive(Debug, Clone, Copy)]
 pub struct Quad {
     pub corners: [[f32; 3]; 4],
     pub uv: [[f32; 2]; 4],
-    pub face: u8,
 }
 
 /// A sprite with a thickness. Built once per texture at load.
@@ -102,6 +117,69 @@ pub struct ItemModel {
 }
 
 impl ItemModel {
+    /// How much of the picture the shape actually fills, as a fraction
+    /// of the sprite's own width and height.
+    ///
+    /// **The frame is not the object.** A model's coordinates run
+    /// -0.5..0.5 across the whole PNG, so scaling a model scales the
+    /// *frame* -- and how much of that frame the drawing occupies is a
+    /// decision the artist made about margins, not about how big the
+    /// thing is. Native copper is a ten-by-seven lump in a sixteen
+    /// square; a flint nodule is twelve by eleven; a handful of fibre
+    /// fills the width. Held at one scale they come out three different
+    /// sizes, and the largest of them was a slab across the corner of
+    /// the screen.
+    ///
+    /// So anything that wants a *thing* of a given size divides by this.
+    /// See `logic::hand::held_scale`, which is the caller that named it.
+    ///
+    /// `[0.0, 0.0]` for a model with no quads, which the texture loader
+    /// refuses to keep -- a picture with no opaque texels is drawn as a
+    /// cube instead.
+    pub fn silhouette(&self) -> [f32; 2] {
+        let (min, max) = self.drawn_box();
+        [max[0] - min[0], max[1] - min[1]]
+    }
+
+    /// The lowest drawn texel, in the sprite's own space.
+    ///
+    /// Negative, and how negative is again the artist's margin rather
+    /// than anything about the object: ash is drawn to the bottom edge
+    /// of its tile and a pick head floats in the middle of its own. Any
+    /// caller that has to make a thing *stand* on something has to know
+    /// this, because standing the frame on the ground buries the one and
+    /// hangs the other in mid-air. See `logic::entities`, which is
+    /// where both were photographed.
+    pub fn foot(&self) -> f32 {
+        self.drawn_box().0[1]
+    }
+
+    /// The rectangle the drawing occupies inside the frame: minimum and
+    /// maximum in x and y.
+    ///
+    /// Public because a spear is laid along it. `logic::hand` poses a
+    /// held spear by two points in the frame and needs the drawing's
+    /// own middle and its own length to do it -- `silhouette` gives the
+    /// second and threw away the first, and a pose built on the
+    /// *picture's* middle slides down its own axis by whatever margin
+    /// the artist left in the corner.
+    pub fn drawn_box(&self) -> ([f32; 2], [f32; 2]) {
+        if self.quads.is_empty() {
+            return ([0.0, 0.0], [0.0, 0.0]);
+        }
+        let mut min = [f32::MAX; 2];
+        let mut max = [f32::MIN; 2];
+        for quad in &self.quads {
+            for corner in &quad.corners {
+                for axis in 0..2 {
+                    min[axis] = min[axis].min(corner[axis]);
+                    max[axis] = max[axis].max(corner[axis]);
+                }
+            }
+        }
+        (min, max)
+    }
+
     /// How many triangles one of these costs to draw.
     #[cfg(test)]
     pub fn triangles(&self) -> usize {
@@ -207,6 +285,7 @@ impl ItemModel {
     /// edge-on it is a line, and an item that vanishes once a second
     /// would be worse than a cube.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))] // `append_tipped` at rest is this
     pub fn append(
         &self,
         vertices: &mut Vec<ItemVertex>,
@@ -230,6 +309,33 @@ impl ItemModel {
         self.append_transformed(vertices, indices, transform, layer, sky, block_light);
     }
 
+    /// Part way between standing and lying, so a dropped thing falls
+    /// over rather than switching.
+    ///
+    /// `tip` is 0 for upright and 1 for flat; everything between is a
+    /// quarter turn scaled, which is what the eye reads as the object
+    /// toppling. See `entities::tipped_over` for why it is not a
+    /// boolean any more.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_tipped(
+        &self,
+        vertices: &mut Vec<ItemVertex>,
+        indices: &mut Vec<u32>,
+        centre: [f32; 3],
+        scale: f32,
+        yaw: f32,
+        tip: f32,
+        layer: u32,
+        sky: u8,
+        block_light: u8,
+    ) {
+        let transform = Mat4::from_translation(Vec3::from_array(centre))
+            * Mat4::from_rotation_y(-yaw)
+            * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2 * tip.clamp(0.0, 1.0))
+            * Mat4::from_scale(Vec3::splat(scale));
+        self.append_transformed(vertices, indices, transform, layer, sky, block_light);
+    }
+
     /// The same, under any transform at all.
     ///
     /// Split out for the view model. A tool held in the hand is pitched,
@@ -249,11 +355,35 @@ impl ItemModel {
     ) {
         for quad in &self.quads {
             let base = vertices.len() as u32;
+            let corners = quad.corners.map(|corner| {
+                transform.transform_point3(Vec3::from_array(corner))
+            });
+            // **The direction the rectangle points after the transform,
+            // not the one it was cut with.** The shader turns whatever
+            // goes in the light word into a normal and a lambert term,
+            // and every quad used to carry the face it had in the
+            // sprite's own space -- so the shading was welded to the
+            // model. A dropped item spins, and every dropped item in the
+            // world was therefore lit by *which side of the plate you
+            // happened to be looking at* rather than by where it
+            // pointed: the front plate a fixed 0.55 of the sun and the
+            // back a fixed 0.35, for ever, however the thing turned. Two
+            // identical nodules a pace apart came out different
+            // brightnesses for no reason a player could see, and the one
+            // facing the sun was as often as not the dark one. The same
+            // fault as an animal whose shading does not change as it
+            // turns, and it survived for the same reason: nothing
+            // disappears, because this pass does not cull.
+            //
+            // Taken from the emitted geometry rather than by rotating an
+            // index, for the reason the rack's winding bug taught:
+            // arithmetic checked against its own arithmetic proves
+            // nothing, and the corners are what the rasteriser reads.
+            let face = nearest_face((corners[1] - corners[0]).cross(corners[2] - corners[1]));
             // Ambient occlusion 3 -- unoccluded. An item lying in the
             // world is surrounded by air by definition.
-            let light = pack_light(sky, block_light, 3, quad.face);
-            for (corner, uv) in quad.corners.iter().zip(quad.uv.iter()) {
-                let position = transform.transform_point3(Vec3::from_array(*corner));
+            let light = pack_light(sky, block_light, 3, face);
+            for (position, uv) in corners.iter().zip(quad.uv.iter()) {
                 vertices.push(ItemVertex {
                     position: position.to_array(),
                     uv: *uv,
@@ -262,6 +392,42 @@ impl ItemModel {
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
+    }
+}
+
+/// The face index whose normal is closest to `normal`.
+///
+/// Six directions is a coarse basis for a rotated quad, but it is the
+/// one the light word can hold -- see `mesh::pack_light` -- and the
+/// error it costs is a few percent of a lambert term on an object with
+/// no shadow to compare against. Widening the vertex to carry a real
+/// normal would cost twelve bytes per vertex to fix something nobody
+/// can see.
+///
+/// Face order is the mesher's: 0 +Y, 1 -Y, 2 +X, 3 -X, 4 +Z, 5 -Z.
+///
+/// Lives here rather than in `logic::hand`, where it was written, so
+/// that the two places a sprite model is turned into vertices snap to
+/// the axes by the same rule. Two copies of this is how the last
+/// face-normal bug in this file survived.
+pub fn nearest_face(normal: Vec3) -> u8 {
+    let [x, y, z] = normal.to_array();
+    if y.abs() >= x.abs() && y.abs() >= z.abs() {
+        if y >= 0.0 {
+            0
+        } else {
+            1
+        }
+    } else if x.abs() >= z.abs() {
+        if x >= 0.0 {
+            2
+        } else {
+            3
+        }
+    } else if z >= 0.0 {
+        4
+    } else {
+        5
     }
 }
 
@@ -323,18 +489,20 @@ fn flat_face(rect: Rect, width: usize, height: usize, front: bool) -> Quad {
     let (x1, y1) = to_local((rect.x1 + 1) as f32, (rect.y1 + 1) as f32, width, height);
     let z = if front { THICKNESS * 0.5 } else { -THICKNESS * 0.5 };
 
-    // Wound so the visible side faces outwards on both plates.
+    // Wound so the visible side faces outwards on both plates: the
+    // front one anticlockwise seen from +Z, the back one from -Z. The
+    // winding is now the only statement either of them makes about
+    // which way it points, so getting it backwards is a plate lit as
+    // its own reverse.
     if front {
         Quad {
             corners: [[x0, y1, z], [x1, y1, z], [x1, y0, z], [x0, y0, z]],
             uv: [[u0, v1], [u1, v1], [u1, v0], [u0, v0]],
-            face: 4, // +Z
         }
     } else {
         Quad {
             corners: [[x1, y1, z], [x0, y1, z], [x0, y0, z], [x1, y0, z]],
             uv: [[u1, v1], [u0, v1], [u0, v0], [u1, v0]],
-            face: 5, // -Z
         }
     }
 }
@@ -357,36 +525,33 @@ fn rim_face(rect: Rect, width: usize, height: usize, side: Side) -> Quad {
     // across the thickness. There is nothing else it could be: the
     // artist drew a picture, not a solid, and the edge of a stroke is
     // the colour of that stroke.
+    //
+    // **Each strip is wound to point out of the edge it stands on**:
+    // left at -X, right at +X, top at +Y, bottom at -Y. The top and
+    // bottom pair once read the other way round -- listed from back to
+    // front, which puts the geometric normal at -Y on the strip that
+    // stands on the top edge -- and every dropped sprite was lit with
+    // its top edge facing the ground and its bottom edge facing the
+    // sky. Nothing vanished, because the item pipeline does not cull,
+    // so the mistake could only ever be seen as shading, which is
+    // exactly the kind that survives. `turning_an_item_a_quarter_turn_    // changes_which_way_its_faces_point` pins all four by emission
+    // order.
     match side {
         Side::Left => Quad {
             corners: [[x0, y1, back], [x0, y1, front], [x0, y0, front], [x0, y0, back]],
             uv: [[u0, v1], [u1, v1], [u1, v0], [u0, v0]],
-            face: 3, // -X
         },
         Side::Right => Quad {
             corners: [[x1, y1, front], [x1, y1, back], [x1, y0, back], [x1, y0, front]],
             uv: [[u0, v1], [u1, v1], [u1, v0], [u0, v0]],
-            face: 2, // +X
         },
-        // **Wound the other way round than they read.** Listing the top
-        // strip from back to front puts its geometric normal at -Y while
-        // the quad calls itself face 0, which is +Y -- and the face
-        // index is what `face_normal` in the shader turns into a
-        // lambert term. So the top edge of every dropped sprite was lit
-        // as though it faced the ground and the bottom edge as though it
-        // faced the sky, which is upside down twice over. Nothing
-        // vanished, because the item pipeline does not cull, so the
-        // mistake could only ever be seen as shading -- which is exactly
-        // the kind that survives.
         Side::Top => Quad {
             corners: [[x0, y0, front], [x1, y0, front], [x1, y0, back], [x0, y0, back]],
             uv: [[u0, v1], [u1, v1], [u1, v0], [u0, v0]],
-            face: 0, // +Y
         },
         Side::Bottom => Quad {
             corners: [[x0, y1, back], [x1, y1, back], [x1, y1, front], [x0, y1, front]],
             uv: [[u0, v1], [u1, v1], [u1, v0], [u0, v0]],
-            face: 1, // -Y
         },
     }
 }
@@ -462,39 +627,60 @@ mod tests {
     }
 
     #[test]
-    fn every_quad_faces_the_way_it_says_it_does() {
-        // The face index is not decoration: the shader turns it into a
-        // normal and lights the quad by it. A strip wound against its
-        // own label is lit as its opposite, and because the item
-        // pipeline does not cull, nothing disappears to give it away --
-        // the top and bottom rims were lit upside down for exactly that
-        // reason.
-        let m = model(&[".##.", "####", "#..#", "..#."]);
+    fn every_quad_of_a_model_is_wound_to_face_out_of_the_shape() {
+        // The winding is the only thing that says which way a rectangle
+        // points -- `append_transformed` reads it and nothing else -- so
+        // a strip wound inwards is lit as its own opposite. Because the
+        // item pipeline does not cull, nothing disappears to give that
+        // away; the top and bottom rims were upside down for exactly
+        // that reason, and only the shading showed it.
+        //
+        // Checked against the mask the model was cut from rather than
+        // against a table of expected faces: step half a texel out of a
+        // rim along its own normal and you must leave the shape, step
+        // half a texel in and you must still be inside it. That holds
+        // for a hole in the middle of a sprite as well as for its
+        // outline, which a "points away from the centre" test does not.
+        let rows = [".##.", "####", "#..#", "..#."];
+        let (solid, width, height) = mask(&rows);
+        let m = ItemModel::from_mask(&solid, width, height);
         assert!(!m.quads.is_empty());
-        // Face order is the mesher's: 0 +Y, 1 -Y, 2 +X, 3 -X, 4 +Z, 5 -Z.
-        const NORMALS: [[f32; 3]; 6] = [
-            [0.0, 1.0, 0.0],
-            [0.0, -1.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [-1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            [0.0, 0.0, -1.0],
-        ];
-        for quad in &m.quads {
-            let [a, b, c, _] = quad.corners;
-            let edge1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-            let edge2 = [c[0] - b[0], c[1] - b[1], c[2] - b[2]];
-            let cross = [
-                edge1[1] * edge2[2] - edge1[2] * edge2[1],
-                edge1[2] * edge2[0] - edge1[0] * edge2[2],
-                edge1[0] * edge2[1] - edge1[1] * edge2[0],
-            ];
-            let claimed = NORMALS[quad.face as usize];
-            let dot: f32 = (0..3).map(|i| cross[i] * claimed[i]).sum();
+        let at = |x: f32, y: f32| {
+            // Local space back to texels: x runs right, y runs *up*,
+            // and image rows run down. See `to_local`.
+            let tx = ((x + 0.5) * width as f32).floor();
+            let ty = ((0.5 - y) * height as f32).floor();
+            if tx < 0.0 || ty < 0.0 || tx >= width as f32 || ty >= height as f32 {
+                return false; // off the picture counts as empty
+            }
+            solid[ty as usize * width + tx as usize]
+        };
+        for (index, quad) in m.quads.iter().enumerate() {
+            let [a, b, c, d] = quad.corners.map(Vec3::from_array);
+            let n = (b - a).cross(c - b).normalize();
+            let middle = (a + b + c + d) * 0.25;
+            if n.z.abs() > 0.5 {
+                // A plate: the one at the front of the slab faces
+                // front, the one at the back faces back.
+                assert_eq!(
+                    n.z > 0.0,
+                    middle.z > 0.0,
+                    "quad {index} is a plate at z {} wound towards {n}",
+                    middle.z
+                );
+                continue;
+            }
+            // A rim, half a texel either side of the edge it stands on.
+            let step = Vec3::new(n.x * 0.5 / width as f32, n.y * 0.5 / height as f32, 0.0);
+            let inner = middle - step;
+            let outer = middle + step;
             assert!(
-                dot > 0.0,
-                "a quad calling itself face {} is wound facing the other way",
-                quad.face
+                at(inner.x, inner.y),
+                "quad {index} at {middle} is wound towards {n}, and behind it is empty"
+            );
+            assert!(
+                !at(outer.x, outer.y),
+                "quad {index} at {middle} is wound towards {n}, which is into the shape"
             );
         }
     }
@@ -538,9 +724,15 @@ mod tests {
 
     #[test]
     fn the_two_plates_face_opposite_ways() {
+        // Read back out of the light word, which is where the shader
+        // reads it: the plates are the first two quads emitted, and
+        // untransformed they must come out +Z and -Z. A plate lit as
+        // its own reverse is the sprite equivalent of a box drawn
+        // inside out.
         let m = model(&["##", "##"]);
-        assert!(m.quads.iter().any(|q| q.face == 4), "no front");
-        assert!(m.quads.iter().any(|q| q.face == 5), "no back");
+        let (mut v, mut i) = (Vec::new(), Vec::new());
+        m.append(&mut v, &mut i, [0.0, 0.0, 0.0], 1.0, 0.0, 0, 15, 0);
+        assert_eq!(faces_of(&v)[0..2], [4, 5], "the plates are not back to back");
     }
 
     #[test]
@@ -590,6 +782,113 @@ mod tests {
             .map(|v| v.position[0])
             .fold(f32::MIN, f32::max);
         assert!(far_x < 0.2, "the model is still facing the way it started");
+    }
+
+    /// Face order is the mesher's: 0 +Y, 1 -Y, 2 +X, 3 -X, 4 +Z, 5 -Z.
+    const NORMALS: [Vec3; 6] = [
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(0.0, -1.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(-1.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+        Vec3::new(0.0, 0.0, -1.0),
+    ];
+
+    /// The face index every emitted quad is carrying, read back out of
+    /// the light word the way the shader reads it.
+    fn faces_of(vertices: &[ItemVertex]) -> Vec<u8> {
+        vertices
+            .chunks_exact(4)
+            .map(|quad| ((quad[0].packed >> 10) & 7) as u8)
+            .collect()
+    }
+
+    #[test]
+    fn every_face_of_a_turned_item_carries_the_direction_it_actually_points() {
+        // **The bug this is here for.** The face index is what the
+        // shader turns into a normal and a lambert term, and it used to
+        // be written straight out of the model -- before the transform
+        // that turns the thing. A dropped item spins, so every one of
+        // them was lit by which side of the plate you were looking at
+        // rather than by where it pointed: front plate a fixed 0.55 of
+        // the sun, back plate a fixed 0.35, and no change at all as the
+        // item came round. The same fault as the animal whose shading
+        // was welded to its body.
+        //
+        // Checked against the *emitted geometry*, not against a table of
+        // what the rotation ought to do -- the winding is what the GPU
+        // reads, and arithmetic verified by its own arithmetic proves
+        // nothing.
+        let m = model(&[".##.", "####", "#..#", "..#."]);
+        for eighth in 0..8 {
+            let yaw = eighth as f32 * std::f32::consts::TAU / 8.0;
+            let mut vertices = Vec::new();
+            let mut indices = Vec::new();
+            m.append(&mut vertices, &mut indices, [3.0, 4.0, 5.0], 0.4, yaw, 0, 15, 0);
+            for quad in vertices.chunks_exact(4) {
+                let corners: Vec<Vec3> =
+                    quad.iter().map(|v| Vec3::from_array(v.position)).collect();
+                let wound = (corners[1] - corners[0]).cross(corners[2] - corners[1]);
+                let claimed = NORMALS[((quad[0].packed >> 10) & 7) as usize];
+                assert!(
+                    wound.normalize().dot(claimed) > 0.7,
+                    "at yaw {yaw} a quad wound towards {wound} says it faces {claimed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn turning_an_item_a_quarter_turn_changes_which_way_its_faces_point() {
+        // The other half of the same property, and the one a table of
+        // model-space indices would still pass: the faces have to
+        // actually *move*. An item whose shading never changes as it
+        // spins is the plastic look the whole renderer is written
+        // against, and it is invisible in a single frame.
+        let m = model(&["##", "##"]);
+        let build = |yaw: f32| {
+            let (mut v, mut i) = (Vec::new(), Vec::new());
+            m.append(&mut v, &mut i, [0.0, 0.0, 0.0], 1.0, yaw, 0, 15, 0);
+            faces_of(&v)
+        };
+        let straight = build(0.0);
+        let quarter = build(std::f32::consts::FRAC_PI_2);
+        assert_ne!(
+            straight, quarter,
+            "a quarter turn left every face pointing where it did"
+        );
+        // By emission order, which is exact: the two plates first, then
+        // the left, right, top and bottom rims. The plates start out
+        // facing ±Z and the side rims ±X; a quarter turn swaps those
+        // two pairs over, and the top and bottom rims do not move at
+        // all, because the spin is about Y.
+        assert_eq!(straight, vec![4, 5, 3, 2, 0, 1]);
+        assert_eq!(quarter[4..], [0, 1], "the spin moved the top or the bottom");
+        assert!(
+            matches!(quarter[0..2], [2, 3] | [3, 2]),
+            "the plates ended up facing {:?} rather than along x",
+            &quarter[0..2]
+        );
+        assert!(
+            matches!(quarter[2..4], [4, 5] | [5, 4]),
+            "the side rims ended up facing {:?} rather than along z",
+            &quarter[2..4]
+        );
+    }
+
+    #[test]
+    fn the_foot_of_a_model_is_the_lowest_texel_the_artist_drew() {
+        // What a caller needs to stand a sprite on the ground. A picture
+        // drawn to the bottom edge of its tile and one drawn in the
+        // middle of it are different objects to place, and the
+        // difference is the margin -- not anything about the thing.
+        let to_the_edge = model(&["....", "....", ".##.", ".##."]);
+        let floating = model(&["....", ".##.", ".##.", "...."]);
+        assert!((to_the_edge.foot() - -0.5).abs() < 1e-6, "{}", to_the_edge.foot());
+        assert!((floating.foot() - -0.25).abs() < 1e-6, "{}", floating.foot());
+        // ...and they are the same size, which is the other half of why
+        // one scale for both is wrong.
+        assert_eq!(to_the_edge.silhouette(), floating.silhouette());
     }
 
     #[test]

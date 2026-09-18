@@ -1,0 +1,95 @@
+// fs — файлы.
+//
+// Подключение:
+//     import "fs" as fs
+//     fs.write_text("out.txt", "привет")
+//     print(fs.read_text("out.txt"))
+//
+// Обёртки над встроенными read/write/append/exists: имена одинаковые по стилю
+// с остальной библиотекой, а не разнобой из встроенных.
+
+import "strings" as fstr
+
+function file_exists(path) {
+    return exists(path)
+}
+
+function read_text(path) {
+    return read(path)
+}
+
+function write_text(path, text) {
+    write(path, text)
+    return null
+}
+
+function append_text(path, text) {
+    append(path, text)
+    return null
+}
+
+/// Строки файла без завершающих переводов строки.
+function read_lines(path) {
+    text = read(path)
+    text = replace(text, "\r\n", "\n")
+    parts = split(text, "\n")
+    // последний перевод строки даёт пустой хвост — он не строка файла
+    if length(parts) > 0 and parts[length(parts) - 1] == "" {
+        out = []
+        i = 0
+        while i < length(parts) - 1 {
+            push(out, parts[i])
+            i = i + 1
+        }
+        return out
+    }
+    return parts
+}
+
+function write_lines(path, lines) {
+    write(path, join(lines, "\n") + "\n")
+    return null
+}
+
+/// Дописывает строку и перевод строки.
+function append_line(path, line) {
+    append(path, line + "\n")
+    return null
+}
+
+/// Расширение файла без точки; пустая строка, если его нет.
+function extension(path) {
+    dot = fstr.last_index_of(path, ".")
+    slash = fstr.last_index_of(path, "/")
+    back = fstr.last_index_of(path, "\\")
+    if back > slash {
+        slash = back
+    }
+    if dot <= slash {
+        return ""
+    }
+    return fstr.substring(path, dot + 1, fstr.size(path))
+}
+
+/// Имя файла без каталога.
+function base_name(path) {
+    slash = fstr.last_index_of(path, "/")
+    back = fstr.last_index_of(path, "\\")
+    if back > slash {
+        slash = back
+    }
+    return fstr.substring(path, slash + 1, fstr.size(path))
+}
+
+/// Каталог без имени файла; пустая строка, если каталога нет.
+function dir_name(path) {
+    slash = fstr.last_index_of(path, "/")
+    back = fstr.last_index_of(path, "\\")
+    if back > slash {
+        slash = back
+    }
+    if slash < 0 {
+        return ""
+    }
+    return fstr.substring(path, 0, slash)
+}

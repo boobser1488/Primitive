@@ -39,6 +39,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::packed::{PackedChunk, PackedLight, SECTIONS, SECTION_HEIGHT};
 use crate::types::{
     is_opaque, light_emission, light_opacity, BlockId, Chunk, ChunkPos, BLOCK_AIR, CHUNK_SIZE_X,
     CHUNK_SIZE_Y, CHUNK_SIZE_Z, CHUNK_VOLUME, MAX_LIGHT,
@@ -59,6 +60,20 @@ pub trait BlockSource {
     /// chunk that dominates everything else they do. Defaults to `None`
     /// so simple implementors don't have to care.
     fn chunk_data(&self, _pos: ChunkPos) -> Option<&[BlockId]> {
+        None
+    }
+
+    /// A whole chunk in the packed form it is kept in, for implementors
+    /// that keep it that way -- the client's `ChunkManager` does.
+    ///
+    /// **A second fast path rather than a replacement for `chunk_data`.**
+    /// A packed chunk has no contiguous slice to hand out, so the callers
+    /// that want bulk access copy out of it a row at a time
+    /// (`PackedChunk::copy_run`) or decode it whole; and the fixtures
+    /// that build a world out of plain arrays keep answering
+    /// `chunk_data` and need not know this exists. Asked first where
+    /// both could answer.
+    fn packed_chunk(&self, _pos: ChunkPos) -> Option<&PackedChunk> {
         None
     }
 }
@@ -103,12 +118,19 @@ const NEIGHBOURS: [(i32, i32, i32); 6] = [
 ];
 
 /// Light for every loaded chunk, one byte per cell: sky in the low
-/// nibble, block light in the high nibble. 16 KB per chunk -- half what
-/// two separate `Vec<u8>` channels would cost, and it keeps both values
-/// for a cell in the same cache line.
+/// nibble, block light in the high nibble -- half what two separate
+/// channels would cost, and it keeps both values for a cell in the same
+/// cache line.
+///
+/// **Kept a section at a time** (`PackedLight`). At 256 blocks tall a
+/// flat array is 64 KB a chunk, and a section of open sky is fifteen in
+/// every cell while a section of deep rock is zero in every cell: 77.5%
+/// of sections on real terrain are one value and cost one byte. Reads and
+/// writes stay a byte at an index; a section is only made dense by a
+/// write that changes it. See `primitive_shared::packed`.
 #[derive(Default)]
 pub struct LightMap {
-    chunks: HashMap<ChunkPos, Vec<u8>>,
+    chunks: HashMap<ChunkPos, PackedLight>,
 }
 
 #[inline]
@@ -130,12 +152,18 @@ impl LightMap {
         self.chunks.len()
     }
 
-    /// Raw nibble-packed light for one chunk (sky low, block high).
-    /// Lets the mesher grab a whole column at once instead of doing a
-    /// hash lookup per sampled cell.
+    /// Nibble-packed light for one chunk (sky low, block high), whole.
+    /// Lets the mesher copy a row at a time instead of doing a hash
+    /// lookup per sampled cell.
     #[inline]
-    pub fn chunk_data(&self, pos: ChunkPos) -> Option<&[u8]> {
-        self.chunks.get(&pos).map(|v| v.as_slice())
+    pub fn chunk_light(&self, pos: ChunkPos) -> Option<&PackedLight> {
+        self.chunks.get(&pos)
+    }
+
+    /// What the map keeps on the heap for light, in bytes -- the cells,
+    /// not the hash table. For the F3 panel and the memory measurements.
+    pub fn heap_bytes(&self) -> usize {
+        self.chunks.values().map(PackedLight::heap_bytes).sum()
     }
 
     pub fn unload_chunk(&mut self, pos: ChunkPos) {
@@ -170,7 +198,7 @@ impl LightMap {
         }
         let (pos, idx) = split(gx, gy, gz);
         match self.chunks.get(&pos) {
-            Some(data) => data[idx] & 0x0F,
+            Some(data) => data.get(idx) & 0x0F,
             None => 0,
         }
     }
@@ -182,7 +210,7 @@ impl LightMap {
         }
         let (pos, idx) = split(gx, gy, gz);
         match self.chunks.get(&pos) {
-            Some(data) => (data[idx] >> 4) & 0x0F,
+            Some(data) => (data.get(idx) >> 4) & 0x0F,
             None => 0,
         }
     }
@@ -214,13 +242,16 @@ impl LightMap {
             return false;
         };
         let level = level.min(MAX_LIGHT);
-        let current = data[idx];
+        let current = data.get(idx);
         let updated = match channel {
             Channel::Sky => (current & 0xF0) | level,
             Channel::Block => (current & 0x0F) | (level << 4),
         };
+        // The comparison is also what keeps a uniform section uniform:
+        // the flood writes cells to what they already hold all the time,
+        // and `PackedLight::set` would make a section dense for that.
         if updated != current {
-            data[idx] = updated;
+            data.set(idx, updated);
             dirty.insert(pos);
         }
         true
@@ -261,6 +292,18 @@ impl LightMap {
         pos: ChunkPos,
         data: Vec<u8>,
     ) -> HashSet<ChunkPos> {
+        self.insert_packed(src, pos, PackedLight::pack(&data))
+    }
+
+    /// The same, for light a worker has already packed -- which is where
+    /// the client packs it, so the frame never walks 64 KB to find out
+    /// which sections are sky. See the client's `mesher`.
+    pub fn insert_packed<S: BlockSource>(
+        &mut self,
+        src: &S,
+        pos: ChunkPos,
+        data: PackedLight,
+    ) -> HashSet<ChunkPos> {
         let mut dirty = HashSet::new();
         self.chunks.insert(pos, data);
         dirty.insert(pos);
@@ -282,26 +325,72 @@ impl LightMap {
                 continue;
             };
 
-            for (my_xz, their_xz) in seam_cells(pos, dx, dz) {
-                let (my_lx, my_lz) = local_of(my_xz);
-                let (their_lx, their_lz) = local_of(their_xz);
-
-                for gy in 0..CHUNK_SIZE_Y {
-                    let my_cell = mine[Chunk::index(my_lx, gy, my_lz)];
-                    let their_cell = theirs[Chunk::index(their_lx, gy, their_lz)];
-
-                    let (my_sky, their_sky) = (my_cell & 0x0F, their_cell & 0x0F);
-                    if their_sky > my_sky + 1 {
-                        sky_queue.push_back((their_xz.0, gy as i32, their_xz.1));
-                    } else if my_sky > their_sky + 1 {
-                        sky_queue.push_back((my_xz.0, gy as i32, my_xz.1));
+            // A column at a time, which walks `y` -- the slowest axis of
+            // the layout -- and so reads one byte from each of
+            // sixty-four cache lines per column. Sweeping the sixteen
+            // pairs plane by plane instead was tried and measured at
+            // 4.8% of a scan that costs six microseconds: both light
+            // arrays are sixteen kilobytes and sit in cache whichever
+            // way round they are read, so there was nothing here for a
+            // better order to win. Left as it was.
+            //
+            // **Then a section at a time, and a pair of uniform sections
+            // that cannot disagree is skipped whole.** When the light map
+            // became packed, reading a cell stopped being an index into a
+            // slice and became a section lookup and a branch, on a scan of
+            // 16,384 pairs of reads per seam, four seams a chunk. With the
+            // skip, the whole of this reconciliation measures 0.081 ms a
+            // chunk over 1793 chunks of the benchmark world, against 0.078
+            // when the map was flat (`tests/chunk_memory.rs`, on an idle
+            // machine: a reading of 0.214 taken while cargo compiled on
+            // the same cores was the machine, not this). Two sections that are each
+            // one value are either within a level of each other in both
+            // channels, in which case every cell of them passes the test
+            // below and nothing would be queued, or they are not, and
+            // then they are scanned as before. Most seam sections are sky
+            // against sky or rock against rock, so most of the scan is
+            // now two comparisons.
+            //
+            // The queues fill in a different order than they did, a
+            // section band at a time rather than a column at a time. The
+            // flood only ever raises a level to the brightest path that
+            // reaches it, which does not depend on the order it is seeded
+            // in -- the property `light_does_not_depend_on_chunk_arrival_
+            // order` already holds the whole map to.
+            let cells = seam_cells(pos, dx, dz);
+            for section in 0..SECTIONS {
+                if let (Some(my_value), Some(their_value)) =
+                    (mine.uniform_section(section), theirs.uniform_section(section))
+                {
+                    let apart = |a: u8, b: u8| a > b + 1 || b > a + 1;
+                    if !apart(my_value & 0x0F, their_value & 0x0F)
+                        && !apart(my_value >> 4, their_value >> 4)
+                    {
+                        continue;
                     }
+                }
+                let band = section * SECTION_HEIGHT..(section + 1) * SECTION_HEIGHT;
+                for &(my_xz, their_xz) in &cells {
+                    let (my_lx, my_lz) = local_of(my_xz);
+                    let (their_lx, their_lz) = local_of(their_xz);
 
-                    let (my_block, their_block) = (my_cell >> 4, their_cell >> 4);
-                    if their_block > my_block + 1 {
-                        block_queue.push_back((their_xz.0, gy as i32, their_xz.1));
-                    } else if my_block > their_block + 1 {
-                        block_queue.push_back((my_xz.0, gy as i32, my_xz.1));
+                    for gy in band.clone() {
+                        let my_cell = mine.get(Chunk::index(my_lx, gy, my_lz));
+                        let their_cell = theirs.get(Chunk::index(their_lx, gy, their_lz));
+
+                        let (my_sky, their_sky) = (my_cell & 0x0F, their_cell & 0x0F);
+                        if their_sky > my_sky + 1 {
+                            sky_queue.push_back((their_xz.0, gy as i32, their_xz.1));
+                        } else if my_sky > their_sky + 1 {
+                            sky_queue.push_back((my_xz.0, gy as i32, my_xz.1));
+                        }
+
+                        let (my_block, their_block) = (my_cell >> 4, their_cell >> 4);
+                        if their_block > my_block + 1 {
+                            block_queue.push_back((their_xz.0, gy as i32, their_xz.1));
+                        } else if my_block > their_block + 1 {
+                            block_queue.push_back((my_xz.0, gy as i32, my_xz.1));
+                        }
                     }
                 }
             }
@@ -538,6 +627,12 @@ fn seam_cells(pos: ChunkPos, dx: i32, dz: i32) -> Vec<((i32, i32), (i32, i32))> 
 /// going through here is 16,384 chunk lookups for data you're holding.
 /// Kept for callers that genuinely only have a `BlockSource`.
 pub fn chunk_blocks<S: BlockSource>(src: &S, pos: ChunkPos) -> Vec<BlockId> {
+    // A decode of sixteen sections when the implementor keeps it packed,
+    // which is a few hundred microseconds against the 65,536 chunk
+    // lookups of the per-cell path below.
+    if let Some(packed) = src.packed_chunk(pos) {
+        return packed.to_blocks();
+    }
     // One memcpy when the implementor has the chunk contiguously --
     // that is the whole reason `chunk_data` exists.
     if let Some(data) = src.chunk_data(pos) {
@@ -569,16 +664,45 @@ pub fn compute_isolated(blocks: &[BlockId]) -> Vec<u8> {
 
     // Direct sunlight, top down. Levels only: what gets *queued* is
     // decided afterwards, and it is far less than this.
-    for lz in 0..CHUNK_SIZE_Z {
-        for lx in 0..CHUNK_SIZE_X {
-            let mut level = MAX_LIGHT;
-            for y in (0..CHUNK_SIZE_Y).rev() {
-                let idx = Chunk::index(lx, y, lz);
-                let id = blocks[idx];
-                level = sky_below(level, id);
-                data[idx] = (data[idx] & 0xF0) | level;
-                if level == 0 {
-                    break;
+    //
+    // **A plane at a time, not a column at a time**, with the level each
+    // column has reached carried in a 256-byte side array. Sunlight is a
+    // column rule -- each cell's level comes from the one above it -- but
+    // walking it as a column steps through `blocks` and `data` in strides
+    // of a whole plane, so all 64 reads of a column land on 64 different
+    // cache lines and every one of the 256 columns pays that again.
+    // Sweeping downward plane by plane touches both arrays strictly
+    // sequentially instead, and the carried levels are small enough to
+    // stay in L1 throughout.
+    //
+    // `alive` counts the columns sunlight has not yet been stopped in, so
+    // a chunk of solid rock under a shallow skyline stops the sweep
+    // instead of walking to the bedrock: the columns that are already
+    // dark contribute nothing but zeroes to an array that starts full of
+    // them.
+    {
+        const COLUMNS: usize = CHUNK_SIZE_X * CHUNK_SIZE_Z;
+        let mut level = [MAX_LIGHT; COLUMNS];
+        let mut alive = COLUMNS;
+        for y in (0..CHUNK_SIZE_Y).rev() {
+            if alive == 0 {
+                break;
+            }
+            let plane = y * COLUMNS;
+            for column in 0..COLUMNS {
+                if level[column] == 0 {
+                    continue;
+                }
+                let next = sky_below(level[column], blocks[plane + column]);
+                level[column] = next;
+                // A whole byte rather than the low nibble of one: block
+                // light has not been written yet, so the high nibble is
+                // still the zero the array was made with. The emission
+                // pass below is the one that has to preserve what is
+                // already there.
+                data[plane + column] = next;
+                if next == 0 {
+                    alive -= 1;
                 }
             }
         }
@@ -594,15 +718,22 @@ pub fn compute_isolated(blocks: &[BlockId]) -> Vec<u8> {
     // the previous version queued every lit cell, which on a chunk with
     // a normal skyline is ten thousand pushes and pops that each
     // discover their four neighbours are already at fifteen.
-    for lz in 0..CHUNK_SIZE_Z {
-        for lx in 0..CHUNK_SIZE_X {
-            for y in 0..CHUNK_SIZE_Y {
-                let idx = Chunk::index(lx, y, lz);
+    //
+    // Walked plane by plane for the same reason the sunlight sweep above
+    // is: `y` is the slowest axis of the layout, so a loop with it
+    // innermost reads one byte from each of 64 cache lines per column and
+    // then does it again for the next one. Every cell is visited either
+    // way; only the order changes.
+    for y in 0..CHUNK_SIZE_Y {
+        let plane = y * CHUNK_SIZE_X * CHUNK_SIZE_Z;
+        for lz in 0..CHUNK_SIZE_Z {
+            for lx in 0..CHUNK_SIZE_X {
+                let idx = plane + lz * CHUNK_SIZE_X + lx;
                 let level = data[idx] & 0x0F;
                 if level <= 1 {
                     continue;
                 }
-                if spreads_sideways(blocks, &data, lx, y, lz, level) {
+                if spreads_sideways(blocks, &data, plane, lx, lz, level) {
                     sky_queue.push_back(idx);
                 }
             }
@@ -627,20 +758,36 @@ pub fn compute_isolated(blocks: &[BlockId]) -> Vec<u8> {
 /// Only horizontal: see the seeding loop in `compute_isolated`. Cells on
 /// the chunk's edge are not seeded on account of what is outside it --
 /// the seam pass in `LightMap::insert_precomputed` owns that.
-fn spreads_sideways(blocks: &[BlockId], data: &[u8], lx: usize, y: usize, lz: usize, level: u8) -> bool {
+///
+/// `plane` is the index the cell's y layer starts at, so a neighbour is
+/// an add rather than three coordinates put back through `Chunk::index`.
+fn spreads_sideways(blocks: &[BlockId], data: &[u8], plane: usize, lx: usize, lz: usize, level: u8) -> bool {
     for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
         let nx = lx as i32 + dx;
         let nz = lz as i32 + dz;
         if nx < 0 || nz < 0 || nx >= CHUNK_SIZE_X as i32 || nz >= CHUNK_SIZE_Z as i32 {
             continue;
         }
-        let nidx = Chunk::index(nx as usize, y, nz as usize);
+        let nidx = plane + nz as usize * CHUNK_SIZE_X + nx as usize;
+        // **What the neighbour already has, before what it is made of.**
+        //
+        // Light arriving from here is at most one step down -- an opacity
+        // only takes more off -- so a neighbour already that bright can
+        // never be brightened from this cell, whatever block is in it.
+        // Answering from the light array alone skips the two table
+        // lookups below, and under open sky, where every cell is at
+        // fifteen and so is everything beside it, that is the entire
+        // test for the great majority of the chunk.
+        let current = data[nidx] & 0x0F;
+        if current + 1 >= level {
+            continue;
+        }
         let id = blocks[nidx];
         if is_opaque(id) {
             continue;
         }
         let arriving = level.saturating_sub(1u8.saturating_add(light_opacity(id)));
-        if arriving > 0 && (data[nidx] & 0x0F) < arriving {
+        if arriving > current {
             return true;
         }
     }
@@ -1285,5 +1432,109 @@ mod real_terrain_lighting {
             }
         }
         println!("isolated light checksum {total:016x} sum {lit}");
+    }
+
+    /// `compute_isolated` written the plain way: a column at a time, and
+    /// every lit cell queued rather than only the ones with a darker
+    /// neighbour.
+    ///
+    /// Slow and obviously right, which is the entire job. The real one
+    /// sweeps planes instead of columns and decides what to seed from the
+    /// light array alone -- two arguments about *order* and *what can be
+    /// skipped*, neither of which is visible in the answer. This is what
+    /// makes "neither of which is visible" a thing the test suite checks
+    /// rather than a thing the comments claim.
+    fn plainly(blocks: &[BlockId]) -> Vec<u8> {
+        let mut data = vec![0u8; CHUNK_VOLUME];
+        let mut sky = VecDeque::new();
+        let mut block = VecDeque::new();
+
+        for lz in 0..CHUNK_SIZE_Z {
+            for lx in 0..CHUNK_SIZE_X {
+                let mut level = MAX_LIGHT;
+                for y in (0..CHUNK_SIZE_Y).rev() {
+                    let idx = Chunk::index(lx, y, lz);
+                    level = sky_below(level, blocks[idx]);
+                    data[idx] = (data[idx] & 0xF0) | level;
+                    if level == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        for (idx, cell) in data.iter().enumerate() {
+            if cell & 0x0F > 1 {
+                sky.push_back(idx);
+            }
+        }
+        for (idx, &id) in blocks.iter().enumerate() {
+            let emission = light_emission(id);
+            if emission > 0 {
+                data[idx] = (data[idx] & 0x0F) | (emission << 4);
+                block.push_back(idx);
+            }
+        }
+        flood_local(blocks, &mut data, sky, Channel::Sky);
+        flood_local(blocks, &mut data, block, Channel::Block);
+        data
+    }
+
+    #[test]
+    fn sweeping_planes_and_seeding_sparsely_light_a_chunk_the_same_as_the_plain_way() {
+        use crate::worldgen::WorldGen;
+        let gen = WorldGen::new(4242);
+        // Several chunks rather than one: the two versions can only
+        // disagree where a skyline is ragged or a cave reaches the
+        // surface, and a single chunk is not guaranteed to have either.
+        for (cx, cz) in [(0, 0), (5, 5), (-3, 7), (11, -2), (-8, -8)] {
+            let chunk = gen.generate_chunk(ChunkPos::new(cx, cz));
+            assert_eq!(
+                compute_isolated(&chunk.blocks),
+                plainly(&chunk.blocks),
+                "chunk ({cx}, {cz})"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use std::time::Instant;
+
+    /// What it costs to light one chunk of real terrain, in isolation.
+    ///
+    /// A measurement rather than an assertion -- run it with
+    /// `cargo test -p primitive_shared --release bench_lighting -- --ignored --nocapture`.
+    /// Real generated terrain rather than a slab, because the cost is
+    /// dominated by how much of the column is rock with caves in it, and
+    /// a flat slab has neither.
+    #[test]
+    #[ignore = "a measurement, not an assertion -- run it explicitly"]
+    fn bench_lighting() {
+        const ROUNDS: usize = 200;
+        const BATCHES: usize = 9;
+
+        let gen = crate::worldgen::WorldGen::new(1337);
+        let chunks: Vec<_> = [(5, 5), (0, 0), (-3, 7), (11, -2)]
+            .map(|(cx, cz)| gen.generate_chunk(ChunkPos::new(cx, cz)))
+            .into_iter()
+            .collect();
+
+        // The fastest batch, not the average of all of them: a desktop
+        // measuring itself is interrupted constantly, and interruptions
+        // only ever make a batch slower. Same argument as the client's
+        // `bench_meshing`.
+        let mut best = f64::MAX;
+        for _ in 0..BATCHES {
+            let started = Instant::now();
+            for _ in 0..ROUNDS {
+                for chunk in &chunks {
+                    std::hint::black_box(compute_isolated(std::hint::black_box(&chunk.blocks)));
+                }
+            }
+            best = best.min(started.elapsed().as_secs_f64() * 1000.0 / ROUNDS as f64);
+        }
+        println!("\ncompute_isolated: {:.4} ms per chunk", best / chunks.len() as f64);
     }
 }

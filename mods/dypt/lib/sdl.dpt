@@ -1,0 +1,956 @@
+// sdl — dyptSDL: окно, рисование, клавиши и мышь через SDL3.
+//
+// Подключение:
+//     import "sdl" as sdl
+//
+//     sdl.open("проба", 640, 480)
+//     while sdl.running() {
+//         while sdl.poll() != null { }
+//         sdl.clear(20, 20, 30)
+//         sdl.color(220, 90, 60)
+//         sdl.fill(100, 100, 80, 60)
+//         sdl.label("привет", 100, 60, 3)
+//         sdl.present()
+//         sdl.wait_frame(60)
+//     }
+//     sdl.close()
+//
+// Рядом с программой должен лежать SDL3.dll — библиотека ищется так же,
+// как её ищет любая программа Windows: в папке запуска и в PATH.
+//
+// Окно здесь одно на программу: заводить второе не нужно почти никогда,
+// а без него всё описание сокращается вдвое. Если всё же понадобилось —
+// window() и renderer() отдают указатели SDL, с ними можно звать SDL
+// напрямую своим блоком extern.
+//
+// Все размеры и рисование — в целых числах. SDL считает во float, но
+// доводы с плавающей точкой во внешние вызовы dypt передавать не умеет,
+// поэтому числа кладутся в память полями расчёта: наружу этого не видно.
+
+extern "SDL3.dll" {
+    function SDL_Init(flags: int): int
+    function SDL_Quit(): int
+    function SDL_GetError(): int
+    function SDL_CreateWindow(заголовок: string, w: int, h: int, flags: int): int
+    function SDL_DestroyWindow(окно: int): int
+    function SDL_SetWindowTitle(окно: int, заголовок: string): int
+    function SDL_GetWindowSize(окно: int, w: int, h: int): int
+    function SDL_CreateRenderer(окно: int, имя: int): int
+    function SDL_DestroyRenderer(рисователь: int): int
+    function SDL_SetRenderVSync(рисователь: int, шаг: int): int
+    function SDL_SetRenderDrawColor(рисователь: int, r: int, g: int, b: int, a: int): int
+    function SDL_SetRenderDrawBlendMode(рисователь: int, режим: int): int
+    function SDL_RenderClear(рисователь: int): int
+    function SDL_RenderPresent(рисователь: int): int
+    function SDL_RenderFillRect(рисователь: int, прямоугольник: int): int
+    function SDL_RenderFillRects(рисователь: int, прямоугольники: int, сколько: int): int
+    function SDL_RenderRect(рисователь: int, прямоугольник: int): int
+    function SDL_RenderLines(рисователь: int, точки: int, сколько: int): int
+    function SDL_RenderPoints(рисователь: int, точки: int, сколько: int): int
+    function SDL_RenderTexture(рисователь: int, образ: int, откуда: int, куда: int): int
+    function SDL_PollEvent(событие: int): int
+    function SDL_PumpEvents(): int
+    function SDL_GetKeyboardState(сколько: int): int
+    function SDL_GetMouseState(x: int, y: int): int
+    function SDL_Delay(мс: int): int
+    function SDL_GetTicks(): int
+    function SDL_LoadBMP(путь: string): int
+    function SDL_CreateTextureFromSurface(рисователь: int, поверхность: int): int
+    function SDL_DestroySurface(поверхность: int): int
+    function SDL_DestroyTexture(образ: int): int
+    function SDL_GetTextureSize(образ: int, w: int, h: int): int
+    function SDL_StartTextInput(окно: int): int
+    function SDL_StopTextInput(окно: int): int
+    function SDL_RenderReadPixels(рисователь: int, откуда: int): int
+    function SDL_SaveBMP(поверхность: int, путь: string): int
+    function SDL_SetSurfaceColorKey(поверхность: int, включить: int, ключ: int): int
+    function SDL_MapSurfaceRGB(поверхность: int, r: int, g: int, b: int): int
+    function SDL_SetTextureColorMod(образ: int, r: int, g: int, b: int): int
+    function SDL_SetTextureAlphaMod(образ: int, a: int): int
+}
+
+// Строку по указателю (ошибку SDL, набранный текст) иначе не прочитать:
+// сырая память dypt проверяет границы своих же кусков, а этот указатель
+// выдан не ею. Копирование в свой кусок снимает вопрос.
+extern "kernel32.dll" {
+    function RtlMoveMemory(куда: int, откуда: int, сколько: int): int
+    function lstrlenA(строка: int): int
+}
+
+// Разряды и виды событий SDL — числами, шестнадцатеричной записи в языке нет.
+_SDL_INIT_VIDEO = 32
+_SDL_WINDOW_RESIZABLE = 32
+_SDL_BLEND = 1
+
+_SDL_EVENT_QUIT = 256
+_SDL_EVENT_WINDOW_RESIZED = 518
+_SDL_EVENT_WINDOW_CLOSE = 528
+_SDL_EVENT_KEY_DOWN = 768
+_SDL_EVENT_KEY_UP = 769
+_SDL_EVENT_TEXT_INPUT = 771
+_SDL_EVENT_MOUSE_MOTION = 1024
+_SDL_EVENT_MOUSE_DOWN = 1025
+_SDL_EVENT_MOUSE_UP = 1026
+_SDL_EVENT_MOUSE_WHEEL = 1027
+
+_sdl_window = 0
+_sdl_renderer = 0
+_sdl_running = false
+_sdl_event = 0
+_sdl_keys = 0
+_sdl_scratch = 0
+_sdl_rects = 0
+_sdl_rects_size = 0
+_sdl_last_frame = 0
+_sdl_width = 0
+_sdl_height = 0
+
+// ----------------------------------------------------------------- окно
+
+/// Открывает окно и рисователь. Ответ — true, если получилось.
+function open(заголовок, ширина, высота) {
+    if _sdl_window != 0 {
+        return true
+    }
+    if SDL_Init(_SDL_INIT_VIDEO) == 0 {
+        return false
+    }
+    _sdl_window = SDL_CreateWindow(заголовок, ширина, высота, _SDL_WINDOW_RESIZABLE)
+    if _sdl_window == 0 {
+        SDL_Quit()
+        return false
+    }
+    _sdl_renderer = SDL_CreateRenderer(_sdl_window, 0)
+    if _sdl_renderer == 0 {
+        SDL_DestroyWindow(_sdl_window)
+        _sdl_window = 0
+        SDL_Quit()
+        return false
+    }
+    SDL_SetRenderDrawBlendMode(_sdl_renderer, _SDL_BLEND)
+    _sdl_event = raw_alloc(128)
+    _sdl_keys = raw_alloc(512)
+    _sdl_scratch = raw_alloc(256)
+    _sdl_rects = raw_alloc(16 * 256)
+    _sdl_rects_size = 256
+    _sdl_width = ширина
+    _sdl_height = высота
+    _sdl_running = true
+    _sdl_last_frame = SDL_GetTicks()
+    return true
+}
+
+/// Закрывает окно и освобождает всё, что было занято.
+function close() {
+    if _sdl_renderer != 0 {
+        SDL_DestroyRenderer(_sdl_renderer)
+        _sdl_renderer = 0
+    }
+    if _sdl_window != 0 {
+        SDL_DestroyWindow(_sdl_window)
+        _sdl_window = 0
+    }
+    if _sdl_event != 0 {
+        raw_free(_sdl_event)
+        raw_free(_sdl_keys)
+        raw_free(_sdl_scratch)
+        raw_free(_sdl_rects)
+        _sdl_event = 0
+        _sdl_keys = 0
+        _sdl_scratch = 0
+        _sdl_rects = 0
+        _sdl_rects_size = 0
+    }
+    _sdl_running = false
+    SDL_Quit()
+    return null
+}
+
+/// Открыто ли окно и не просили ли его закрыть.
+function running() {
+    return _sdl_running
+}
+
+/// Прекратить работу: следующий running() ответит false.
+function stop() {
+    _sdl_running = false
+    return null
+}
+
+/// Новый заголовок окна.
+function set_title(заголовок) {
+    if _sdl_window != 0 {
+        SDL_SetWindowTitle(_sdl_window, заголовок)
+    }
+    return null
+}
+
+/// Ширина и высота окна массивом из двух чисел.
+function window_size() {
+    if _sdl_window == 0 {
+        return [0, 0]
+    }
+    raw_set32(_sdl_scratch, 0, 0)
+    raw_set32(_sdl_scratch, 4, 0)
+    SDL_GetWindowSize(_sdl_window, _sdl_scratch, _sdl_scratch + 4)
+    _sdl_width = raw_get32(_sdl_scratch, 0)
+    _sdl_height = raw_get32(_sdl_scratch, 4)
+    return [_sdl_width, _sdl_height]
+}
+
+/// Ждать развёртки перед показом кадра: рисунок перестаёт рваться,
+/// но кадры идут не чаще, чем обновляется экран.
+function vsync(да) {
+    if _sdl_renderer == 0 {
+        return false
+    }
+    шаг = 0
+    if да {
+        шаг = 1
+    }
+    return SDL_SetRenderVSync(_sdl_renderer, шаг) != 0
+}
+
+/// Указатель на окно SDL — для тех, кто зовёт SDL сам.
+function window() {
+    return _sdl_window
+}
+
+/// Указатель на рисователь SDL.
+function renderer() {
+    return _sdl_renderer
+}
+
+/// Что SDL сказал о последней неудаче.
+function error_text() {
+    указатель = SDL_GetError()
+    if указатель == 0 {
+        return ""
+    }
+    n = lstrlenA(указатель)
+    if n <= 0 {
+        return ""
+    }
+    if n > 255 {
+        n = 255
+    }
+    RtlMoveMemory(_sdl_scratch, указатель, n)
+    return _sdl_bytes_text(_sdl_scratch, n)
+}
+
+// ------------------------------------------------------------ рисование
+
+/// Цвет для дальнейшего рисования: доли красного, зелёного и синего от 0 до 255.
+function color(r, g, b) {
+    SDL_SetRenderDrawColor(_sdl_renderer, r, g, b, 255)
+    return null
+}
+
+/// То же с прозрачностью: a = 0 — насквозь, 255 — плотно.
+function color_a(r, g, b, a) {
+    SDL_SetRenderDrawColor(_sdl_renderer, r, g, b, a)
+    return null
+}
+
+/// Залить всё окно цветом.
+function clear(r, g, b) {
+    SDL_SetRenderDrawColor(_sdl_renderer, r, g, b, 255)
+    SDL_RenderClear(_sdl_renderer)
+    return null
+}
+
+/// Показать нарисованное. До этого вызова на экране ничего не меняется.
+function present() {
+    SDL_RenderPresent(_sdl_renderer)
+    return null
+}
+
+/// Закрашенный прямоугольник.
+function fill(x, y, w, h) {
+    _sdl_put_rect(_sdl_rects, 0, x, y, w, h)
+    SDL_RenderFillRect(_sdl_renderer, _sdl_rects)
+    return null
+}
+
+/// Только очертание прямоугольника.
+function outline(x, y, w, h) {
+    _sdl_put_rect(_sdl_rects, 0, x, y, w, h)
+    SDL_RenderRect(_sdl_renderer, _sdl_rects)
+    return null
+}
+
+/// Точка.
+function point(x, y) {
+    raw_setf32(_sdl_rects, 0, x)
+    raw_setf32(_sdl_rects, 4, y)
+    SDL_RenderPoints(_sdl_renderer, _sdl_rects, 1)
+    return null
+}
+
+/// Отрезок.
+function line(x1, y1, x2, y2) {
+    raw_setf32(_sdl_rects, 0, x1)
+    raw_setf32(_sdl_rects, 4, y1)
+    raw_setf32(_sdl_rects, 8, x2)
+    raw_setf32(_sdl_rects, 12, y2)
+    SDL_RenderLines(_sdl_renderer, _sdl_rects, 2)
+    return null
+}
+
+/// Ломаная по массиву точек: [[x, y], [x, y], ...].
+function polyline(точки) {
+    n = length(точки)
+    if n < 2 {
+        return null
+    }
+    _sdl_need_rects(n / 2 + 1)
+    i = 0
+    while i < n {
+        raw_setf32(_sdl_rects, i * 8, точки[i][0])
+        raw_setf32(_sdl_rects, i * 8 + 4, точки[i][1])
+        i = i + 1
+    }
+    SDL_RenderLines(_sdl_renderer, _sdl_rects, n)
+    return null
+}
+
+/// Закрашенный круг: собирается из строк пикселей и уходит в SDL одним вызовом.
+function circle(x, y, радиус) {
+    if радиус <= 0 {
+        return null
+    }
+    _sdl_need_rects(2 * радиус + 2)
+    сколько = 0
+    dy = -радиус
+    while dy <= радиус {
+        полуширина = _sdl_isqrt(радиус * радиус - dy * dy)
+        if полуширина > 0 {
+            _sdl_put_rect(_sdl_rects, сколько * 16, x - полуширина, y + dy, полуширина * 2, 1)
+            сколько = сколько + 1
+        }
+        dy = dy + 1
+    }
+    if сколько > 0 {
+        SDL_RenderFillRects(_sdl_renderer, _sdl_rects, сколько)
+    }
+    return null
+}
+
+/// Очертание круга — по восьми частям сразу, без тригонометрии.
+function ring(x, y, радиус) {
+    if радиус <= 0 {
+        return null
+    }
+    _sdl_need_rects(8 * (радиус + 2))
+    сколько = 0
+    dx = 0
+    dy = радиус
+    ошибка = 3 - 2 * радиус
+    while dx <= dy {
+        сколько = _sdl_ring_dots(сколько, x, y, dx, dy)
+        if ошибка > 0 {
+            dy = dy - 1
+            ошибка = ошибка + 4 * (dx - dy) + 10
+        } else {
+            ошибка = ошибка + 4 * dx + 6
+        }
+        dx = dx + 1
+    }
+    if сколько > 0 {
+        SDL_RenderPoints(_sdl_renderer, _sdl_rects, сколько)
+    }
+    return null
+}
+
+function _sdl_ring_dots(сколько, x, y, dx, dy) {
+    сколько = _sdl_dot(сколько, x + dx, y + dy)
+    сколько = _sdl_dot(сколько, x - dx, y + dy)
+    сколько = _sdl_dot(сколько, x + dx, y - dy)
+    сколько = _sdl_dot(сколько, x - dx, y - dy)
+    сколько = _sdl_dot(сколько, x + dy, y + dx)
+    сколько = _sdl_dot(сколько, x - dy, y + dx)
+    сколько = _sdl_dot(сколько, x + dy, y - dx)
+    сколько = _sdl_dot(сколько, x - dy, y - dx)
+    return сколько
+}
+
+function _sdl_dot(сколько, x, y) {
+    raw_setf32(_sdl_rects, сколько * 8, x)
+    raw_setf32(_sdl_rects, сколько * 8 + 4, y)
+    return сколько + 1
+}
+
+// --------------------------------------------------------------- надписи
+
+_SDL_FONT_W = 6
+_SDL_FONT_H = 10
+
+/// Ширина надписи в точках при заданном увеличении.
+function label_width(текст, увеличение) {
+    return length(текст) * _SDL_FONT_W * увеличение
+}
+
+/// Высота строки при заданном увеличении.
+function label_height(увеличение) {
+    return _SDL_FONT_H * увеличение
+}
+
+/// Надпись встроенным растровым шрифтом 6×10 — латиница, кириллица, цифры
+/// и знаки. Увеличение 1 даёт мелкие буквы, 3 — крупные. Все точки строки
+/// уходят в SDL одним вызовом, поэтому надпись стоит недорого.
+function label(текст, x, y, увеличение) {
+    n = length(текст)
+    if n == 0 {
+        return null
+    }
+    _sdl_need_rects(n * _SDL_FONT_H * 3 + 8)
+    сколько = 0
+    место = 0
+    while место < n {
+        знак = текст[место]
+        глиф = 0
+        if has(_sdl_font, знак) {
+            глиф = _sdl_font[знак]
+        } elif has(_sdl_font, lower(знак)) {
+            глиф = _sdl_font[lower(знак)]
+        }
+        if глиф != 0 {
+            сколько = _sdl_glyph(глиф, x + место * _SDL_FONT_W * увеличение, y, увеличение, сколько)
+        }
+        место = место + 1
+    }
+    if сколько > 0 {
+        SDL_RenderFillRects(_sdl_renderer, _sdl_rects, сколько)
+    }
+    return null
+}
+
+// Один знак: строка разбирается по разрядам, а подряд идущие точки
+// сливаются в один прямоугольник — их получается втрое меньше.
+function _sdl_glyph(глиф, x, y, увеличение, сколько) {
+    строка = 0
+    while строка < _SDL_FONT_H {
+        разряды = and(shr(глиф, (_SDL_FONT_H - 1 - строка) * _SDL_FONT_W), 63)
+        if разряды != 0 {
+            столбец = 0
+            while столбец < _SDL_FONT_W {
+                if and(shr(разряды, _SDL_FONT_W - 1 - столбец), 1) == 1 {
+                    длина = 1
+                    while столбец + длина < _SDL_FONT_W and and(shr(разряды, _SDL_FONT_W - 1 - столбец - длина), 1) == 1 {
+                        длина = длина + 1
+                    }
+                    _sdl_put_rect(_sdl_rects, сколько * 16,
+                        x + столбец * увеличение, y + строка * увеличение,
+                        длина * увеличение, увеличение)
+                    сколько = сколько + 1
+                    столбец = столбец + длина
+                } else {
+                    столбец = столбец + 1
+                }
+            }
+        }
+        строка = строка + 1
+    }
+    return сколько
+}
+
+// --------------------------------------------------------------- картинки
+
+/// Картинка из файла BMP. Ответ — указатель на образ или 0.
+/// SDL сам умеет только BMP; остальные виды нужно сперва перевести в него.
+function image(путь) {
+    поверхность = SDL_LoadBMP(путь)
+    if поверхность == 0 {
+        return 0
+    }
+    образ = SDL_CreateTextureFromSurface(_sdl_renderer, поверхность)
+    SDL_DestroySurface(поверхность)
+    return образ
+}
+
+/// Картинка из BMP, у которой один цвет считается прозрачным. Так
+/// рисуют наборы значков: фон закрашивают заведомо неиспользуемым
+/// цветом (обычно ярко-розовым) и объявляют его прозрачным.
+function image_keyed(путь, r, g, b) {
+    поверхность = SDL_LoadBMP(путь)
+    if поверхность == 0 {
+        return 0
+    }
+    SDL_SetSurfaceColorKey(поверхность, 1, SDL_MapSurfaceRGB(поверхность, r, g, b))
+    образ = SDL_CreateTextureFromSurface(_sdl_renderer, поверхность)
+    SDL_DestroySurface(поверхность)
+    return образ
+}
+
+/// Кусок картинки в кусок окна: так рисуют из общего листа со значками.
+/// Вырезка задаётся в точках самой картинки, место — в точках окна.
+function draw_part(образ, сx, сy, сw, сh, x, y, w, h) {
+    if образ == 0 {
+        return null
+    }
+    _sdl_put_rect(_sdl_rects, 0, сx, сy, сw, сh)
+    _sdl_put_rect(_sdl_rects, 16, x, y, w, h)
+    SDL_RenderTexture(_sdl_renderer, образ, _sdl_rects, _sdl_rects + 16)
+    return null
+}
+
+/// Подкрасить картинку: все её точки умножаются на этот цвет.
+/// 255, 255, 255 — вернуть как было.
+function tint(образ, r, g, b) {
+    if образ != 0 {
+        SDL_SetTextureColorMod(образ, r, g, b)
+    }
+    return null
+}
+
+/// Прозрачность картинки целиком: 0 — насквозь, 255 — плотно.
+function image_alpha(образ, a) {
+    if образ != 0 {
+        SDL_SetTextureAlphaMod(образ, a)
+    }
+    return null
+}
+
+/// Размеры картинки массивом из двух чисел.
+function image_size(образ) {
+    if образ == 0 {
+        return [0, 0]
+    }
+    raw_set32(_sdl_scratch, 0, 0)
+    raw_set32(_sdl_scratch, 4, 0)
+    SDL_GetTextureSize(образ, _sdl_scratch, _sdl_scratch + 4)
+    return [_sdl_f32_int(raw_get32(_sdl_scratch, 0)), _sdl_f32_int(raw_get32(_sdl_scratch, 4))]
+}
+
+/// Нарисовать картинку в прямоугольник. Ширина и высота 0 — взять
+/// собственный размер картинки.
+function draw_image(образ, x, y, w, h) {
+    if образ == 0 {
+        return null
+    }
+    if w <= 0 or h <= 0 {
+        размер = image_size(образ)
+        w = размер[0]
+        h = размер[1]
+    }
+    _sdl_put_rect(_sdl_rects, 0, x, y, w, h)
+    SDL_RenderTexture(_sdl_renderer, образ, 0, _sdl_rects)
+    return null
+}
+
+/// Снимок нарисованного в файл BMP. Делать его нужно до present():
+/// после показа кадра рисователь может отдать уже очищенное поле.
+function screenshot(путь) {
+    поверхность = SDL_RenderReadPixels(_sdl_renderer, 0)
+    if поверхность == 0 {
+        return false
+    }
+    вышло = SDL_SaveBMP(поверхность, путь)
+    SDL_DestroySurface(поверхность)
+    return вышло != 0
+}
+
+/// Освободить картинку.
+function free_image(образ) {
+    if образ != 0 {
+        SDL_DestroyTexture(образ)
+    }
+    return null
+}
+
+// ---------------------------------------------------------------- события
+
+/// Очередное событие словарём или null, если очередь пуста.
+///
+/// Поле kind говорит, что случилось:
+///     quit        — окно закрывают; running() после этого даёт false
+///     key_down    — нажали клавишу; key — её имя, repeat — удержание
+///     key_up      — отпустили
+///     text        — набрали знак; text — сам знак или несколько
+///     mouse_down  — нажали кнопку мыши; button, x, y
+///     mouse_up    — отпустили
+///     mouse_move  — двигают мышь; x, y
+///     wheel       — крутят колесо; wheel — на сколько щелчков
+///     resize      — размер окна изменился; width, height
+function poll() {
+    if _sdl_event == 0 {
+        return null
+    }
+    if SDL_PollEvent(_sdl_event) == 0 {
+        return null
+    }
+    вид = raw_get32(_sdl_event, 0)
+    if вид == _SDL_EVENT_QUIT or вид == _SDL_EVENT_WINDOW_CLOSE {
+        _sdl_running = false
+        return {"kind": "quit"}
+    }
+    if вид == _SDL_EVENT_KEY_DOWN or вид == _SDL_EVENT_KEY_UP {
+        код = raw_get32(_sdl_event, 28)
+        имя = "key_down"
+        if вид == _SDL_EVENT_KEY_UP {
+            имя = "key_up"
+        }
+        return {"kind": имя,
+                "key": key_name(код),
+                "keycode": код,
+                "scancode": raw_get32(_sdl_event, 24),
+                "repeat": raw_get8(_sdl_event, 37) != 0}
+    }
+    if вид == _SDL_EVENT_TEXT_INPUT {
+        return {"kind": "text", "text": _sdl_event_text()}
+    }
+    if вид == _SDL_EVENT_MOUSE_MOTION {
+        return {"kind": "mouse_move",
+                "x": _sdl_f32_int(raw_get32(_sdl_event, 28)),
+                "y": _sdl_f32_int(raw_get32(_sdl_event, 32))}
+    }
+    if вид == _SDL_EVENT_MOUSE_DOWN or вид == _SDL_EVENT_MOUSE_UP {
+        имя = "mouse_down"
+        if вид == _SDL_EVENT_MOUSE_UP {
+            имя = "mouse_up"
+        }
+        return {"kind": имя,
+                "button": raw_get8(_sdl_event, 24),
+                "clicks": raw_get8(_sdl_event, 26),
+                "x": _sdl_f32_int(raw_get32(_sdl_event, 28)),
+                "y": _sdl_f32_int(raw_get32(_sdl_event, 32))}
+    }
+    if вид == _SDL_EVENT_MOUSE_WHEEL {
+        return {"kind": "wheel",
+                "wheel": _sdl_f32_int(raw_get32(_sdl_event, 28)),
+                "x": _sdl_f32_int(raw_get32(_sdl_event, 36)),
+                "y": _sdl_f32_int(raw_get32(_sdl_event, 40))}
+    }
+    if вид == _SDL_EVENT_WINDOW_RESIZED {
+        _sdl_width = raw_get32(_sdl_event, 20)
+        _sdl_height = raw_get32(_sdl_event, 24)
+        return {"kind": "resize", "width": _sdl_width, "height": _sdl_height}
+    }
+    return {"kind": "other", "code": вид}
+}
+
+/// Разобрать всю очередь событий разом. Ответ — массив словарей.
+function poll_all() {
+    события = []
+    e = poll()
+    while e != null {
+        push(события, e)
+        e = poll()
+    }
+    return события
+}
+
+/// Принимать набранный текст (события kind = "text").
+function start_text_input() {
+    SDL_StartTextInput(_sdl_window)
+    return null
+}
+
+/// Перестать принимать набранный текст.
+function stop_text_input() {
+    SDL_StopTextInput(_sdl_window)
+    return null
+}
+
+// -------------------------------------------------------------- клавиатура
+
+_sdl_scancodes = {
+    "a": 4, "b": 5, "c": 6, "d": 7, "e": 8, "f": 9, "g": 10, "h": 11, "i": 12,
+    "j": 13, "k": 14, "l": 15, "m": 16, "n": 17, "o": 18, "p": 19, "q": 20,
+    "r": 21, "s": 22, "t": 23, "u": 24, "v": 25, "w": 26, "x": 27, "y": 28,
+    "z": 29, "1": 30, "2": 31, "3": 32, "4": 33, "5": 34, "6": 35, "7": 36,
+    "8": 37, "9": 38, "0": 39, "enter": 40, "escape": 41, "backspace": 42,
+    "tab": 43, "space": 44, "minus": 45, "equals": 46, "leftbracket": 47,
+    "rightbracket": 48, "backslash": 49, "semicolon": 51, "apostrophe": 52,
+    "grave": 53, "comma": 54, "period": 55, "slash": 56, "capslock": 57,
+    "f1": 58, "f2": 59, "f3": 60, "f4": 61, "f5": 62, "f6": 63, "f7": 64,
+    "f8": 65, "f9": 66, "f10": 67, "f11": 68, "f12": 69, "insert": 73,
+    "home": 74, "pageup": 75, "delete": 76, "end": 77, "pagedown": 78,
+    "right": 79, "left": 80, "down": 81, "up": 82, "ctrl": 224, "shift": 225,
+    "alt": 226, "lctrl": 224, "lshift": 225, "lalt": 226, "rctrl": 228,
+    "rshift": 229, "ralt": 230
+}
+
+_sdl_key_names = {
+    13: "enter", 27: "escape", 8: "backspace", 9: "tab", 32: "space",
+    127: "delete", 1073741903: "right", 1073741904: "left", 1073741905: "down",
+    1073741906: "up", 1073741897: "insert", 1073741898: "home",
+    1073741899: "pageup", 1073741901: "end", 1073741902: "pagedown",
+    1073741882: "f1", 1073741883: "f2", 1073741884: "f3", 1073741885: "f4",
+    1073741886: "f5", 1073741887: "f6", 1073741888: "f7", 1073741889: "f8",
+    1073741890: "f9", 1073741891: "f10", 1073741892: "f11", 1073741893: "f12",
+    1073742048: "ctrl", 1073742049: "shift", 1073742050: "alt",
+    1073742052: "rctrl", 1073742053: "rshift", 1073742054: "ralt"
+}
+
+/// Имя клавиши по её коду: печатный знак — сам собой, прочее — словом.
+function key_name(код) {
+    if has(_sdl_key_names, код) {
+        return _sdl_key_names[код]
+    }
+    if код >= 33 and код < 127 {
+        return chr(код)
+    }
+    return "код " + код
+}
+
+/// Обновить снимок состояния клавиш. poll() и wait_frame() делают это сами.
+function keys_update() {
+    if _sdl_keys == 0 {
+        return null
+    }
+    SDL_PumpEvents()
+    raw_set32(_sdl_scratch, 8, 0)
+    указатель = SDL_GetKeyboardState(_sdl_scratch + 8)
+    сколько = raw_get32(_sdl_scratch, 8)
+    if сколько > 512 {
+        сколько = 512
+    }
+    if указатель != 0 and сколько > 0 {
+        RtlMoveMemory(_sdl_keys, указатель, сколько)
+    }
+    return null
+}
+
+/// Нажата ли клавиша прямо сейчас: key_down("left"), key_down("space"),
+/// key_down("w"). Смотрит на место клавиши, а не на раскладку, поэтому
+/// «w» — это верхняя клавиша слева и при русской раскладке тоже.
+function key_down(имя) {
+    if _sdl_keys == 0 {
+        return false
+    }
+    ключ = lower(имя)
+    if has(_sdl_scancodes, ключ) == false {
+        return false
+    }
+    return raw_get8(_sdl_keys, _sdl_scancodes[ключ]) != 0
+}
+
+/// Где мышь и что на ней нажато: словарь с x, y, left, middle, right.
+function mouse() {
+    raw_set32(_sdl_scratch, 0, 0)
+    raw_set32(_sdl_scratch, 4, 0)
+    кнопки = SDL_GetMouseState(_sdl_scratch, _sdl_scratch + 4)
+    return {"x": _sdl_f32_int(raw_get32(_sdl_scratch, 0)),
+            "y": _sdl_f32_int(raw_get32(_sdl_scratch, 4)),
+            "left": and(кнопки, 1) != 0,
+            "middle": and(кнопки, 2) != 0,
+            "right": and(кнопки, 4) != 0}
+}
+
+// ------------------------------------------------------------------ время
+
+/// Сколько миллисекунд прошло с начала работы SDL.
+function ticks() {
+    return SDL_GetTicks()
+}
+
+/// Подождать столько миллисекунд.
+function delay(мс) {
+    SDL_Delay(мс)
+    return null
+}
+
+/// Выдержать нужную частоту кадров: досыпает остаток кадра и обновляет
+/// снимок клавиш. Ответ — сколько миллисекунд прошло с прошлого кадра.
+function wait_frame(кадров_в_секунду) {
+    сейчас = SDL_GetTicks()
+    прошло = сейчас - _sdl_last_frame
+    кадр = 1000 / кадров_в_секунду
+    if прошло < кадр {
+        SDL_Delay(кадр - прошло)
+        сейчас = SDL_GetTicks()
+        прошло = сейчас - _sdl_last_frame
+    }
+    _sdl_last_frame = сейчас
+    keys_update()
+    return прошло
+}
+
+// ------------------------------------------------------------- внутреннее
+
+function _sdl_put_rect(куда, смещение, x, y, w, h) {
+    raw_setf32(куда, смещение, x)
+    raw_setf32(куда, смещение + 4, y)
+    raw_setf32(куда, смещение + 8, w)
+    raw_setf32(куда, смещение + 12, h)
+    return null
+}
+
+// Запас под прямоугольники растёт, но не уменьшается: за несколько кадров
+// он доходит до нужного размера и больше не трогается.
+function _sdl_need_rects(сколько) {
+    if сколько <= _sdl_rects_size {
+        return null
+    }
+    новый = _sdl_rects_size * 2
+    while новый < сколько {
+        новый = новый * 2
+    }
+    raw_free(_sdl_rects)
+    _sdl_rects = raw_alloc(16 * новый)
+    _sdl_rects_size = новый
+    return null
+}
+
+// Целая часть квадратного корня — двоичным поиском, без обращения к math.
+function _sdl_isqrt(n) {
+    if n <= 0 {
+        return 0
+    }
+    x = 1
+    while x * x <= n {
+        x = x * 2
+    }
+    низ = x / 2
+    верх = x
+    while верх - низ > 1 {
+        середина = (низ + верх) / 2
+        if середина * середина <= n {
+            низ = середина
+        } else {
+            верх = середина
+        }
+    }
+    return низ
+}
+
+// Число с плавающей точкой одинарной точности, записанное разрядами,
+// в целое. Дробную часть отбрасываем: рисуем-то по точкам.
+function _sdl_f32_int(биты) {
+    if биты == 0 {
+        return 0
+    }
+    знак = 1
+    if биты >= 2147483648 {
+        знак = -1
+        биты = биты - 2147483648
+    }
+    показатель = биты / 8388608
+    мантисса = биты % 8388608
+    if показатель == 0 {
+        return 0
+    }
+    значение = 8388608 + мантисса
+    сдвиг = показатель - 127 - 23
+    while сдвиг > 0 {
+        значение = значение * 2
+        сдвиг = сдвиг - 1
+    }
+    while сдвиг < 0 {
+        значение = значение / 2
+        сдвиг = сдвиг + 1
+    }
+    return знак * значение
+}
+
+function _sdl_bytes_text(куда, n) {
+    out = ""
+    i = 0
+    while i < n {
+        b = raw_get8(куда, i)
+        if b == 0 {
+            return out
+        }
+        out = out + chr(b)
+        i = i + 1
+    }
+    return out
+}
+
+// Набранный текст лежит не в самом событии, а по указателю в нём.
+function _sdl_event_text() {
+    низ = raw_get32(_sdl_event, 24)
+    верх = raw_get32(_sdl_event, 28)
+    указатель = верх * 4294967296 + низ
+    if указатель == 0 {
+        return ""
+    }
+    n = lstrlenA(указатель)
+    if n <= 0 {
+        return ""
+    }
+    if n > 32 {
+        n = 32
+    }
+    RtlMoveMemory(_sdl_scratch, указатель, n)
+    байты = []
+    i = 0
+    while i < n {
+        push(байты, raw_get8(_sdl_scratch, i))
+        i = i + 1
+    }
+    return _sdl_utf8(байты)
+}
+
+// Набранный знак приходит в UTF-8; свой разбор нужен потому, что chr()
+// ждёт номер знака, а не байты.
+function _sdl_utf8(байты) {
+    out = ""
+    n = length(байты)
+    i = 0
+    while i < n {
+        b = байты[i]
+        if b < 128 {
+            out = out + chr(b)
+            i = i + 1
+        } elif b >= 192 and b < 224 and i + 1 < n {
+            out = out + chr((b - 192) * 64 + (байты[i + 1] % 64))
+            i = i + 2
+        } elif b >= 224 and b < 240 and i + 2 < n {
+            out = out + chr((b - 224) * 4096 + (байты[i + 1] % 64) * 64 + (байты[i + 2] % 64))
+            i = i + 3
+        } else {
+            i = i + 1
+        }
+    }
+    return out
+}
+
+// Растровый шрифт 6×10: у каждого знака шестьдесят разрядов, по шесть
+// на строку, сверху вниз. Собран из моноширинного начертания, поэтому
+// строчки и заглавные стоят на одной сетке.
+_sdl_font = {
+    " ": 0, "!": 17871426043904, "\"": 44667659878400, "#": 28525548584960,
+    "$": 594438557856000, "%": 129085363023872, "&": 124545903222784, "'": 17867063951360,
+    "(": 581100621562114, ")": 2269531620253960, "*": 18569358213120, "+": 279694032896,
+    ",": 16648, "-": 234881024, ".": 16384, "/": 4537701122560, "0": 54037572009984,
+    "1": 18421182947328, "2": 31405909274624, "3": 66045876690944, "4": 26811643469824,
+    "5": 66535502962688, "6": 31627218804736, "7": 66041599246336, "8": 66595768819712,
+    "9": 54033340022784, ":": 4294983680, ";": 4294983944, "<": 141869195264,
+    "=": 16110059520, ">": 554085416960, "?": 52916379484160, "@": 27031842411534,
+    "A": 18290289713152, "B": 66604358754304, "C": 62689615339520, "D": 124401887068160,
+    "E": 62137575727104, "F": 62137575702528, "G": 62696091869184, "H": 80434306818048,
+    "I": 61851892244480, "J": 61712271728640, "K": 40282702254080, "L": 35742854209536,
+    "M": 153303128875008, "N": 44682929807360, "O": 62759425597440, "P": 62201027133440,
+    "Q": 62759425597699, "R": 62201027399680, "S": 31349016944640, "T": 136618682892288,
+    "U": 80421421891584, "V": 44678567706624, "W": 44682862698496, "X": 75458350223360,
+    "Y": 75464791048192, "Z": 132220704645120, "[": 53335040229900, "\\": 35463612604480,
+    "]": 26527899590790, "^": 18290118230016, "_": 31, "`": 2269391999729664,
+    "a": 16126898176, "b": 35750387441664, "c": 6578823168, "d": 8948871192576,
+    "e": 7769976832, "f": 31093483913216, "g": 32522176414, "h": 35750387421184,
+    "i": 8811159547904, "j": 8811159494798, "k": 35745069305856, "l": 61712271732736,
+    "m": 33643909120, "n": 16259518464, "o": 13191659520, "p": 16259539464,
+    "q": 15339217026, "r": 16259252224, "s": 16308301824, "t": 582104440832,
+    "u": 9817092096, "v": 10907828224, "w": 18626420736, "x": 18491183104,
+    "y": 10907828504, "z": 15100600320, "{": 26667587223814, "|": 1143771333935364,
+    "}": 53055765627148, "~": 985137152, "А": 18290289713152, "Б": 66535639277568,
+    "В": 66604358754304, "Г": 62131133251584, "Д": 62270753862720, "Е": 62137575727104,
+    "Ж": 93336322265088, "З": 132108933251072, "И": 40350365552640,
+    "Й": 184124985134321664, "К": 40282702254080, "Л": 124541507616768,
+    "М": 153303128875008, "Н": 80434306818048, "О": 62759425597440, "П": 66598990024704,
+    "Р": 62201027133440, "С": 62689615339520, "Т": 136618682892288, "У": 44678465486848,
+    "Ф": 18577163304960, "Х": 75458350223360, "Ц": 44678567751744, "Ч": 80421350547456,
+    "Ш": 93824992276480, "Щ": 93824992276544, "Ъ": 106118057877504, "Ы": 80434375008256,
+    "Ь": 35749313699840, "Э": 61657493856256, "Ю": 102629675200512, "Я": 62829166665728,
+    "а": 16126898176, "б": 2024142003503104, "в": 16343429120, "г": 15168733184,
+    "д": 15202907200, "е": 7769976832, "ж": 22787215360, "з": 16207114240, "и": 9851670528,
+    "й": 2876332269932544, "к": 12048699392, "л": 15202852864, "м": 10978136064,
+    "н": 9917730816, "о": 13191659520, "п": 16259518464, "р": 16259539464, "с": 6578823168,
+    "т": 33354170368, "у": 10907828504, "ф": 17883527962884, "х": 18491183104,
+    "ц": 10907873344, "ч": 9915600896, "ш": 22906531840, "щ": 22906531904,
+    "ъ": 26023882752, "ы": 19836559360, "ь": 8844013568, "э": 15284363264,
+    "ю": 24131493888, "я": 32517988352, "Ё": 180206122670546944, "ё": 43988235087872,
+    "—": 520093696, "–": 251658240, "«": 638106992640, "»": 79793278156800,
+    "№": 120628910850048, "°": 66605279084544, "…": 86016, "·": 67108864
+}

@@ -62,7 +62,6 @@ const WASH: [f32; 4] = [0.20, 0.015, 0.02, 0.78];
 /// A second, harder wash right behind the panel, so the text is never
 /// read against whatever the world happened to be.
 const PANEL_FILL: [f32; 4] = [0.09, 0.05, 0.06, 0.96];
-const PANEL_EDGE: [f32; 4] = [0.52, 0.16, 0.16, 1.0];
 /// The bar of colour across the top of the panel: the one thing on the
 /// screen that is purely decorative, and the thing that makes it read as
 /// a plate rather than as a box.
@@ -72,9 +71,39 @@ const TITLE: [f32; 4] = [0.94, 0.28, 0.24, 1.0];
 const TITLE_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.75];
 const CAUSE: [f32; 4] = [0.86, 0.80, 0.78, 1.0];
 
-const BUTTON: [f32; 4] = [0.17, 0.11, 0.12, 1.0];
-const BUTTON_HOVER: [f32; 4] = [0.34, 0.16, 0.16, 1.0];
-const BUTTON_EDGE: [f32; 4] = [0.46, 0.24, 0.24, 1.0];
+/// The notice's skin: the slab and the bevel every other screen is cut
+/// from, in the notice's red.
+///
+/// **It had a palette of shapes of its own, not only of colours.** Every
+/// other screen in the game is a bevelled slab with bevelled buttons on
+/// it (`Painter::slab`, `Painter::button`); this one was a flat box with
+/// a hairline round it and flat buttons with hairlines round them -- the
+/// look the rest of the interface was moved off, surviving on the one
+/// screen that could not be put beside the others, because `ui::snapshot`
+/// did not draw it. The red stays: it says what happened before a word
+/// is read. What changed is that it is the same interface in another
+/// light rather than a second one.
+const SKIN: widgets::Theme = widgets::Theme {
+    panel: PANEL_FILL,
+    light: [0.40, 0.15, 0.15, 1.0],
+    dark: [0.03, 0.01, 0.015, 1.0],
+    button: [0.17, 0.11, 0.12, 1.0],
+    // Darker than the hover it replaced, `[0.34, 0.16, 0.16]`, which put
+    // the white label at 4.1:1 on the one button a player is about to
+    // press. This is 4.6:1, and still plainly lit against the resting face.
+    button_hover: [0.30, 0.13, 0.13, 1.0],
+    ink: widgets::TEXT,
+    ..widgets::Theme::DARK
+};
+
+/// How much of the screen this notice takes, about the middle it is
+/// centred on.
+///
+/// What the frame loop asks before growing it -- see
+/// `widgets::Layout::fit`. Half the panel, plus the room the buttons
+/// hang below it; there is a test that measures the drawn geometry
+/// against this, so it cannot quietly stop being true.
+pub const EXTENT: (f32, f32) = (0.62, 0.52);
 
 const PANEL_WIDTH: f32 = 1.24;
 const PANEL_HEIGHT: f32 = 0.86;
@@ -238,7 +267,10 @@ impl DeathScreen {
         if !self.is_open() {
             return;
         }
-        let mut p = Painter::onto(font, std::mem::take(out));
+        // The death screen belongs with the menu: it is what you look
+        // at instead of the world, over a scrim. In its own red -- see
+        // `SKIN` -- but through the same widgets.
+        let mut p = Painter::onto_themed(font, std::mem::take(out), SKIN);
         self.paint(&mut p, language);
         *out = p.into_vertices();
     }
@@ -258,12 +290,26 @@ impl DeathScreen {
         // enough to be an animation anyone waits through.
         let drop = (1.0 - settle) * 0.10;
         let panel = Rect::centred(0.0, -drop, PANEL_WIDTH, PANEL_HEIGHT);
-        p.quad(panel, alpha(PANEL_FILL, settle));
-        p.border(panel, 0.005, alpha(PANEL_EDGE, settle));
-        // The bar across the top, inset so it reads as part of the plate.
+
+        // **Drawn at full strength, then faded as one piece.** That is
+        // what lets the plate be the shared slab and its buttons the
+        // shared button: those take their colours from the skin and know
+        // nothing about an opening, and fading each colour by hand is
+        // what kept this screen on hand-drawn boxes. One pass over the
+        // finished run fades the bevel with the face it belongs to.
+        let from = p.vertices.len();
+        const SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.35];
+        let shadow = widgets::SHADOW_OFFSET;
+        p.quad(
+            Rect::new(panel.x0 + shadow, panel.y0 - shadow, panel.x1 + shadow, panel.y1 - shadow),
+            SHADOW,
+        );
+        p.slab(panel, SKIN.panel);
+        // The bar across the top, under the bevel, so it reads as part of
+        // the plate.
         p.quad(
             Rect::new(panel.x0 + 0.02, panel.y1 - 0.022, panel.x1 - 0.02, panel.y1 - 0.008),
-            alpha(ACCENT, settle),
+            ACCENT,
         );
 
         // The title, with a hard shadow under it: it is drawn over a
@@ -272,51 +318,48 @@ impl DeathScreen {
         let title_top = panel.y1 - 0.10;
         let shadow_offset = widgets::PIXEL * 2.0;
         let title = language.text(Msg::YouDied);
-        p.text_centred(
-            title,
-            shadow_offset,
-            title_top - shadow_offset,
-            2.4,
-            alpha(TITLE_SHADOW, settle),
-        );
-        p.text_centred(title, 0.0, title_top, 2.4, alpha(TITLE, settle));
+        p.text_centred(title, shadow_offset, title_top - shadow_offset, 2.4, TITLE_SHADOW);
+        p.text_centred(title, 0.0, title_top, 2.4, TITLE);
 
-        // What happened, last and quietly.
+        for (index, (label, _)) in CHOICES.iter().enumerate() {
+            let rect = button_rect(index);
+            let hovered =
+                self.cursor.is_some_and(|(x, y)| rect.contains(x, y)) || self.focus == Some(index);
+            // Nudged with the panel, so the whole plate arrives as one
+            // thing rather than a box with buttons sliding inside it.
+            let drawn = Rect::new(rect.x0, rect.y0 - drop, rect.x1, rect.y1 - drop);
+            p.button(drawn, language.text(*label), hovered, true);
+        }
+
+        // The keys, under the buttons and as far below the last of them
+        // as the plate's edge is below the keys. Both are still bound,
+        // and a player whose hand never left the keyboard should not
+        // have to reach for the mouse to get back into the world.
+        //
+        // Measured from the buttons rather than from the plate's bottom,
+        // where it was pinned six hundredths off the edge with a tenth of
+        // dead air above it: a line that belongs to the buttons has to
+        // be seen to be with them.
+        let last = button_rect(CHOICES.len() - 1);
+        p.text_centred(
+            language.text(crate::ui::lang::by_input(Msg::DeathHelp, Msg::DeathHelpTouch)),
+            0.0,
+            last.y0 - 0.07 - drop,
+            0.72,
+            widgets::TEXT_DIM,
+        );
+
+        for vertex in &mut p.vertices[from..] {
+            vertex.tint[3] *= settle;
+        }
+
+        // What happened, last and quietly, on its own clock.
         let told = self.phase(CAUSE_DELAY, PANEL_SECONDS);
         if told > 0.0 {
             let cause = self.cause.as_deref().unwrap_or("");
             let text = widgets::fit(cause, 1.0, PANEL_WIDTH - 0.14);
             p.text_centred(&text, 0.0, title_top - 0.13, 1.0, alpha(CAUSE, told));
         }
-
-        for (index, (label, _)) in CHOICES.iter().enumerate() {
-            let rect = button_rect(index);
-            // Nudged with the panel, so the whole plate arrives as one
-            // thing rather than a box with buttons sliding inside it.
-            let rect = Rect::new(rect.x0, rect.y0 - drop, rect.x1, rect.y1 - drop);
-            let hovered = self.cursor.is_some_and(|(x, y)| {
-                button_rect(index).contains(x, y)
-            }) || self.focus == Some(index);
-            let fill = if hovered { BUTTON_HOVER } else { BUTTON };
-            p.quad(rect, alpha(fill, settle));
-            p.border(
-                rect,
-                0.0035,
-                alpha(if hovered { ACCENT } else { BUTTON_EDGE }, settle),
-            );
-            p.label_in(rect, language.text(*label), 1.1, alpha(widgets::TEXT, settle));
-        }
-
-        // The keys, under the buttons. Both are still bound, and a
-        // player whose hand never left the keyboard should not have to
-        // reach for the mouse to get back into the world.
-        p.text_centred(
-            language.text(Msg::DeathHelp),
-            0.0,
-            panel.y0 + 0.062 - drop,
-            0.72,
-            alpha(widgets::TEXT_DIM, settle),
-        );
     }
 }
 
@@ -329,7 +372,12 @@ const CHOICES: &[(Msg, Choice)] = &[
 /// Where a button sits. One definition, used to draw it and to hit-test
 /// it -- so what lights up is by construction what a click activates.
 fn button_rect(index: usize) -> Rect {
-    let first = -0.10;
+    // Eight hundredths higher than it was. At -0.10 there was a fifth of
+    // a screen of empty plate between the cause of death and RESPAWN,
+    // and the key hint under the buttons was squeezed against the plate's
+    // edge to pay for it -- the screen read as three things that had
+    // drifted apart rather than one notice.
+    let first = -0.02;
     let pitch = BUTTON_HEIGHT + 0.035;
     Rect::centred(
         0.0,
@@ -460,6 +508,36 @@ mod tests {
         }
     }
 
+    /// Each button's face is drawn on exactly the rectangle a click on it
+    /// is tested against.
+    ///
+    /// The buttons moved and changed widget in the same change -- flat
+    /// boxes became the shared bevelled `Painter::button` -- and those are
+    /// the two ways a drawing and its hit-test part company. Read off the
+    /// finished vertices rather than off `button_rect`, which is what both
+    /// halves call and so cannot disagree with itself.
+    #[test]
+    fn a_death_button_is_drawn_exactly_where_it_is_clicked() {
+        let vertices = settled().build(FontAtlas::for_test(), Language::English);
+        for index in 0..CHOICES.len() {
+            let wanted = button_rect(index);
+            let found = vertices.chunks_exact(6).any(|quad| {
+                if quad[0].tint != SKIN.button {
+                    return false;
+                }
+                let x0 = quad.iter().map(|v| v.position[0]).fold(f32::MAX, f32::min);
+                let x1 = quad.iter().map(|v| v.position[0]).fold(f32::MIN, f32::max);
+                let y0 = quad.iter().map(|v| v.position[1]).fold(f32::MAX, f32::min);
+                let y1 = quad.iter().map(|v| v.position[1]).fold(f32::MIN, f32::max);
+                (x0 - wanted.x0).abs() < 1e-5
+                    && (x1 - wanted.x1).abs() < 1e-5
+                    && (y0 - wanted.y0).abs() < 1e-5
+                    && (y1 - wanted.y1).abs() < 1e-5
+            });
+            assert!(found, "button {index} is clicked at {wanted:?} and drawn somewhere else");
+        }
+    }
+
     #[test]
     fn a_click_with_no_cursor_chooses_nothing() {
         // The cursor is only known once it has moved over the window,
@@ -467,6 +545,32 @@ mod tests {
         // be at the origin.
         let screen = settled();
         assert_eq!(screen.click(), None);
+    }
+
+    #[test]
+    fn the_written_down_extent_is_the_one_the_screen_actually_takes() {
+        // `EXTENT` is what the frame loop grows this screen by and what
+        // a click is divided by on the way back in. A copy of a number
+        // that lives somewhere else goes stale, and the way this one
+        // would go stale is silently: the notice would be drawn a
+        // little off the glass and answer taps a little to one side.
+        let panel = Rect::centred(0.0, 0.0, PANEL_WIDTH, PANEL_HEIGHT);
+        let mut lowest = panel.y0;
+        for index in 0..CHOICES.len() {
+            lowest = lowest.min(button_rect(index).y0);
+        }
+        assert!(
+            EXTENT.0 >= PANEL_WIDTH / 2.0,
+            "the notice is {} wide and claims {}",
+            PANEL_WIDTH,
+            EXTENT.0 * 2.0,
+        );
+        assert!(
+            EXTENT.1 >= panel.y1.max(-lowest),
+            "the notice reaches {} and claims {}",
+            panel.y1.max(-lowest),
+            EXTENT.1,
+        );
     }
 
     #[test]

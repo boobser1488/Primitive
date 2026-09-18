@@ -24,6 +24,29 @@ pub enum Permission {
     Operator,
 }
 
+/// Which of the two a caller holds, from the two facts that decide it:
+/// whether this is a world of their own, and what the profiles say about
+/// their UUID (`None` for a connection that has not got one).
+///
+/// **One rule, because it is now asked in two places.** It has always been
+/// worked out where a chat line arrives; the give menu asks the same
+/// question outright before it draws itself
+/// (`protocol::ClientMessage::AmIAnOperator`). Written twice, the menu and
+/// the command could disagree about who may run `/give` -- a page that
+/// opens and then refuses, or worse, one that hides itself from somebody
+/// the server would have obeyed.
+pub fn permission_for(local_operator: bool, profile_says_operator: Option<bool>) -> Permission {
+    // Свой мир: единственный игрок — оператор по построению. См.
+    // `RunOptions::local_operator`.
+    if local_operator || profile_says_operator == Some(true) {
+        return Permission::Operator;
+    }
+    // No profile, no authority. Unreachable in practice -- the UUID is set
+    // before the handle is published -- but the fallback that costs
+    // nothing is the one that grants nothing.
+    Permission::Player
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Help,
@@ -36,6 +59,16 @@ pub enum Command {
     Say(String),
     /// Report or set the time of day (0.0..1.0, or a named phase).
     Time(Option<f32>),
+    /// Report or set the weather.
+    ///
+    /// The same shape as `/time` and for the same reason: an operator
+    /// wants to know what the sky is doing far more often than they want
+    /// to change it, so the reporting form is the one without an
+    /// argument and the one anybody may run.
+    ///
+    /// `Some(None)` is `/weather auto`: hand the sky back to the
+    /// countdown after it has been held somewhere by hand.
+    Weather(Option<Option<primitive_shared::weather::Weather>>),
     /// Where the caller is.
     Where,
     /// Teleport to absolute coordinates.
@@ -44,6 +77,14 @@ pub enum Command {
     Spawn,
     /// Server counters: uptime, players, chunks, ticks.
     Stats,
+    /// What is extending this server: the scripted plugins and the
+    /// native mods, with what each of them says about itself.
+    ///
+    /// One command for both, because from an operator's side they are
+    /// one question -- "what is running here" -- and two commands would
+    /// mean somebody diagnosing a strange server has to know which kind
+    /// of thing to suspect before they can look.
+    Extensions,
     /// Flush the world to disk now.
     Save,
     /// Put blocks straight into the caller's pack.
@@ -81,10 +122,17 @@ impl Command {
             | Command::Where
             | Command::Spawn
             | Command::Stats
-            | Command::Time(None) => Permission::Player,
+            // Read-only, and worth being open: "what is running on this
+            // server" is a question a player is entitled to an answer
+            // to, and a server that hid it would be a server where
+            // nobody can tell a mod's behaviour from a bug.
+            | Command::Extensions
+            | Command::Time(None)
+            | Command::Weather(None) => Permission::Player,
             // Anything that affects other people or the world.
             Command::Say(_)
             | Command::Time(Some(_))
+            | Command::Weather(Some(_))
             | Command::Teleport { .. }
             | Command::Save
             | Command::Give { .. }
@@ -125,8 +173,11 @@ pub const HELP_TEXT: &[&str] = &[
     "/where                - your position",
     "/spawn                - teleport to spawn",
     "/stats                - server counters",
+    "/mods                 - the plugins and mods that are loaded",
     "/time                 - show the time of day",
     "/time <0..1|day|night|noon|midnight>  - set it (operator)",
+    "/weather              - what the sky is doing",
+    "/weather <clear|rain|storm|auto>  - set it (operator)",
     "/tp <x> <y> <z>       - teleport (operator)",
     "/say <message>        - broadcast (operator)",
     "/save                 - flush world, chests and players to disk (operator)",
@@ -157,6 +208,7 @@ pub fn parse(line: &str) -> Result<Command, ParseError> {
         "where" | "pos" => Ok(Command::Where),
         "spawn" => Ok(Command::Spawn),
         "stats" | "tps" => Ok(Command::Stats),
+        "mods" | "plugins" | "extensions" => Ok(Command::Extensions),
         "save" => Ok(Command::Save),
         "stop" | "quit" | "shutdown" => Ok(Command::Stop),
 
@@ -170,6 +222,19 @@ pub fn parse(line: &str) -> Result<Command, ParseError> {
         "time" => match rest.first() {
             None => Ok(Command::Time(None)),
             Some(arg) => Ok(Command::Time(Some(parse_time(arg)?))),
+        },
+
+        "weather" => match rest.first() {
+            None => Ok(Command::Weather(None)),
+            Some(arg) if arg.eq_ignore_ascii_case("auto") => Ok(Command::Weather(Some(None))),
+            Some(arg) => match primitive_shared::weather::Weather::parse(arg) {
+                Some(weather) => Ok(Command::Weather(Some(Some(weather)))),
+                // A typo is a refusal rather than silently a clear sky,
+                // which is the same rule `Weather::parse` follows and
+                // for the same reason: an operator who mistyped "rian"
+                // should be told, not quietly given sunshine.
+                None => Err(ParseError::Usage("/weather <clear|rain|storm|auto>")),
+            },
         },
 
         "tp" | "teleport" => {
@@ -274,6 +339,9 @@ pub enum Response {
     /// Text to everyone.
     Broadcast(String),
     SetTime(f32),
+    /// Set the weather, or -- for `None` -- hand it back to the
+    /// countdown. See `Command::Weather`.
+    SetWeather(Option<primitive_shared::weather::Weather>),
     TeleportSelf { x: f32, y: f32, z: f32 },
     TeleportSelfToSpawn,
     Kick { username: String, reason: String },
@@ -308,6 +376,7 @@ pub fn authorize(command: Command, permission: Permission, caller: Option<Player
         Command::List => Response::Reply(vec!["__LIST__".to_string()]),
         Command::Profiles => Response::Reply(vec!["__PROFILES__".to_string()]),
         Command::Stats => Response::Reply(vec!["__STATS__".to_string()]),
+        Command::Extensions => Response::Reply(vec!["__EXTENSIONS__".to_string()]),
         Command::Where => {
             if caller.is_none() {
                 // The console isn't standing anywhere.
@@ -341,6 +410,8 @@ pub fn authorize(command: Command, permission: Permission, caller: Option<Player
         Command::Say(text) => Response::Broadcast(text),
         Command::Time(None) => Response::Reply(vec!["__TIME__".to_string()]),
         Command::Time(Some(t)) => Response::SetTime(t),
+        Command::Weather(None) => Response::Reply(vec!["__WEATHER__".to_string()]),
+        Command::Weather(Some(weather)) => Response::SetWeather(weather),
         Command::Save => Response::Save,
         Command::Kick { username, reason } => Response::Kick { username, reason },
         Command::Op { username } => Response::SetOperator {
@@ -362,10 +433,12 @@ fn command_name(command: &Command) -> &'static str {
         Command::Profiles => "players",
         Command::Say(_) => "say",
         Command::Time(_) => "time",
+        Command::Weather(_) => "weather",
         Command::Where => "where",
         Command::Teleport { .. } => "tp",
         Command::Spawn => "spawn",
         Command::Stats => "stats",
+        Command::Extensions => "mods",
         Command::Save => "save",
         Command::Give { .. } => "give",
         Command::Kick { .. } => "kick",
@@ -377,6 +450,22 @@ fn command_name(command: &Command) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// **The rule the give menu is drawn from.** `ui::journal` shows the
+    /// page to an operator and to nobody else, and it learns which it is
+    /// facing by asking the server, which answers with this. A rule that
+    /// said yes where `authorize` says no would be a menu that opens and
+    /// then refuses -- which is what it did before, and what the player
+    /// asked to be rid of.
+    #[test]
+    fn your_own_world_makes_you_an_operator_and_a_server_that_never_heard_of_you_does_not() {
+        use super::{permission_for, Permission};
+        assert_eq!(permission_for(true, None), Permission::Operator, "the only player of a local world is not its operator");
+        assert_eq!(permission_for(true, Some(false)), Permission::Operator, "a local world outranks the profile file");
+        assert_eq!(permission_for(false, Some(true)), Permission::Operator);
+        assert_eq!(permission_for(false, Some(false)), Permission::Player);
+        assert_eq!(permission_for(false, None), Permission::Player, "a connection with no profile was granted authority");
+    }
+
     use super::*;
 
     #[test]
