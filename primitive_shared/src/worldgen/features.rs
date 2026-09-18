@@ -1453,7 +1453,7 @@ mod tests {
                 }
                 assert_ne!(crate::types::block_axis(id), crate::types::Axis::Y, "seed {seed}: a hollow giant stands a log upright at {:?}", (x, y, z));
                 assert!(crate::types::break_seconds(id).is_some(), "seed {seed}: a hollow giant's log cannot be broken by hand");
-                assert_eq!(crate::types::block_drop(id), Some(site.material), "seed {seed}: a hollow giant's log gives something else");
+                assert_eq!(crate::types::block_drop(id).map(block_kind), Some(site.material), "seed {seed}: a hollow giant's log gives something else");
                 logs += 1;
             }
             assert!(logs >= 50, "seed {seed}: a hollow giant of {logs} logs is not a giant");

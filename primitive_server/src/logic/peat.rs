@@ -61,6 +61,26 @@
 //! peat. It is the container store's whole list every two seconds for a few
 //! sods, and a list of the cells that are drying is what the pit kilns and
 //! the racks keep.
+//!
+//! ## Raw pottery dries here too
+//!
+//! "Сырая керамика должна сохнуть перед обжигом." A pot set down in the yard
+//! is a sod of clay in every way this module cares about: the sun, the
+//! warmth and the wind dry it, a roof slows it, frost stops it, and rain
+//! takes it back. So it is laid on the same list and stepped by the same
+//! rules, with two differences, both the clay's own:
+//!
+//! - **Damp air slows it** (`drying::damp_share`, the rack's term): a pot in
+//!   a swamp camp stays leather-hard for days, where peat is cut in a bog
+//!   and dried there because there is nothing else. The bog's sods would be
+//!   unmakeable at the bog if the damp slowed them too.
+//! - **Its stages are its own** (`clay::Dryness`): wet under the middle,
+//!   leather-hard over it, bone-dry at the end -- and bone-dry is finished,
+//!   as the peat brick is: rain does not undo it, for the same reason.
+//!
+//! A pot in a pack or a chest dries as well, more slowly and on the world's
+//! slow clock (`rot`, `clay::DRIES_EVERY`); set down in fair weather is the
+//! quick way, and the decision between the two is the reason both exist.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -68,6 +88,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use primitive_shared::clay::{self, Dryness};
 use primitive_shared::types::{block_kind, is_set_down, BlockId, BLOCK_DRIED_PEAT, BLOCK_DRYING_PEAT, BLOCK_PEAT};
 use primitive_shared::weather::Weather;
 
@@ -91,7 +112,17 @@ pub const STEP_INTERVAL_SECS: f32 = 2.0;
 /// out in the morning is fuel by the next, and a wet week is a week without.
 pub const DRY_SECONDS: f32 = 900.0;
 
-/// Where the wet sod turns into the half-dried one, and back.
+/// How long a piece of raw pottery takes from wet to bone-dry in the best
+/// weather, in seconds: ten minutes, a game day.
+///
+/// **Shorter than a sod**, because a pot is a thin wall and a sod is a
+/// brick of wet moss; and long enough that a pot thrown in the evening is
+/// fired the next day, not the same one. At a fair day's average (about
+/// half the best) a row set out in the morning is bone-dry by nightfall.
+pub const POTTERY_DRY_SECONDS: f32 = 600.0;
+
+/// Where the wet sod turns into the half-dried one, and back -- and the wet
+/// pot into the leather-hard one.
 pub const HALF: f32 = 0.5;
 
 /// How much of the best rate the open air gives with no sun and no wind:
@@ -128,6 +159,55 @@ pub fn stage(progress: f32) -> BlockId {
 #[inline]
 pub fn is_drying_sod(item: BlockId) -> bool {
     matches!(block_kind(item), BLOCK_PEAT | BLOCK_DRYING_PEAT)
+}
+
+/// Is this something that dries lying out: a sod, or raw pottery that is
+/// not bone-dry yet?
+#[inline]
+pub fn is_drying(item: BlockId) -> bool {
+    is_drying_sod(item) || clay::is_drying(item)
+}
+
+/// What `item` lying out is at this progress: a sod's stage, or the piece
+/// of pottery at its dryness.
+pub fn stage_of(item: BlockId, progress: f32) -> BlockId {
+    if !clay::is_raw_pottery(item) {
+        return stage(progress);
+    }
+    let dryness = if progress >= 1.0 {
+        Dryness::BoneDry
+    } else if progress >= HALF {
+        Dryness::LeatherHard
+    } else {
+        Dryness::Wet
+    };
+    clay::with_dryness(item, dryness)
+}
+
+/// Is `item` done drying -- fuel, or bone-dry -- and off the list for good?
+fn finished(item: BlockId) -> bool {
+    block_kind(item) == BLOCK_DRIED_PEAT || (clay::is_raw_pottery(item) && !clay::is_drying(item))
+}
+
+/// How fast `item` dries here, as a share of the best rate: [`rate`], and
+/// for clay slowed by damp air as a rack is (`drying::damp_share`). Rain
+/// takes a pot back exactly as it takes a sod.
+pub fn rate_for(item: BlockId, ambient: &Ambient, weather: Weather, world_days: f32) -> f32 {
+    let rate = rate(ambient, weather, world_days);
+    if clay::is_raw_pottery(item) && rate > 0.0 {
+        rate * crate::logic::drying::damp_share(ambient.humidity)
+    } else {
+        rate
+    }
+}
+
+/// How many seconds of the best weather `item` takes from wet to done.
+fn dry_seconds(item: BlockId) -> f32 {
+    if clay::is_raw_pottery(item) {
+        POTTERY_DRY_SECONDS
+    } else {
+        DRY_SECONDS
+    }
 }
 
 /// How fast a sod here dries, as a share of the best rate: negative when
@@ -218,6 +298,10 @@ impl Peat {
         let start = match block_kind(item) {
             BLOCK_PEAT => 0.0,
             BLOCK_DRYING_PEAT => HALF,
+            _ if clay::is_drying(item) => match clay::dryness(item) {
+                Dryness::Wet => 0.0,
+                _ => HALF,
+            },
             _ => {
                 self.forget(at);
                 return;
@@ -277,10 +361,11 @@ impl Peat {
                     continue;
                 }
             }
-            let Some(sod) = chests.contents(at).block_in(0).filter(|&item| is_drying_sod(item)) else {
+            let Some(lying) = chests.contents(at).slots()[0].filter(|stack| is_drying(stack.block)) else {
                 self.forget(at);
                 continue;
             };
+            let sod = lying.block;
             let ambient = Ambient::of(
                 world,
                 fires,
@@ -288,27 +373,30 @@ impl Peat {
                 world_days,
                 weather,
             );
-            let rate = rate(&ambient, weather, world_days);
+            let rate = rate_for(sod, &ambient, weather, world_days);
             if rate == 0.0 {
                 continue;
             }
             let progress = {
                 let progress = self.progress.entry(at).or_insert(0.0);
-                *progress = (*progress + rate * elapsed / DRY_SECONDS).clamp(0.0, 1.0);
+                *progress = (*progress + rate * elapsed / dry_seconds(sod)).clamp(0.0, 1.0);
                 *progress
             };
             self.dirty = true;
-            let now = stage(progress);
-            if block_kind(now) == block_kind(sod) {
+            let now = stage_of(sod, progress);
+            if now == sod {
                 continue;
             }
             // The one sod in the store becomes the next stage of itself.
             // Done inside the edit, so a hand that took it between the
             // look above and now leaves nothing to rewrite.
+            // The wear word goes with it: a bowl off the wheel carries the
+            // potter's grade there (`quality`), and drying is not a reason
+            // to forget who made it.
             let rewritten = chests.edit(at, |store| {
-                if store.block_in(0).is_some_and(is_drying_sod) {
+                if store.block_in(0).is_some_and(is_drying) {
                     store.take_slot(0);
-                    store.put_in_slot(0, primitive_shared::inventory::Stack::new(now, 1));
+                    store.put_in_slot(0, primitive_shared::inventory::Stack::worn(now, 1, lying.damage));
                     true
                 } else {
                     false
@@ -317,7 +405,7 @@ impl Peat {
             if rewritten {
                 changed.push(at);
             }
-            if now == BLOCK_DRIED_PEAT {
+            if finished(now) {
                 // Fuel now, and fuel for good: see the module note on why
                 // rain does not undo a brick.
                 self.forget(at);
@@ -473,6 +561,47 @@ mod tests {
         // the cell is open sky by construction (see `a_sod_lying_at`).
         assert_eq!(now, Some(BLOCK_PEAT), "the storm left a half-dried sod half dried");
         assert!(peat.progress_at(AT).is_some_and(|p| p < HALF));
+    }
+
+    #[test]
+    fn a_wet_pot_set_down_in_the_sun_turns_leather_hard_and_then_bone_dry() {
+        let (world, mut chests) = a_sod_lying_at(AT);
+        chests.edit(AT, |store| {
+            store.take_slot(0);
+            store.put_in_slot(0, Stack::new(primitive_shared::types::BLOCK_JUG_RAW, 1));
+        });
+        let fires = Fires::new();
+        let mut peat = Peat::new();
+        peat.lay(AT, primitive_shared::types::BLOCK_JUG_RAW);
+        assert_eq!(peat.progress_at(AT), Some(0.0), "a wet pot was not laid out to dry");
+        peat.set_progress(AT, HALF - 0.001);
+        let changed = step_a_while(&mut peat, &world, &fires, &mut chests, Weather::Clear);
+        assert_eq!(changed, vec![AT], "nobody was told the pot had turned");
+        let now = chests.contents(AT).block_in(0).expect("the pot");
+        assert_eq!(clay::dryness(now), Dryness::LeatherHard);
+        assert_eq!(block_kind(now), primitive_shared::types::BLOCK_JUG_RAW, "drying changed what it is");
+
+        peat.set_progress(AT, 0.999);
+        step_a_while(&mut peat, &world, &fires, &mut chests, Weather::Clear);
+        assert_eq!(clay::dryness(chests.contents(AT).block_in(0).unwrap()), Dryness::BoneDry);
+        assert_eq!(peat.progress_at(AT), None, "a bone-dry pot was left on the drying list");
+        // ...and a bone-dry one set down again is not laid out at all.
+        peat.lay(AT, chests.contents(AT).block_in(0).unwrap());
+        assert_eq!(peat.progress_at(AT), None);
+    }
+
+    #[test]
+    fn damp_air_slows_a_pot_and_leaves_a_sod_alone() {
+        let mut swamp = fair();
+        swamp.humidity = 1.0;
+        let pot = primitive_shared::types::BLOCK_VESSEL_RAW;
+        let meadow = rate_for(pot, &fair(), Weather::Clear, NOON);
+        let damp = rate_for(pot, &swamp, Weather::Clear, NOON);
+        assert!(damp < meadow, "a pot in a swamp dried as fast as in a meadow: {damp} against {meadow}");
+        assert_eq!(rate_for(BLOCK_PEAT, &swamp, Weather::Clear, NOON), rate(&swamp, Weather::Clear, NOON), "the bog's own peat was slowed by the bog");
+        let mut rained_on = fair();
+        rained_on.getting_wet = true;
+        assert!(rate_for(pot, &rained_on, Weather::Rain, NOON) < 0.0, "the rain did not take a pot back");
     }
 
     #[test]

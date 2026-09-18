@@ -110,6 +110,113 @@ pub fn is_log(id: BlockId) -> bool {
     WOODS.iter().any(|w| w.log == kind)
 }
 
+// ---- seasoning ----
+//
+// **A log off a standing tree is green**, half its weight water, and it
+// burns like it: a sullen, smoky fire that boils its own sap before it gives
+// any heat. Stacked in the air where the rain does not lie on it, it seasons
+// in days (in the real world, a summer). The player asked for the decision
+// that follows: cut ahead and stack, or burn it green now.
+//
+// **Where it is kept.** The two bits a piece of furniture spends on its wood
+// (`types::WOOD_LOW_SHIFT`), which a log has never had a use for: the log's
+// own variant field is its axis and its moss, both taken. It is a count of
+// how green -- [`GREENEST`] off the stump, nought seasoned -- so a stack
+// seasons a stage at a time on the world's slow clock (`rot` on the server,
+// the same four-a-day steps the larder ages on) with nothing kept per slot.
+//
+// **Nought is seasoned**, so every log already in a chest, in a save written
+// before this, and every `BLOCK_LOG` a recipe or a test names, is dry wood --
+// and what makes a log green is being *cut*: `types::block_drop` of a trunk,
+// and the spare logs of a felled tree. Deadfall, a bough lying in the wood,
+// is dead wood, dry already, and gives a seasoned log.
+//
+// **A log in the world carries no seasoning.** `types::placed` takes it
+// off: a log in a wall is a building, and breaking one out of it gives a
+// green log back like any other trunk. The alternative was the bits in the
+// world as well, which is every rule about a standing log -- the mesher,
+// the felling, the moss -- learning that a trunk has a second field.
+
+/// How green a freshly cut log is: the top of the two bits.
+pub const GREENEST: u8 = 3;
+
+/// Where the greenness sits in a log's id: the furniture's wood bits.
+pub const GREEN_SHIFT: u32 = crate::types::WOOD_LOW_SHIFT;
+/// ...and the field itself.
+pub const GREEN_MASK: BlockId = 0b11 << GREEN_SHIFT;
+
+/// How many of the world's four-a-day steps it takes a log in a **log pile**
+/// to season by one stage, and [`SEASONS_EVERY_UNDER_A_ROOF`] for one kept
+/// under a roof in a chest or a pack.
+///
+/// **Three days in a pile, six in a chest.** A pile is what firewood is
+/// stacked in: air through it on every side, and rain only stopping it on
+/// the steps it falls (`logic::rot` on the server skips those). A chest
+/// keeps the rain off and the air out, and a log in one dries at half the
+/// pace -- which is what makes the pile worth building. Out in the open and
+/// not in a pile, a log lying in the grass seasons not at all: it lies in
+/// the dew and goes soft at the bottom.
+pub const SEASONS_EVERY_IN_A_PILE: u32 = 4;
+/// See [`SEASONS_EVERY_IN_A_PILE`].
+pub const SEASONS_EVERY_UNDER_A_ROOF: u32 = 8;
+
+/// How green this is, [`GREENEST`] to nought. Nought for anything that is
+/// not a log.
+#[inline]
+pub fn greenness(id: BlockId) -> u8 {
+    if !is_log(id) {
+        return 0;
+    }
+    ((id & GREEN_MASK) >> GREEN_SHIFT) as u8
+}
+
+/// Is this a log that has not finished seasoning? What burns badly
+/// (`hearth::GREEN_HEAT`) -- the whole way, not a third less at each stage:
+/// "green until it is seasoned" is a rule a player can hold, where a heat
+/// that crept up a stage at a time is a number they cannot see.
+#[inline]
+pub fn is_green(id: BlockId) -> bool {
+    greenness(id) > 0
+}
+
+/// The same log, fresh off the stump. Anything else unchanged.
+#[inline]
+pub fn green(id: BlockId) -> BlockId {
+    if !is_log(id) {
+        return id;
+    }
+    (id & !GREEN_MASK) | (BlockId::from(GREENEST) << GREEN_SHIFT)
+}
+
+/// The same log, seasoned -- or the same id, for anything else.
+#[inline]
+pub fn seasoned(id: BlockId) -> BlockId {
+    if !is_log(id) {
+        return id;
+    }
+    id & !GREEN_MASK
+}
+
+/// One stage further seasoned; a seasoned log stays one.
+#[inline]
+pub fn season_a_stage(id: BlockId) -> BlockId {
+    let g = greenness(id);
+    if g == 0 {
+        return id;
+    }
+    (id & !GREEN_MASK) | (BlockId::from(g - 1) << GREEN_SHIFT)
+}
+
+/// The word the tooltip puts after a log's name, or `None` for a seasoned
+/// one: green off the stump, seasoning on the way.
+pub fn seasoning_label(id: BlockId) -> Option<&'static str> {
+    match greenness(id) {
+        0 => None,
+        GREENEST => Some("green"),
+        _ => Some("seasoning"),
+    }
+}
+
 /// Is this a plank of any wood -- not pegged?
 #[inline]
 pub fn is_planks(id: BlockId) -> bool {
@@ -165,6 +272,39 @@ pub fn stands_in_for(asked: BlockId, held: BlockId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_green_log_seasons_a_stage_at_a_time_and_stays_the_same_wood() {
+        for wood in WOODS {
+            let cut = green(wood.log);
+            assert!(is_green(cut) && crate::types::is_known_block(cut), "a green {} is invented", crate::types::block_name(wood.log));
+            assert_eq!(block_kind(cut), wood.log, "cutting changed the wood");
+            let mut log = cut;
+            for _ in 0..GREENEST {
+                assert!(is_green(log));
+                log = season_a_stage(log);
+                assert!(crate::types::is_known_block(log));
+            }
+            assert_eq!(log, wood.log, "three stages did not season it");
+            assert_eq!(season_a_stage(log), log, "a seasoned log went further");
+        }
+        // A plank is never green: it was cut small and dried.
+        assert!(!is_green(green(BLOCK_PLANKS)));
+        assert_eq!(green(BLOCK_PLANKS), BLOCK_PLANKS);
+    }
+
+    #[test]
+    fn a_log_cut_off_a_tree_is_green_and_a_bough_off_the_forest_floor_is_not() {
+        use crate::types::{block_drop, BLOCK_BOUGH};
+        assert!(block_drop(BLOCK_LOG).is_some_and(is_green), "a trunk gave a seasoned log");
+        assert!(block_drop(BLOCK_FIR_LOG).is_some_and(is_green));
+        if let Some(dead) = block_drop(BLOCK_BOUGH).filter(|&d| is_log(d)) {
+            assert!(!is_green(dead), "deadfall came out green");
+        }
+        // ...and a green log put into a wall is a plain log in the world.
+        let laid = crate::types::placed(green(BLOCK_LOG), 0.0, (0, 1, 0));
+        assert_eq!(greenness(laid), 0, "a wall of logs carries sap in the world");
+    }
 
     #[test]
     fn every_wood_is_four_different_blocks_and_no_block_is_two_woods() {

@@ -150,7 +150,10 @@ async fn a_pit_kiln_is_dug_filled_lit_and_gives_back_fired_pottery_over_the_wire
     server.place_block(pit.0, pit.1 + 1, pit.2, BLOCK_AIR);
     server.place_block(pit.0, pit.1 + 2, pit.2, BLOCK_COBBLESTONE);
 
-    for (block, count) in [(BLOCK_VESSEL_RAW, 1), (BLOCK_FIBER, 8), (BLOCK_LOG, 8), (BLOCK_FLINT, 1)] {
+    // A pot laid out until it is bone-dry: a wet one may crack in the fire
+    // (`clay::crack_chance`), and this is the test of the kiln, not of luck.
+    let dry_pot = primitive_shared::clay::with_dryness(BLOCK_VESSEL_RAW, primitive_shared::clay::Dryness::BoneDry);
+    for (block, count) in [(dry_pot, 1), (BLOCK_FIBER, 8), (BLOCK_LOG, 8), (BLOCK_FLINT, 1)] {
         assert_eq!(server.give(block, count), 0, "the pack had no room for block {block}");
     }
     let pack = client
@@ -165,7 +168,7 @@ async fn a_pit_kiln_is_dug_filled_lit_and_gives_back_fired_pottery_over_the_wire
             .find(|&slot| pack.block_in(slot) == Some(block))
             .expect("given but in no slot")
     };
-    let (pottery, fibre, logs, flint) = (slot_of(BLOCK_VESSEL_RAW), slot_of(BLOCK_FIBER), slot_of(BLOCK_LOG), slot_of(BLOCK_FLINT));
+    let (pottery, fibre, logs, flint) = (slot_of(dry_pot), slot_of(BLOCK_FIBER), slot_of(BLOCK_LOG), slot_of(BLOCK_FLINT));
 
     // «Кладутся в низ предметы для обжога»: the pot, at the pit's floor.
     client.use_with(pottery, floor).await;

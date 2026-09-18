@@ -5761,6 +5761,8 @@ pub fn oriented(id: BlockId, axis: Axis) -> BlockId {
 /// protect by refusing one: it checks the id, the support and the space,
 /// exactly as it does for a block that does not turn.
 pub fn placed(held: BlockId, yaw: f32, clicked: (i32, i32, i32)) -> BlockId {
+    // A log in the world carries no seasoning (`wood`, "seasoning").
+    let held = crate::wood::seasoned(held);
     let laid = match Axis::of_normal(clicked.0, clicked.1, clicked.2) {
         Some(axis) => oriented(held, axis),
         None => held,
@@ -8018,6 +8020,11 @@ pub fn is_known_block(id: BlockId) -> bool {
         if crate::bees::is_hive(kind) {
             return id & WOOD_HIGH_BIT == 0 && is_known_block(id & !WOOD_MASK);
         }
+        // ...and a log spends the two low ones on how green it still is
+        // (`wood::greenness`), all four of which are a stage.
+        if crate::wood::is_log(kind) {
+            return id & WOOD_HIGH_BIT == 0 && is_known_block(id & !WOOD_MASK);
+        }
         if !carries_wood(kind) || furniture_wood(id) >= crate::wood::WOODS.len() {
             return false;
         }
@@ -8088,6 +8095,11 @@ pub fn is_known_block(id: BlockId) -> bool {
     }
     if kind == BLOCK_FISH_TRAP {
         return trap_catch(id) <= crate::fishing::TRAP_HOLDS;
+    }
+    // ...and raw pottery spends it on how dry it is (`clay::Dryness`),
+    // three stages; a fourth is a claim.
+    if crate::clay::is_raw_pottery(kind) {
+        return crate::clay::is_valid_variant(id);
     }
     // ...and a wild hive spends it on its honey, which stops at what a hive
     // holds (`bees::HIVE_FULL`). Asked here rather than waved through by
@@ -8402,7 +8414,14 @@ pub fn block_drop(id: BlockId) -> Option<BlockId> {
     if carries_wood(id) {
         return crate::blocks::definition(id).drop.map(|drop| in_wood(drop, furniture_wood(id)));
     }
-    crate::blocks::definition(id).drop
+    // **A log cut out of the world is green** (`wood::green`): a trunk is a
+    // living tree, and a log pulled out of a wall is a log that stood in the
+    // weather. The boughs above returned first, and are dead wood -- dry.
+    let drop = crate::blocks::definition(id).drop;
+    if crate::wood::is_log(id) {
+        return drop.map(crate::wood::green);
+    }
+    drop
 }
 
 /// What stands in the cell after this block is broken.
@@ -9522,7 +9541,8 @@ mod mining_tests {
     fn grass_and_stone_drop_something_else() {
         assert_eq!(block_drop(BLOCK_GRASS), Some(BLOCK_DIRT));
         assert_eq!(block_drop(BLOCK_STONE), Some(BLOCK_COBBLESTONE));
-        assert_eq!(block_drop(BLOCK_LOG), Some(BLOCK_LOG));
+        // A trunk gives the same log, green off the stump (`wood::green`).
+        assert_eq!(block_drop(BLOCK_LOG), Some(crate::wood::green(BLOCK_LOG)));
     }
 
     #[test]
@@ -10024,8 +10044,9 @@ mod orientation_tests {
     fn breaking_a_sideways_log_gives_an_ordinary_one() {
         // Or the inventory would hold three kinds of log and a stack of
         // each -- three slots for one material.
-        assert_eq!(block_drop(oriented(BLOCK_LOG, Axis::X)), Some(BLOCK_LOG));
-        assert_eq!(block_drop(oriented(BLOCK_LOG, Axis::Z)), Some(BLOCK_LOG));
+        // One kind of log out of every axis: green, as every cut log is.
+        assert_eq!(block_drop(oriented(BLOCK_LOG, Axis::X)), Some(crate::wood::green(BLOCK_LOG)));
+        assert_eq!(block_drop(oriented(BLOCK_LOG, Axis::Z)), Some(crate::wood::green(BLOCK_LOG)));
     }
 
     #[test]
@@ -10629,7 +10650,7 @@ mod tool_tests {
                 "deadfall lying on the ground could not be gathered"
             );
         }
-        assert_eq!(block_drop(oriented(BLOCK_LOG, Axis::X)), Some(BLOCK_LOG));
+        assert_eq!(block_drop(oriented(BLOCK_LOG, Axis::X)).map(block_kind), Some(BLOCK_LOG));
     }
 
     #[test]

@@ -427,6 +427,14 @@ fn finish(
         return None;
     }
     let done = match batch {
+        // **Raw pottery is rolled for, a piece at a time**, against how wet
+        // it went in (`clay::crack_chance`). The server's dice, as every
+        // roll is; one generator for the batch, so four bricks are four
+        // throws and not one throw read four times.
+        Batch::Recipe(recipe) if recipe.inputs.iter().any(|&(block, _)| primitive_shared::clay::is_raw_pottery(block)) => {
+            let mut dice = crate::logic::rng::Rng::from_clock();
+            hearth::complete_fired(contents, recipe, quality, || dice.range(0.0, 1.0)).is_some()
+        }
         Batch::Recipe(recipe) => hearth::complete_made(contents, recipe, quality),
         Batch::Boil => hearth::boil(contents),
     };

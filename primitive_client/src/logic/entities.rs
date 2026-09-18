@@ -1424,6 +1424,17 @@ pub fn build_set_down_into(
                 // Lit by the cell it lies in, as a dropped one is; drawn a
                 // hair over the floor, the settled stack's own height.
                 let (sky, block_light) = sampled_light(floor, light);
+                // **Wet clay lying out is drawn darker** (`clay::shade`), and
+                // by the light it is given rather than by a tint: an item
+                // vertex has a layer and a light word and no colour, and a
+                // colour channel for one shade on one kind of thing is a
+                // vertex format change for every item drawn. A pot drying in
+                // the sun reads as wet, then leather-hard, then pale. Light
+                // levels off rather than a share of them, because the light
+                // curve is steep: two levels is the shade the icon wears,
+                // and six tenths of the level was a pot in a cave.
+                let off = ((1.0 - primitive_shared::clay::shade(item)[0]) * 5.0).round() as u8;
+                let (sky, block_light) = (sky.saturating_sub(off), block_light.saturating_sub(off));
                 let at = (floor - origin.as_dvec3()).as_vec3();
                 model.append_tipped(
                     item_vertices,

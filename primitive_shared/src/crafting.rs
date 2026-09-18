@@ -5162,8 +5162,12 @@ mod tests {
         let bread = crate::food::nutrition(crate::types::BLOCK_BREAD).unwrap();
         let bowl = crate::food::nutrition(BLOCK_MILLET_PORRIDGE).unwrap();
         assert!(bowl < bread, "porridge fed as well as bread, and the quicker meal won outright");
-        assert!(crate::food::is_perishable(BLOCK_MILLET_PORRIDGE), "porridge keeps like bread");
-        assert!(!crate::food::is_perishable(crate::types::BLOCK_BREAD));
+        // Both go off, porridge in two days and a loaf in four; the grain
+        // they are made of keeps, which is why it is the thing to store.
+        assert!(crate::food::is_perishable(BLOCK_MILLET_PORRIDGE), "porridge keeps for ever");
+        assert!(crate::food::is_perishable(crate::types::BLOCK_BREAD), "bread keeps for ever");
+        assert!(crate::food::rot_every(crate::types::BLOCK_BREAD) > crate::food::rot_every(BLOCK_MILLET_PORRIDGE), "porridge keeps as long as a loaf");
+        assert!(!crate::food::is_perishable(crate::types::BLOCK_GRAIN), "the grain went off");
     }
 
     #[test]
