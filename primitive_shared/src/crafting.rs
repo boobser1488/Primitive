@@ -3706,6 +3706,20 @@ pub const RECIPES: &[Recipe] = &[
         returns: &[(crate::types::BLOCK_LODESTONE, 1), (BLOCK_JUG, 1)],
         failure: 0.0,
     },
+    // **A barter stall** (`types::BLOCK_STALL`): a counter of boards on
+    // sticks, under a bolt of cloth. The cloth is the price of it, and
+    // deliberately: a stall is worth building once there is somebody to
+    // trade with, which on a server is about when flax is first spun --
+    // and a stone-age player with nothing to sell has no use for one yet.
+    // Appended, because a recipe's place here is its number on the wire.
+    Recipe {
+        name: "stall",
+        inputs: &[(BLOCK_PLANKS, 3), (BLOCK_STICK, 4), (BLOCK_CLOTH, 1)],
+        output: (crate::types::BLOCK_STALL, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
 ];
 
 /// Why a craft cannot happen, or that it can.

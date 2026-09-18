@@ -2313,6 +2313,14 @@ pub const BLOCK_MASON_BLOCK: BlockId = 618;
 pub const BLOCK_POTTERS_WHEEL: BlockId = 619;
 /// A low bench with a hide pinned across it. See `BLOCK_WORKBENCH`.
 pub const BLOCK_LEATHER_BENCH: BlockId = 620;
+/// **A barter stall**: a counter under a cloth awning, where a player leaves
+/// goods and a price for whoever comes by while they are away. What is on it
+/// lives in the container store like a chest's (`stall::STOCK`,
+/// `stall::TAKINGS`); who owns it and what it asks is the server's
+/// `logic::stalls`. See `stall` for the rules of a trade.
+///
+/// Id 665, in the gap after the drying goods: nothing reads a range there.
+pub const BLOCK_STALL: BlockId = 665;
 
 /// **A step**: the lower half of its cell whole, and the back quarter of the
 /// upper half -- two boxes, turned the way it was put down, its low side
@@ -4682,6 +4690,8 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     (BLOCK_MASON_BLOCK, "mason_block"),
     (BLOCK_POTTERS_WHEEL, "potters_wheel"),
     (BLOCK_LEATHER_BENCH, "leather_bench"),
+    // A barter stall. See `BLOCK_STALL`.
+    (BLOCK_STALL, "stall"),
     // Steps, and the three roofs built out of steps and slabs. See
     // `BLOCK_TILE_ROOF`.
     (BLOCK_PLANK_STAIRS, "plank_stairs"),
@@ -4916,6 +4926,9 @@ pub const PLACEABLE_BLOCKS: &[BlockId] = &[
     BLOCK_POTTERS_WHEEL,
     BLOCK_LEATHER_BENCH,
     BLOCK_ANVIL,
+    // ...and a stall, which comes back whole with its goods in the owner's
+    // pack or spilled for anybody else (`stall`).
+    BLOCK_STALL,
     // Steps and roofing, put down and taken back like the planks and the
     // cobbles they are cut from. See `BLOCK_TILE_ROOF`.
     BLOCK_STAKE,

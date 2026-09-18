@@ -7201,6 +7201,40 @@ pub const BLOCKS: &[BlockDef] = &[
         turns: false,
         propped: true,
     },
+    // **A barter stall** (`types::BLOCK_STALL`): the chest's row in most
+    // things -- a container, turned to face whoever put it down, a model a
+    // little in from its cell -- and not `propped`, for the chest's reason:
+    // a block that falls when its floor is dug goes through the drop path,
+    // and a stall's goods belong to the spill.
+    BlockDef {
+        id: BLOCK_STALL,
+        name: "stall",
+        shape: Shape::Cube,
+        thickness: LAYERS_PER_BLOCK,
+        matter: Matter::Solid,
+        opacity: 0,
+        emission: 0,
+        hardness: Some(2.0),
+        felled: None,
+        needs: Tier::Hand,
+        work: Work::Wood,
+        tool: None,
+        drop: Some(BLOCK_STALL),
+        leaves_behind: None,
+        weight: 8.0,
+        stack: crate::inventory::MAX_STACK,
+        durability: None,
+        drag: 1.0,
+        grip: 1.0,
+        placeable: true,
+        foliage: false,
+        orientable: false,
+        faces: true,
+        falls: false,
+        container: true,
+        turns: false,
+        propped: false,
+    },
     // **The door, in its two halves** (`types::BLOCK_DOOR`). What the rows
     // say is the shut door: a wall's opacity, and the whole cell tall so a
     // player's head meets the top half. It is three sixteenths *across*,

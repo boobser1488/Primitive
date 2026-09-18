@@ -30,6 +30,7 @@
 //! there now.
 
 use primitive_shared::protocol::Side;
+use primitive_shared::stall::Offer;
 
 use crate::engine::texture::{FaceLayers, FontAtlas};
 use crate::logic::inventory::{Inventory, HOTBAR_SLOTS, SLOTS};
@@ -231,6 +232,55 @@ pub enum Intent {
     /// hand is down-then-out, or Back, which closes whatever is held.
     /// See `tapping_beside_a_container_closes_it_but_only_with_empty_hands`.
     Close,
+    /// The owner of a stall setting row `row`'s price, or taking it down.
+    /// See `ClientMessage::StallOffer`.
+    SetOffer { row: usize, offer: Option<Offer> },
+    /// One lot of row `row`, at the price this screen showed. See
+    /// `ClientMessage::StallBuy` for why the price rides along.
+    Buy { row: usize, offer: Offer },
+}
+
+/// What a stall has said about itself: whose it is, whether it is this
+/// player's, and its prices. See `ServerMessage::StallOffers`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StallView {
+    pub at: (i32, i32, i32),
+    pub owner: String,
+    pub yours: bool,
+    pub offers: Vec<Option<Offer>>,
+}
+
+/// One side of a price while the owner is still making it: a thing and how
+/// many.
+type Half = Option<(primitive_shared::types::BlockId, u32)>;
+
+/// The counts a price steps through under the owner's `-` and `+`.
+///
+/// **Steps, not ones.** A price of forty-eight flint is two taps from
+/// thirty-two rather than sixteen, and the counts people trade in are round
+/// ones -- a dozen, a score -- so the steps are where the prices are.
+const PRICE_STEPS: [u32; 15] = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 48, primitive_shared::stall::MAX_LOT];
+
+/// The next count up or down from `count`, staying inside the steps.
+fn step_count(count: u32, up: bool) -> u32 {
+    if up {
+        PRICE_STEPS.iter().copied().find(|&s| s > count).unwrap_or(primitive_shared::stall::MAX_LOT)
+    } else {
+        PRICE_STEPS.iter().rev().copied().find(|&s| s < count).unwrap_or(1)
+    }
+}
+
+/// Something on a stall's price rows a click can land on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StallControl {
+    /// The goods square of a row: what the stall gives.
+    Give(usize),
+    /// The price square: what the stall takes.
+    Take(usize),
+    /// A `-` or `+`: row, the price side rather than the goods, and up.
+    Step { row: usize, take: bool, up: bool },
+    /// TRADE for a buyer, REMOVE for the owner.
+    Action(usize),
 }
 
 /// Which of the three container screens is being drawn.
@@ -270,6 +320,10 @@ pub enum Layout {
     /// compartment is one whose contents are that long. See
     /// [`ChestScreen::layout`].
     Body { rucksack: bool },
+    /// A barter stall: its price rows, the counter and the till over the
+    /// pack. A working half like the hearth's, not a grid, because its two
+    /// rows of squares mean different things -- see `stall::STOCK`.
+    Stall,
 }
 
 impl Layout {
@@ -286,6 +340,7 @@ impl Layout {
             ContainerKind::Hearth(_) => Layout::Hearth,
             ContainerKind::Rack => Layout::Rack,
             ContainerKind::Vessel => Layout::Vessel,
+            ContainerKind::Stall => Layout::Stall,
         }
     }
 }
@@ -356,6 +411,17 @@ pub struct ChestScreen {
     /// forty whenever a different container opens -- a player opening a
     /// body is looking for the body's things first.
     rucksack_page: bool,
+    /// What the stall that is open has said about itself, if it is a stall.
+    stall: Option<StallView>,
+    /// The owner's prices half made: a row with its goods chosen and not
+    /// yet its price, or the other way round.
+    ///
+    /// **Kept here and not sent**, because a price with one side is not a
+    /// price, and the server is right to refuse one (`Offer::is_valid`). The
+    /// rejected way was a price with a placeholder on the missing side --
+    /// "four flint for one of nothing" -- which a buyer's screen would draw
+    /// as an offer, for the half a minute the owner was looking for a hide.
+    drafts: [(Half, Half); primitive_shared::stall::OFFERS],
 }
 
 impl Default for ChestScreen {
@@ -380,6 +446,104 @@ impl ChestScreen {
             vessel_slot: None,
             dismissed: None,
             rucksack_page: false,
+            stall: None,
+            drafts: Default::default(),
+        }
+    }
+
+    /// The server has said whose stall this is and what it asks.
+    ///
+    /// Sent just before the stall's `ChestState` (see
+    /// `ServerMessage::StallOffers`), so it is kept against the position it
+    /// names and `show` keeps it only for that one.
+    pub fn show_stall(&mut self, view: StallView) {
+        if self.stall.as_ref().is_some_and(|old| old.at != view.at) {
+            self.drafts = Default::default();
+        }
+        // A row the server now has a price for is no longer a draft.
+        for (row, offer) in view.offers.iter().enumerate() {
+            if offer.is_some() {
+                if let Some(draft) = self.drafts.get_mut(row) {
+                    *draft = (None, None);
+                }
+            }
+        }
+        self.stall = Some(view);
+    }
+
+    /// What the open stall has said about itself, if a stall is open.
+    pub fn stall(&self) -> Option<&StallView> {
+        self.stall.as_ref().filter(|view| self.at == Some(view.at))
+    }
+
+    /// Row `row` as the screen shows it: the server's price, or the
+    /// owner's draft of one.
+    fn stall_row(&self, row: usize) -> (Half, Half) {
+        let offer = self.stall().and_then(|view| view.offers.get(row).copied().flatten());
+        match offer {
+            Some(o) => (Some((o.give, o.give_count)), Some((o.take, o.take_count))),
+            None => self.drafts.get(row).copied().unwrap_or_default(),
+        }
+    }
+
+    /// A click on the stall's price rows, or `None` if it was not on them.
+    ///
+    /// `Some(None)` is a click that landed and asks nothing of the server.
+    fn click_stall(&mut self, pack: &Inventory, cursor: (f32, f32)) -> Option<Option<Intent>> {
+        let view = self.stall()?.clone();
+        let control = stall_control_at(cursor, view.yours)?;
+        let held = self.held.and_then(|(side, slot)| match side {
+            Side::Pack => pack.block_in(slot),
+            Side::Chest => self.contents.block_in(slot),
+        });
+        if !view.yours {
+            self.release();
+            let StallControl::Action(row) = control else {
+                return Some(None);
+            };
+            return Some(view.offers.get(row).copied().flatten().map(|offer| Intent::Buy { row, offer }));
+        }
+        let row = match control {
+            StallControl::Give(row) | StallControl::Take(row) | StallControl::Action(row) => row,
+            StallControl::Step { row, .. } => row,
+        };
+        let (mut give, mut take) = self.stall_row(row);
+        match control {
+            StallControl::Action(_) => {
+                self.release();
+                self.drafts[row] = (None, None);
+                return Some(view.offers.get(row).copied().flatten().map(|_| Intent::SetOffer { row, offer: None }));
+            }
+            // **A thing held up to a square names it; nothing moves.** The
+            // held stack is a sample and goes back where it was, which is
+            // why the owner can price a thing they have one of -- and why the
+            // price can be a thing picked up off their own counter.
+            StallControl::Give(_) | StallControl::Take(_) => {
+                let Some(block) = held else {
+                    return Some(None);
+                };
+                self.release();
+                let block = primitive_shared::types::block_kind(block);
+                let side = if matches!(control, StallControl::Give(_)) { &mut give } else { &mut take };
+                *side = Some((block, side.map_or(1, |(_, count)| count)));
+            }
+            StallControl::Step { take: on_take, up, .. } => {
+                let side = if on_take { &mut take } else { &mut give };
+                let Some((block, count)) = *side else {
+                    return Some(None);
+                };
+                *side = Some((block, step_count(count, up)));
+            }
+        }
+        match (give, take) {
+            (Some((give, give_count)), Some((take, take_count))) => {
+                self.drafts[row] = (None, None);
+                Some(Some(Intent::SetOffer { row, offer: Some(Offer { give, give_count, take, take_count }) }))
+            }
+            half => {
+                self.drafts[row] = half;
+                Some(None)
+            }
         }
     }
 
@@ -489,6 +653,10 @@ impl ChestScreen {
             self.cursor = Some((0.0, 0.0));
             self.heading = Msg::Chest;
             self.rucksack_page = false;
+            if self.stall.as_ref().is_some_and(|view| view.at != at) {
+                self.stall = None;
+                self.drafts = Default::default();
+            }
         }
         if let Some(block) = block {
             self.heading = heading_for(block);
@@ -509,6 +677,8 @@ impl ChestScreen {
         self.block = None;
         self.heading = Msg::Chest;
         self.rucksack_page = false;
+        self.stall = None;
+        self.drafts = Default::default();
         self.release();
     }
 
@@ -670,6 +840,19 @@ impl ChestScreen {
                 return None;
             }
         }
+        if layout == Layout::Stall {
+            if let Some(answer) = self.click_stall(pack, cursor) {
+                return answer;
+            }
+            // **A buyer's hands stay off the counter and the till.** The
+            // server refuses anyway (`usable_chest`); refusing here as well
+            // means a stranger never sees a pick-up that goes nowhere.
+            let owner = self.stall().is_some_and(|view| view.yours);
+            if !owner && matches!(slot_at(cursor, layout), Some((Side::Chest, _))) {
+                self.release();
+                return None;
+            }
+        }
         if layout.grid()
             && sort_button_rect().contains(cursor.0, cursor.1)
         {
@@ -781,6 +964,9 @@ impl ChestScreen {
         self.weather
             .map(|w| (w.progress.to_bits(), w.rate.to_bits(), w.wet, w.near_fire))
             .hash(&mut h);
+        // A price changed by the owner changes no slot either.
+        self.stall.hash(&mut h);
+        self.drafts.hash(&mut h);
         h.finish()
     }
 
@@ -1228,6 +1414,95 @@ impl ChestScreen {
         );
     }
 
+    /// The stall's half: its prices, the counter and the till.
+    fn draw_stall(
+        &self,
+        p: &mut Painter,
+        layers: &FaceLayers,
+        pack: &Inventory,
+        hovered: Option<(Side, usize)>,
+        language: Language,
+    ) {
+        use primitive_shared::inventory::Stack;
+        use primitive_shared::stall::{STOCK, TAKINGS};
+        let view = self.stall();
+        let yours = view.is_some_and(|v| v.yours);
+        let over = |rect: Rect| self.cursor.is_some_and(|(x, y)| rect.contains(x, y));
+
+        // The prices, captioned with whose they are: a buyer at a row of
+        // stalls wants to know whose counter this is before what is on it.
+        let caption = match view {
+            Some(v) if v.yours => language.text(Msg::StallYourPrices).to_string(),
+            Some(v) => format!("{} - {}", language.text(Msg::StallPrices), v.owner),
+            None => language.text(Msg::StallPrices).to_string(),
+        };
+        stall_caption(p, stall_row_top(0), &caption);
+
+        for row in 0..primitive_shared::stall::OFFERS {
+            let (goods, price) = self.stall_row(row);
+            let offer = view.and_then(|v| v.offers.get(row).copied().flatten());
+            for (control, half) in [(StallControl::Give(row), goods), (StallControl::Take(row), price)] {
+                let rect = stall_control_rect(control);
+                let edge = if over(rect) { SlotEdge::Hovered } else { SlotEdge::Plain };
+                draw_slot_stack(p, rect, layers, half.map(|(block, count)| Stack::new(block, count)), edge);
+            }
+            trade_arrow(p, stall_cell(stall_row_top(row), 3, 1));
+            if yours {
+                for take in [false, true] {
+                    for up in [false, true] {
+                        let rect = stall_control_rect(StallControl::Step { row, take, up });
+                        let side = if take { price } else { goods };
+                        let enabled = side.is_some_and(|(_, count)| {
+                            if up { count < primitive_shared::stall::MAX_LOT } else { count > 1 }
+                        });
+                        p.button(rect, if up { "+" } else { "-" }, over(rect), enabled);
+                    }
+                }
+                let rect = stall_control_rect(StallControl::Action(row));
+                let anything = goods.is_some() || price.is_some();
+                p.button(rect, language.text(Msg::StallClear), over(rect), offer.is_some() || anything);
+            } else if let Some(offer) = offer {
+                // How many lots are on the counter, and whether this pack can
+                // pay for one: the two things that decide whether TRADE does
+                // anything, said before it is pressed.
+                let lots = primitive_shared::stall::lots_in_stock(&self.contents, &offer);
+                let rect = stall_control_rect(StallControl::Action(row));
+                let can = lots > 0 && primitive_shared::stall::can_pay(pack, &offer);
+                p.button(rect, language.text(Msg::StallTrade), over(rect), can);
+                let left = format!("{lots} {}", language.text(Msg::StallLeft));
+                let arrow = stall_cell(stall_row_top(row), 3, 1);
+                let scale = widgets::fitted_scale(&left, 0.55, arrow.width() + GAP, 0.4);
+                p.text_centred(
+                    &left,
+                    arrow.centre_x(),
+                    arrow.y0 + widgets::cell_height(scale) + 0.004,
+                    scale,
+                    if lots > 0 { widgets::INK_DIM } else { widgets::TEXT_BAD },
+                );
+            }
+        }
+
+        for (range, top, caption) in [
+            (STOCK, stall_stock_top(), Msg::StallStock),
+            (TAKINGS, stall_takings_top(), Msg::StallTakings),
+        ] {
+            stall_caption(p, top, language.text(caption));
+            for slot in range {
+                let Some(rect) = stall_slot_rect(slot) else {
+                    continue;
+                };
+                let edge = if self.held == Some((Side::Chest, slot)) {
+                    SlotEdge::Source
+                } else if hovered == Some((Side::Chest, slot)) {
+                    SlotEdge::Hovered
+                } else {
+                    SlotEdge::Plain
+                };
+                draw_slot_stack(p, rect, layers, self.contents.slots().get(slot).copied().flatten(), edge);
+            }
+        }
+    }
+
     /// The same screen, appended to a list the caller keeps between    /// The same screen, appended to a list the caller keeps between
     /// frames -- so a rebuild reuses the allocation instead of making a
     /// fresh one.
@@ -1282,6 +1557,7 @@ impl ChestScreen {
             Layout::Hearth => self.draw_hearth(&mut p, layers, hovered, language),
             Layout::Rack => self.draw_rack(&mut p, layers, hovered, language),
             Layout::Vessel => self.draw_vessel(&mut p, layers, hovered, language),
+            Layout::Stall => self.draw_stall(&mut p, layers, pack, hovered, language),
             Layout::Chest => {}
             Layout::Body { rucksack } => {
                 // The body's own word on its tab rather than a new one:
@@ -1416,6 +1692,20 @@ impl ChestScreen {
                 crate::ui::inventory_screen::hover_note(&mut p, cursor, &text, panel);
             }
         }
+        // ...and a price's squares, which are pictures of things that are in
+        // no inventory: a buyer who cannot tell a hide from a fleece by its
+        // icon is asked for one of them.
+        if let (Some(cursor), Layout::Stall, Some(view)) = (self.cursor, layout, self.stall()) {
+            let named = match stall_control_at(cursor, view.yours) {
+                Some(StallControl::Give(row)) => self.stall_row(row).0,
+                Some(StallControl::Take(row)) => self.stall_row(row).1,
+                _ => None,
+            };
+            if let Some((block, count)) = named {
+                let text = crate::ui::names::stack_line(block, count, language);
+                crate::ui::inventory_screen::hover_note(&mut p, cursor, &text, panel);
+            }
+        }
 
         // The action bar, between the grids. A hearth has none: "store
         // everything" into a furnace is a gesture with no meaning,
@@ -1493,11 +1783,19 @@ impl ChestScreen {
         // already said. Worse than redundant: the tray reaches lower
         // than the rule did, so the two crossed.
         p.text(&summary, grid_left(), panel.y0 + 0.108, 0.86, widgets::INK);
+        // The stall's own line: the owner is pricing and the buyer is
+        // trading, and the chest's shift-click hint is neither.
+        let hint = match (layout, self.stall()) {
+            (Layout::Stall, Some(view)) if view.yours => Msg::StallHintOwner,
+            (Layout::Stall, _) => Msg::StallHintBuyer,
+            _ => hint(),
+        };
+        let hint = language.text(hint);
         p.text(
-            language.text(hint()),
+            hint,
             grid_left(),
             panel.y0 + 0.056,
-            HINT_SCALE,
+            widgets::fitted_scale(hint, HINT_SCALE, grid_width(), 0.5),
             widgets::INK_DIM,
         );
 
@@ -1536,6 +1834,9 @@ fn heading_for(block: primitive_shared::types::BlockId) -> Msg {
     }
     if primitive_shared::types::opens_as_vessel(block) {
         return Msg::Jug;
+    }
+    if primitive_shared::types::block_kind(block) == primitive_shared::types::BLOCK_STALL {
+        return Msg::Stall;
     }
     // Where you died, and what is left of it once the ground has had the
     // soft half -- and the pack an older world may still be holding, which
@@ -1629,7 +1930,9 @@ pub fn held_vessel_message(
         | Intent::Sort
         | Intent::BulkMove { .. }
         | Intent::MoveKind(..)
-        | Intent::Close => None,
+        | Intent::Close
+        | Intent::SetOffer { .. }
+        | Intent::Buy { .. } => None,
     }
 }
 
@@ -1718,6 +2021,7 @@ fn work_tray(layout: Layout) -> Option<Rect> {
         Layout::Hearth => hearth_top(),
         Layout::Rack => rack_top(),
         Layout::Vessel => vessel_top(),
+        Layout::Stall => stall_top(),
         Layout::Chest | Layout::Body { .. } => return None,
     };
     Some(Rect::new(
@@ -1799,6 +2103,7 @@ fn panel_rect(layout: Layout) -> Rect {
         Layout::Hearth => hearth_top() + LABEL_HEIGHT,
         Layout::Rack => rack_top() + LABEL_HEIGHT,
         Layout::Vessel => vessel_top() + LABEL_HEIGHT,
+        Layout::Stall => stall_top() + LABEL_HEIGHT,
         Layout::Chest => content_top() + LABEL_HEIGHT,
         // The tabs are stacked on top of the chest's own panel rather than
         // cut out of it, so not one slot moves between a chest and a body
@@ -2372,6 +2677,10 @@ pub fn slot_at(cursor: (f32, f32), layout: Layout) -> Option<(Side, usize)> {
         Layout::Vessel => vessel_slot_rect(primitive_shared::inventory::VESSEL_SLOT)
             .filter(|rect| rect.contains(cursor.0, cursor.1))
             .map(|_| primitive_shared::inventory::VESSEL_SLOT),
+        // The counter and the till, the rects `draw_stall` draws.
+        Layout::Stall => primitive_shared::stall::STOCK
+            .chain(primitive_shared::stall::TAKINGS)
+            .find(|&slot| stall_slot_rect(slot).is_some_and(|rect| rect.contains(cursor.0, cursor.1))),
         Layout::Chest | Layout::Body { .. } => {
             // A place under the pointer that shows no square -- the two
             // bare rows under a rucksack's twenty -- is nothing at all,
@@ -2460,11 +2769,159 @@ pub fn page_tab_at(cursor: (f32, f32)) -> Option<bool> {
 /// the grids is not also a swing at the world behind it.
 #[allow(dead_code)]
 pub fn contains(cursor: (f32, f32)) -> bool {
-    // The largest of the three, so a click beside a chest screen is
-    // never treated as a swing at the world behind it. A few pixels of
-    // dead margin round a rack costs nothing; a live one costs a block.
-    // A body with a rucksack is the tallest now, by its tab strip.
-    panel_rect(Layout::Body { rucksack: false }).contains(cursor.0, cursor.1)
+    // The largest of them, so a click beside a chest screen is never
+    // treated as a swing at the world behind it. A few pixels of dead
+    // margin round a rack costs nothing; a live one costs a block. A body
+    // with a rucksack and a stall are the tallest, so both are asked.
+    [Layout::Body { rucksack: false }, Layout::Stall]
+        .into_iter()
+        .any(|layout| panel_rect(layout).contains(cursor.0, cursor.1))
+}
+
+// ---- the stall layout ----
+//
+// **Three price rows, the counter, the till, over the pack.** A working half
+// like the hearth's, measured up from the pack so the belt does not move.
+// A price row is laid on the grid's own ten columns -- `-`, goods, `+`, an
+// arrow, `-`, price, `+`, and the verb across the last three -- so every
+// square in it lines up with a square of the counter under it, and a row
+// reads left to right as the sentence it is: *this many of that, for this
+// many of that*.
+//
+// The `-` and `+` are only the owner's. A buyer's row has the same squares
+// with nothing either side of them, rather than a narrower row: a price
+// that moved when the owner opened it would be two screens where there is
+// one stall.
+
+/// How tall the stall's half is: a caption band over each of its three
+/// groups, the price rows, and a row each for the counter and the till.
+fn stall_height() -> f32 {
+    let offers = primitive_shared::stall::OFFERS as f32;
+    LABEL_HEIGHT * 3.0 + offers * CELL + (offers - 1.0) * GAP + CELL * 2.0
+}
+
+/// The top of the stall's half. See `rack_top`, which this follows.
+fn stall_top() -> f32 {
+    let pack_top = content_top() - grid_height(Side::Chest) - grid_split();
+    pack_top + LABEL_HEIGHT + HALF_GAP + stall_height()
+}
+
+/// The top of price row `row`.
+fn stall_row_top(row: usize) -> f32 {
+    stall_top() - LABEL_HEIGHT - row as f32 * (CELL + GAP)
+}
+
+/// The top of the counter's row: under the last price row and its caption.
+fn stall_stock_top() -> f32 {
+    stall_row_top(primitive_shared::stall::OFFERS - 1) - CELL - LABEL_HEIGHT
+}
+
+/// The top of the till's row.
+fn stall_takings_top() -> f32 {
+    stall_stock_top() - CELL - LABEL_HEIGHT
+}
+
+/// Column `column` of the grid, `span` columns wide, in a row whose top is
+/// `top`.
+fn stall_cell(top: f32, column: usize, span: usize) -> Rect {
+    let x0 = grid_left() + column as f32 * (CELL + GAP);
+    let width = span as f32 * CELL + (span as f32 - 1.0) * GAP;
+    Rect::new(x0, top - CELL, x0 + width, top)
+}
+
+/// Where one of a price row's controls is drawn. **The exact inverse of
+/// [`stall_control_at`].**
+pub fn stall_control_rect(control: StallControl) -> Rect {
+    match control {
+        StallControl::Step { row, take, up } => {
+            let column = match (take, up) {
+                (false, false) => 0,
+                (false, true) => 2,
+                (true, false) => 4,
+                (true, true) => 6,
+            };
+            // **A whole column, as big as the square beside it.** Not a
+            // finger (`widgets::FINGER_SIDE`) on a phone, and it cannot be:
+            // a row has seven things to press and ten columns to hold them,
+            // and seven fingers are wider than the panel. What it can be is
+            // no smaller than the squares this screen is already pressed at
+            // -- the grid's own bargain -- and it was smaller, inset a tenth
+            // each side, until the phone's numbers were looked at.
+            stall_cell(stall_row_top(row), column, 1)
+        }
+        StallControl::Give(row) => stall_cell(stall_row_top(row), 1, 1),
+        StallControl::Take(row) => stall_cell(stall_row_top(row), 5, 1),
+        StallControl::Action(row) => stall_cell(stall_row_top(row), 7, 3),
+    }
+}
+
+/// Every control a price row has, for the owner or for a buyer.
+fn stall_controls(yours: bool) -> Vec<StallControl> {
+    let mut all = Vec::new();
+    for row in 0..primitive_shared::stall::OFFERS {
+        all.extend([StallControl::Give(row), StallControl::Take(row), StallControl::Action(row)]);
+        if yours {
+            for take in [false, true] {
+                for up in [false, true] {
+                    all.push(StallControl::Step { row, take, up });
+                }
+            }
+        }
+    }
+    all
+}
+
+/// Which price-row control a point is over.
+pub fn stall_control_at(cursor: (f32, f32), yours: bool) -> Option<StallControl> {
+    stall_controls(yours)
+        .into_iter()
+        .find(|&control| stall_control_rect(control).contains(cursor.0, cursor.1))
+}
+
+/// Where a stall's square is -- the counter's ten and the till's ten -- or
+/// `None` for one it does not have.
+pub fn stall_slot_rect(slot: usize) -> Option<Rect> {
+    use primitive_shared::stall::{STOCK, TAKINGS};
+    if STOCK.contains(&slot) {
+        return Some(stall_cell(stall_stock_top(), slot - STOCK.start, 1));
+    }
+    if TAKINGS.contains(&slot) {
+        return Some(stall_cell(stall_takings_top(), slot - TAKINGS.start, 1));
+    }
+    None
+}
+
+/// A caption over one of the stall's rows, fitted to the grid's width.
+///
+/// **Not `caption_over`, whose floor is seven tenths.** This caption carries
+/// a player's name -- twenty-four letters at most (`MAX_USERNAME_LEN`) --
+/// and a name that long at seven tenths ran off the panel's right edge.
+/// Small and whole beats large and cut off, for the one word on the screen
+/// the buyer came to read.
+fn stall_caption(p: &mut Painter, row_top: f32, text: &str) {
+    let scale = widgets::fitted_scale(text, CAPTION_SCALE, grid_width(), 0.35);
+    p.text(text, grid_left(), widgets::caption_top_over(row_top, scale), scale, widgets::INK_DIM);
+}
+
+/// The arrow between a row's goods and its price: a shaft and a stepped
+/// head, as the hearth's is, pointing from the goods to the price -- "this,
+/// for that".
+fn trade_arrow(p: &mut Painter, cell: Rect) {
+    let y = cell.centre_y();
+    let x0 = cell.x0 + CELL * 0.15;
+    let x1 = cell.x1 - CELL * 0.15;
+    let head = ARROW_HEIGHT * 0.9;
+    p.quad(Rect::new(x0, y - ARROW_HEIGHT * 0.2, x1 - head, y + ARROW_HEIGHT * 0.2), widgets::INK_DIM);
+    const STEPS: usize = 4;
+    for step in 0..STEPS {
+        let fraction = step as f32 / STEPS as f32;
+        let inset = ARROW_HEIGHT * 0.5 * fraction;
+        let sx = x1 - head + head * fraction;
+        p.quad(
+            Rect::new(sx, y - ARROW_HEIGHT * 0.5 + inset, sx + head / STEPS as f32 + 0.002, y + ARROW_HEIGHT * 0.5 - inset),
+            widgets::INK_DIM,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3965,5 +4422,168 @@ mod vessel_tests {
         let panel = panel_rect(Layout::Vessel);
         screen.set_cursor(Some((panel.x0 - 0.02, panel.centre_y())));
         assert_eq!(screen.click(&Inventory::new(), Button::Left, false, false), Some(Intent::Close));
+    }
+}
+
+/// The stall's half of the screen: where its prices, counter and till are
+/// drawn is where they are clicked, for the owner and for a buyer, and what
+/// a click asks the server is the thing the player meant.
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+    use primitive_shared::protocol::ContainerKind;
+    use primitive_shared::stall::{STOCK, TAKINGS};
+    use primitive_shared::types::{BLOCK_FLINT, BLOCK_HIDE, BLOCK_STALL};
+
+    const AT: (i32, i32, i32) = (4, 20, 4);
+    const FLINT_FOR_HIDE: Offer = Offer { give: BLOCK_FLINT, give_count: 4, take: BLOCK_HIDE, take_count: 1 };
+    /// As long as a name may be (`MAX_USERNAME_LEN`), in the widest letters.
+    const LONG_NAME: &str = "WWWWWWWWWWWWWWWWWWWWWWWW";
+
+    fn a_stall(yours: bool, owner: &str) -> ChestScreen {
+        let mut screen = ChestScreen::new();
+        screen.show_stall(StallView { at: AT, owner: owner.to_string(), yours, offers: vec![Some(FLINT_FOR_HIDE), None, None] });
+        let mut store = Inventory::chest();
+        store.add_within(STOCK, BLOCK_FLINT, 12);
+        store.add_within(TAKINGS, BLOCK_HIDE, 2);
+        screen.show(AT, store, Some(BLOCK_STALL), ContainerKind::Stall, None, None);
+        screen
+    }
+
+    fn centre(rect: Rect) -> (f32, f32) {
+        (rect.centre_x(), rect.centre_y())
+    }
+
+    #[test]
+    fn a_stall_opens_as_a_stall_and_knows_whose_it_is() {
+        let screen = a_stall(false, "ada");
+        assert_eq!(screen.layout(), Layout::Stall);
+        assert_eq!(screen.heading(), Msg::Stall);
+        assert_eq!(screen.stall().map(|v| v.owner.as_str()), Some("ada"));
+    }
+
+    #[test]
+    fn every_stall_control_and_square_is_clicked_where_it_is_drawn() {
+        for yours in [true, false] {
+            for control in stall_controls(yours) {
+                let at = centre(stall_control_rect(control));
+                assert_eq!(stall_control_at(at, yours), Some(control), "{control:?} is not clicked where it is drawn");
+                assert_eq!(slot_at(at, Layout::Stall), None, "{control:?} is drawn over a square");
+            }
+            for slot in STOCK.chain(TAKINGS) {
+                let at = centre(stall_slot_rect(slot).expect("a stall square"));
+                assert_eq!(slot_at(at, Layout::Stall), Some((Side::Chest, slot)), "square {slot} is not clicked where it is drawn");
+                assert_eq!(stall_control_at(at, yours), None, "a price control is drawn over square {slot}");
+            }
+        }
+        // ...and the pack under it is still the pack.
+        for slot in 0..SLOTS {
+            let at = centre(slot_rect(Side::Pack, slot));
+            assert_eq!(slot_at(at, Layout::Stall), Some((Side::Pack, slot)));
+        }
+    }
+
+    #[test]
+    fn a_buyers_row_has_no_price_controls_where_the_owners_has_them() {
+        let step = StallControl::Step { row: 0, take: false, up: true };
+        assert_eq!(stall_control_at(centre(stall_control_rect(step)), false), None, "a buyer can press the owner's +");
+    }
+
+    #[test]
+    fn every_stall_control_is_no_smaller_than_the_squares_beside_it() {
+        // See the note in `stall_control_rect` for why a square and not a
+        // finger: seven controls a row, ten columns.
+        const SLACK: f32 = 1e-4;
+        for control in stall_controls(true) {
+            let rect = stall_control_rect(control);
+            assert!(rect.width() >= CELL - SLACK && rect.height() >= CELL - SLACK, "{control:?} is smaller than a square");
+        }
+    }
+
+    #[test]
+    fn the_stall_stands_in_its_own_tray_clear_of_the_pack() {
+        let tray = work_tray(Layout::Stall).expect("a stall has a tray");
+        let lowest = stall_slot_rect(TAKINGS.start).unwrap();
+        assert!(lowest.y0 > tray.y0, "the till hangs out of the bottom of its tray");
+        assert!(tray.y0 > pack_tray().y1, "the stall's tray runs into the pack's");
+        let highest = stall_control_rect(StallControl::Action(0));
+        assert!(highest.y1 < panel_rect(Layout::Stall).y1 - header_height(), "the first price row is under the heading");
+    }
+
+    #[test]
+    fn nothing_on_a_stall_runs_off_its_panel_in_any_language() {
+        let panel = panel_rect(Layout::Stall);
+        let slack = 0.02;
+        for &language in Language::ALL {
+            for yours in [true, false] {
+                let mut screen = a_stall(yours, LONG_NAME);
+                screen.set_cursor(Some(centre(stall_control_rect(StallControl::Action(0)))));
+                let mut pack = Inventory::new();
+                pack.add(BLOCK_HIDE, 3);
+                for v in screen.build(FontAtlas::for_test(), &FaceLayers::empty_for_test(), &pack, language) {
+                    let [x, y] = v.position;
+                    if x.abs() > 4.0 {
+                        continue; // the scrim
+                    }
+                    assert!(
+                        x >= panel.x0 - slack && x <= panel.x1 + slack && y >= panel.y0 - slack && y <= panel.y1 + slack,
+                        "{language:?}, owner {yours}: something is drawn at ({x}, {y}), off a panel of {panel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_owner_names_a_price_by_holding_things_up_to_its_squares() {
+        let mut screen = a_stall(true, "ada");
+        let mut pack = Inventory::new();
+        pack.add(BLOCK_HIDE, 1);
+        let click = |screen: &mut ChestScreen, pack: &Inventory, at: (f32, f32)| {
+            screen.set_cursor(Some(at));
+            screen.click(pack, Button::Left, false, false)
+        };
+        // A flint lifted off the counter and held to row 1's goods square:
+        // half a price, kept on the screen.
+        assert_eq!(click(&mut screen, &pack, centre(stall_slot_rect(STOCK.start).unwrap())), None);
+        assert_eq!(click(&mut screen, &pack, centre(stall_control_rect(StallControl::Give(1)))), None);
+        assert_eq!(screen.held(), None, "the sample stayed in hand after naming the goods");
+        for _ in 0..2 {
+            let more = StallControl::Step { row: 1, take: false, up: true };
+            assert_eq!(click(&mut screen, &pack, centre(stall_control_rect(more))), None, "half a price was sent");
+        }
+        // ...and a hide out of the pack held to its price square finishes it.
+        let hide = (0..SLOTS).find(|&s| pack.block_in(s) == Some(BLOCK_HIDE)).unwrap();
+        assert_eq!(click(&mut screen, &pack, centre(slot_rect(Side::Pack, hide))), None);
+        let asked = click(&mut screen, &pack, centre(stall_control_rect(StallControl::Take(1))));
+        assert_eq!(
+            asked,
+            Some(Intent::SetOffer { row: 1, offer: Some(Offer { give: BLOCK_FLINT, give_count: 3, take: BLOCK_HIDE, take_count: 1 }) })
+        );
+        // REMOVE on a row with a price takes it down.
+        let removed = click(&mut screen, &pack, centre(stall_control_rect(StallControl::Action(0))));
+        assert_eq!(removed, Some(Intent::SetOffer { row: 0, offer: None }));
+    }
+
+    #[test]
+    fn a_buyer_asks_for_the_price_it_was_shown_and_cannot_lift_the_counter() {
+        let mut screen = a_stall(false, "ada");
+        let pack = Inventory::new();
+        screen.set_cursor(Some(centre(stall_slot_rect(STOCK.start).unwrap())));
+        assert_eq!(screen.click(&pack, Button::Left, false, false), None);
+        assert_eq!(screen.held(), None, "a buyer picked something up off somebody else's counter");
+        screen.set_cursor(Some(centre(stall_control_rect(StallControl::Action(0)))));
+        assert_eq!(screen.click(&pack, Button::Left, false, false), Some(Intent::Buy { row: 0, offer: FLINT_FOR_HIDE }));
+        // A row with no price asks nothing.
+        screen.set_cursor(Some(centre(stall_control_rect(StallControl::Action(2)))));
+        assert_eq!(screen.click(&pack, Button::Left, false, false), None);
+    }
+
+    #[test]
+    fn a_price_changed_by_the_owner_redraws_the_buyers_screen() {
+        let mut screen = a_stall(false, "ada");
+        let before = screen.ui_key();
+        screen.show_stall(StallView { at: AT, owner: "ada".into(), yours: false, offers: vec![Some(Offer { take_count: 2, ..FLINT_FOR_HIDE }), None, None] });
+        assert_ne!(screen.ui_key(), before, "a new price would not be drawn until something else changed");
     }
 }
