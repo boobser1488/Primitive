@@ -2226,6 +2226,7 @@ impl Animal {
                 hurt: (self.hurt_for / HURT_SECONDS).clamp(0.0, 1.0),
                 attitude: self.attitude_now(),
                 growth: youth::to_wire(self.growth),
+                tack: 0,
             },
             x: f64::from(self.at().0),
             // The *centre* of the animal, which is what the client draws

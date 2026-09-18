@@ -62,6 +62,7 @@ pub mod ground;
 pub mod haunt;
 pub mod husbandry;
 pub mod hearth;
+pub mod horse;
 pub mod injury;
 pub mod inventory;
 pub mod lighting;

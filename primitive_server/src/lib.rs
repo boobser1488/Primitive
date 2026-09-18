@@ -2379,7 +2379,8 @@ async fn tick_loop(ctx: Arc<Context>) {
                     | Species::Pike
                     | Species::Herring
                     | Species::Gull
-                    | Species::Rat => Blow::Blunt,
+                    | Species::Rat
+                    | Species::Horse => Blow::Blunt,
                 };
                 let outcome = strike_player(&ctx, &victim, blow.damage, how, wound);
                 if !matches!(outcome, survival::Outcome::Unchanged) {

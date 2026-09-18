@@ -73,6 +73,10 @@ impl Resting {
             // Never sent for the player's own body either (`Posture::Swimming`):
             // the client's own physics knows when it swims.
             Posture::Swimming => Resting::Standing,
+            // A rider sits, and with no front of their own to be turned to:
+            // the horse turns under them and the view goes with the reins
+            // (`horseback`), not with a chair.
+            Posture::Mounted => Resting::Sitting { facing: None },
         }
     }
 

@@ -253,6 +253,7 @@ pub const ANIMAL_SHEETS: &[&str] = &[
     // the same one. Its eye is a black bead with no white in it, which
     // is the one thing a rat's face has that a hare's does not.
     "animals/rat.png",
+    "animals/horse.png",
 ];
 
 /// Which sheet a species wears, as a row of `ANIMAL_SHEETS`.
@@ -285,6 +286,7 @@ pub fn sheet_index(species: primitive_shared::animals::Species) -> usize {
         Species::Pike => 14,
         Species::Herring => 15,
         Species::Rat => 16,
+        Species::Horse => 17,
     }
 }
 

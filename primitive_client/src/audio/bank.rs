@@ -613,6 +613,16 @@ pub fn voice_of(species: Species, cry: Cry) -> Option<Sfx> {
     if species == Species::Rat {
         return voice_of(Species::Hare, if cry == Cry::Idle { Cry::Alarm } else { cry });
     }
+    // **A horse is heard through the zebra's recordings**, which are a
+    // zebra's bray and a donkey's (`assets/sounds/SOURCES.md`): the nearest
+    // CC0 equids this repository already holds. A borrowed voice and not a
+    // gap, because a herd that bolts in silence is a herd nobody turns to
+    // look at -- and it is a stand-in, said so here and in SOURCES.md, until
+    // a CC0 recording of a horse itself is fetched and checked the way every
+    // other file was.
+    if species == Species::Horse {
+        return voice_of(Species::Zebra, cry);
+    }
     VOICES
         .contains(&(species, cry))
         .then_some(Sfx::Animal(species, cry))

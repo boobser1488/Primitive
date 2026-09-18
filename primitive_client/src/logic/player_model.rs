@@ -773,7 +773,7 @@ const STROKES_PER_BLOCK: f32 = 0.45;
 fn postured(posture: Posture, unit: Vec3) -> Vec3 {
     match posture {
         Posture::Standing => unit,
-        Posture::Sitting => unit - Vec3::Y * SEAT_DROP,
+        Posture::Sitting | Posture::Mounted => unit - Vec3::Y * SEAT_DROP,
         // (x, y, z) -> (x, -z, y): up goes to +z, front (-z) goes to up.
         Posture::Lying => Vec3::new(unit.x, -unit.z + LYING_LIFT, unit.y - LYING_MIDDLE),
         // A dead figure is not drawn with this -- it lies on its side through
@@ -863,7 +863,7 @@ pub fn joint_angle(joint: Joint, pose: &Pose) -> f32 {
     // the snapshot's speed says, which is the speed of being put on the
     // furniture and nothing a leg should answer.
     match (pose.posture, joint) {
-        (Posture::Sitting, Joint::LegRight | Joint::LegLeft) => return SEATED_LEGS,
+        (Posture::Sitting | Posture::Mounted, Joint::LegRight | Joint::LegLeft) => return SEATED_LEGS,
         (Posture::Lying, Joint::LegRight | Joint::LegLeft | Joint::ArmRight | Joint::ArmLeft) => {
             return 0.0
         }

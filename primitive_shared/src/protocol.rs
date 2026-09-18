@@ -920,6 +920,16 @@ pub enum Posture {
     /// furniture. The byte after `Fallen`, so a v56 client that is sent one
     /// draws a swimmer standing, which is what it drew already.
     Swimming,
+    /// Astride a horse: legs either side of its back, hands at the reins.
+    ///
+    /// **Not `Sitting`**, which is a chair's pose -- knees bent in front,
+    /// feet on the floor -- and a rider drawn that way sits *inside* the
+    /// horse with their shins through its shoulders. In `PlayerState` for
+    /// everybody who can see the rider (the server's `players::snapshot`),
+    /// and in the rider's own `ServerMessage::Posture` so their own arms and
+    /// shadow agree. The byte after `Swimming`, so an older client draws a
+    /// rider standing on the saddle, which is wrong and harmless.
+    Mounted,
 }
 
 impl From<u8> for Posture {
@@ -929,6 +939,7 @@ impl From<u8> for Posture {
             2 => Posture::Lying,
             3 => Posture::Fallen,
             4 => Posture::Swimming,
+            5 => Posture::Mounted,
             _ => Posture::Standing,
         }
     }
@@ -1244,6 +1255,17 @@ pub enum EntityKind {
         hurt: f32,
         attitude: Attitude,
         growth: u8,
+        /// What it is wearing and who is on it, as `horse::TACK_*` bits:
+        /// a saddle, saddlebags, a rider, a halter, the herd's stallion.
+        ///
+        /// **A byte on every animal for the one species that wears
+        /// anything**, and that is the cheap way round. A second entity
+        /// kind for a horse would be a second arm in every match over
+        /// animals -- the aim, the hit box, the model, the sounds -- for the
+        /// sake of a saddle drawn on its back; a byte that is nought on a
+        /// deer costs one byte. Zero reads as a wild animal with nothing on,
+        /// which is the one reading that cannot put a rider on a boar.
+        tack: u8,
     },
     /// A raft on the water. The entity's `y` is its waterline -- see
     /// `raft::Body`.
