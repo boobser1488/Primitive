@@ -3204,6 +3204,7 @@ pub fn build_mesh(
                         step_block(
                             [x as f32, y as f32, z as f32],
                             id,
+                            |dx, dy, dz| cache.block_near(cell, y, dx, dy, dz),
                             textures,
                             model_light(cache, cell, y, cover_table),
                             vertices,
@@ -6981,9 +6982,18 @@ pub(crate) fn stake_block(
 // ---- steps ----
 
 /// A step, in its cell's space: the tread, the lower half of the cell, and
-/// the riser, the upper half over the back half -- the boxes
-/// `geometry::step_boxes` collides, written at their north and turned by
-/// `turned_from_north`, the door's arrangement.
+/// the riser over the back of it, cut or joined at a corner of two flights
+/// by the steps round it (`geometry::StepShape`) -- the boxes
+/// `geometry::step_boxes` collides, taken in their written pose from the
+/// same list (`geometry::step_pose_boxes`) and turned by
+/// `turned_from_north`, the door's arrangement. `near` is the block at an
+/// offset from the step; a step carried in a hand has no neighbours and is
+/// the straight one it is placed as.
+///
+/// **Turned rather than written where it stands**, so a tread's courses of
+/// tiles or planks run along the step whichever way it faces: a roof whose
+/// east slope showed its tiles across the slope and whose north slope
+/// showed them along it would read as two materials.
 ///
 /// **Cropped**, so a tread shows the eight rows of planks or tiles under it
 /// at the density of the wall beside it rather than the whole picture
@@ -6997,20 +7007,22 @@ pub(crate) fn stake_block(
 pub(crate) fn step_block(
     at: [f32; 3],
     block: BlockId,
+    near: impl Fn(i32, i32, i32) -> BlockId,
     textures: &crate::engine::texture::FaceLayers,
     light: u8,
     vertices: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
 ) {
+    use primitive_shared::geometry::{step_pose_boxes, step_shape};
     use primitive_shared::types::{block_facing, block_kind};
     let (sky, block_light) = (light & 0x0F, (light >> 4) & 0x0F);
     let quarters = turned_from_north(block_facing(block));
     // The kind: the picture is one for every facing, as the door's is.
     let layer = textures.layer_for_face(block_kind(block), 0);
-    push_box(at, [0.0, 0.0, 0.0], [16.0, 8.0, 16.0], quarters, layer, true, sky, block_light, vertices, indices);
-    // The riser starts behind the tread, as it collides (`geometry::STEP_TREAD`).
-    let riser_from = primitive_shared::geometry::STEP_TREAD * 16.0;
-    push_box(at, [0.0, 8.0, riser_from], [16.0, 16.0, 16.0], quarters, layer, true, sky, block_light, vertices, indices);
+    for (min, max) in step_pose_boxes(step_shape(block, near)).iter() {
+        let sixteenths = |p: [f32; 3]| p.map(|v| v * 16.0);
+        push_box(at, sixteenths(min), sixteenths(max), quarters, layer, true, sky, block_light, vertices, indices);
+    }
 }
 
 // ---- dripstone ----
@@ -7909,7 +7921,7 @@ pub(crate) fn carried_model(
         door_block([0.0; 3], lower, textures, [OPEN_SKY; 3], vertices, indices);
         door_block([0.0, 1.0, 0.0], t::door_partner((0, 0, 0), lower).map_or(lower, |(_, top)| top), textures, [OPEN_SKY; 3], vertices, indices);
     } else if t::is_step(block) {
-        step_block([0.0; 3], block, textures, OPEN_SKY, vertices, indices);
+        step_block([0.0; 3], block, |_, _, _| t::BLOCK_AIR, textures, OPEN_SKY, vertices, indices);
     } else if matches!(kind, t::BLOCK_DRYING_RACK | t::BLOCK_HIDE_FRAME) {
         rack_block([0.0; 3], block, RackColumns::Lone, textures, OPEN_SKY, vertices, indices);
     } else if matches!(kind, t::BLOCK_NEST | t::BLOCK_NEST_EGGS) {
@@ -11478,25 +11490,75 @@ mod transparency_tests {
             faced, Facing, BLOCK_BRANCH_ROOF, BLOCK_COBBLESTONE_STAIRS, BLOCK_PLANK_STAIRS, BLOCK_THATCH_ROOF,
             BLOCK_TILE_ROOF,
         };
+        // **And every neighbour that bends it** (`geometry::StepShape`): a
+        // step turned each way behind it and in front of it, and the same
+        // with a flight carrying straight on past the turn. The corner is
+        // decided from the neighbours on both sides of this comparison, so
+        // this is the one place that says the two decide it alike: the boxes
+        // drawn in the cell are the boxes collided in it, none missing and
+        // none extra.
         let slack = BITE * T + 1e-4;
         let cell = (7, 20, 7);
         let every = [BLOCK_PLANK_STAIRS, BLOCK_COBBLESTONE_STAIRS, BLOCK_TILE_ROOF, BLOCK_THATCH_ROOF, BLOCK_BRANCH_ROOF];
-        for (kind, facing) in every.into_iter().flat_map(|kind| [Facing::North, Facing::East, Facing::South, Facing::West].map(|f| (kind, f))) {
+        let facings = [Facing::North, Facing::East, Facing::South, Facing::West];
+        let same = |a: ([f32; 3], [f32; 3]), b: ([f32; 3], [f32; 3])| {
+            (0..3).all(|k| (a.0[k] - b.0[k]).abs() <= slack && (a.1[k] - b.1[k]).abs() <= slack)
+        };
+        let inside = |(lo, hi): &([f32; 3], [f32; 3])| {
+            (0..3).all(|k| {
+                let c = [cell.0, cell.1, cell.2][k] as f32;
+                lo[k] >= c - slack && hi[k] <= c + 1.0 + slack
+            })
+        };
+        let mut shapes = std::collections::HashSet::new();
+        for (kind, facing) in every.into_iter().flat_map(|kind| facings.map(|f| (kind, f))) {
             let step = faced(kind, facing);
-            let at = |x: i32, y: i32, z: i32| if (x, y, z) == cell { step } else { BLOCK_AIR };
-            let drawn = boxes_of(&mesh_of(&cache_of(at)).vertices);
-            assert_eq!(drawn.len(), 2, "{kind} {facing:?}: a step drawn as {} boxes", drawn.len());
-            let mut walked = Vec::new();
-            primitive_shared::geometry::for_each_block_box(step, cell.0, cell.1, cell.2, |_, _, _| BLOCK_AIR, |min, max| {
-                walked.push((min, max))
-            });
-            for (min, max) in walked {
-                assert!(
-                    drawn.iter().any(|(lo, hi)| (0..3).all(|a| (lo[a] - min[a]).abs() <= slack && (hi[a] - max[a]).abs() <= slack)),
-                    "{kind} {facing:?}: walked into at {min:?}..{max:?}, drawn at {drawn:?}"
+            let (fx, fz) = facing.step();
+            // Offsets round the step and what stands there; nothing else.
+            let mut around: Vec<Vec<((i32, i32), BlockId)>> = vec![Vec::new()];
+            for by in 0..4 {
+                let other = faced(kind, facings[((facing.quarters() + by) % 4) as usize]);
+                for (ox, oz) in [(-fx, -fz), (fx, fz)] {
+                    around.push(vec![((ox, oz), other)]);
+                    // ...with a flight going on past the turn, either side.
+                    for side in [(fz, fx), (-fz, -fx)] {
+                        around.push(vec![((ox, oz), other), (side, step)]);
+                    }
+                }
+            }
+            for neighbours in around {
+                let at = |x: i32, y: i32, z: i32| {
+                    if (x, y, z) == cell {
+                        return step;
+                    }
+                    neighbours
+                        .iter()
+                        .find(|((dx, dz), _)| (x, y, z) == (cell.0 + dx, cell.1, cell.2 + dz))
+                        .map_or(BLOCK_AIR, |&(_, id)| id)
+                };
+                let drawn: Vec<_> = boxes_of(&mesh_of(&cache_of(at)).vertices).into_iter().filter(inside).collect();
+                let mut walked = Vec::new();
+                primitive_shared::geometry::for_each_block_box(
+                    step,
+                    cell.0,
+                    cell.1,
+                    cell.2,
+                    |dx, dy, dz| at(cell.0 + dx, cell.1 + dy, cell.2 + dz),
+                    |min, max| walked.push((min, max)),
                 );
+                shapes.insert(walked.len());
+                assert_eq!(drawn.len(), walked.len(), "{kind} {facing:?} beside {neighbours:?}: drawn {drawn:?}, walked into {walked:?}");
+                for &w in &walked {
+                    assert!(
+                        drawn.iter().any(|&d| same(d, w)),
+                        "{kind} {facing:?} beside {neighbours:?}: walked into at {w:?}, drawn at {drawn:?}"
+                    );
+                }
             }
         }
+        // An inside corner is three boxes: were no neighbour ever to bend a
+        // step, this test would pass for nothing.
+        assert!(shapes.contains(&3), "no inside corner was ever made: {shapes:?}");
     }
 
     #[test]

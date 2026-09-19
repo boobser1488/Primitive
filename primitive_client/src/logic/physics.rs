@@ -2332,6 +2332,25 @@ fn ray_enters_block(
     let near = |dx: i32, dy: i32, dz: i32| {
         chunks.block_at(cell[0] + dx, cell[1] + dy, cell[2] + dz).unwrap_or(primitive_shared::types::BLOCK_AIR)
     };
+    // **A step is aimed at its boxes, not at the box round them.** The
+    // hull is the whole cell, and a ray that stopped there stopped on the
+    // air over the tread: a click at the tread from in front of the step
+    // entered the hull through its front face, so a block put "on the
+    // step" went into the cell in front of it, on the ground; and a look
+    // over a tread at whatever stood behind it hit nothing drawn. The outline is still the hull (`block_box_for_aim`) -- an
+    // outline is one box -- and what is hit is what is drawn and walked
+    // into (`geometry::step_boxes`).
+    if primitive_shared::types::is_step(block) {
+        let mut nearest: Option<(f32, Option<usize>)> = None;
+        primitive_shared::geometry::for_each_block_box(block, cell[0], cell[1], cell[2], near, |min, max| {
+            if let Some((distance, face)) = primitive_shared::geometry::ray_box_entry(origin, dir, min, max, max_distance) {
+                if distance <= max_distance && nearest.is_none_or(|(best, _)| distance < best) {
+                    nearest = Some((distance, face));
+                }
+            }
+        });
+        return nearest.map(|(_, face)| face);
+    }
     let (min, max) = primitive_shared::geometry::block_box_for_aim_near(
         block,
         cell[0],
@@ -3174,6 +3193,43 @@ pub(crate) mod tests {
         primitive_shared::types::BLOCK_THATCH_ROOF,
         primitive_shared::types::BLOCK_BRANCH_ROOF,
     ];
+
+    #[test]
+    fn a_step_is_aimed_at_the_tread_and_the_riser_it_is_drawn_with_not_the_air_over_the_tread() {
+        // **"у ступенек странная коллизия".** The ray used to stop at the
+        // box round the step, the whole cell, so looking down at a tread
+        // from in front of the step it came in through the cell's front face
+        // over the tread -- and a block put on the tread went into the cell
+        // in front of the step, on the ground. Asked of every kind and
+        // facing from a standing eye two cells in front: the tread's top
+        // puts a block on the step, the riser's face puts one in front of it.
+        use primitive_shared::types::{faced, Facing};
+        use primitive_shared::geometry::STEP_TREAD;
+        for kind in EVERY_STEP {
+            for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+                let chunks = floor_with_a_step(kind, facing);
+                assert_eq!(chunks.block_at(8, 10, 8), Some(faced(kind, facing)));
+                let (fx, fz) = facing.step();
+                let front = Vec3::new(fx as f32, 0.0, fz as f32);
+                let middle = Vec3::new(8.5, 10.0, 8.5);
+                let eye = middle + front * 2.0 + Vec3::Y * 1.62;
+                // The middle of what shows of the tread, and of the riser's face.
+                let tread = middle + front * (0.5 - STEP_TREAD * 0.5) + Vec3::Y * 0.5;
+                let riser = middle + front * (0.5 - STEP_TREAD) + Vec3::Y * 0.75;
+                for (target, wanted, what) in [
+                    (tread, (8, 11, 8), "the tread"),
+                    (riser, (8 + fx, 10, 8 + fz), "the riser"),
+                ] {
+                    let hit = raycast_block(&chunks, eye.as_dvec3(), (target - eye).normalize(), 5.0);
+                    assert_eq!(
+                        hit,
+                        Some(((8, 10, 8), wanted)),
+                        "{kind} {facing:?}: a click at {what} lands a block at {hit:?}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn walking_at_a_step_from_its_low_side_stands_on_the_tread_before_the_riser() {

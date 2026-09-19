@@ -1740,3 +1740,289 @@ fn a_knife_takes_bark_off_a_birch_and_a_willow_and_bast_off_a_nettle_and_the_bar
     assert!(s.until(2.0, |s| s.inventory.count(t::BLOCK_WILLOW_BARK) == 0), "the bark was not spent");
     no_corrections(&s);
 }
+
+// ---------------------------------------------------------------- steps
+
+/// Which way is *up* a step of this facing: the side its riser stands on
+/// (`geometry::step_boxes`), as a unit step in x and z.
+fn up_of(facing: Facing) -> (i32, i32) {
+    match facing {
+        Facing::North => (0, 1),
+        Facing::East => (-1, 0),
+        Facing::South => (0, -1),
+        Facing::West => (1, 0),
+    }
+}
+
+/// Holds forward along `yaw` until `done` or `seconds`, and answers every
+/// rise of the feet from one frame to the next.
+fn walk_until(s: &mut Scenario, yaw: f32, seconds: f32, done: impl Fn(&Scenario) -> bool) -> Vec<f64> {
+    s.face(yaw);
+    s.hold(Action::Forward);
+    let mut rises = Vec::new();
+    let mut last = s.feet().y;
+    for _ in 0..(seconds / FRAME) as usize {
+        s.frame();
+        let y = s.feet().y;
+        if y > last + 1e-4 {
+            rises.push(y - last);
+        }
+        last = y;
+        if done(s) {
+            break;
+        }
+    }
+    s.release_all();
+    s.seconds(0.4);
+    rises
+}
+
+/// **Up and down a flight of every kind of step, from each of the four
+/// sides it can face, straight and at a slant, with the server watching.**
+///
+/// "у ступенек странная коллизия": a flight is three steps on a rising
+/// fill, five cells wide, to a landing. Each is climbed from its low side
+/// and walked back down, head-on and twenty-five degrees off, and every
+/// frame's rise is at most a step's height -- never the whole block a
+/// riser caught by the wrong side would give -- and nothing is ever
+/// corrected. The kinds take turns by facing so every material and every
+/// facing is walked.
+#[test]
+fn every_kind_of_step_is_walked_up_and_down_from_every_side_without_a_correction() {
+    let mut s = Scenario::new();
+    let (x0, z0) = FIELD;
+    let g = GROUND + 1;
+    for (i, facing) in FACINGS.into_iter().enumerate() {
+        let kind = STEP_KINDS[i % STEP_KINDS.len()];
+        let roof = STEP_KINDS[(i + 2) % STEP_KINDS.len()];
+        for (j, kind) in [kind, roof].into_iter().enumerate() {
+            let (ux, uz) = up_of(facing);
+            let (px, pz) = (uz.abs(), ux.abs());
+            let base = (x0 + 12 * i as i32 - 6, z0 + 12 * j as i32);
+            let mut cells = Vec::new();
+            for w in -2..=2 {
+                for k in 1..=3 {
+                    let (x, z) = (base.0 + ux * k + px * w, base.1 + uz * k + pz * w);
+                    for y in g..g + k - 1 {
+                        cells.push(((x, y, z), t::BLOCK_PLANKS));
+                    }
+                    cells.push(((x, g + k - 1, z), t::faced(kind, facing)));
+                }
+                for k in 4..=5 {
+                    for y in g..g + 3 {
+                        cells.push(((base.0 + ux * k + px * w, y, base.1 + uz * k + pz * w), t::BLOCK_PLANKS));
+                    }
+                }
+            }
+            s.stand_at(feet_on(base.0 - ux, base.1 - uz));
+            s.build(&cells);
+            let up_yaw = (uz as f32).atan2(ux as f32);
+            for slant in [0.0_f32, 25.0, -25.0] {
+                let yaw = up_yaw + slant.to_radians();
+                s.stand_at(feet_on(base.0 - ux, base.1 - uz));
+                let landing = f64::from(g + 3);
+                let rises = walk_until(&mut s, yaw, 6.0, |s| (s.feet().y - landing).abs() < 0.01 && s.player.grounded);
+                let biggest = rises.iter().copied().fold(0.0, f64::max);
+                assert!(
+                    (s.feet().y - landing).abs() < 0.05,
+                    "{kind} {facing:?} slant {slant}: the climb did not reach the landing, stuck at {:?}",
+                    s.feet()
+                );
+                assert!(
+                    biggest <= f64::from(primitive_shared::geometry::PLAYER_STEP_HEIGHT) + 0.02,
+                    "{kind} {facing:?} slant {slant}: one frame lifted the player {biggest:.3}: {rises:?}"
+                );
+                // And down again, facing the other way.
+                let ground = f64::from(g);
+                walk_until(&mut s, yaw + std::f32::consts::PI, 6.0, |s| (s.feet().y - ground).abs() < 0.01 && s.player.grounded);
+                assert!(
+                    (s.feet().y - ground).abs() < 0.05,
+                    "{kind} {facing:?} slant {slant}: the walk down stopped at {:?}",
+                    s.feet()
+                );
+            }
+        }
+    }
+    no_corrections(&s);
+}
+
+/// **Into the corner of two flights and out again, on the diagonal**: an
+/// outside corner, where the two flights' risers meet at a post, and an
+/// inside one, where they run round the corner. Each is one course of
+/// steps round a landing a block up; the walk goes at the corner along the
+/// diagonal, reaches the landing, and comes back down, never lifted more
+/// than a step in a frame and never corrected. The corner shape is decided
+/// from the neighbours by the client's collider and the server's alike
+/// (`geometry::step_shape`), and a corner the two disagreed about would be
+/// a rubber-band here.
+#[test]
+fn the_corners_of_a_flight_are_walked_up_and_down_on_the_diagonal_without_a_correction() {
+    let mut s = Scenario::new();
+    let (x0, z0) = FIELD;
+    let g = GROUND + 1;
+    // Outside: a west-facing flight along z and a south-facing one along x,
+    // their risers toward the landing in the angle between them.
+    let (ox, oz) = (x0 + 4, z0 + 6);
+    // Inside: the same two directions of rise with the landing round the
+    // outside of the L, so the walker comes at the corner from inside it.
+    let (ix, iz) = (x0 + 16, z0 + 6);
+    s.stand_at(feet_on(ox - 3, oz + 3));
+    let mut cells = Vec::new();
+    for d in 0..4 {
+        cells.push(((ox, g, oz - d), t::faced(t::BLOCK_PLANK_STAIRS, Facing::West)));
+        cells.push(((ox + 1 + d, g, oz), t::faced(t::BLOCK_TILE_ROOF, Facing::South)));
+        cells.push(((ix, g, iz - d), t::faced(t::BLOCK_COBBLESTONE_STAIRS, Facing::West)));
+        cells.push(((ix - 1 - d, g, iz), t::faced(t::BLOCK_THATCH_ROOF, Facing::North)));
+        for e in 1..4 {
+            cells.push(((ox + e, g, oz - d - 1), t::BLOCK_PLANKS));
+        }
+    }
+    for x in ix - 4..=ix + 3 {
+        for z in iz - 4..=iz + 3 {
+            if x > ix || z > iz {
+                cells.push(((x, g, z), t::BLOCK_PLANKS));
+            }
+        }
+    }
+    s.build(&cells);
+    let landing = f64::from(g + 1);
+    let ground = f64::from(g);
+    for (name, start, yaw) in [
+        // From outside the angle, toward the landing in it: +x and -z.
+        ("outside", (ox - 2, oz + 2), (-1.0_f32).atan2(1.0)),
+        // From the angle, toward the landing round it: +x and +z.
+        ("inside", (ix - 2, iz - 2), 1.0_f32.atan2(1.0)),
+    ] {
+        s.stand_at(feet_on(start.0, start.1));
+        let rises = walk_until(&mut s, yaw, 4.0, |s| (s.feet().y - landing).abs() < 0.01 && s.player.grounded);
+        let biggest = rises.iter().copied().fold(0.0, f64::max);
+        s.shot(&format!("corner_{name}_climbed"));
+        assert!((s.feet().y - landing).abs() < 0.05, "{name}: the walk at the corner stopped at {:?}", s.feet());
+        assert!(
+            biggest <= f64::from(primitive_shared::geometry::PLAYER_STEP_HEIGHT) + 0.02,
+            "{name}: one frame lifted the player {biggest:.3}: {rises:?}"
+        );
+        walk_until(&mut s, yaw + std::f32::consts::PI, 4.0, |s| (s.feet().y - ground).abs() < 0.01 && s.player.grounded);
+        assert!((s.feet().y - ground).abs() < 0.05, "{name}: the walk down from the corner stopped at {:?}", s.feet());
+    }
+    no_corrections(&s);
+}
+
+/// Looks from `eye` at `target` for a picture, without moving the body.
+fn look_from(s: &mut Scenario, eye: DVec3, target: DVec3) {
+    let dir = (target - eye).as_vec3().normalize();
+    s.camera.position = eye;
+    s.camera.yaw = dir.z.atan2(dir.x);
+    s.camera.pitch = dir.y.asin();
+}
+
+const STEP_KINDS: [BlockId; 5] =
+    [t::BLOCK_PLANK_STAIRS, t::BLOCK_COBBLESTONE_STAIRS, t::BLOCK_TILE_ROOF, t::BLOCK_THATCH_ROOF, t::BLOCK_BRANCH_ROOF];
+const FACINGS: [Facing; 4] = [Facing::North, Facing::East, Facing::South, Facing::West];
+
+/// **Every step, every facing, alone, in rows, at corners, against a wall
+/// and stacked**, from eye height on four sides and from above, through the
+/// real renderer. A diagnostic, not a check:
+///
+/// ```text
+/// PRIMITIVE_SCENARIO_SHOTS=<absolute dir> cargo test -p primitive_client --lib scenario::tests::a_gallery_of_steps -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn a_gallery_of_steps() {
+    let mut s = Scenario::new();
+    let (x0, z0) = FIELD;
+    let g = GROUND + 1;
+    s.stand_at(feet_on(x0 + 16, z0 + 8));
+    let mut cells = Vec::new();
+    // Kinds along x, facings along z: every one alone.
+    for (k, kind) in STEP_KINDS.into_iter().enumerate() {
+        for (f, facing) in FACINGS.into_iter().enumerate() {
+            cells.push(((x0 + 3 * k as i32, g, z0 + 3 * f as i32), t::faced(kind, facing)));
+        }
+    }
+    // Rows of four, one per facing: north and south along x, east and west
+    // along z.
+    let rx = x0 + 18;
+    for facing in FACINGS {
+        for i in 0..4 {
+            let (x, z) = match facing {
+                Facing::North => (rx + i, z0),
+                Facing::South => (rx + i, z0 + 3),
+                Facing::East => (rx + 6, z0 + 6 + i),
+                Facing::West => (rx + 9, z0 + 6 + i),
+            };
+            cells.push(((x, g, z), t::faced(t::BLOCK_PLANK_STAIRS, facing)));
+        }
+    }
+    // Corners: an L of steps meeting with the low sides outward (the
+    // corner an outside one) and one with them inward (an inside one).
+    let cx = x0 + 30;
+    for (i, kind) in [t::BLOCK_PLANK_STAIRS, t::BLOCK_TILE_ROOF].into_iter().enumerate() {
+        let z = z0 + 7 * i as i32;
+        for d in 0..4 {
+            cells.push(((cx, g, z + d), t::faced(kind, Facing::West)));
+            cells.push(((cx + 1 + d, g, z + 3), t::faced(kind, Facing::South)));
+            cells.push(((cx + 10, g, z + d), t::faced(kind, Facing::West)));
+            cells.push(((cx + 6 + d, g, z + 3), t::faced(kind, Facing::North)));
+        }
+    }
+    // A roof: two slopes meeting at a ridge, two courses high.
+    let px = x0 + 12;
+    let pz = z0 + 16;
+    for d in 0..4 {
+        for h in 0..2 {
+            cells.push(((px + h, g + h, pz + d), t::faced(t::BLOCK_TILE_ROOF, Facing::West)));
+            cells.push(((px + 3 - h, g + h, pz + d), t::faced(t::BLOCK_TILE_ROOF, Facing::East)));
+        }
+    }
+    // A staircase up to a wall, and steps stacked on steps.
+    let (wx, wz) = (x0, z0 + 16);
+    for k in 0..3 {
+        for y in g..g + k {
+            cells.push(((wx + k, y, wz), t::BLOCK_PLANKS));
+        }
+        cells.push(((wx + k, g + k, wz), t::faced(t::BLOCK_COBBLESTONE_STAIRS, Facing::West)));
+    }
+    for y in g..g + 4 {
+        cells.push(((wx + 3, y, wz), t::BLOCK_PLANKS));
+    }
+    for y in g..g + 3 {
+        cells.push(((wx + 6, y, wz), t::faced(t::BLOCK_PLANK_STAIRS, Facing::West)));
+    }
+    s.build(&cells);
+    s.seconds(0.5);
+
+    let eye_h = f64::from(g) + 1.62;
+    let shoot = |s: &mut Scenario, name: &str, centre: DVec3, dist: f64| {
+        for (i, (dx, dz)) in [(-1.0, -0.6), (0.6, -1.0), (1.0, 0.6), (-0.6, 1.0)].into_iter().enumerate() {
+            let eye = DVec3::new(centre.x + dx * dist, eye_h, centre.z + dz * dist);
+            look_from(s, eye, centre);
+            s.shot(&format!("{name}_side{i}"));
+        }
+        look_from(s, centre + DVec3::new(-0.8, dist, -0.5), centre);
+        s.shot(&format!("{name}_above"));
+    };
+    let c = |x: f64, z: f64| DVec3::new(x, f64::from(g) + 0.5, z);
+    shoot(&mut s, "alone", c(f64::from(x0) + 7.5, f64::from(z0) + 5.0), 9.0);
+    for (k, _) in STEP_KINDS.iter().enumerate() {
+        let at = c(f64::from(x0) + 3.0 * k as f64 + 0.5, f64::from(z0) + 3.5);
+        look_from(&mut s, at + DVec3::new(-1.6, 1.3, -2.2), at);
+        s.shot(&format!("kind{k}_close"));
+    }
+    shoot(&mut s, "rows", c(f64::from(rx) + 5.0, f64::from(z0) + 5.0), 8.0);
+    shoot(&mut s, "corners", c(f64::from(cx) + 5.5, f64::from(z0) + 5.0), 9.0);
+    // Each corner close, from outside the L and from inside it.
+    for (i, _) in ["plank", "tile"].iter().enumerate() {
+        let z = f64::from(z0 + 7 * i as i32) + 3.5;
+        for (name, x, out) in [("outside", f64::from(cx) + 0.5, (-1.0, 1.0)), ("inside", f64::from(cx + 10) + 0.5, (1.0, 1.0))] {
+            let at = c(x, z);
+            look_from(&mut s, at + DVec3::new(out.0 * 2.2, 2.0, out.1 * 2.2), at);
+            s.shot(&format!("corner{i}_{name}_from_out"));
+            look_from(&mut s, at + DVec3::new(-out.0 * 2.2, 2.0, -out.1 * 2.2), at);
+            s.shot(&format!("corner{i}_{name}_from_in"));
+        }
+    }
+    shoot(&mut s, "roof", c(f64::from(px) + 2.0, f64::from(pz) + 2.0), 6.0);
+    shoot(&mut s, "wall", c(f64::from(wx) + 3.0, f64::from(wz) + 0.5), 6.0);
+}

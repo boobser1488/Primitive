@@ -77,13 +77,14 @@ pub fn for_each_block_box(
         }
         return;
     }
-    // **A step is its two boxes** (`step_boxes`), and never its cell: the
+    // **A step is its boxes** (`step_boxes`), and never its cell: the
     // cell is a metre wall, and a staircase of walls is a thing a player
     // jumps up rather than walks. `block_box` still answers the whole cell,
-    // which is right for what asks it -- a placement beside a body, and aim.
+    // which is right for what asks it -- a placement beside a body, and the
+    // outline. The ray is asked of these boxes (`physics::ray_enters_block`).
     if crate::types::is_step(block) {
         let (x, y, z) = (bx as f32, by as f32, bz as f32);
-        for (min, max) in step_boxes(block) {
+        for (min, max) in step_boxes(block, near).iter() {
             visit([x + min[0], y + min[1], z + min[2]], [x + max[0], y + max[1], z + max[2]]);
         }
         return;
@@ -180,29 +181,181 @@ fn standing_torch_top(block: BlockId) -> Option<f32> {
 /// floor -- a flight still walks up it, and a roof still reads as courses.
 pub const STEP_TREAD: f32 = 11.0 / 16.0;
 
-/// The two boxes of a step, relative to its cell's corner: the lower half of
-/// the cell whole, and the upper half of it over the back of the cell behind
-/// the tread (`STEP_TREAD`) -- the side away from the placer, so the low side
-/// is the one they walk up from.
+/// Which shape a step takes from the steps beside it, in its written pose
+/// (back to +z, as north's is): `Side` is the side of that pose, -x or +x,
+/// the corner turns toward.
 ///
-/// **Turned by the table `block_box` turns a frame by**, from a written pose
-/// whose back is +z (north's back, as the door's is): `mesh::step_block`
-/// draws the same boxes through `turned_from_north`, and
-/// `a_step_is_drawn_exactly_where_it_is_walked_into` holds the two together
-/// for every facing. A step turned one way and collided another is a
-/// staircase whose treads are where its risers are drawn.
+/// **A step at the corner of two flights is a corner**, the way a mason
+/// cuts one. Without this the corner cell was a straight step like its
+/// row, and an L of steps had a riser standing out past the other flight
+/// by the depth of a tread at an outside corner and a hole the size of one
+/// at an inside corner -- drawn, walked into and aimed at alike, which is
+/// why it read as a strange model *and* a strange collision.
+///
+/// The rule, read off the two cells a corner can be made by:
+///
+/// * **Outside**: the step *behind* this one is a step turned a quarter
+///   from it. Its riser and this one's meet in the one quarter they share,
+///   and that quarter is all of this riser that is left -- a post the two
+///   flights' risers both run into.
+/// * **Inside**: the step *in front* is turned a quarter. This riser keeps
+///   its whole length, and a second one runs along the side the other
+///   flight rises toward, so the two flights' risers join round the corner.
+///
+/// Either way only if the cell on the far side of the turn is not a step
+/// facing this one's way: that is the middle of a straight flight with a
+/// crossing flight ending at it, and bending it would put a notch in a
+/// flight that was straight.
+///
+/// Rejected: *corners as blocks of their own* (two more ids per material,
+/// ten rows, placed by hand). The player would have to know they exist and
+/// which of four to pick, and a flight that was built and then turned would
+/// keep a straight step at its corner until somebody broke it -- what this
+/// shape does from the neighbours, a row does from the player's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepShape {
+    Straight,
+    Outside(StepSide),
+    Inside(StepSide),
+}
+
+/// A side of a step's written pose: toward -x or toward +x.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepSide {
+    Minus,
+    Plus,
+}
+
+/// Where a point of a step's written pose lands for a step of this facing,
+/// on the x/z plane of the cell. **The table `block_box` turns a frame by**
+/// and `mesh::turned_from_north` turns a model by: a quarter from north is
+/// east, whose back is -x. A step turned one way and collided another is a
+/// staircase whose treads are where its risers are drawn, and
+/// `a_step_is_drawn_exactly_where_it_is_walked_into` holds the two together.
+fn step_pose_to_cell(quarters: u32, x: f32, z: f32) -> (f32, f32) {
+    match quarters % 4 {
+        1 => (1.0 - z, x),
+        2 => (1.0 - x, 1.0 - z),
+        3 => (z, 1.0 - x),
+        _ => (x, z),
+    }
+}
+
+/// The step, if `id` is one, and which way its back is in the world.
+fn step_back(id: BlockId) -> Option<(i32, i32)> {
+    crate::types::is_step(id).then(|| {
+        let (fx, fz) = block_facing(id).step();
+        (-fx, -fz)
+    })
+}
+
+/// Which shape the step `block` takes; `near(dx, dy, dz)` is the block at an
+/// offset from it. See [`StepShape`].
+pub fn step_shape(block: BlockId, near: impl Fn(i32, i32, i32) -> BlockId) -> StepShape {
+    let facing = block_facing(block);
+    let (fx, fz) = facing.step();
+    let (bx, bz) = (-fx, -fz);
+    // The written pose's +x, in the world.
+    let (ex, ez) = match facing.quarters() % 4 {
+        1 => (0, 1),
+        2 => (-1, 0),
+        3 => (0, -1),
+        _ => (1, 0),
+    };
+    let side_of = |(x, z): (i32, i32)| if x * ex + z * ez > 0 { StepSide::Plus } else { StepSide::Minus };
+    let same_way = |dx: i32, dz: i32| {
+        let other = near(dx, 0, dz);
+        crate::types::is_step(other) && block_facing(other) == facing
+    };
+    // Turned a quarter: its back is across this one's, not along it.
+    let across = |(x, z): (i32, i32)| x * bx + z * bz == 0;
+    if let Some(back) = step_back(near(bx, 0, bz)).filter(|&back| across(back)) {
+        if !same_way(-back.0, -back.1) {
+            return StepShape::Outside(side_of(back));
+        }
+    }
+    if let Some(back) = step_back(near(fx, 0, fz)).filter(|&back| across(back)) {
+        if !same_way(back.0, back.1) {
+            return StepShape::Inside(side_of(back));
+        }
+    }
+    StepShape::Straight
+}
+
+/// The boxes of a step, at most three.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StepBoxes {
+    boxes: [([f32; 3], [f32; 3]); 3],
+    len: usize,
+}
+
+impl StepBoxes {
+    pub fn iter(&self) -> impl Iterator<Item = ([f32; 3], [f32; 3])> + '_ {
+        self.boxes[..self.len].iter().copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+/// A step's boxes in its written pose, back to +z, relative to its cell's
+/// corner: the lower half of the cell whole (the tread), and over it the
+/// riser behind the tread (`STEP_TREAD`) -- cut to a corner post, or joined
+/// by a second riser round an inside corner, as `shape` says.
+///
+/// **What `mesh::step_block` draws**, turned by its facing there, and what
+/// [`step_boxes`] collides, turned by the same table here: one list of
+/// boxes, so the drawing and the collider cannot grow apart when a shape is
+/// added.
 ///
 /// Half a cell each rise because `PLAYER_STEP_HEIGHT` is half a cell and a
 /// hair: the step-up rides both, so a flight is walked.
-pub fn step_boxes(block: BlockId) -> [([f32; 3], [f32; 3]); 2] {
-    let (near, far) = (STEP_TREAD, 1.0);
-    let ((x0, x1), (z0, z1)) = match block_facing(block).quarters() {
-        1 => ((1.0 - far, 1.0 - near), (0.0, 1.0)),
-        2 => ((0.0, 1.0), (1.0 - far, 1.0 - near)),
-        3 => ((near, far), (0.0, 1.0)),
-        _ => ((0.0, 1.0), (near, far)),
+pub fn step_pose_boxes(shape: StepShape) -> StepBoxes {
+    let t = STEP_TREAD;
+    let tread = ([0.0, 0.0, 0.0], [1.0, 0.5, 1.0]);
+    let riser = ([0.0, 0.5, t], [1.0, 1.0, 1.0]);
+    // The strip of the upper half a riser round the corner stands on, on
+    // one side of the pose: as deep as a riser, from the front of the cell
+    // to the riser it meets.
+    let span = |side: StepSide| match side {
+        StepSide::Minus => (0.0, 1.0 - t),
+        StepSide::Plus => (t, 1.0),
     };
-    [([0.0, 0.0, 0.0], [1.0, 0.5, 1.0]), ([x0, 0.5, z0], [x1, 1.0, z1])]
+    let mut boxes = [tread, riser, riser];
+    let len = match shape {
+        StepShape::Straight => 2,
+        StepShape::Outside(side) => {
+            let (x0, x1) = span(side);
+            boxes[1] = ([x0, 0.5, t], [x1, 1.0, 1.0]);
+            2
+        }
+        StepShape::Inside(side) => {
+            let (x0, x1) = span(side);
+            boxes[2] = ([x0, 0.5, 0.0], [x1, 1.0, t]);
+            3
+        }
+    };
+    StepBoxes { boxes, len }
+}
+
+/// The boxes of a step, relative to its cell's corner: [`step_pose_boxes`]
+/// of its [`step_shape`], turned to face the way it faces -- the low side
+/// toward the placer, so the side they walk up from.
+pub fn step_boxes(block: BlockId, near: impl Fn(i32, i32, i32) -> BlockId) -> StepBoxes {
+    let quarters = block_facing(block).quarters();
+    let mut out = step_pose_boxes(step_shape(block, near));
+    for (min, max) in out.boxes.iter_mut().take(out.len) {
+        let (ax, az) = step_pose_to_cell(quarters, min[0], min[2]);
+        let (bx, bz) = step_pose_to_cell(quarters, max[0], max[2]);
+        (min[0], max[0]) = (ax.min(bx), ax.max(bx));
+        (min[2], max[2]) = (az.min(bz), az.max(bz));
+    }
+    out
 }
 
 /// `for_each_block_box`, in `f64` world coordinates that are exact however
@@ -1101,10 +1254,101 @@ mod tests {
     fn a_player_can_stand_on_the_lower_half_of_a_step() {
         const { assert!(STEP_TREAD > 2.0 * PLAYER_HALF_WIDTH) };
         use crate::types::{faced, Facing, BLOCK_PLANK_STAIRS};
-        let [tread, riser] = step_boxes(faced(BLOCK_PLANK_STAIRS, Facing::North));
+        let boxes = step_boxes(faced(BLOCK_PLANK_STAIRS, Facing::North), |_, _, _| BLOCK_AIR);
+        let [tread, riser] = [boxes.boxes[0], boxes.boxes[1]];
         assert!(tread.1[1] <= 0.5 && riser.0[1] >= 0.5);
         let depth = (0..3).filter(|&a| a != 1).map(|a| riser.0[a].max(1.0 - riser.1[a])).fold(0.0_f32, f32::max);
         assert!(depth > 2.0 * PLAYER_HALF_WIDTH, "a tread {depth} deep is narrower than a body");
+    }
+
+    /// **Every riser in a flight meets the riser beside it face to face**,
+    /// along a straight flight and round both corners of an L, for every
+    /// facing and both ways of turning.
+    ///
+    /// "у ступенек странная ... модель": the corner of two flights was a
+    /// straight step like its row, so at an outside corner its riser stood
+    /// out past the other flight by the depth of a tread, and at an inside
+    /// corner a riser-sized hole opened where the two flights should have
+    /// met. Asked of what is walked into, which
+    /// `a_step_is_drawn_exactly_where_it_is_walked_into` holds to what is
+    /// drawn: on every face two steps share, the risers touching it from one
+    /// side cover exactly what the risers touching it from the other do.
+    #[test]
+    fn the_risers_of_a_flight_meet_face_to_face_along_it_and_round_its_corners() {
+        use crate::types::{faced, is_step, Facing, BLOCK_PLANK_STAIRS};
+        use std::collections::HashMap;
+        let facings = [Facing::North, Facing::East, Facing::South, Facing::West];
+        // What of the risers of the step at `cell` touches its side `dir`,
+        // as intervals across the face (the other horizontal axis).
+        let touching = |world: &HashMap<(i32, i32), BlockId>, cell: (i32, i32), dir: (i32, i32)| {
+            let near = |dx: i32, dy: i32, dz: i32| {
+                if dy != 0 {
+                    return BLOCK_AIR;
+                }
+                world.get(&(cell.0 + dx, cell.1 + dz)).copied().unwrap_or(BLOCK_AIR)
+            };
+            let (axis, across) = if dir.0 != 0 { (0, 2) } else { (2, 0) };
+            let plane = if dir.0 + dir.1 > 0 { 1.0 } else { 0.0 };
+            let mut spans: Vec<(f32, f32)> = step_boxes(world[&cell], near)
+                .iter()
+                .filter(|(min, _)| min[1] >= 0.5)
+                .filter(|(min, max)| if plane > 0.5 { max[axis] >= 1.0 } else { min[axis] <= 0.0 })
+                .map(|(min, max)| (min[across], max[across]))
+                .collect();
+            spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+            // Adjacent spans are one span.
+            let mut merged: Vec<(f32, f32)> = Vec::new();
+            for (lo, hi) in spans {
+                match merged.last_mut() {
+                    Some(last) if lo <= last.1 + 1e-6 => last.1 = last.1.max(hi),
+                    _ => merged.push((lo, hi)),
+                }
+            }
+            merged
+        };
+        for facing in facings {
+            let (fx, fz) = facing.step();
+            let (bx, bz) = (-fx, -fz);
+            for turn in [1, 3] {
+                let other = facings[((facing.quarters() + turn) % 4) as usize];
+                let (ox, oz) = other.step();
+                // A flight of `facing` running along its side, ending at the
+                // corner (0, 0); and a flight of `other` leaving the corner
+                // along `facing`'s back (outside: the other flight's risers
+                // meet this one's at the back) or its front (inside).
+                for (name, leave) in [("outside", (bx, bz)), ("inside", (fx, fz))] {
+                    let mut world = HashMap::new();
+                    // The first flight runs away from the corner toward the
+                    // side the second flight rises to at an outside corner,
+                    // and away from it at an inside one: the two flights'
+                    // high sides meet inside the L or outside it.
+                    let run = if name == "outside" { (-ox, -oz) } else { (ox, oz) };
+                    for k in 0..3 {
+                        world.insert((run.0 * k, run.1 * k), faced(BLOCK_PLANK_STAIRS, facing));
+                    }
+                    for k in 1..4 {
+                        world.insert((leave.0 * k, leave.1 * k), faced(BLOCK_PLANK_STAIRS, other));
+                    }
+                    for (&cell, &id) in &world {
+                        assert!(is_step(id));
+                        for dir in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                            let beside = (cell.0 + dir.0, cell.1 + dir.1);
+                            if !world.contains_key(&beside) {
+                                continue;
+                            }
+                            let here = touching(&world, cell, dir);
+                            let there = touching(&world, beside, (-dir.0, -dir.1));
+                            let close = here.len() == there.len()
+                                && here.iter().zip(&there).all(|(a, b)| (a.0 - b.0).abs() < 1e-5 && (a.1 - b.1).abs() < 1e-5);
+                            assert!(
+                                close,
+                                "{facing:?} turning to {other:?}, {name} corner: the risers at {cell:?} meet the ones at {beside:?} as {here:?} against {there:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// **A standing torch is walked into at its pole.** It used to be its whole
