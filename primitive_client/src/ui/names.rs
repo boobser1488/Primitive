@@ -218,10 +218,11 @@ fn rules_label(block: BlockId) -> Option<&'static str> {
 /// used to print it from two copies of one `format!`.
 pub fn stack_line(block: BlockId, count: u32, language: Language) -> String {
     format!(
-        "{}{} x{count}   {:.0} kg",
+        "{}{} x{count}   {:.0} {}",
         self::block(block, language),
         condition(block, language).map(|w| format!(" ({w})")).unwrap_or_default(),
         primitive_shared::types::block_weight(block) * count as f32,
+        language.text(crate::ui::lang::Msg::Kg),
     )
 }
 

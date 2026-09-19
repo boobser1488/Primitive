@@ -344,7 +344,12 @@ impl StationScreen {
         let panel = Panel::for_game(open.game);
         let mut p = Painter::onto(font, std::mem::take(out));
         p.scrim(widgets::SCRIM);
-        p.panel(panel.frame);
+        // **The deep panel and an amber heading from the left edge**, which
+        // is what the pack, the chest, the hearth and the death notice are.
+        // This screen was a flat slab with its heading centred in the ink,
+        // written beside the others rather than out of them, and walking
+        // from a chest to an anvil changed the skin of the interface.
+        p.deep_panel(panel.frame);
         // **The heading names the job once a run is up.** A player four
         // seconds into a run is watching a marker and has stopped reading;
         // what they may still need is which of the two things on the list
@@ -359,7 +364,7 @@ impl StationScreen {
                 Game::Whet => Msg::HoningTitle,
             })),
         };
-        p.text_centred(&title, panel.frame.centre_x(), panel.title_top, TITLE_SCALE, widgets::INK);
+        p.text(&title, panel.frame.x0 + PAD, panel.title_top, TITLE_SCALE, widgets::ACCENT);
         p.button(panel.close, language.text(Msg::Cancel), self.cursor.is_some_and(|at| panel.close.contains(at.0, at.1)), true);
 
         match open.run.as_ref() {
@@ -452,7 +457,10 @@ impl StationScreen {
         for blow in 0..game.presses() {
             let pip = panel.pip(blow, game.presses());
             let struck = blow < run.presses.len();
-            p.quad(pip, if struck { widgets::ACCENT } else { widgets::WELL_DARK });
+            // The blows to come in the dim ink, not in `WELL_DARK`: a dark
+            // pip on the dark panel measured next to nothing, and three
+            // blows left read as no pips at all.
+            p.quad(pip, if struck { widgets::ACCENT } else { widgets::INK_DIM });
         }
         p.text_centred(
             language.text(crate::ui::lang::by_input(Msg::StationStrike, Msg::StationStrikeTouch)),

@@ -1660,6 +1660,7 @@ pub fn touch_controls(
     painter: &mut Painter,
     layout: &crate::platform::touch::Layout,
     held: impl Fn(crate::platform::touch::Slot) -> bool,
+    language: crate::ui::lang::Language,
 ) {
 
     // Pixels to the space the interface is authored in. The same
@@ -1740,7 +1741,9 @@ pub fn touch_controls(
         // is not a known length: see `widgets::scale_to_fit`. Four
         // fifths of the button, so the letters do not touch the border
         // and it still reads as a button rather than as a word.
-        let label = placed.emits.label();
+        // In the player's language where it is a word -- see
+        // `Emits::label_in`.
+        let label = placed.emits.label_in(language);
         let scale = crate::ui::widgets::scale_to_fit(rect, label, 0.8);
         painter.label_in_two_tones(
             rect,

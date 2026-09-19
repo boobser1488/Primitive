@@ -1576,21 +1576,10 @@ impl ChestScreen {
                 // under it saying the same is what ties the forty to it.
                 for (page, label) in [(false, self.heading), (true, Msg::TabBackpack)] {
                     let rect = page_tab_rect(page);
-                    let text = language.text(label);
-                    if page == rucksack {
-                        p.well(rect, widgets::TRAY);
-                        let scale = widgets::fitted_scale(text, 0.80, (rect.width() - 0.03).max(0.0), 0.55);
-                        p.text_centred(
-                            text,
-                            rect.centre_x(),
-                            rect.centre_y() + widgets::cell_height(scale) / 2.0,
-                            scale,
-                            widgets::ACCENT,
-                        );
-                    } else {
-                        let over = self.cursor.is_some_and(|(x, y)| rect.contains(x, y));
-                        p.button(rect, text, over, true);
-                    }
+                    // The pack screen's strip, by the same function: see
+                    // `Painter::tab` for the two sizes of word it replaced.
+                    let over = self.cursor.is_some_and(|(x, y)| rect.contains(x, y));
+                    p.tab(rect, language.text(label), page == rucksack, over, true);
                 }
             }
         }
@@ -1762,7 +1751,14 @@ impl ChestScreen {
         // Every square the container has: a body with a rucksack is sixty,
         // and "12/40" over a body holding fifty stacks is a lie about the
         // one thing the line is for.
-        let squares = if layout.grid() { self.contents.slots().len().max(CHEST_SLOTS) } else { CHEST_SLOTS };
+        // And a horse's bags are twelve, whatever the inventory type they
+        // travel in is long: "3/40" over twelve drawn squares was the same
+        // lie the other way round.
+        let squares = match layout {
+            Layout::Bags => primitive_shared::horse::BAGS_SLOTS,
+            _ if layout.grid() => self.contents.slots().len().max(CHEST_SLOTS),
+            _ => CHEST_SLOTS,
+        };
         let used = (0..squares)
             .filter(|&slot| self.contents.count_in(slot) > 0)
             .count();
@@ -1775,16 +1771,18 @@ impl ChestScreen {
         // of all three.
         let summary = if layout.grid() {
             format!(
-                "{used}/{squares} {}   {stored} {}   {:.0} kg",
+                "{used}/{squares} {}   {stored} {}   {:.0} {}",
                 language.text(Msg::SlotsWord),
                 language.text(Msg::ItemsWord),
                 self.contents.total_weight(),
+                language.text(Msg::Kg),
             )
         } else {
             format!(
-                "{stored} {}   {:.0} kg",
+                "{stored} {}   {:.0} {}",
                 language.text(Msg::ItemsWord),
                 self.contents.total_weight(),
+                language.text(Msg::Kg),
             )
         };
         // **No rule under the grid.** There was one, drawn the whole
@@ -2734,7 +2732,16 @@ fn chest_square(layout: Layout, place: usize) -> Option<usize> {
             let offset = place.checked_sub(HOTBAR_SLOTS)?;
             (offset < BACKPACK_SLOTS).then_some(CORPSE_COMPARTMENT.start + offset)
         }
-        Layout::Bags => (place < primitive_shared::horse::BAGS_SLOTS).then_some(place),
+        // **From the top, in reading order**, the rucksack page's rule. The
+        // bags were the identity once, and a chest's first ten places are
+        // its *bottom* row (the one that mirrors the belt), so the twelve
+        // were drawn as a full row at the foot of the tray and two orphans
+        // at its head, with two empty rows between -- the first thing read
+        // on the screen was two squares that looked left over.
+        Layout::Bags => {
+            let offset = place.checked_sub(HOTBAR_SLOTS)?;
+            (offset < primitive_shared::horse::BAGS_SLOTS).then_some(offset)
+        }
         _ => (place < CHEST_SLOTS).then_some(place),
     }
 }
@@ -3738,6 +3745,30 @@ mod tests {
         let mut screen = ChestScreen::new();
         screen.show(AT, body, Some(BLOCK_CORPSE), ContainerKind::Chest, None, None);
         screen
+    }
+
+    /// **A horse's twelve squares start at the top of the tray and are
+    /// clicked where they are drawn**: every one of them is under exactly
+    /// one place, the first is the top-left one, and no place past the
+    /// twelfth answers at all. See `chest_square` for the orphaned pair.
+    #[test]
+    fn saddlebags_read_from_the_top_and_are_clicked_where_they_are_drawn() {
+        use primitive_shared::horse::BAGS_SLOTS;
+        let mut reached = Vec::new();
+        for place in 0..CHEST_SLOTS {
+            let cell = chest_slot_rect(Side::Chest, place);
+            let hit = slot_at((cell.centre_x(), cell.centre_y()), Layout::Bags);
+            assert_eq!(hit, chest_square(Layout::Bags, place).map(|s| (Side::Chest, s)), "place {place}");
+            reached.extend(hit.map(|(_, square)| square));
+        }
+        reached.sort_unstable();
+        assert_eq!(reached, (0..BAGS_SLOTS).collect::<Vec<_>>(), "a bag square has no place, or two");
+        let first = chest_slot_rect(Side::Chest, (0..CHEST_SLOTS).find(|&p| chest_square(Layout::Bags, p) == Some(0)).unwrap());
+        for place in 0..CHEST_SLOTS {
+            let other = chest_slot_rect(Side::Chest, place);
+            assert!(other.y1 <= first.y1 + 1e-6, "the first bag square is not on the top row");
+            assert!(other.y1 < first.y1 - 1e-6 || other.x0 >= first.x0 - 1e-6, "the first bag square is not the leftmost of the top row");
+        }
     }
 
     /// **The rucksack's compartment is clicked where it is drawn**: every

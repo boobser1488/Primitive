@@ -36,8 +36,11 @@ pub const UNTEXTURED: u32 = u32::MAX;
 /// past that the wheel is the only way to select, so the list is capped
 /// here rather than growing a second row.
 pub const MAX_SLOTS: usize = 10;
-/// Six quads per slot at the very most (backdrop, icon, 4 frame edges).
-pub const MAX_HOTBAR_VERTICES: usize = MAX_SLOTS * 8 * 6 + 64;
+/// Sixteen quads per slot at the very most: the recess, the icon and four
+/// frame edges, and then the pack's marks (`inventory_screen::slot_marks`)
+/// -- two for a quality square, four for a chipped edge, two for a wear
+/// bar. It was eight while the bar drew no marks at all.
+pub const MAX_HOTBAR_VERTICES: usize = MAX_SLOTS * 16 * 6 + 64;
 
 /// Slot geometry. Public because the HUD draws stack counts and the
 /// health row relative to the bar, and two modules laying the same bar
@@ -267,6 +270,22 @@ pub fn build_into(
         let layer = icon_layer(textures, block);
         let tint = if is_selected { ICON_TINT } else { ICON_TINT_DIM };
         push_quad(out, x0, y0, x1, y1, layer, icon_tint(block, tint));
+
+        // The pack's marks, by the pack's function: a chipped corner for
+        // the tool that needs the stone, a square for how well a thing was
+        // made, a bar for what is left of it. The bar is where a player
+        // actually looks for "which axe is going" -- see
+        // `inventory_screen::slot_marks` for why it used to show none.
+        let stack = inventory.slots().get(index).copied().flatten();
+        let mut painter = crate::ui::widgets::Painter::onto(textures.font, std::mem::take(out));
+        crate::ui::inventory_screen::slot_marks(
+            &mut painter,
+            crate::ui::widgets::Rect::new(x0, y0, x1, y1),
+            block,
+            stack.map(|s| s.condition()),
+            stack.and_then(|s| s.quality().band()),
+        );
+        *out = painter.into_vertices();
     }
 }
 
@@ -765,8 +784,9 @@ mod tests {
 
     #[test]
     fn a_full_bar_fits_in_the_vertex_budget() {
-        // 1 backdrop + per slot: 4 frame quads + 1 icon = 5.
-        let quads = 1 + MAX_SLOTS * 5;
+        // 1 backdrop + per slot: the recess, 4 frame quads, 1 icon, and
+        // every mark at once -- quality 2, edge 4, wear 2.
+        let quads = 1 + MAX_SLOTS * (6 + 8);
         assert!(
             quads * 6 <= MAX_HOTBAR_VERTICES,
             "{MAX_SLOTS} full slots need {} vertices but the budget is {MAX_HOTBAR_VERTICES}",
