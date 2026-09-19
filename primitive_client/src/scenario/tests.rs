@@ -804,3 +804,101 @@ fn a_stall_put_down_by_one_player_is_traded_at_by_another_through_both_screens()
     no_corrections(&owner);
     no_corrections(&buyer);
 }
+
+// ---------------------------------------------------------------- building
+
+/// Right-clicks `times` times to lay on `built`, waiting after each click
+/// until the cell has changed -- one stage a click, the way a player lays a
+/// wall. Aimed at the top of what stands there if anything does, and at the
+/// top of `under` if nothing does: the gesture a player makes either way.
+fn lay_on(s: &mut Scenario, under: (i32, i32, i32), built: (i32, i32, i32), times: usize) -> Vec<t::BlockId> {
+    let mut seen = Vec::new();
+    for _ in 0..times {
+        let before = s.block(built);
+        let top = s.drawn_bounds(built, built).map_or(0.0, |(_, hi)| f64::from(hi[1]) - built.1 as f64);
+        if top > 0.0 {
+            s.look_at(glam::DVec3::new(built.0 as f64 + 0.5, built.1 as f64 + top - 0.05, built.2 as f64 + 0.5));
+        } else {
+            s.look_at_face(under, (0, 1, 0));
+        }
+        s.use_aimed();
+        let changed = s.until(3.0, |s| s.block(built) != before);
+        assert!(changed, "a click did not lay anything on {:?}", before.map(t::block_name));
+        seen.push(s.block(built).unwrap_or(t::BLOCK_AIR));
+    }
+    seen
+}
+
+#[test]
+fn earth_dug_out_comes_as_four_handfuls_and_four_handfuls_heap_back_into_the_hole() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let cell = (x0 + 1, GROUND, z);
+    s.stand_at(feet_on(x0, z));
+    s.look_at_face(cell, (0, 1, 0));
+    s.input.breaking = true;
+    let dug = s.until(40.0, |s| s.block(cell) == Some(t::BLOCK_AIR));
+    s.input.breaking = false;
+    assert!(dug, "the dig never finished: {:?}", s.block(cell).map(t::block_name));
+    let got = s.until(5.0, |s| s.inventory.count(t::BLOCK_HANDFUL_EARTH) >= 4);
+    assert!(got, "a cell of earth gave {} handfuls", s.inventory.count(t::BLOCK_HANDFUL_EARTH));
+    assert_eq!(s.inventory.count(t::BLOCK_DIRT), 0, "the whole block came out as well as its handfuls");
+
+    // ...and back, a quarter a click, on the floor of the hole.
+    s.select(t::BLOCK_HANDFUL_EARTH);
+    let under = (cell.0, cell.1 - 1, cell.2);
+    let stages = lay_on(&mut s, under, cell, 4);
+    assert_eq!(stages.last().copied(), Some(t::BLOCK_DIRT), "four handfuls heaped into {stages:?}");
+    assert!(primitive_shared::dig::is_dug(stages[0]), "the first handful was not a quarter of a cell");
+    assert_eq!(s.inventory.count(t::BLOCK_HANDFUL_EARTH), 0);
+    no_corrections(&s);
+}
+
+#[test]
+fn a_brick_wall_is_laid_course_by_course_in_mortar_and_stands_as_high_as_it_is_drawn() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.give(t::BLOCK_BRICK, 4);
+    s.give(t::BLOCK_MORTAR, 4);
+    s.select(t::BLOCK_BRICK);
+    let ground = (x0 + 2, GROUND, z);
+    let wall = (x0 + 2, GROUND + 1, z);
+    let stages = lay_on(&mut s, ground, wall, 2);
+    let names: Vec<&str> = stages.iter().map(|&b| t::block_name(b)).collect();
+    assert_eq!(t::block_kind(stages[1]), t::BLOCK_BRICK_COURSES, "{names:?}");
+    // The top of what is drawn: a box as wide as its cell has its sides on
+    // the cell's walls, which `drawn_bounds` leaves out, so its top is what
+    // says how high it stands.
+    let (_, hi) = s.drawn_bounds(wall, wall).expect("two courses are not drawn");
+    assert!((hi[1] - wall.1 as f32 - 0.5).abs() < 0.05, "two courses are drawn {} high", hi[1] - wall.1 as f32);
+    assert!(s.physics_solid(wall), "the courses are drawn and walked through");
+    s.shot("brick courses");
+    lay_on(&mut s, ground, wall, 2);
+    assert_eq!(s.block(wall), Some(t::BLOCK_BRICKS), "four mortared courses are not brickwork");
+    assert_eq!(s.inventory.count(t::BLOCK_MORTAR), 0, "a course went on without its trowel");
+    assert_eq!(s.inventory.count(t::BLOCK_BRICK), 0);
+    no_corrections(&s);
+}
+
+#[test]
+fn a_cob_lift_is_refused_on_a_wet_one_and_the_wall_waits_as_it_was_left() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.give(t::BLOCK_COB, 2);
+    s.select(t::BLOCK_COB);
+    let ground = (x0 + 2, GROUND, z - 1);
+    let wall = (x0 + 2, GROUND + 1, z - 1);
+    let first = lay_on(&mut s, ground, wall, 1)[0];
+    assert!(primitive_shared::build::is_wet(first), "a fresh lift of cob is not wet");
+    let (_, hi) = s.drawn_bounds(wall, wall).expect("the lift is not drawn");
+    assert!((hi[1] - wall.1 as f32 - 0.25).abs() < 0.05, "one lift is drawn {} high", hi[1] - wall.1 as f32);
+    s.look_at(glam::DVec3::new(wall.0 as f64 + 0.5, wall.1 as f64 + 0.2, wall.2 as f64 + 0.5));
+    s.use_aimed();
+    let told = s.until(3.0, |s| s.heard_any(|m| matches!(m, ServerMessage::Error(e) if e.contains("still wet"))));
+    assert!(told, "a lift went onto a wet one without a word");
+    assert_eq!(s.block(wall), Some(first), "the wet lift changed under a refused one");
+    assert_eq!(s.inventory.count(t::BLOCK_COB), 1, "the refused lump was spent");
+    no_corrections(&s);
+}

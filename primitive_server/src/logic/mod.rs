@@ -45,6 +45,7 @@ pub mod collapse;
 pub mod commands;
 pub mod drying;
 pub mod peat;
+pub mod walls;
 pub mod containers;
 pub mod falling;
 pub mod felling;

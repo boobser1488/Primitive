@@ -42,6 +42,7 @@
 
 pub mod animals;
 pub mod bees;
+pub mod build;
 pub mod clay;
 pub mod blocks;
 pub mod body;

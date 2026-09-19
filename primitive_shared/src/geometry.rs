@@ -56,7 +56,7 @@ pub fn for_each_block_box(
     // world-aware gatherer and the lone one give the same answer -- which
     // is what keeps a half-dug wall the same wall to the collider, to the
     // dropped stack rolling past it and to the animal walking along it.
-    if let Some((min, max)) = crate::dig::bite_box(block) {
+    if let Some((min, max)) = crate::dig::part_box(block) {
         let (x, y, z) = (bx as f32, by as f32, bz as f32);
         visit([x + min[0], y + min[1], z + min[2]], [x + max[0], y + max[1], z + max[2]]);
         return;
@@ -351,7 +351,7 @@ pub fn block_box(block: BlockId, bx: i32, by: i32, bz: i32) -> Option<([f32; 3],
     // own cell floor and reaches the walls of its cell. A bite out of the
     // underside does neither. One box, from `dig::bite_box`, so the thing a
     // player walks into is exactly the thing the mesher drew.
-    if let Some((min, max)) = crate::dig::bite_box(block) {
+    if let Some((min, max)) = crate::dig::part_box(block) {
         let (x, y, z) = (bx as f32, by as f32, bz as f32);
         return Some(([x + min[0], y + min[1], z + min[2]], [x + max[0], y + max[1], z + max[2]]));
     }
@@ -514,7 +514,7 @@ pub fn block_box_for_aim(
     // the metre of air in front of it -- and a player who has cut a
     // doorway three quarters of the way through a wall can put their
     // crosshair through the gap onto what is behind.
-    if let Some((min, max)) = crate::dig::bite_box(block) {
+    if let Some((min, max)) = crate::dig::part_box(block) {
         let (x, y, z) = (bx as f32, by as f32, bz as f32);
         return Some(([x + min[0], y + min[1], z + min[2]], [x + max[0], y + max[1], z + max[2]]));
     }
@@ -1452,6 +1452,13 @@ mod tests {
                 "bones_2",
                 "bones_3",
                 "bones_4",
+                // ...and a wall one course up, which is a quarter of a cell
+                // of bricks, stones or cob: a kerb, walked over on the way to
+                // laying the next course (`build`).
+                "brick_courses",
+                "dry_bricks",
+                "dry_stone_wall",
+                "cob_wall",
                 // ...and the two low stages of a pit kiln, pots and fibre,
                 // which sit in a hole a player may walk across rather than
                 // fall into; the logs fill it to the rim. And the firepit,

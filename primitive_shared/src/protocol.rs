@@ -1915,6 +1915,26 @@ pub enum ClientMessage {
         row: u8,
         offer: crate::stall::Offer,
     },
+    /// **A stage of a wall, or a handful of a heap, laid in the cell**: with
+    /// whatever is in the selected slot, onto whatever is there
+    /// (`build::lay`). The client names the cell and nothing else it could
+    /// lie about -- what the cell becomes, what it costs and whether mortar
+    /// went under it are the server's, worked out from its own copy of the
+    /// cell and the pack, the way `Dig` leaves the next shape to the server.
+    ///
+    /// Rejected: **`SetBlock` with the next stage in it.** The client would
+    /// then say what the wall becomes, and the server would have to work it
+    /// out anyway to know whether that was true -- and then again to know
+    /// what to charge, which a placement's one-item-of-its-kind rule cannot
+    /// say for two stones and a trowel.
+    Build {
+        global_x: i32,
+        global_y: i32,
+        global_z: i32,
+        /// Which way a new wattle panel runs: along x, so its face is to a
+        /// builder looking along z. Read for nothing else.
+        along_x: bool,
+    },
 }
 
 /// Messages the server sends to the client.

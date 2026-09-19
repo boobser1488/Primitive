@@ -414,6 +414,9 @@ pub const CHARCOAL_C: f32 = 400.0;
 /// what the first pots in the world actually were, and it is what a kiln
 /// in a bog reaches on peat.
 pub const FIRING_C: f32 = 700.0;
+/// **Limestone gives up its lime at about nine hundred degrees**: past a
+/// pot's firing, short of copper's melt. A kiln on charcoal, not a campfire.
+pub const LIME_C: f32 = 900.0;
 /// The metals, as TerraFirmaCraft melts them.
 pub const TIN_MELTS_C: f32 = 230.0;
 pub const BRONZE_MELTS_C: f32 = 950.0;
@@ -492,6 +495,7 @@ pub fn needs_degrees(recipe: &Recipe) -> Option<f32> {
         BLOCK_COAL => CHARCOAL_C,
         // ...and roof tiles, which are fired as a brick is.
         BLOCK_BRICK | BLOCK_VESSEL | BLOCK_MOULD | BLOCK_JUG | BLOCK_BOWL | BLOCK_TILE_SLAB => FIRING_C,
+        BLOCK_QUICKLIME => LIME_C,
         // Reduced out of its ore, which is hotter work than the metal's own
         // melting point: see `TIN_SMELTS_C`.
         BLOCK_TIN_INGOT => TIN_SMELTS_C,

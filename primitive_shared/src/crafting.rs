@@ -33,7 +33,7 @@ use crate::types::{
     BLOCK_COOKED_MEAT, BLOCK_COPPER_AXE, BLOCK_COPPER_KNIFE, BLOCK_COPPER_PICKAXE,
     BLOCK_IRON_AXE, BLOCK_IRON_KNIFE, BLOCK_IRON_PICKAXE, BLOCK_RAW_MEAT, BLOCK_REEDS,
     // 1.6: the fire that is hot enough, and what it fires.
-    BLOCK_BRICK, BLOCK_BRICKS, BLOCK_BRICK_RAW, BLOCK_CLAY, BLOCK_KILN,
+    BLOCK_BRICK, BLOCK_BRICK_RAW, BLOCK_CLAY, BLOCK_KILN,
     // ...and the field.
     BLOCK_BREAD, BLOCK_DOUGH, BLOCK_GRAIN, BLOCK_HOE,
     // ...and the pot the copper age runs on.
@@ -1671,11 +1671,14 @@ pub const RECIPES: &[Recipe] = &[
         failure: 0.0,
     },
     Recipe {
-        // ...and laid into a wall. Hands: this is the one step in the
-        // chain that is bricklaying rather than firing.
-        name: "brickwork",
-        inputs: &[(BLOCK_BRICK, 4)],
-        output: (BLOCK_BRICKS, 1),
+        // **Mud mortar**, the first there was: clay beaten into sand. This
+        // slot made a cube of brickwork out of four bricks, and a wall of
+        // bricks is laid now, a course at a time where it stands (`build`);
+        // the row kept its place because its place is its name on the wire,
+        // and what it makes is the other half of a course.
+        name: "clay mortar",
+        inputs: &[(crate::types::BLOCK_HANDFUL_CLAY, 2), (crate::types::BLOCK_HANDFUL_SAND, 1)],
+        output: (crate::types::BLOCK_MORTAR, 1),
         station: Station::Hands,
         returns: &[],
         failure: 0.0,
@@ -1831,7 +1834,9 @@ pub const RECIPES: &[Recipe] = &[
         // running it. That is the correct order: pottery, then copper,
         // then the thing that wins iron.
         name: "bloomery",
-        inputs: &[(BLOCK_BRICKS, 4), (BLOCK_COBBLESTONE, 8)],
+        // Four courses of brick in mortar, as the wall it was built of
+        // before a cube of brickwork stopped being a thing in the pack.
+        inputs: &[(BLOCK_BRICK, 16), (crate::types::BLOCK_MORTAR, 4), (BLOCK_COBBLESTONE, 8)],
         output: (BLOCK_BLOOMERY, 1),
         station: Station::Hands,
         returns: &[],
@@ -3720,6 +3725,108 @@ pub const RECIPES: &[Recipe] = &[
         returns: &[],
         failure: 0.0,
     },
+    // ---- building in stages (`build`) ----
+    //
+    // **Four handfuls packed into a block, by hand, and the block is the
+    // common one.** The other way back is to heap them where they go, which
+    // keeps their rock; this is the quick way for a recipe that wants a
+    // block, and what it costs is the rock. See `build`'s module doc.
+    Recipe {
+        name: "pack earth",
+        inputs: &[(crate::types::BLOCK_HANDFUL_EARTH, 4)],
+        output: (BLOCK_DIRT, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "pack sand",
+        inputs: &[(crate::types::BLOCK_HANDFUL_SAND, 4)],
+        output: (BLOCK_SAND, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "pack gravel",
+        inputs: &[(crate::types::BLOCK_HANDFUL_GRAVEL, 4)],
+        output: (crate::types::BLOCK_GRAVEL, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "pack clay",
+        inputs: &[(crate::types::BLOCK_HANDFUL_CLAY, 4)],
+        output: (BLOCK_CLAY, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "heap chips",
+        inputs: &[(crate::types::BLOCK_STONE_CHIPS, 4)],
+        output: (BLOCK_COBBLESTONE, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **Lime: limestone or chalk burnt in the kiln.** A kiln and not a
+    // campfire, because lime wants the heat a kiln holds for hours -- and the
+    // walk to white ground, which is what the decision between clay mortar
+    // and lime mortar is made of.
+    Recipe {
+        name: "burn limestone",
+        inputs: &[(crate::types::BLOCK_LIMESTONE, 1)],
+        output: (crate::types::BLOCK_QUICKLIME, 2),
+        station: Station::Forge,
+        returns: &[],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "burn chalk",
+        inputs: &[(crate::types::BLOCK_CHALK, 1)],
+        output: (crate::types::BLOCK_QUICKLIME, 2),
+        station: Station::Forge,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **Lime mortar**: lime slaked in a jug of water and beaten into sand,
+    // four trowels where clay makes one ("clay mortar", in brickwork's old
+    // slot). Early walls are clay-mortared because clay is what there is; a
+    // town is lime-mortared because lime goes four times as far.
+    Recipe {
+        name: "lime mortar",
+        inputs: &[(crate::types::BLOCK_QUICKLIME, 1), (crate::types::BLOCK_HANDFUL_SAND, 3), (BLOCK_JUG_WATER, 1)],
+        output: (crate::types::BLOCK_MORTAR, 4),
+        station: Station::Hands,
+        returns: &[(BLOCK_JUG, 1)],
+        failure: 0.0,
+    },
+    // **Daub: clay and earth and straw.** Rejected: dung in it, which is what
+    // every wattle-and-daub wall from Kent to the Caucasus has had -- dung is
+    // not an item here, on purpose (`types::BLOCK_DUNG`), and a daub row
+    // would be the one reason to carry it.
+    Recipe {
+        name: "daub",
+        inputs: &[(crate::types::BLOCK_HANDFUL_CLAY, 1), (crate::types::BLOCK_HANDFUL_EARTH, 1), (BLOCK_FIBER, 1)],
+        output: (crate::types::BLOCK_DAUB, 2),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **Cob: earth and clay kneaded with straw.** One lump is one lift of a
+    // wall, so a cell of cob is two of these rows -- earth by the handful,
+    // which is what a cob house has always been dug out of the ground it
+    // stands on.
+    Recipe {
+        name: "cob",
+        inputs: &[(crate::types::BLOCK_HANDFUL_EARTH, 2), (crate::types::BLOCK_HANDFUL_CLAY, 1), (BLOCK_FIBER, 1)],
+        output: (crate::types::BLOCK_COB, 2),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
 ];
 
 /// Why a craft cannot happen, or that it can.
@@ -5009,9 +5116,13 @@ mod tests {
                 // ...and the thirteenth: an instrument, read in the hand
                 // and spent on nothing. See `types::is_instrument`.
                 let is_instrument = crate::types::is_instrument(r.output.0);
+                // ...and the fourteenth: a lump of daub or cob, spent by being
+                // laid into a wall where it stands (`build::is_laid`).
+                let is_laid = crate::build::is_laid(r.output.0);
                 assert!(
                     is_tool
                         || is_instrument
+                        || is_laid
                         || is_workshop_tool
                         || is_tackle
                         || is_dressing

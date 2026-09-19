@@ -1757,6 +1757,10 @@ async fn read_loop(
                 crate::stall_buy(&ctx, &handle, row, offer);
             }
 
+            ClientMessage::Build { global_x, global_y, global_z, along_x } => {
+                build_in_place(&ctx, &handle, (global_x, global_y, global_z), along_x);
+            }
+
             ClientMessage::Disconnect => return Ok(()),
         }
     }
@@ -1898,6 +1902,26 @@ fn dig_one_slice(
         state.last_edit = Some(std::time::Instant::now());
     }
     crate::broadcast_block(ctx, (global_x, global_y, global_z), next);
+    // **A handful for the quarter**, out of the face that was worked
+    // (`build::slice_handful`), where the digger is standing: out of the cell
+    // it would pop out of rock still standing in it. Asked of the cell as it
+    // was, so the sod peeled off turf is nothing and the first quarter of a
+    // soil is a handful of it.
+    if let Some(handful) = primitive_shared::build::slice_handful(target) {
+        let out = (
+            global_x as f32 + 0.5 + f32::from(face.0) * 0.7,
+            global_y as f32 + 0.5 + f32::from(face.1) * 0.7,
+            global_z as f32 + 0.5 + f32::from(face.2) * 0.7,
+        );
+        ctx.items.lock().unwrap_or_else(|e| e.into_inner()).spawn(
+            handful,
+            1,
+            primitive_shared::geometry::wide(out),
+            (0.0, 0.0, 0.0),
+            None,
+            std::time::Instant::now(),
+        );
+    }
     // **The cell has changed shape, so everything that reads its shape is
     // told.** A bite is not air, so nothing falls into it -- but the water
     // beside it may now wash the rest of it away (`logic::water`), and a
@@ -1908,6 +1932,120 @@ fn dig_one_slice(
         sim.on_block_changed(global_x, global_y, global_z);
     }
     crate::notify_mechanics(ctx, global_x, global_y, global_z);
+}
+
+/// One stage of a wall, or one handful of a heap, laid at `at` with what is
+/// in the selected slot (`build::lay`).
+///
+/// **Its own path, not `SetBlock`'s**, for `dig_one_slice`'s reason turned
+/// round: a placement spends one of the kind it writes, and a course of brick
+/// spends a brick and a trowel of mortar and writes a wall, so the one rule
+/// the placement path is built on is the one thing this is not. What it
+/// shares with every edit it asks the same way: the reach and the rate, the
+/// plugin's placement hook, and nobody standing where the courses go.
+fn build_in_place(ctx: &Arc<Context>, handle: &Arc<PlayerHandle>, at: (i32, i32, i32), along_x: bool) {
+    use primitive_shared::build;
+    let (x, y, z) = at;
+    let Some(target) = ctx.world.cached_block(x, y, z) else {
+        return; // not loaded; nothing to build on
+    };
+    let under = ctx.world.cached_block(x, y - 1, z).unwrap_or(BLOCK_AIR);
+    let put_straight = |reason: &str| {
+        handle.send(ServerMessage::Error(reason.to_string()));
+        handle.send(ServerMessage::BlockUpdate(BlockChange { global_x: x, global_y: y, global_z: z, block_id: target }));
+    };
+    let (slot, held, have, mortar) = {
+        let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = state.selected_slot;
+        let held = state.inventory.block_in(slot).unwrap_or(BLOCK_AIR);
+        let have = state.inventory.count_in(slot);
+        let mortar = state.inventory.count(primitive_shared::types::BLOCK_MORTAR) > 0;
+        (slot, held, have, mortar)
+    };
+    let laid = match build::lay(target, held, mortar, under, along_x) {
+        Ok(laid) => laid,
+        Err(reason) => return put_straight(reason),
+    };
+    if have < laid.spends {
+        return put_straight("you are not carrying enough of that");
+    }
+    let verdict = {
+        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.anticheat.check_build(x, y, z)
+    };
+    match verdict {
+        Verdict::Allow => {}
+        Verdict::Reject { reason, .. } => {
+            ctx.metrics.anticheat_flags.fetch_add(1, Ordering::Relaxed);
+            return put_straight(&format!("edit refused: {reason}"));
+        }
+        Verdict::Kick(reason) => {
+            ctx.metrics.anticheat_flags.fetch_add(1, Ordering::Relaxed);
+            handle.request_kick(DisconnectReason::AntiCheat(reason));
+            return;
+        }
+    }
+    if !crate::fire_plugin_hook(
+        ctx,
+        "on_block_place",
+        vec![
+            crate::logic::plugins::Value::Int(handle.id as i64),
+            crate::logic::plugins::Value::Int(x as i64),
+            crate::logic::plugins::Value::Int(y as i64),
+            crate::logic::plugins::Value::Int(z as i64),
+            crate::logic::plugins::Value::Int(laid.result as i64),
+        ],
+        Some(vec![at]),
+    ) {
+        return put_straight("a plugin refused that change");
+    }
+    // A course laid round somebody's ankles is a course laid inside them.
+    if ctx.registry.player_occupying_block(x, y, z, laid.result).is_some() {
+        return put_straight("can't build inside somebody");
+    }
+    // Spent before the write and given back if the write fails: the order the
+    // placement path keeps, for its reason -- refusing after spending is how
+    // players quietly lose things.
+    {
+        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        let spent = state.inventory.block_in(slot) == Some(held) && state.inventory.take_from(slot, laid.spends) == laid.spends;
+        let mortared = spent && (!laid.mortar || state.inventory.take_exact(primitive_shared::types::BLOCK_MORTAR, 1));
+        if spent && !mortared {
+            state.inventory.add(held, laid.spends);
+        }
+        if !mortared {
+            std::mem::drop(state);
+            return put_straight("you are not carrying enough of that");
+        }
+        state.inventory_dirty = true;
+    }
+    if !ctx.world.set_block(x, y, z, laid.result) {
+        {
+            let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.inventory.add(held, laid.spends);
+            if laid.mortar {
+                state.inventory.add(primitive_shared::types::BLOCK_MORTAR, 1);
+            }
+        }
+        crate::send_inventory(handle);
+        return;
+    }
+    crate::send_inventory(handle);
+    ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+    {
+        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.last_edit = Some(std::time::Instant::now());
+    }
+    // **Wet mud starts drying the moment it is on the wall** (`logic::walls`).
+    if build::is_wet(laid.result) {
+        ctx.walls.lock().unwrap_or_else(|e| e.into_inner()).lay(at);
+    }
+    crate::broadcast_block(ctx, at, laid.result);
+    {
+        let mut sim = ctx.falling.lock().unwrap_or_else(|e| e.into_inner());
+        sim.on_block_changed(x, y, z);
+    }
+    crate::notify_mechanics(ctx, x, y, z);
 }
 
 /// Returns false if the caller should stop processing further requests

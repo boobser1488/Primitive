@@ -3355,6 +3355,48 @@ pub const BLOCK_LODESTONE: BlockId = 698;
 /// under cloud (`logic::bearing`); this is what a player reaches iron
 /// for, if they travel.
 pub const BLOCK_WATER_COMPASS: BlockId = 699;
+
+// ---- building in stages: handfuls, mortar, walls laid in place ----
+//
+// See `build` for all of it. **Numbered from 415**, in the empty run between
+// the drowned bough (391) and the pit kiln (440), and not at the next free
+// number past 699: the 690s are full, three other changes were adding blocks
+// at the same time, and ids taken from the end of a run someone else is
+// counting through are a collision found by a save file. `build`'s
+// `the_ids_still_free_under_seven_hundred_are_listed` prints what is left.
+
+/// **A handful of earth**: what one swing of a spade takes out of a soil.
+/// Which soil rides in the id (`build::handful_of`).
+pub const BLOCK_HANDFUL_EARTH: BlockId = 415;
+/// A handful of sand, of whichever rock the sand is.
+pub const BLOCK_HANDFUL_SAND: BlockId = 416;
+/// A handful of gravel, of whichever rock.
+pub const BLOCK_HANDFUL_GRAVEL: BlockId = 417;
+/// A handful of clay: out of a bank, or out of a swamp's mud.
+pub const BLOCK_HANDFUL_CLAY: BlockId = 418;
+/// **Stone chips**: a quarter of a heap of cobble, knocked off it.
+pub const BLOCK_STONE_CHIPS: BlockId = 419;
+/// **Quicklime**: limestone or chalk burnt in a kiln. Slaked with water and
+/// beaten into sand it is lime mortar.
+pub const BLOCK_QUICKLIME: BlockId = 420;
+/// **Mortar**, a trowel's worth: laid under a course of bricks.
+pub const BLOCK_MORTAR: BlockId = 421;
+/// **Daub**: clay, earth and straw (and dung, if there is any) worked
+/// together, pressed into a woven panel.
+pub const BLOCK_DAUB: BlockId = 422;
+/// **Cob**: a lump of earth and clay kneaded with straw, built up in lifts.
+pub const BLOCK_COB: BlockId = 423;
+/// A brick wall being laid in mortar, one to three courses up. The fourth
+/// course makes it `BLOCK_BRICKS`.
+pub const BLOCK_BRICK_COURSES: BlockId = 424;
+/// Bricks laid without mortar, one to four courses up.
+pub const BLOCK_DRY_BRICKS: BlockId = 425;
+/// **A dry stone wall** of field stones, one to four courses up.
+pub const BLOCK_DRY_STONE_WALL: BlockId = 426;
+/// **A wattle panel**: a frame of stakes, woven with rods, daubed wet, dry.
+pub const BLOCK_WATTLE: BlockId = 427;
+/// **A cob wall**, one to four lifts, the top one wet or dry.
+pub const BLOCK_COB_WALL: BlockId = 428;
 /// A bolt of plain woven cotton, and the material of the cloth set.
 pub const BLOCK_CLOTH: BlockId = 190;
 /// What cloth is worn as, one per slot. What they do is in
@@ -4493,6 +4535,21 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     (BLOCK_CAIRN, "cairn"),
     (BLOCK_LODESTONE, "lodestone"),
     (BLOCK_WATER_COMPASS, "water_compass"),
+    // Building in stages. See `build`.
+    (BLOCK_HANDFUL_EARTH, "handful_earth"),
+    (BLOCK_HANDFUL_SAND, "handful_sand"),
+    (BLOCK_HANDFUL_GRAVEL, "handful_gravel"),
+    (BLOCK_HANDFUL_CLAY, "handful_clay"),
+    (BLOCK_STONE_CHIPS, "stone_chips"),
+    (BLOCK_QUICKLIME, "quicklime"),
+    (BLOCK_MORTAR, "mortar"),
+    (BLOCK_DAUB, "daub"),
+    (BLOCK_COB, "cob"),
+    (BLOCK_BRICK_COURSES, "brick_courses"),
+    (BLOCK_DRY_BRICKS, "dry_bricks"),
+    (BLOCK_DRY_STONE_WALL, "dry_stone_wall"),
+    (BLOCK_WATTLE, "wattle"),
+    (BLOCK_COB_WALL, "cob_wall"),
     (BLOCK_CLOTH, "cloth"),
     (BLOCK_CLOTH_CAP, "cloth_cap"),
     (BLOCK_CLOTH_TUNIC, "cloth_tunic"),
@@ -4991,9 +5048,8 @@ pub const PLACEABLE_BLOCKS: &[BlockId] = &[
     // what a player carries is seed, and a handful of half-grown wheat
     // that could be planted would be a way to skip the waiting.
     BLOCK_SEEDS,
-    // Brickwork, which is the point of having a kiln at all if you are
-    // not going to smelt with it.
-    BLOCK_BRICKS,
+    // Not brickwork: that is laid a course at a time in the place it
+    // stands, and never put down whole (`build`).
     // ...and the dry belt's, cut rather than fired. See the constant.
     BLOCK_SANDSTONE_BRICKS,
     // Ice, which is placeable for one reason: the surface it makes is a
@@ -6421,6 +6477,14 @@ pub fn collision_height(id: BlockId) -> f32 {
     if let Some((crate::dig::Side::PosY, _)) = crate::dig::bite(id) {
         return crate::dig::left(id);
     }
+    // ...and a wall built part of the way up is as tall as its courses
+    // (`build::stage_box`), for the same reason. A wattle panel is a whole
+    // cell tall and thin, which the height cannot say and `block_box` does.
+    if let Some((min, max)) = crate::build::stage_box(id) {
+        if min[0] == 0.0 && max[0] == 1.0 && min[2] == 0.0 && max[2] == 1.0 {
+            return max[1];
+        }
+    }
     // **A pile of logs is as tall as its highest log** (`pit::pile_extent`),
     // for the dug floor's reason: one log is a third of a cell, and a probe
     // that read the table's whole cube would hold a player a metre over it.
@@ -6452,7 +6516,9 @@ pub fn has_full_top(id: BlockId) -> bool {
     // ...and nothing on a pile of logs until it is full: short of eight its
     // top course has gaps in it, or there is no top course at all
     // (`pit::PILE_LOGS_AT`) -- six reach the top of the cell with one log.
-    !crate::dig::is_dug(id)
+    // ...and nothing on a wall part of the way up: its top is a course,
+    // not a floor, and a heap or a wall is only started on a whole one.
+    !crate::dig::is_part(id)
         && is_collidable(id)
         && block_layers(id) == LAYERS_PER_BLOCK
         && (crate::pit::pile_extent(id).is_none() || crate::pit::pile_logs(id) == Some(crate::pit::PILE_LOGS_MAX))
@@ -6987,6 +7053,14 @@ pub fn blocks_the_sky(id: BlockId) -> bool {
     // the row can only say one of those. See `light_opacity`.
     if is_door(id) {
         return !door_is_open(id);
+    }
+    // **A wall is a wall when it is finished**, and not before: three
+    // courses of brick are a cube by their row, and a room walled with them
+    // would be shut to the sky over a gap a quarter of a metre high. A
+    // daubed wattle panel closes a room though light gets past its edges
+    // (its row's opacity is nought). See `build::closes`.
+    if crate::build::is_staged(id) {
+        return crate::build::closes(id);
     }
     crate::blocks::definition(id).opacity >= 8
 }
@@ -7990,7 +8064,8 @@ pub fn is_opaque(id: BlockId) -> bool {
         // front of it and the player would be looking into a hole with a
         // whole block still drawn across it. Light comes in through a bite
         // for the same reason it comes in through a drift of snow.
-        && !crate::dig::is_dug(id)
+        // ...and a wall part way up is a bite the other way up (`build`).
+        && !crate::dig::is_part(id)
 }
 
 /// Drawn with alpha blending rather than in the opaque pass -- you can
@@ -8053,6 +8128,13 @@ pub fn light_opacity(id: BlockId) -> u8 {
     if is_door(id) {
         return if door_is_open(id) { 0 } else { MAX_LIGHT };
     }
+    // **A wall part way up lets the light over it**, as a bite lets it in:
+    // the row is the finished wall's, and a cell dark to the light engine
+    // would draw its three courses unlit (they take their light from their
+    // own cell and the cells round it).
+    if crate::build::stage_box(id).is_some() {
+        return 0;
+    }
     crate::blocks::definition(id).opacity
 }
 
@@ -8088,6 +8170,16 @@ pub fn is_known_block(id: BlockId) -> bool {
     // and the flag on a block nobody quarries is a claim.
     if id & crate::dig::DUG != 0 && crate::dig::digs_in_slices(kind) {
         return crate::dig::bite(id).is_some() && is_known_block(kind);
+    }
+    // **A handful carries its material and a wall its courses** in the same
+    // bits a wood and a bite use, and which a kind means is the kind's
+    // (`build`). Asked here for the bite's reason: every stage is written by
+    // the server and every one of them crosses the wire.
+    if crate::build::is_handful(kind) {
+        return crate::build::block_of_handful(id).is_some();
+    }
+    if crate::build::is_staged(kind) {
+        return crate::build::is_valid(id);
     }
     // **Every one of a rack's six bits means something**: a facing, which
     // of its four cells, and two bits of what hangs (`RACK_TOP`). Asked
@@ -8450,6 +8542,12 @@ pub fn is_breakable(id: BlockId) -> bool {
 /// a full load somewhere a person could plausibly stagger under.
 #[inline]
 pub fn block_weight(id: BlockId) -> f32 {
+    // **A handful is a quarter of what it heaps into**, rock and all: a pack
+    // of basalt chips is carried where a pack of tuff chips is, as the
+    // cobbles are (`ground`). The row's number is only a placeholder.
+    if let Some(block) = crate::build::block_of_handful(id) {
+        return crate::blocks::definition(block).weight / f32::from(crate::dig::SLICES);
+    }
     crate::blocks::definition(id).weight
 }
 
@@ -8605,6 +8703,9 @@ pub fn block_drop_count(id: BlockId) -> u8 {
         // **A cairn is the six stones it was piled from**, so taking one
         // apart to move it costs nothing but the walk.
         BLOCK_CAIRN => 6,
+        // **Three bricks out of a mortared wall's four**: the mortar keeps
+        // one. See the row, and `build` for the dry wall that keeps none.
+        BLOCK_BRICKS => 3,
         // **A hive gives every comb that is in it**, and the empty comb two
         // lumps of wax: taking a hive apart is the end of it, and one lump --
         // two torches -- for the end of a place is a trade nobody would make
@@ -9715,6 +9816,11 @@ mod mining_tests {
                 // ...and an instrument, which is read in the hand
                 // (`is_instrument`): a compass is spent on nothing.
                 if is_instrument(drop) {
+                    continue;
+                }
+                // ...and daub and cob, which are laid into a wall rather than
+                // crafted with (`build::is_laid`).
+                if crate::build::is_laid(drop) {
                     continue;
                 }
                 // ...and a half-dried sod of peat, which nothing is made

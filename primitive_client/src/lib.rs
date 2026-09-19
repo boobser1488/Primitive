@@ -7853,6 +7853,37 @@ fn try_place_block(
     let Some(block_id) = inventory.block_in(input.hotbar_slot) else {
         return;
     };
+    // **Building in stages is asked first** (`build`): a handful onto a
+    // heap, a brick onto its wall, a rod into a stake. The cell aimed at if
+    // the thing held goes *on* it, the cell in front of it if a new heap or
+    // wall starts there -- and the server works out the rest (`Build`), so
+    // nothing here says what the cell becomes. Before the placeable test,
+    // because a handful, a brick and a lump of cob are items and would stop
+    // there; and a stick and a stone are placeable, and put on a stake or a
+    // footing stone they are building rather than lying down beside it.
+    {
+        let aimed = chunks.block_at(hit.0, hit.1, hit.2).unwrap_or(BLOCK_AIR);
+        let in_front = chunks.block_at(before.0, before.1, before.2).unwrap_or(BLOCK_AIR);
+        let cell = if primitive_shared::build::builds_on(aimed, block_id) {
+            Some(hit)
+        } else if primitive_shared::build::builds_on(in_front, block_id) {
+            Some(before)
+        } else {
+            None
+        };
+        if let Some(cell) = cell {
+            // A panel is woven across the builder's view, so they face it.
+            let forward = camera.forward();
+            net.send(ClientMessage::Build {
+                global_x: cell.0,
+                global_y: cell.1,
+                global_z: cell.2,
+                along_x: forward.z.abs() >= forward.x.abs(),
+            });
+            debug_stats.network_messages_out_this_second += 1;
+            return;
+        }
+    }
     // An item is not a block: there is no cell of the world that could
     // hold a handful of fibre. The server refuses this too, but doing
     // it here means right-clicking with one selected does nothing at

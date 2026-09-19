@@ -37,7 +37,8 @@ use crate::types::{
     BLOCK_CHARRED_LOG, BLOCK_CHARRED_PLANKS, BLOCK_CLAY, BLOCK_COBBLESTONE_STAIRS, BLOCK_DIRT,
     BLOCK_DOOR, BLOCK_DOOR_TOP, BLOCK_DRIED_PEAT, BLOCK_DRY_TURF, BLOCK_GRASS, BLOCK_ICE, BLOCK_MUD,
     BLOCK_PEAT, BLOCK_PLANK_STAIRS, BLOCK_SANDSTONE_BRICKS, BLOCK_SNOW, BLOCK_STRIPPED_LOG,
-    BLOCK_THATCH_ROOF, BLOCK_THATCH_SLAB, BLOCK_TILE_ROOF, BLOCK_TILE_SLAB,
+    BLOCK_THATCH_ROOF, BLOCK_THATCH_SLAB, BLOCK_TILE_ROOF, BLOCK_TILE_SLAB, BLOCK_COB_WALL, BLOCK_WATTLE,
+    BLOCK_DRY_STONE_WALL, BLOCK_DRY_BRICKS, BLOCK_BRICK_COURSES,
 };
 use crate::wildfire::{walk_room, Face, ROOM_MAX_RISE};
 
@@ -84,6 +85,19 @@ pub fn material(block: BlockId) -> Material {
         BLOCK_DIRT | BLOCK_GRASS | BLOCK_CLAY | BLOCK_MUD | BLOCK_PEAT | BLOCK_DRIED_PEAT | BLOCK_DRY_TURF => {
             m(1.0, 0.25)
         }
+        // **The walls laid in place** (`build`), each with its bargain. Cob
+        // is earth a lift at a time, rammed and dried: the warmest wall and
+        // the one that holds a fire longest, for the weeks it took. Wattle
+        // and daub is a thumb of clay on a hurdle -- it keeps the wind out
+        // nearly as well and holds next to nothing, a hut's wall and not a
+        // hall's. A dry stone wall is stone with the wind through every
+        // joint: a stone wall's mass and a fence's draught. Bricks laid dry
+        // are the same, less so -- the joints are tighter than a field
+        // wall's.
+        BLOCK_COB_WALL => m(1.0, 0.3),
+        BLOCK_WATTLE => m(0.85, 0.04),
+        BLOCK_DRY_STONE_WALL => m(0.35, 0.2),
+        BLOCK_DRY_BRICKS | BLOCK_BRICK_COURSES => m(0.45, 0.2),
         _ if crate::wood::is_log(block) => m(0.9, 0.12),
         _ if crate::wood::wood_of(block).is_some() => m(0.55, 0.02),
         _ if crate::ground::rock_of(block).is_some() => m(0.6, 0.2),
@@ -469,6 +483,33 @@ mod tests {
         assert!(log_room.evens_out(Wind::CALM) > board_room.evens_out(Wind::CALM));
         assert!(log_room.evens_out(Wind::CALM) <= BEST_EVENS_OUT);
         assert!(board_room.evens_out(Wind::CALM) > ROOF_ALONE, "four walls of boards were worth no more than a roof");
+    }
+
+    /// A wall laid to the top, dried: what a hut of it is walled with.
+    fn finished(held: BlockId, start: BlockId) -> BlockId {
+        let mut cell = start;
+        while crate::build::builds_on(cell, held) {
+            cell = crate::build::dried(crate::build::lay(cell, held, false, BLOCK_STONE, true).unwrap().result);
+        }
+        cell
+    }
+
+    #[test]
+    fn a_cob_hut_is_the_warmest_and_a_dry_stone_one_lets_the_wind_through() {
+        use crate::types::{BLOCK_COB, BLOCK_DAUB, BLOCK_PEBBLE, BLOCK_STAKE, BLOCK_STICK};
+        let cob = finished(BLOCK_COB, BLOCK_AIR);
+        let wattle = finished(BLOCK_DAUB, finished(BLOCK_STICK, BLOCK_STAKE));
+        let dry_stone = finished(BLOCK_PEBBLE, BLOCK_PEBBLE);
+        let rooms: Vec<Room> = [cob, wattle, dry_stone, BLOCK_STONE].iter().map(|&w| room(&hut(w, BLOCK_STONE, false))).collect();
+        for (wall, r) in [cob, wattle, dry_stone].iter().zip(&rooms) {
+            assert!(r.is_enclosed(), "a hut walled with {wall:#06x} is not a room");
+        }
+        let (cob, wattle, dry_stone, stone) = (&rooms[0], &rooms[1], &rooms[2], &rooms[3]);
+        assert!(cob.evens_out(Wind::CALM) > stone.evens_out(Wind::CALM), "cob kept the night out no better than stone");
+        assert!(cob.holds_days(Wind::CALM) > stone.holds_days(Wind::CALM), "cob held the fire no longer than stone");
+        assert!(wattle.evens_out(Wind::CALM) > stone.evens_out(Wind::CALM), "daub kept out no more than stone");
+        assert!(wattle.holds_days(Wind::CALM) < stone.holds_days(Wind::CALM), "a daubed hurdle held heat like stone");
+        assert!(dry_stone.evens_out(Wind::CALM) < stone.evens_out(Wind::CALM), "a dry stone wall was as tight as a mortared one");
     }
 
     #[test]
