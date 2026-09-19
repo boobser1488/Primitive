@@ -1462,7 +1462,7 @@ fn a_swimmer_beside_a_cut_in_a_pond_is_carried_toward_it() {
     // ticks behind a busy machine and the same pour takes longer to arrive:
     // the property is that the water takes the swimmer, not how fast this
     // machine is today.
-    let taken = s.until(8.0, |s| s.feet().x - before > 0.5);
+    let taken = s.until(20.0, |s| s.feet().x - before > 0.5);
     let carried = s.feet().x - before;
     s.shot("carried_to_the_cut");
     assert!(taken, "the pond poured out beside the swimmer and carried them {carried:.2} blocks");

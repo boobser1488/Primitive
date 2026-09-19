@@ -1396,7 +1396,7 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::PanDrying, en: "the pan is still drying: it wants sun and no rain", simple: "the salt is not ready -- it needs sun, and rain undoes it", ru: "соль ещё выпаривается: нужно солнце и ни капли дождя", pl: "panew jeszcze paruje: trzeba słońca i żadnego deszczu" },
     Line { msg: Msg::PanWantsSea, en: "a salt pan is filled from a jug of the sea", simple: "pour a jug of sea water into it", ru: "солеварню наполняют кувшином морской воды", pl: "panew napełnia się dzbanem morskiej wody" },
     Line { msg: Msg::PanFreshWater, en: "that is fresh water: it dries to nothing", simple: "that water has no salt in it", ru: "это пресная вода: от неё ничего не останется", pl: "to słodka woda: nic z niej nie zostanie" },
-    Line { msg: Msg::HoningTitle, en: "HONING STONE", simple: "SHARPENING STONE", ru: "ТОЧИЛЬНАЯ КОЛОДА", pl: "KAMIEŃ SZLIFIERSKI" },    // What the server tells a player (`ServerMessage::Notice`): its refusals and
+    // What the server tells a player (`ServerMessage::Notice`): its refusals and
     // its news, which were English sentences on the wire. See `notice`.
     Line { msg: Msg::Notice(Notice::NothingInHand), en: "you have nothing in your hand", simple: "your hand is empty", ru: "у тебя ничего нет в руке", pl: "nie masz nic w ręce" },
     Line { msg: Msg::Notice(Notice::AnimalGone), en: "it is gone", simple: "it is not there any more", ru: "его уже нет", pl: "już go nie ma" },
