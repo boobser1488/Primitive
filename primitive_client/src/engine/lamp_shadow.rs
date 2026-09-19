@@ -67,8 +67,9 @@
 //! fill's own test). A table, a fence or a leaf casts nothing from a fire: a
 //! byte a cell cannot hold the shape of a table, and a leaf that cast a
 //! cell-sized solid shadow would be a worse canopy than none. The sun's walk
-//! is not left as blind: a cell with a model in it hands the ray to the map,
-//! which has the model's shape ([`ASKS_THE_MAP`]). Animals, players and dropped things are lit as
+//! is not left as blind: a cell with a model in it, or a block short of a
+//! whole one (a slab, a lip), hands the ray to the map, which has its shape
+//! ([`ASKS_THE_MAP`]). Animals, players and dropped things are lit as
 //! they were -- the walk is in the terrain's two shadowed pipelines only. The
 //! torch in the player's own hand casts nothing: its shadows would fall
 //! exactly behind what the eye sees, where the eye cannot see them.
@@ -154,9 +155,37 @@ fn stopping(block: BlockId, plants: PlantShadows) -> u8 {
         // it is not in the map's picture otherwise, and asking the map about
         // it would be a lookup for nothing on every blade of a meadow.
         ASKS_THE_MAP
+    } else if is_part_of_a_block(block) {
+        ASKS_THE_MAP
     } else {
         0
     }
+}
+
+/// A block drawn in the solid pass that does not fill its cell: a slab, a
+/// turf lip, a floor dug down, a wall part way up, a step, a hearth half a
+/// cell high. **Not opaque** (`types::is_opaque` says why each of them
+/// must not be), so the walk took every one of them for air.
+///
+/// **The bug it is for**: at the Hard step a roof of slabs threw no shadow at
+/// all within the thirty-two blocks round the player -- the posts under it
+/// did, the roof did not -- and the Soft step, which asks the map everywhere,
+/// drew the same roof's shadow on the same ground
+/// (`what_layers_plants_and_caves_cast`, `slab_roof`). The lips the generator
+/// lays along every slope and a bitten wall were the same air to the walk. The map has all of them: they are solid
+/// geometry, drawn by the solid caster. So the walk hands a ray that meets
+/// one to the map, as it does a model's cell -- rather than stopping it
+/// (`STOPS_SUN`), which would cast a whole cell for a slab half a cell deep,
+/// the thing `ASKS_THE_MAP` was written to avoid.
+///
+/// Liquids are not here: water lets the light through, and the map does not
+/// draw it.
+fn is_part_of_a_block(block: BlockId) -> bool {
+    use primitive_shared::types::{collision_depth, is_cross, is_flat, is_liquid, is_partial, is_step};
+    !is_liquid(block)
+        && !is_cross(block)
+        && !is_flat(block)
+        && (is_partial(block) || primitive_shared::dig::is_part(block) || is_step(block) || collision_depth(block).is_some())
 }
 
 /// Where a ray toward the sun ended. See the module note.
@@ -452,6 +481,20 @@ impl Volume {
         SunRay::Unknown
     }
 
+    /// Where a Soft ray aims at the fire whose middle is `flame`: `off` from
+    /// it, or the middle itself when that lands in a cell that stops light.
+    /// **`flame_aim` in `shader.wgsl` is this, line for line**; see it for the
+    /// floor that lost half of every hearth's light.
+    #[cfg(test)]
+    pub fn flame_aim(&self, flame: Vec3, off: Vec3) -> Vec3 {
+        let aim = flame + off;
+        if self.stops(aim.floor().as_ivec3().to_array()) {
+            flame
+        } else {
+            aim
+        }
+    }
+
     /// Whether a straight line from `from` to `to` -- both counted in blocks
     /// from the volume's corner -- reaches the cell `to` is in without
     /// entering a cell that stops the light.
@@ -566,6 +609,49 @@ mod tests {
         // from it is not.
         assert!(camp.ray_is_clear(Vec3::new(21.95, 12.5, 20.5), FIRE), "the pillar's lit face is shadowed");
         assert!(!camp.ray_is_clear(Vec3::new(23.05, 12.5, 20.5), FIRE), "the pillar's back face is lit");
+    }
+
+    #[test]
+    fn a_soft_ray_never_aims_at_a_fire_through_the_floor_it_stands_on() {
+        // **The report**: "в пещерах проблемы с тенями" -- at the Soft step the
+        // floor round a fire in a closed room and the room's walls came out
+        // darker than with no shadows at all, in wedges. Two of the four
+        // corners a Soft ray aims at lay in the ground under the fire, and
+        // every ray to them crossed the ground. See `flame_aim`. A hearth, not
+        // glowstone: a block of glowstone is rightly in the way of its own
+        // far corners.
+        let hearth = (0..=u16::MAX as u32)
+            .map(|id| id as BlockId)
+            .find(|&id| primitive_shared::blocks::is_defined(id) && light_emission(id) > 0 && !is_opaque(id))
+            .expect("some fire is not a whole block");
+        let camp = volume_of(move |x, y, z| match (x, y, z) {
+            _ if y <= 10 => BLOCK_STONE,
+            (20, 11, 20) => hearth,
+            (22, 11..=13, 20) => BLOCK_STONE,
+            _ => BLOCK_AIR,
+        });
+        let corners = [(1.0, 1.0, 1.0), (1.0, -1.0, -1.0), (-1.0, 1.0, -1.0), (-1.0, -1.0, 1.0)]
+            .map(|(x, y, z)| Vec3::new(x, y, z) * 0.9);
+        for off in corners {
+            let aim = camp.flame_aim(FIRE, off);
+            assert!(!camp.stops(aim.floor().as_ivec3().to_array()), "a soft ray aims into rock at {aim}");
+        }
+        // Open floor on the side away from the pillar, as `vs_main_shadowed`
+        // lifts it: every ray reaches the fire.
+        for (x, z) in [(17.5, 20.5), (20.5, 23.5), (18.5, 17.5), (23.5, 23.5)] {
+            let floor = Vec3::new(x, 11.05, z);
+            let seen = corners.iter().filter(|&&off| camp.ray_is_clear(floor, camp.flame_aim(FIRE, off))).count();
+            assert_eq!(seen, 4, "the open floor at {floor} sees {seen} of the fire's four corners");
+        }
+        // The pillar still casts: behind it the fire's middle is hidden, and
+        // at most the two corners on the far side of the pillar's edge show
+        // round it -- the penumbra the Soft step is for.
+        let behind = Vec3::new(25.5, 11.05, 20.5);
+        let seen = corners.iter().filter(|&&off| camp.ray_is_clear(behind, camp.flame_aim(FIRE, off))).count();
+        assert!(!camp.ray_is_clear(behind, FIRE) && seen <= 2, "the pillar stopped casting: {seen} of four seen behind it");
+        let source = include_str!("shader.wgsl");
+        assert!(source.contains("const LAMP_FLAME: f32 = 0.9;"), "shader.wgsl aims its soft rays somewhere else");
+        assert_eq!(source.matches("lamp_ray_clear(local, flame_aim(flame,").count(), 4, "a soft ray in shader.wgsl is not aimed through `flame_aim`");
     }
 
     #[test]
@@ -702,6 +788,36 @@ mod tests {
             // business by the setting, not by the volume.
             assert_eq!(volume.sun_ray(Vec3::new(20.5, 0.99, 20.5), up), SunRay::OpenSky, "a tuft asked the map");
         }
+    }
+
+    #[test]
+    fn a_ray_past_a_slab_a_lip_or_a_bitten_block_is_handed_to_the_map() {
+        // **The report**: at the Hard step a roof of slabs cast nothing inside
+        // the volume, where the Soft step drew its shadow on the same ground.
+        // Every block short of a whole one was air to the walk: the ray from
+        // the ground under the roof went up through it and was called open
+        // sky. See `is_part_of_a_block`.
+        use primitive_shared::dig::{lowered, next_bite, Side};
+        use primitive_shared::types::{BLOCK_DIRT, BLOCK_GRASS, BLOCK_TILE_SLAB};
+        let bitten = next_bite(BLOCK_DIRT, Side::PosX).expect("dirt can be bitten from the side");
+        for part in [BLOCK_TILE_SLAB, lowered(BLOCK_GRASS, 3), lowered(BLOCK_STONE, 2), bitten] {
+            let volume = volume_of(|x, y, z| match (x, y, z) {
+                _ if y <= 10 => BLOCK_STONE,
+                (18..=22, 14, 18..=22) => part,
+                _ => BLOCK_AIR,
+            });
+            let name = primitive_shared::types::block_name(part);
+            let up = Vec3::new(0.05, 1.0, 0.03).normalize();
+            assert_eq!(volume.sun_ray(Vec3::new(20.5, 11.05, 20.5), up), SunRay::Unknown, "{name}: the ground under it was called open sky");
+            assert_eq!(volume.sun_ray(Vec3::new(40.5, 11.05, 40.5), up), SunRay::OpenSky, "{name}: open ground far from it was not open sky");
+        }
+        // Water is still nothing the sun stops.
+        let pond = volume_of(|x, y, z| match (x, y, z) {
+            _ if y <= 10 => BLOCK_STONE,
+            (18..=22, 11, 18..=22) => BLOCK_WATER,
+            _ => BLOCK_AIR,
+        });
+        assert_eq!(pond.cells.iter().filter(|&&c| c != 0 && c != STOPS_ALL).count(), 0, "a pond asks the map");
     }
 
     #[test]

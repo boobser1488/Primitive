@@ -21113,6 +21113,308 @@ mod lighting_tools {
         println!("pictures in {out}");
     }
 
+    /// **The three reports of one evening, in one scene, at the player's own
+    /// settings**: "у слоёв с листвой баги, у растений баги с тенями, в
+    /// пещерах проблемы с тенями".
+    ///
+    /// ```text
+    /// PLANT_SHADOWS=all GPU_REPRO_DIR=C:/absolute/dir cargo test -p primitive_client --lib \
+    ///     what_layers_plants_and_caves_cast -- --ignored --nocapture
+    /// ```
+    ///
+    /// A meadow with a terrace whose edge is a row of turf lips (a quarter, a
+    /// half and three quarters high), and on the lips, on the terrace and on
+    /// the flat ground below it the same row of things: a tuft, a flower, snow,
+    /// fallen leaves, ash, a fern, fireweed two cells tall. Fallen leaves of
+    /// every wood, an oak with its litter under it, a plot of sand with three
+    /// plants on it, a roof of slabs and one of stairs. Beside them a stone
+    /// hill with a tunnel into a room lit by a fire, the room's sunward wall
+    /// one block thick. Every view at 13:24, the golden hour and dusk, with the
+    /// shadows off, at the Hard step and at the Soft one, and again with the
+    /// plants' shadows at `trees` whatever `PLANT_SHADOWS` says, to tell a
+    /// plant's own shadow from anything else; and a picture of what each took
+    /// from the unshadowed frame, red where it took light and cyan where it
+    /// *gave* it, which a shadow never should. `LAYER_VIEWS` picks views by
+    /// name; `SHADOW_MAP_WGSL=<an older shader.wgsl>` draws the shadowed frames
+    /// through it, for a before picture from this binary.
+    #[test]
+    #[ignore = "a tool: needs a GPU; photographs leaf layers, plants and a cave in the sun"]
+    fn what_layers_plants_and_caves_cast() {
+        use primitive_shared::dig::lowered;
+        use primitive_shared::types::{
+            in_wood, BlockId, Chunk, BLOCK_ASH, BLOCK_DIRT, BLOCK_FERN, BLOCK_FIREWEED, BLOCK_FLOWER, BLOCK_GRASS,
+            BLOCK_LEAF_LITTER, BLOCK_LEAVES, BLOCK_LOG, BLOCK_SNOW_COVER, BLOCK_STONE,
+            BLOCK_TALL_GRASS, CHUNK_VOLUME, PLANT_TOP,
+        };
+        let Some((device, queue)) = crate::engine::test_gpu() else {
+            println!("no GPU adapter on this machine; skipping");
+            return;
+        };
+        let out = std::env::var("GPU_REPRO_DIR").unwrap_or_else(|_| ".".to_string());
+        std::fs::create_dir_all(&out).expect("output directory");
+        let settings = player_settings();
+        println!(
+            "the player's settings: fov {}, anisotropy {}, msaa {}, shadows {:?}, plants {:?} (the tool reads PLANT_SHADOWS: {:?}), lighting {:?}",
+            settings.fov_degrees,
+            settings.anisotropy,
+            settings.msaa,
+            settings.shadows,
+            settings.plant_shadows,
+            plant_shadows_from_env(),
+            settings.lighting
+        );
+        let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
+        crate::logic::models::load(assets);
+        let textures = TextureManager::load(device, queue, assets, settings.anisotropy).expect("textures load");
+        let (width, height) = (1280u32, 720u32);
+        let rig = Rig::new(device, queue, &textures, width, height, settings.msaa.max(1));
+        rig.knobs.fov_degrees.set(Some(settings.fov_degrees));
+        rig.knobs.ambient_occlusion.set(Some(settings.ambient_occlusion));
+        let generator = WorldGen::new(1337);
+
+        const G: usize = 63;
+        let row = |x: usize| -> Vec<BlockId> {
+            match x % 7 {
+                0 => vec![BLOCK_TALL_GRASS],
+                1 => vec![BLOCK_FLOWER],
+                2 => vec![BLOCK_SNOW_COVER],
+                3 => vec![BLOCK_LEAF_LITTER],
+                4 => vec![BLOCK_ASH],
+                5 => vec![BLOCK_FERN],
+                _ => vec![BLOCK_FIREWEED, BLOCK_FIREWEED | PLANT_TOP],
+            }
+        };
+        // Four chunks east to west: the meadow, the hill, and open ground past
+        // the hill for its tunnel to take its sky from.
+        let mut chunks = ChunkManager::new(4);
+        let mut positions = Vec::new();
+        for cz in 0..3i32 {
+            for cx in 0..4i32 {
+                let pos = ChunkPos::new(cx, cz);
+                let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+                let mut set = |x: usize, y: usize, z: usize, block: BlockId| blocks[Chunk::index(x, y, z)] = block;
+                for z in 0..CHUNK_SIZE_Z {
+                    for x in 0..CHUNK_SIZE_X {
+                        for y in 0..=G {
+                            set(x, y, z, match G - y {
+                                0 => BLOCK_GRASS,
+                                1..=3 => BLOCK_DIRT,
+                                _ => BLOCK_STONE,
+                            });
+                        }
+                    }
+                }
+                if (cx, cz) == (1, 1) {
+                    // The terrace: z 1..6 a block up, its edge at z 7 a row of lips.
+                    for x in 1..15 {
+                        for z in 1..7 {
+                            set(x, G, z, BLOCK_DIRT);
+                            set(x, G + 1, z, BLOCK_GRASS);
+                        }
+                        let quarters = [2u8, 3, 1][(x - 1) / 5 % 3];
+                        set(x, G, 7, BLOCK_DIRT);
+                        set(x, G + 1, 7, lowered(BLOCK_GRASS, quarters));
+                        for (dy, &b) in row(x).iter().enumerate() {
+                            set(x, G + 2 + dy, 7, b);
+                            set(x, G + 2 + dy, 5, b);
+                            set(x, G + 1 + dy, 9, b);
+                        }
+                    }
+                    // Fallen leaves of every wood, two cells of each.
+                    for x in 1..15 {
+                        let wood = (x - 1) / 2 % primitive_shared::wood::WOODS.len();
+                        set(x, G + 1, 11, in_wood(BLOCK_LEAF_LITTER, wood));
+                        set(x, G + 1, 12, in_wood(BLOCK_LEAF_LITTER, wood));
+                    }
+                }
+                if (cx, cz) == (1, 2) {
+                    // An oak with its litter under it.
+                    for y in G + 1..G + 6 {
+                        set(8, y, 4, BLOCK_LOG);
+                    }
+                    for x in 5..12 {
+                        for z in 1..8 {
+                            for y in G + 5..G + 8 {
+                                if (x, z) != (8, 4) || y > G + 5 {
+                                    set(x, y, z, BLOCK_LEAVES);
+                                }
+                            }
+                            if (x, z) != (8, 4) {
+                                set(x, G + 1, z, BLOCK_LEAF_LITTER);
+                            }
+                        }
+                    }
+                }
+                if (cx, cz) == (1, 0) {
+                    // A plot of sand with a tuft, fireweed and a flower on it:
+                    // pale enough that a plant's shadow is seen to start at
+                    // its foot or not.
+                    for x in 2..14 {
+                        for z in 5..13 {
+                            set(x, G, z, primitive_shared::types::BLOCK_SAND);
+                        }
+                    }
+                    set(4, G + 1, 9, BLOCK_TALL_GRASS);
+                    set(7, G + 1, 9, BLOCK_FIREWEED);
+                    set(7, G + 2, 9, BLOCK_FIREWEED | PLANT_TOP);
+                    set(10, G + 1, 9, BLOCK_FLOWER);
+                }
+                if (cx, cz) == (0, 1) {
+                    // Things short of a whole block: a roof of slabs and one of
+                    // stairs on stone posts, and a stone wall whose top course
+                    // is a lip -- beside a wall of snow, which is whole.
+                    for (x0, z0, roof) in [
+                        (3usize, 3usize, primitive_shared::types::BLOCK_TILE_SLAB),
+                        (3, 9, primitive_shared::types::faced(primitive_shared::types::BLOCK_COBBLESTONE_STAIRS, primitive_shared::types::Facing::West)),
+                    ] {
+                        for x in x0..x0 + 5 {
+                            for z in z0..z0 + 5 {
+                                set(x, G + 3, z, roof);
+                            }
+                        }
+                        for (x, z) in [(x0, z0), (x0 + 4, z0), (x0, z0 + 4), (x0 + 4, z0 + 4)] {
+                            set(x, G + 1, z, BLOCK_STONE);
+                            set(x, G + 2, z, BLOCK_STONE);
+                        }
+                    }
+                    for z in 2..14 {
+                        set(11, G + 1, z, primitive_shared::types::BLOCK_SNOW);
+                        set(11, G + 2, z, primitive_shared::types::BLOCK_SNOW);
+                        set(13, G + 1, z, BLOCK_STONE);
+                        set(13, G + 2, z, lowered(BLOCK_STONE, 2));
+                    }
+                }
+                if (cx, cz) == (2, 1) {
+                    // A stone hill east of the meadow, so its evening shadow
+                    // falls away from it: x 3..15, twelve high, with grass on
+                    // top; a tunnel in from +x at z 7..8, and a room x 4..8
+                    // behind a wall one block thick (x 3) toward the
+                    // afternoon sun.
+                    for x in 3..16 {
+                        for z in 1..15 {
+                            for y in G + 1..G + 12 {
+                                set(x, y, z, BLOCK_STONE);
+                            }
+                            set(x, G + 12, z, BLOCK_GRASS);
+                        }
+                    }
+                    for x in 4..9 {
+                        for z in 4..12 {
+                            for y in G + 1..G + 4 {
+                                set(x, y, z, BLOCK_AIR);
+                            }
+                        }
+                    }
+                    for x in 9..16 {
+                        for z in 7..9 {
+                            for y in G + 1..G + 3 {
+                                set(x, y, z, BLOCK_AIR);
+                            }
+                        }
+                    }
+                    set(5, G + 1, 5, primitive_shared::types::BLOCK_CAMPFIRE_LIT);
+                    // ...and a gallery with no fire in it, a block wide, in
+                    // from +x at z 13: what the sky alone lights, and the few
+                    // sixteenths of it that reach its far end.
+                    for x in 4..16 {
+                        for y in G + 1..G + 3 {
+                            set(x, y, 13, BLOCK_AIR);
+                        }
+                    }
+                }
+                chunks.insert(Chunk { pos, blocks });
+                positions.push(pos);
+            }
+        }
+        let (arena, meshes) = upload_scene(device, queue, &textures, &generator, &chunks, &positions);
+        let scene = Scene {
+            name: "layers_plants_caves",
+            arena,
+            meshes,
+            origin: Vec3::ZERO,
+            west: (Vec3::ZERO, Vec3::X),
+            east: (Vec3::ZERO, Vec3::X),
+            underground: 0.0,
+            chunks: Some(chunks),
+        };
+        let floor = G as f32 + 1.0;
+        let views = [
+            ("lips", Vec3::new(24.0, floor + 2.4, 29.5), Vec3::new(24.0, floor + 0.6, 23.0)),
+            ("lips_close", Vec3::new(21.5, floor + 1.6, 26.0), Vec3::new(20.5, floor + 0.9, 23.0)),
+            ("lips_from_x", Vec3::new(34.0, floor + 2.0, 25.5), Vec3::new(24.0, floor + 0.8, 23.0)),
+            ("flower_close", Vec3::new(24.5, floor + 0.9, 26.9), Vec3::new(24.5, floor + 0.35, 25.5)),
+            ("lip_flower_close", Vec3::new(24.5, floor + 1.4, 25.2), Vec3::new(24.5, floor + 0.85, 23.5)),
+            ("fireweed_foot", Vec3::new(24.2, floor + 1.3, 28.2), Vec3::new(23.2, floor + 0.3, 25.5)),
+            ("fern_close", Vec3::new(21.5, floor + 1.0, 27.0), Vec3::new(21.5, floor + 0.4, 25.5)),
+            ("sand_plot", Vec3::new(23.5, floor + 1.8, 13.5), Vec3::new(23.5, floor, 9.0)),
+            ("partial_roofs", Vec3::new(7.0, floor + 3.5, 35.0), Vec3::new(8.0, floor, 24.0)),
+            ("slab_roof", Vec3::new(13.0, floor + 3.0, 13.0), Vec3::new(5.0, floor, 21.0)),
+            ("litter", Vec3::new(22.0, floor + 2.5, 31.5), Vec3::new(22.0, floor, 27.5)),
+            ("oak", Vec3::new(30.0, floor + 2.6, 45.5), Vec3::new(24.0, floor + 0.5, 37.0)),
+            ("cave_tunnel", Vec3::new(46.5, floor + 1.5, 24.0), Vec3::new(38.0, floor + 0.6, 22.0)),
+            ("cave_room", Vec3::new(39.8, floor + 1.6, 26.5), Vec3::new(35.5, floor + 0.5, 20.5)),
+            ("cave_dark", Vec3::new(46.5, floor + 1.4, 29.5), Vec3::new(37.0, floor + 0.7, 29.5)),
+            ("cave_from_outside", Vec3::new(24.0, floor + 5.0, 24.0), Vec3::new(36.0, floor + 2.0, 24.0)),
+        ];
+        let wanted = std::env::var("LAYER_VIEWS").ok();
+        let chosen = |name: &str| wanted.as_ref().is_none_or(|list| list.split(',').any(|w| name.contains(w.trim())));
+        let quality = settings.lighting;
+        let mut brightened_caves = Vec::new();
+        for (view, eye, at) in views.iter().filter(|(view, ..)| chosen(view)) {
+            for (when, t) in [("1324", 13.4f32 / 24.0), ("golden", 0.70), ("dusk", 0.725)] {
+                let sun = crate::engine::sky::Sky::new(t, 900.0).sun_direction();
+                rig.knobs.hard_shadows.set(false);
+                rig.frame(Mode::Step(quality, false), &scene, (*eye, *at), t);
+                let unshadowed = rig.read();
+                unshadowed.save(format!("{out}/{view}_{when}_off.png")).expect("write png");
+                for (case, hard, plants) in [("hard", true, None), ("soft", false, None), ("hard_trees", true, Some("trees")), ("soft_trees", false, Some("trees"))] {
+                    let asked = std::env::var("PLANT_SHADOWS").ok();
+                    if let Some(plants) = plants {
+                        std::env::set_var("PLANT_SHADOWS", plants);
+                    }
+                    rig.knobs.hard_shadows.set(hard);
+                    // The volume is kept by scene and corner, not by which
+                    // plants it was gathered for.
+                    *rig.lamp_cache.borrow_mut() = None;
+                    rig.lamp_uploaded.set(None);
+                    rig.frame(Mode::Step(quality, true), &scene, (*eye, *at), t);
+                    let shot = rig.read();
+                    match asked {
+                        Some(asked) => std::env::set_var("PLANT_SHADOWS", asked),
+                        None => std::env::remove_var("PLANT_SHADOWS"),
+                    }
+                    shot.save(format!("{out}/{view}_{when}_{case}.png")).expect("write png");
+                    let mut red = shot.clone();
+                    let (mut darker, mut lighter) = (0usize, 0usize);
+                    for (lit, (dark, into)) in unshadowed.pixels().zip(shot.pixels().zip(red.pixels_mut())) {
+                        let drop: i32 = (0..3).map(|c| i32::from(lit[c]) - i32::from(dark[c])).sum();
+                        if drop > 24 {
+                            *into = image::Rgba([230, 30, 30, 255]);
+                            darker += 1;
+                        } else if drop < -24 {
+                            *into = image::Rgba([30, 200, 230, 255]);
+                            lighter += 1;
+                        }
+                    }
+                    red.save(format!("{out}/{view}_{when}_{case}_red.png")).expect("write png");
+                    println!("{view} {when} {case}: sun y {:.3}, {darker} pixels darker, {lighter} lighter", -sun.y);
+                    // **Under rock a shadow only takes light away.** Outdoors a
+                    // face beside a wall is rightly lit brighter with the
+                    // shadows on (`sun_sky`); under the hill it was the sun
+                    // lighting walls through the rock -- 409 thousand pixels
+                    // of a room with no fire in it, at dusk.
+                    if view.starts_with("cave_") && *view != "cave_from_outside" {
+                        brightened_caves.push((format!("{view} {when} {case}"), lighter));
+                    }
+                }
+            }
+        }
+        let lit_by_the_hill: Vec<_> = brightened_caves.iter().filter(|(_, lighter)| *lighter > 5_000).collect();
+        assert!(lit_by_the_hill.is_empty(), "a cave came out brighter with shadows on: {lit_by_the_hill:?}");
+        rig.knobs.hard_shadows.set(false);
+        println!("pictures in {out}");
+    }
+
     /// A door's two halves, bottom and top, as `types::door_partner` pairs them.
     fn t_door_halves(lower: primitive_shared::types::BlockId) -> (primitive_shared::types::BlockId, primitive_shared::types::BlockId) {
         primitive_shared::types::door_partner((0, 0, 0), lower).map_or((lower, lower), |(_, top)| (lower, top))

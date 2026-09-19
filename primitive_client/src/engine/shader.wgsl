@@ -2213,26 +2213,17 @@ fn shadow_reach(view_distance: f32) -> f32 {
 // `lamp_point`), and `voxels` whether to: the models' entry points have no
 // point in the volume to walk from and read the map at every step.
 fn shadowed_lambert(lambert: f32, sky_level: f32, coord: vec3<f32>, view_distance: f32, at: vec3<f32>, voxels: bool) -> f32 {
-    if (sky_level <= 0.0) {
-        return lambert;
-    }
-    let reach = shadow_reach(view_distance);
-    // **No sun casting here** -- night, a closed storm deck, past the map's
-    // radius -- and what the rest of this would work out to is `lambert`
-    // exactly, after a lookup into a map that decides nothing. These entry
-    // points run at night now, for the fires' shadows, so the lookup is
-    // skipped rather than paid on every sky-lit pixel of a dark world.
-    if (reach <= 0.0) {
-        return lambert;
+    let least = shadow_least(lambert, sky_level, view_distance);
+    // **No sun casting here** -- no sky, night, a closed storm deck, past
+    // the map's radius -- and `shadow_least` has answered `lambert` itself:
+    // what the rest of this would work out to exactly, after a lookup into a
+    // map that decides nothing. These entry points run at night now, for the
+    // fires' shadows, so the lookup is skipped rather than paid on every
+    // sky-lit pixel of a dark world.
+    if (least >= lambert) {
+        return least;
     }
     let beam = (lambert - LAMBERT_FLOOR) / (1.0 - LAMBERT_FLOOR);
-    // A face turned away from the sun keeps `AWAY_FLOOR`; one the sun is
-    // on, and something stands in front of, comes down to `SHADOW_FLOOR`.
-    // The two meet smoothly over the first `AWAY_BLEND` of the beam, so a
-    // wall the sun comes round onto does not step darker as it starts to
-    // be lit.
-    let kept = mix(AWAY_FLOOR, SHADOW_FLOOR, smoothstep(0.0, AWAY_BLEND, beam));
-    let least = mix(LAMBERT_FLOOR, kept, reach);
     if (beam <= 1e-4) {
         return least;
     }
@@ -2243,6 +2234,27 @@ fn shadowed_lambert(lambert: f32, sky_level: f32, coord: vec3<f32>, view_distanc
         share = sunlit_share(coord, view_distance);
     }
     return least + (1.0 - least) * beam * share;
+}
+
+// What `shadowed_lambert` keeps whatever the shadow says: the floor of the
+// beam, which stands for the light off the sky and the ground rather than
+// the sun (see `SHADOW_FLOOR`). `lambert` itself where no shadow is cast --
+// no sky over the face, or no reach -- so that a caller can tell the part
+// of a face's light the sun's beam gave it from the part it would have
+// had anyway. `sun_sky` needs exactly that split.
+fn shadow_least(lambert: f32, sky_level: f32, view_distance: f32) -> f32 {
+    let reach = shadow_reach(view_distance);
+    if (sky_level <= 0.0 || reach <= 0.0) {
+        return lambert;
+    }
+    let beam = (lambert - LAMBERT_FLOOR) / (1.0 - LAMBERT_FLOOR);
+    // A face turned away from the sun keeps `AWAY_FLOOR`; one the sun is
+    // on, and something stands in front of, comes down to `SHADOW_FLOOR`.
+    // The two meet smoothly over the first `AWAY_BLEND` of the beam, so a
+    // wall the sun comes round onto does not step darker as it starts to
+    // be lit.
+    let kept = mix(AWAY_FLOOR, SHADOW_FLOOR, smoothstep(0.0, AWAY_BLEND, beam));
+    return min(mix(LAMBERT_FLOOR, kept, reach), lambert);
 }
 
 // **What a face turned away from the sun keeps where the shadows reach.**
@@ -2477,6 +2489,25 @@ fn lamp_ray_clear(start: vec3<f32>, goal: vec3<f32>) -> f32 {
     return 1.0;
 }
 
+// Where a Soft ray aims at a fire: `LAMP_FLAME` off its middle, **unless that
+// is inside something that stops light**, and then at the middle itself.
+// `Volume::flame_aim`, line for line.
+//
+// A fire stands on a floor. Two of the four corners are below its middle, in
+// the row under it -- the ground -- and a ray walked to a point inside the
+// ground crosses the ground on the way: the floor round every hearth and the
+// walls of the room it was in lost half the fire's light, in wedges, the
+// moment the Soft step was chosen (`what_layers_plants_and_caves_cast`,
+// `cave_room`). The same held for a fire against a wall and glowstone in a
+// ceiling. A corner in rock is not a part of the flame anything can see.
+fn flame_aim(flame: vec3<f32>, off: vec3<f32>) -> vec3<f32> {
+    let aim = flame + off;
+    if (lamp_stops(vec3<i32>(floor(aim)))) {
+        return flame;
+    }
+    return aim;
+}
+
 // How much of its block light a point keeps once the fires round it have
 // had their say: 1 where the brightest fire in reach is in view,
 // `LAMP_BLOCKED_SHARE` where no fire is.
@@ -2506,10 +2537,10 @@ fn lamp_visibility(at: vec3<f32>) -> f32 {
         }
         var clear: f32;
         if (soft) {
-            clear = 0.25 * (lamp_ray_clear(local, flame + vec3<f32>(LAMP_FLAME, LAMP_FLAME, LAMP_FLAME))
-                + lamp_ray_clear(local, flame + vec3<f32>(LAMP_FLAME, -LAMP_FLAME, -LAMP_FLAME))
-                + lamp_ray_clear(local, flame + vec3<f32>(-LAMP_FLAME, LAMP_FLAME, -LAMP_FLAME))
-                + lamp_ray_clear(local, flame + vec3<f32>(-LAMP_FLAME, -LAMP_FLAME, LAMP_FLAME)));
+            clear = 0.25 * (lamp_ray_clear(local, flame_aim(flame, vec3<f32>(LAMP_FLAME, LAMP_FLAME, LAMP_FLAME)))
+                + lamp_ray_clear(local, flame_aim(flame, vec3<f32>(LAMP_FLAME, -LAMP_FLAME, -LAMP_FLAME)))
+                + lamp_ray_clear(local, flame_aim(flame, vec3<f32>(-LAMP_FLAME, LAMP_FLAME, -LAMP_FLAME)))
+                + lamp_ray_clear(local, flame_aim(flame, vec3<f32>(-LAMP_FLAME, -LAMP_FLAME, LAMP_FLAME))));
         } else {
             clear = lamp_ray_clear(local, flame);
         }
@@ -2537,9 +2568,29 @@ fn lamp_visibility(at: vec3<f32>) -> f32 {
 // follows the flood fill, which is what a roof really does to the light from
 // the rest of the sky. Past the map's reach and at night it is the flood
 // fill's sky exactly, so the ordinary pipelines and these agree there.
-fn sun_sky(in: VertexOutput) -> f32 {
+//
+// **Only the beam, and not the floor under it.** `lambert` here is
+// `shadowed_lambert`'s: the floor (`shadow_least`) and, over it, what the
+// shadow let through. The floor is not sunlight -- it stands for the light
+// off the sky and the ground, which is what a roof really does take away --
+// and it was scaled by the whole sky with the beam. In a cave that is the
+// difference between dark and lit: a room reached by a tunnel has a sky
+// level of a few sixteenths, the walk finds rock over every fragment of it,
+// and the floor of fifteen to twenty-five hundredths of the *full* sun then
+// lit every wall of it, where the frame without shadows gave it that floor
+// times its few sixteenths. Turning shadows on made caves brighter
+// ("в пещерах проблемы с тенями"; `what_layers_plants_and_caves_cast`,
+// `cave_dark`: the dead end of a gallery grey where the frame without shadows
+// is black, and a room with no fire in it -- the first photograph -- 409
+// thousand pixels of 922 lighter at dusk). So the floor takes the
+// flood fill's sky, as the ordinary pipelines give it, and what the sun
+// adds over it takes the whole sky wherever the sun gets through.
+// `the_shadow_floor_of_a_cave_follows_its_sky_and_not_the_open_sky` holds it.
+fn sun_sky(in: VertexOutput, lambert: f32) -> f32 {
     let sky = in.light_terms.x;
-    return mix(sky, step(1e-4, sky), shadow_reach(in.view_distance));
+    let open = mix(sky, step(1e-4, sky), shadow_reach(in.view_distance));
+    let least = shadow_least(in.lambert, sky, in.view_distance);
+    return (sky * least + open * max(lambert - least, 0.0)) / max(lambert, 1e-4);
 }
 
 // `in` with its block light cut to what the fires round it can see, and
@@ -2566,7 +2617,7 @@ fn fs_solid_shadowed(
     let solid_hole = step(sampled.a, ALPHA_CUTOFF);
     let filled = vec4<f32>(sampled.rgb * mix(1.0, HOLE_SHADE, solid_hole), sampled.a);
     let lambert = shadowed_lambert(in.lambert, in.light_terms.x, shadow_coord, in.view_distance, lamp_point, true);
-    return shade_lit_sky(lamp_lit(in, lamp_point), filled, lambert, sun_sky(in), cell_footprint(in.uv));
+    return shade_lit_sky(lamp_lit(in, lamp_point), filled, lambert, sun_sky(in, lambert), cell_footprint(in.uv));
 }
 
 // `fs_cutout`, shadowed: leaves, grass, and the animals.
@@ -2583,7 +2634,7 @@ fn fs_cutout_shadowed(
         discard;
     }
     let lambert = shadowed_lambert(in.lambert, in.light_terms.x, shadow_coord, in.view_distance, lamp_point, true);
-    return shade_lit_sky(lamp_lit(in, lamp_point), sampled, lambert, sun_sky(in), cell_px);
+    return shade_lit_sky(lamp_lit(in, lamp_point), sampled, lambert, sun_sky(in, lambert), cell_px);
 }
 
 // The casters: the world drawn from the sun, depth only.
@@ -2636,16 +2687,42 @@ fn vs_shadow_cutout(in: VertexInput) -> ShadowCutoutOutput {
 // for a tuft: a sprite's two planes carry the up face whatever way they stand
 // (`mesh::cross_block`), so at noon every one of them would be pushed three
 // quarters of a block down -- under the grass it stands on -- and cast
-// nothing. A tuft is a plane with nothing behind it, so it is pushed by a
-// sixth of that, always: enough that a blade is not compared against its own
-// depth and speckled, and less than any sprite is tall, so its shadow still
-// starts at its foot.
+// nothing. A tuft is a plane with nothing behind it, so it is pushed only as
+// far as keeps a blade from being compared against its own depth.
+//
+// **How far that is depends on the sun, and a fixed push lifted every shadow
+// off its plant.** The picture's depth is height (`shadow::LightView::around`),
+// so a push is a drop in height, and a blade that stands less than the push
+// above the ground (plus the receivers' own lift, `shadow_bias.x`, which the
+// ground's lookup climbs by and the shadow's near end slides back by) casts
+// nothing: the shadow began that height times `cot(elevation)` out from the
+// foot. It was a sixth of the leaves' push, an eighth of a block, always --
+// half a block of bare sand between a fireweed and its shadow at the golden
+// hour and a whole block at dusk, and a tuft's shadow a scrap lying on its
+// own well away from it (`what_layers_plants_and_caves_cast`, `sand_plot`).
+//
+// What a blade needs is set by the one texel the Hard step reads: a point
+// lands up to half a texel's diagonal from the texel's middle, where its own
+// plane was drawn, and across that a plane standing in the beam changes
+// height by the distance over `cot(elevation)` -- a lot at noon, almost
+// nothing with the sun low. So the push is the receivers' lift times
+// `tan(elevation)`: the gap it leaves at the foot is then the same lift at
+// every hour, a texel and a half, and at noon, where a steep sun makes the
+// most of every texel's error, the push is larger than the old eighth.
+// Capped at the leaves' push, which is what a sun straight overhead would
+// otherwise run it past.
+const LEAF_PUSH_BLOCKS: f32 = 0.75;
 @vertex
 fn vs_shadow_plant(in: VertexInput) -> ShadowCutoutOutput {
     let v = terrain_vertex(in);
     var out: ShadowCutoutOutput;
     out.clip_position = globals.shadow_view_proj * vec4<f32>(in.position + in.chunk_offset.xyz, 1.0);
-    out.clip_position.z = out.clip_position.z + globals.shadow_bias.z / 6.0;
+    let rise = max(-globals.sun.y, 1e-3);
+    let run = max(length(globals.sun.xz), 1e-3);
+    let push = min(globals.shadow_bias.x * rise / run, LEAF_PUSH_BLOCKS);
+    // `shadow_bias.z` is `LEAF_PUSH_BLOCKS` in depth: the ratio turns blocks
+    // of height into depth.
+    out.clip_position.z = out.clip_position.z + push * globals.shadow_bias.z / LEAF_PUSH_BLOCKS;
     out.uv = v.uv;
     out.tex_layer = v.tex_layer;
     return out;

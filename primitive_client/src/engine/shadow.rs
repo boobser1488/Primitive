@@ -1175,9 +1175,22 @@ impl ShadowMap {
             ],
         });
 
+        // **An older shader, for a before-and-after from one binary**: the
+        // offscreen tools' `SHADOW_MAP_WGSL=<a copy of shader.wgsl>` builds
+        // these pipelines from it, so a change to the shadowed entry points is
+        // timed against what it replaced with nothing else different -- not
+        // the build, not the scene, not the card's temperature an hour later.
+        // Test builds only; the game compiles the text beside this file.
+        #[cfg(test)]
+        let text: std::borrow::Cow<'static, str> = match std::env::var("SHADOW_MAP_WGSL") {
+            Ok(path) => std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")).into(),
+            Err(_) => include_str!("shader.wgsl").into(),
+        };
+        #[cfg(not(test))]
+        let text: std::borrow::Cow<'static, str> = include_str!("shader.wgsl").into();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("chunk shader, for the shadow pipelines"),
-            source: wgpu::ShaderSource::Wgsl(atlas.specialise(lighting.specialise(include_str!("shader.wgsl")))),
+            source: wgpu::ShaderSource::Wgsl(atlas.specialise(lighting.specialise(&text))),
         });
 
         let caster_primitive = |cull_mode: Option<wgpu::Face>| wgpu::PrimitiveState {
@@ -1471,6 +1484,152 @@ mod tests {
     fn phase_apart(a: glam::Vec2, b: glam::Vec2) -> f32 {
         let d = (a.fract() - b.fract()).abs();
         d.min(glam::Vec2::ONE - d).max_element()
+    }
+
+    /// The sun a shadowed terrain fragment is lit by, as a share of the full
+    /// beam: `sun_sky * shadowed_lambert` in `shader.wgsl`, written out for a
+    /// fragment with `sky` of the flood fill's sky over it, a vertex
+    /// half-Lambert of `lambert`, `reach` of the shadows' strength, and
+    /// `share` of the beam let through by the map or the walk. The shader's
+    /// lines are asserted to be these by the test that reads it.
+    fn shadowed_sun(sky: f32, lambert: f32, reach: f32, share: f32) -> f32 {
+        const LAMBERT_FLOOR: f32 = 0.35;
+        const SHADOW_FLOOR: f32 = 0.15;
+        const AWAY_FLOOR: f32 = 0.25;
+        const AWAY_BLEND: f32 = 0.3;
+        let beam = (lambert - LAMBERT_FLOOR) / (1.0 - LAMBERT_FLOOR);
+        let least = if sky <= 0.0 || reach <= 0.0 {
+            lambert
+        } else {
+            let kept = AWAY_FLOOR + (SHADOW_FLOOR - AWAY_FLOOR) * smoothstep(0.0, AWAY_BLEND, beam);
+            (LAMBERT_FLOOR + (kept - LAMBERT_FLOOR) * reach).min(lambert)
+        };
+        let shaded = if least >= lambert || beam <= 1e-4 { least } else { least + (1.0 - least) * beam * share };
+        let open = sky + (if sky > 1e-4 { 1.0 } else { 0.0 } - sky) * reach;
+        let sun_sky = (sky * least + open * (shaded - least).max(0.0)) / shaded.max(1e-4);
+        sun_sky * shaded
+    }
+
+    #[test]
+    fn the_shadow_floor_of_a_cave_follows_its_sky_and_not_the_open_sky() {
+        // **The report**: "в пещерах проблемы с тенями". A room reached by a
+        // tunnel has a few sixteenths of sky; the walk finds rock over every
+        // fragment of it and lets none of the beam through, and the floor the
+        // beam comes down to -- the light off the sky and the ground -- was
+        // scaled by the *open* sky with the beam. Every wall of the room took
+        // a sixth of the full sun and came out brighter than with no shadows
+        // at all (`what_layers_plants_and_caves_cast`, `cave_dark`). A shadow
+        // takes light away; it never gives it.
+        let source = include_str!("shader.wgsl");
+        for line in [
+            "const LAMBERT_FLOOR: f32 = 0.35;",
+            "const SHADOW_FLOOR: f32 = 0.15;",
+            "const AWAY_FLOOR: f32 = 0.25;",
+            "const AWAY_BLEND: f32 = 0.3;",
+            "    let open = mix(sky, step(1e-4, sky), shadow_reach(in.view_distance));",
+            "    let least = shadow_least(in.lambert, sky, in.view_distance);",
+            "    return (sky * least + open * max(lambert - least, 0.0)) / max(lambert, 1e-4);",
+            "    return min(mix(LAMBERT_FLOOR, kept, reach), lambert);",
+        ] {
+            assert!(source.contains(line), "shader.wgsl no longer says `{line}`, which this test is a copy of");
+        }
+        for sky in [1.0 / 15.0, 2.0 / 15.0, 0.3, 0.6, 1.0] {
+            for lambert in [0.35, 0.4, 0.6, 0.8, 1.0] {
+                for reach in [0.0, 0.25, 0.5, 1.0] {
+                    let without = sky * lambert;
+                    // In the dark, the sun gets no further than without shadows.
+                    let blocked = shadowed_sun(sky, lambert, reach, 0.0);
+                    assert!(
+                        blocked <= without + 1e-6,
+                        "sky {sky:.2}, lambert {lambert}, reach {reach}: a face the sun cannot reach took {blocked:.3} of it, {without:.3} without shadows"
+                    );
+                    // And a face the sun does reach has the whole beam over
+                    // the floor wherever there is any sky over it: the fix for
+                    // the roof that darkened sand twice is kept.
+                    let lit = shadowed_sun(sky, lambert, 1.0, 1.0);
+                    let floor = shadowed_sun(sky, lambert, 1.0, 0.0);
+                    let beam = (lambert - 0.35) / 0.65;
+                    assert!(
+                        (lit - floor - (1.0 - floor / sky) * beam).abs() < 1e-4,
+                        "sky {sky:.2}, lambert {lambert}: the sun's beam is scaled by the flood fill again"
+                    );
+                }
+            }
+        }
+        // Under an open sky nothing changed: the shade is the old shade.
+        assert!((shadowed_sun(1.0, 0.9, 1.0, 0.0) - 0.15).abs() < 0.02, "shade on open ground moved");
+    }
+
+    /// `vs_shadow_plant`'s push, in blocks of height: the receivers' lift
+    /// times the tangent of the sun's elevation, no more than the leaves'.
+    fn plant_push_blocks(sun: Vec3, lift: f32) -> f32 {
+        let rise = (-sun.y).max(1e-3);
+        let run = glam::Vec2::new(sun.x, sun.z).length().max(1e-3);
+        (lift * rise / run).min(LEAF_PUSH_BLOCKS as f32)
+    }
+
+    #[test]
+    fn a_plants_shadow_starts_at_its_foot_at_every_hour_the_sun_casts() {
+        // **The report**: "у растений баги с тенями". A sprite was drawn into
+        // the picture an eighth of a block lower than it stands, at every
+        // hour, and the depth of this picture is height: a blade had to stand
+        // that eighth, and the ground's own lift, above the ground to cast at
+        // all. With the sun low that is a long way out -- half a block of
+        // bare sand between a fireweed and its shadow at the golden hour, a
+        // block at dusk. Measured through the picture's own matrix: a stem
+        // standing at the origin, and the ground `d` blocks down-sun from it
+        // looked up as `vs_main_shadowed` looks it up.
+        let source = include_str!("shader.wgsl");
+        assert!(
+            source.contains(&format!("const LEAF_PUSH_BLOCKS: f32 = {LEAF_PUSH_BLOCKS:?};")),
+            "shader.wgsl's leaf push is not this file's"
+        );
+        assert!(
+            source.contains("let push = min(globals.shadow_bias.x * rise / run, LEAF_PUSH_BLOCKS);"),
+            "shader.wgsl no longer pushes a plant the way this test measures"
+        );
+        let mut checked = 0;
+        for step in 0..=40 {
+            let t = 0.26 + step as f32 * 0.0118;
+            let sun = sun_at(t);
+            let elevation = -sun.y;
+            let strength = strength(sun, 0.0);
+            // Under about nine degrees the shadows are still fading in
+            // (`strength`), and even the ground's own depth bias is a block
+            // long there.
+            if strength <= 0.0 || elevation < 0.15 {
+                continue;
+            }
+            let view = LightView::new(sun, Vec3::new(0.5, 64.0, 0.5), Vec3::ZERO, RADIUS, RESOLUTION, strength);
+            let (_, _, bias) = view.globals(RESOLUTION);
+            let (lift, depth_bias) = (bias[0], bias[1]);
+            let push = plant_push_blocks(sun, lift) * bias[2] / LEAF_PUSH_BLOCKS as f32;
+            let away = glam::Vec2::new(sun.x, sun.z).normalize();
+            let foot = Vec3::new(0.0, 64.0, 0.0);
+            // Where the shadow of a stem a block tall begins on the ground.
+            let starts = (1..400).map(|i| i as f32 * 0.005).find(|&d| {
+                let ground = foot + Vec3::new(away.x, 0.0, away.y) * d;
+                let looked = view.project(ground + Vec3::Y * lift);
+                // The point of the stem on the same line of the beam.
+                let height = lift + d * elevation / glam::Vec2::new(sun.x, sun.z).length();
+                if height > 1.0 {
+                    return false;
+                }
+                let stem = view.project(foot + Vec3::Y * height);
+                looked.z - depth_bias > stem.z + push
+            });
+            let starts = starts.expect("a stem a block tall casts no shadow at all");
+            // Three texels: the lift itself, a texel and a half, which every
+            // receiver's shadow is short by, and the depth bias's share.
+            let allowed = 3.0 * view.texel;
+            assert!(
+                starts <= allowed,
+                "at {t:.3} (sun {:.1} degrees up) a plant's shadow starts {starts:.2} blocks from its foot; {allowed:.2} is a texel's slack",
+                elevation.asin().to_degrees()
+            );
+            checked += 1;
+        }
+        assert!(checked > 20, "the day had only {checked} hours of shadow in it");
     }
 
     #[test]
