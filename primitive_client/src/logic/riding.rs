@@ -1448,7 +1448,21 @@ mod tests {
             // machine, busy or idle, can draw steadily; a passenger's raft is
             // held to it rather than to a number. Before `Glide` it was 3.8 cm
             // against the rower's 0.4.
-            assert!(rowed.wobble_cm < 2.0, "even the rower's own raft trembled by {} cm: {rowed:?}", rowed.wobble_cm);
+            //
+            // **The number for the rower is a floor under "broken", not a
+            // measure of smooth.** It was 2 cm, which is what an idle machine
+            // draws (0.4) with room to spare -- and what a machine building
+            // three other crates at once does not: 2.8 to 3.4 cm with no stall,
+            // no surge and no hitch, failing every full run while every run of
+            // this test alone passed. That is this machine's steadiness, which
+            // the paragraph above says is exactly what the rower's raft is for
+            // measuring. A rower's prediction that has come apart -- snapped to
+            // each server tick, the fault `Glide` was written against -- stops
+            // and lurches a tick's travel at a time, and the `stalls + surges`
+            // assertion above is what catches that, strictly. This bound is the
+            // backstop for a wobble with no stall in it, at a level no busy
+            // machine has come near.
+            assert!(rowed.wobble_cm < 5.0, "even the rower's own raft trembled by {} cm: {rowed:?}", rowed.wobble_cm);
             for (who, m) in [("passenger's raft", &carried), ("passenger", &stood)] {
                 assert!(
                     m.wobble_cm < rowed.wobble_cm + 0.5,
