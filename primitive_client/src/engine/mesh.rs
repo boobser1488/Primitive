@@ -2991,7 +2991,7 @@ pub fn build_mesh(
                     } else {
                         cross_block(
                             [gx, y, gz],
-                            [x as f32, y as f32, z as f32],
+                            [x as f32, y as f32 - cross_drop(cache, cell, y, id), z as f32],
                             id,
                             textures.layer_for_face(id, 0),
                             cache.light_near(cell, y, 0, 0, 0),
@@ -3664,9 +3664,15 @@ pub fn build_mesh(
                     }
 
                     if is_cross(id) {
+                        // **On the real top of what it grows on**
+                        // (`types::stand_drop`): a flower on a turf lip was
+                        // drawn from its own cell's floor, a quarter of a
+                        // block over the grass. The light is still its own
+                        // cell's, which is the air the plant stands in, and
+                        // the shadow pass draws these same vertices.
                         cross_block(
                             [gx, y, gz],
-                            [x as f32, y as f32, z as f32],
+                            [x as f32, y as f32 - cross_drop(cache, cell, y, id), z as f32],
                             id,
                             textures.layer_for_face(id, cross_face(id)),
                             cache.light_near(cell, y, 0, 0, 0),
@@ -5381,6 +5387,28 @@ fn seen_by_water(cache: &Neighbourhood, cell: usize, [x, y, z]: [i32; 3], n: [i3
     } else {
         neighbour
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Plants drawn from their own cell's floor, as they were before
+    /// `types::stand_drop`: the "before" of a before-and-after taken with one
+    /// binary (`scenario`, the tufts on a slope's lips). Per thread, because
+    /// the scenarios mesh side by side.
+    pub(crate) static PLANTS_ON_THEIR_OWN_FLOOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// How far below its cell a cross in the cache is drawn: `types::stand_drop`,
+/// asked of the cells under it. The second cell down is read only for the
+/// upper half of a tall plant, the one cross that stands on another.
+fn cross_drop(cache: &Neighbourhood, cell: usize, y: i32, id: BlockId) -> f32 {
+    #[cfg(test)]
+    if PLANTS_ON_THEIR_OWN_FLOOR.with(std::cell::Cell::get) {
+        return 0.0;
+    }
+    let ground = cache.block_near(cell, y, 0, -1, 0);
+    let under = if primitive_shared::types::is_plant_top(id) { cache.block_near(cell, y, 0, -2, 0) } else { BLOCK_AIR };
+    primitive_shared::types::stand_drop(id, ground, under)
 }
 
 /// **The shape of a tuft, as four corners per plane.**

@@ -161,7 +161,19 @@ pub struct World {
     /// after the fire has eaten its wall.
     edit_serial: AtomicU64,
     recent_edits: std::sync::Mutex<std::collections::VecDeque<Edit>>,
+    /// Chunks with player edits in them that have come into the cache since
+    /// the tick last asked ([`World::take_arrivals`]): what a list of cells
+    /// that must match the blocks -- the wet walls (`logic::walls`) -- reads
+    /// to find what a crash left it without. Only chunks with edits, because
+    /// only an edit can be one of those cells, and capped so a world nobody
+    /// ticks (a test) cannot grow it without end.
+    arrivals: std::sync::Mutex<Vec<ChunkPos>>,
 }
+
+/// The most chunk arrivals kept between two ticks. A tick drains them all;
+/// past this a burst is dropped rather than held, and what it held is found
+/// the next time the chunk comes in.
+const MAX_ARRIVALS: usize = 4096;
 
 /// How many edits [`World::edited_since`] can look back over. Past it, a
 /// cache older than the oldest is told it is stale, which is always safe:
@@ -242,7 +254,32 @@ impl World {
             decorator: RwLock::new(None),
             edit_serial: AtomicU64::new(0),
             recent_edits: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(RECENT_EDITS)),
+            arrivals: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Every edited chunk that has arrived in the cache since the last call.
+    pub fn take_arrivals(&self) -> Vec<ChunkPos> {
+        std::mem::take(&mut *self.arrivals.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// The player edits in one chunk, as global cells and what is in them.
+    pub fn edits_in(&self, pos: ChunkPos) -> Vec<((i32, i32, i32), BlockId)> {
+        let edits = self.edits.read().unwrap_or_else(|e| e.into_inner());
+        let Some(chunk) = edits.get(&pos) else {
+            return Vec::new();
+        };
+        chunk
+            .iter()
+            .filter(|&(&index, _)| (index as usize) < CHUNK_VOLUME)
+            .map(|(&index, &block)| {
+                let index = index as usize;
+                // `Chunk::index` undone, as `insert` undoes it.
+                let (x, z, y) = (index % CHUNK_SIZE_X, index / CHUNK_SIZE_X % CHUNK_SIZE_Z, index / (CHUNK_SIZE_X * CHUNK_SIZE_Z));
+                let (gx, gz) = (pos.x * CHUNK_SIZE_X as i32 + x as i32, pos.z * CHUNK_SIZE_Z as i32 + z as i32);
+                ((gx, y as i32, gz), block)
+            })
+            .collect()
     }
 
     /// The count of every edit so far: take it with a computed answer, and
@@ -622,7 +659,12 @@ impl World {
         let mut packed = packed;
         {
             let edits = self.edits.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(chunk_edits) = edits.get(&pos) {
+            if let Some(chunk_edits) = edits.get(&pos).filter(|edits| !edits.is_empty()) {
+                let mut arrivals = self.arrivals.lock().unwrap_or_else(|e| e.into_inner());
+                if arrivals.len() < MAX_ARRIVALS {
+                    arrivals.push(pos);
+                }
+                drop(arrivals);
                 for (&index, &block) in chunk_edits {
                     let index = index as usize;
                     if index < CHUNK_VOLUME {

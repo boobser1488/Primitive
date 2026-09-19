@@ -6148,6 +6148,24 @@ pub fn oriented(id: BlockId, axis: Axis) -> BlockId {
     (id & !ORIENTATION_MASK) | ((axis as BlockId) << ORIENTATION_SHIFT)
 }
 
+/// **Is `held` what a placement of `placing` is made of** -- the question
+/// the server asks of the slot before it takes one out of it.
+///
+/// The same kind, whichever way it was laid; the same wood, for a thing that
+/// is made of one (`carries_wood`); and **wet exactly when the hand's is**
+/// (`wet`, "Put down wet"), because the wet bit is the one part of a stack a
+/// placement keeps and so the one a client could invent or shed. What
+/// [`placed`] takes off -- the lie, the facing, a log's seasoning -- is not
+/// asked. It used to be `held == block_kind(placing)`, which is the same
+/// answer for a dry seasoned log and refused a green one: the log a player
+/// has just felled would not go into a wall.
+pub fn spends(held: BlockId, placing: BlockId) -> bool {
+    held != 0
+        && block_kind(held) == block_kind(placing)
+        && crate::wet::is_wet(held) == crate::wet::is_wet(placing)
+        && (!carries_wood(placing) || furniture_wood(held) == furniture_wood(placing))
+}
+
 /// What a player's block becomes when it is put down: the one rule for
 /// which way it lies and which way it looks.
 ///
@@ -6178,11 +6196,14 @@ pub fn oriented(id: BlockId, axis: Axis) -> BlockId {
 /// protect by refusing one: it checks the id, the support and the space,
 /// exactly as it does for a block that does not turn.
 pub fn placed(held: BlockId, yaw: f32, clicked: (i32, i32, i32)) -> BlockId {
-    // A log in the world carries no seasoning (`wood`, "seasoning"), and
-    // nothing in the world carries the water it was carried in (`wet`): a
-    // wet torch on a wall is a torch, and the bit it would keep there is a
-    // wood or a bite on every other kind.
-    let held = crate::wet::dried(crate::wood::seasoned(held));
+    // A log in the world carries no seasoning (`wood`, "seasoning") -- but
+    // **a wet thing put down is still wet** (`wet`, "Put down wet"): the
+    // sixteenth bit stays, and dries in the weather where it stands. It used
+    // to come off here, and a wet log laid in a wall and cut out again was a
+    // dry one: a swim, a wall and an axe were a way to dry kindling in two
+    // seconds. The bit is free on every kind that gets wet, in the world as
+    // in the pack; on every other kind `wet` leaves it alone.
+    let held = crate::wood::seasoned(held);
     let laid = match Axis::of_normal(clicked.0, clicked.1, clicked.2) {
         Some(axis) => oriented(held, axis),
         None => held,
@@ -6880,6 +6901,52 @@ pub fn rest_drop(lying: BlockId, ground: BlockId) -> f32 {
         return 0.0;
     }
     coating_rests_at(ground).map_or(0.0, |top| 1.0 - top)
+}
+
+/// **How far below the floor of its own cell anything that stands on the
+/// block under it is drawn, aimed at and cracked**: a flat thing by
+/// [`rest_drop`], and a plant -- a tuft, a flower, a sapling, a mushroom,
+/// any cross -- by the same rule, onto the real top of what it grows on.
+///
+/// `ground` is the cell under it and `under` the one under that, for the
+/// upper half of a tall plant: it stands on its own lower half, which stands
+/// on the ground, and the two halves go down together or the stalk parts at
+/// the seam.
+///
+/// **A plant used to be drawn from its own cell's floor whatever it grew
+/// on**, and `can_grow_on` lets the meadow's tufts and flowers grow on the
+/// turf lips the generator lays up every slope: every flower on a hillside
+/// hung a quarter of a block over the grass it grew from, with daylight
+/// under its stem. Kelp is not lowered: it is a ribbon that stacks, and a
+/// lowered bottom length would open a gap under the next one up.
+///
+/// A slab, or anything else whose collider is the whole cell across and
+/// short of the top, is a top too, at [`collision_height`].
+#[inline]
+pub fn stand_drop(standing: BlockId, ground: BlockId, under: BlockId) -> f32 {
+    if is_flat(standing) {
+        return rest_drop(standing, ground);
+    }
+    if !is_cross(standing) || matches!(block_kind(standing), BLOCK_KELP | BLOCK_KELP_TOP) {
+        return 0.0;
+    }
+    if is_plant_top(standing) && is_tall_plant(ground) && !is_plant_top(ground) {
+        return stand_drop(ground, under, BLOCK_AIR);
+    }
+    if has_full_top(ground) {
+        return 0.0;
+    }
+    if let Some(top) = coating_rests_at(ground) {
+        return 1.0 - top;
+    }
+    let height = collision_height(ground);
+    let across = crate::geometry::block_box(ground, 0, 0, 0)
+        .is_some_and(|(min, max)| min[0] <= 0.0 && min[2] <= 0.0 && max[0] >= 1.0 && max[2] >= 1.0 && min[1] <= 0.0);
+    if across && height > 0.0 && height < 1.0 {
+        1.0 - height
+    } else {
+        0.0
+    }
 }
 
 /// Adding `added` layers to what is already in a cell.
@@ -8068,8 +8135,9 @@ pub fn can_grow_on(plant: BlockId, ground: BlockId) -> bool {
     // rise. Not for a layer (above: a drift over a lip would hang over the
     // quarter it does not fill) and not for a torch or a chest, which ask
     // `has_full_top` themselves -- a lip is ground for roots, not for
-    // things set down. A plant stands on the lip's real top
-    // (`types::collision_height`), which is where it is drawn.
+    // things set down. A plant is drawn, aimed at and cracked on the lip's
+    // real top (`stand_drop`) -- it was drawn from the floor of its own cell
+    // for a while after this said so, a quarter of a block over the grass.
     // ...and **a coating lies on any level top** (`coating_rests_at`): snow,
     // ash and fallen leaves on a lip of any soil and on a floor dug down, at
     // its real height. A sheet with no thickness has no foot to hang over a
@@ -9080,8 +9148,13 @@ pub fn block_drop(id: BlockId) -> Option<BlockId> {
     // living tree, and a log pulled out of a wall is a log that stood in the
     // weather. The boughs above returned first, and are dead wood -- dry.
     let drop = crate::blocks::definition(id).drop;
-    if crate::wood::is_log(id) {
-        return drop.map(crate::wood::green);
+    let drop = if crate::wood::is_log(id) { drop.map(crate::wood::green) } else { drop };
+    // **A thing broken while it is still wet comes away wet** (`wet`, "Put
+    // down wet"): the water is in the wood, not in the wall. Only onto what
+    // gets wet, which leaves a stone's drop -- and a leaf handful's wood --
+    // alone.
+    if crate::wet::is_wet(id) {
+        return drop.map(crate::wet::wetted);
     }
     drop
 }

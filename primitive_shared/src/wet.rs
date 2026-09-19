@@ -52,6 +52,36 @@
 //! above all: it spends the same bit on which tree it fell from
 //! (`types::carries_wood`), and leaves are wet anyway.
 //!
+//! ## Put down wet
+//!
+//! **A wet thing put down stays wet, and dries where it stands.** The bit
+//! goes into the world with it (`types::placed`), because every kind that
+//! gets wet has the sixteenth bit free in a cell as in a pack -- none of
+//! them is quarried (`dig::DUG`), heaped, staged or furniture -- so the
+//! picture, the save, the wire and the break all carry it with nothing new.
+//! What is not in the id is *how far along* the drying is, and that is the
+//! wet walls' list on the server (`logic::walls`, `walls.bin`): the same
+//! weather as a wet lift of cob -- sun, warmth and wind; a roof slows it to
+//! the air alone; rain takes it back -- for [`PLACED_DRIES_SECONDS`], and
+//! never washed away, because a log is not mud. Broken while still wet, it
+//! drops wet (`types::block_drop`).
+//!
+//! It used to be stripped on the way down, and a wet log laid in a wall and
+//! cut out again came back dry: a swim, a wall and an axe were a way to dry
+//! kindling in two seconds, and the drying the pack does by a fire was a
+//! chore anybody who knew the trick skipped.
+//!
+//! Rejected: **a list of wet cells and no bit**, the id left dry and the
+//! wetness only on the server. The break would have to ask the list before
+//! it knew what to drop, the client would draw and predict a dry log, and a
+//! chunk evicted and rebuilt from the overlay would be a dry wall with a wet
+//! entry nobody could match to it. The bit is the fact; the list is only
+//! the clock.
+//!
+//! Rejected: **drying at once in the sun, a roll per step**, for the walls'
+//! reason: a log that might be dry in a minute or wet at dusk in the same
+//! weather is a log nobody can plan a fire around.
+//!
 //! Pure rules, no I/O. The server decides when a pack soaks and dries
 //! (`logic::climate`, `pack_weather` below); the client draws the mark.
 
@@ -169,6 +199,17 @@ pub const PACK_DRIES_SECONDS: f32 = 60.0;
 /// the open on a clear warm day, which is what a player walking in the sun
 /// gets for nothing, and a reason to wait for the fire when it is cloudy.
 pub const SUN_DRIES: f32 = 0.5;
+
+/// Seconds of the best drying weather (`logic::peat::rate` at 1.0: a warm,
+/// clear, windy noon) a wet thing put down in the world takes to dry.
+///
+/// **Four minutes, twice a pack's two in the sun** ([`SUN_DRIES`]): a log in
+/// a wall is one thing with the water all through it where a pack is a
+/// handful of sticks with the air round every one -- and anything shorter
+/// would make a wall a better drying rack than the fire the pack is dried
+/// by. Under a roof it is the air alone, a third of the rate: a quarter of
+/// an hour, which is what a woodshed is for.
+pub const PLACED_DRIES_SECONDS: f32 = 240.0;
 
 /// What the weather is doing to the pack this sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,10 +425,38 @@ mod tests {
     }
 
     #[test]
-    fn nothing_put_down_in_the_world_carries_the_water_it_was_carried_in() {
+    fn a_wet_log_put_down_is_still_wet_and_breaks_out_wet() {
         let torch = placed(wetted(BLOCK_TORCH), 0.0, (0, 1, 0));
-        assert!(!is_wet(torch) && block_kind(torch) == BLOCK_TORCH);
-        let log = placed(wetted(crate::wood::green(BLOCK_LOG)), 0.0, (0, 1, 0));
-        assert!(!is_wet(log) && is_known_block(log));
+        assert!(is_wet(torch) && block_kind(torch) == BLOCK_TORCH && is_known_block(torch));
+        let log = placed(wetted(crate::wood::green(BLOCK_LOG)), 0.0, (1, 0, 0));
+        assert!(is_wet(log) && is_known_block(log), "the wall dried the log it was built of");
+        assert_eq!(block_axis(log), Axis::X, "the water took the log's lie");
+        let back = block_drop(log).expect("a log gives a log");
+        assert!(is_wet(back), "a wet log cut out of a wall came back dry");
+        assert_eq!(block_drop(dried(log)).map(is_wet), Some(false), "a dry log came out wet");
+    }
+
+    #[test]
+    fn a_log_is_spent_on_a_placement_only_as_wet_as_it_went_down() {
+        let green_wet = wetted(crate::wood::green(BLOCK_LOG));
+        let down = placed(green_wet, 0.0, (0, 1, 0));
+        assert!(spends(green_wet, down), "a felled, soaked log would not go into a wall");
+        assert!(!spends(BLOCK_LOG, down), "a dry log was put down wet");
+        assert!(!spends(green_wet, dried(down)), "a wet log was put down dry");
+        assert!(spends(crate::wood::green(BLOCK_LOG), placed(crate::wood::green(BLOCK_LOG), 0.0, (1, 0, 0))));
+    }
+
+    #[test]
+    fn no_kind_that_gets_wet_spends_its_wet_bit_on_anything_in_the_world() {
+        // The bit is a bite, a heap, a course or a wood on the kinds that
+        // spend it; one of those that also got wet would be two meanings.
+        for id in 1..1024 {
+            if !crate::blocks::is_defined(id) || !gets_wet(id) {
+                continue;
+            }
+            assert!(!crate::dig::may_be_bitten(id), "{} is quarried and gets wet", block_name(id));
+            assert!(!crate::build::is_handful(id) && !crate::build::is_staged(id), "{} is built", block_name(id));
+            assert!(!carries_wood(id), "{} carries a wood in the wet bit", block_name(id));
+        }
     }
 }

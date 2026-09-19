@@ -875,6 +875,10 @@ async fn read_loop(
                 // placement that forgot it set down an empty jug and
                 // deleted the grain.
                 let mut spent_damage = 0;
+                // ...and the thing itself, to give back whole if the write
+                // fails: a green log refunded as a seasoned one, or a wet one
+                // as dry, would be the refusal doing the drying.
+                let mut spent_block = primitive_shared::types::block_kind(block_id);
                 // What the break was made with, for the nettle's sting after
                 // the drop (`crate::sting_from_nettle`). Read before the wear,
                 // so a knife that broke on the stroke still cut the stalk.
@@ -940,27 +944,26 @@ async fn read_loop(
                         continue;
                     }
                 } else {
-                    // What comes out of the pack is the *kind*: a log
-                    // is a log however the player chose to lay it, and
-                    // an inventory that told three kinds of log apart
-                    // would spend three slots on one material.
-                    let carried = primitive_shared::types::block_kind(block_id);
+                    // What comes out of the pack is the thing the
+                    // placement was made from (`types::spends`): a log
+                    // however the player chose to lay it and however green
+                    // it was, wet or dry as it is in the hand.
                     let spent = {
                         let mut state =
                             handle.state.lock().unwrap_or_else(|e| e.into_inner());
                         let slot = state.selected_slot;
-                        let damage = state
+                        let (held, damage) = state
                             .inventory
                             .slots()
                             .get(slot)
                             .copied()
                             .flatten()
-                            .map_or(0, |stack| stack.damage);
-                        if state.inventory.block_in(slot) == Some(carried)
-                            && state.inventory.take_from(slot, 1) == 1
+                            .map_or((0, 0), |stack| (stack.block, stack.damage));
+                        if primitive_shared::types::spends(held, block_id) && state.inventory.take_from(slot, 1) == 1
                         {
                             state.inventory_dirty = true;
                             spent_damage = damage;
+                            spent_block = held;
                             true
                         } else {
                             false
@@ -1009,11 +1012,7 @@ async fn read_loop(
                             handle.state.lock().unwrap_or_else(|e| e.into_inner());
                         // `add_worn`: what goes back is the jug of grain
                         // that came out, not a new empty one.
-                        state.inventory.add_worn(
-                            primitive_shared::types::block_kind(block_id),
-                            1,
-                            spent_damage,
-                        );
+                        state.inventory.add_worn(spent_block, 1, spent_damage);
                         state.inventory_dirty = true;
                         drop(state);
                         crate::send_inventory(&handle);
@@ -1032,6 +1031,11 @@ async fn read_loop(
                 // jug's reason: a refused placement owns nothing.
                 if block_id != BLOCK_AIR && crate::is_stall(written) {
                     crate::stall_placed(&ctx, &handle, (global_x, global_y, global_z));
+                }
+                // **A wet thing put down starts drying where it stands**, on
+                // the wet walls' clock (`logic::walls`; `wet`, "Put down wet").
+                if block_id != BLOCK_AIR && primitive_shared::wet::is_wet(written) {
+                    ctx.walls.lock().unwrap_or_else(|e| e.into_inner()).lay((global_x, global_y, global_z));
                 }
                 // Noted for hunger: an accepted edit is what the server
                 // counts as this player working. See `last_edit`.

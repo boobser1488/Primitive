@@ -572,14 +572,12 @@ impl AntiCheat {
         } else if block != BLOCK_AIR && (!is_placeable(block) || !is_known_block(block)) {
             return self.flag(W_BAD_BLOCK, format!("block id {block} is not placeable"));
         }
-        // **Wet is a fact about a thing carried, never about a cell**
-        // (`wet`): `types::placed` takes the water off, so a wet id in a
-        // placement is a client that did not ask the rules. Known it is --
-        // a wet log is a real thing in a pack -- and that is why it has to
-        // be asked here and not left to `is_known_block`.
-        if primitive_shared::wet::is_wet(block) && !primitive_shared::dig::is_dug(block) {
-            return self.flag(W_BAD_BLOCK, format!("block id {block} is wet, and nothing in the world is"));
-        }
+        // **A wet id is a real placement now** (`wet`, "Put down wet"): a wet
+        // log goes into the wall wet. What stops a client inventing the water
+        // is not here but where the thing is spent (`net::connection`): the
+        // slot has to hold it wet, so a dry log cannot be put down wet nor a
+        // wet one dry. It used to be refused here, when the rule was that the
+        // world held nothing wet.
 
         // ...and one variant bit that is legal on a block the *server*
         // writes and never on one a client asks for. A rack carries
@@ -1212,12 +1210,14 @@ mod tests {
         let mut ac = AntiCheat::new(cfg(), 8, (0.0, 30.0, 0.0));
         let slice = dig::next_bite(primitive_shared::types::BLOCK_STONE, dig::Side::PosX).unwrap();
         assert!(ac.check_block_edit(1, 30, 0, slice).is_allowed(), "an honest swing was refused");
-        // A face of six that names nothing, and a bite on a log.
+        // A face of six that names nothing, and a bite on planks. (Not on
+        // a log any more: on a log that bit is the water in it, and a wet
+        // log is a real placement -- `wet`, "Put down wet".)
         assert!(!ac
             .check_block_edit(1, 30, 0, primitive_shared::types::BLOCK_STONE | dig::DUG | (7 << primitive_shared::types::VARIANT_SHIFT))
             .is_allowed());
         assert!(!ac
-            .check_block_edit(1, 30, 0, primitive_shared::types::BLOCK_LOG | dig::DUG)
+            .check_block_edit(1, 30, 0, primitive_shared::types::BLOCK_PLANKS | dig::DUG)
             .is_allowed());
         // ...and a dig across the valley is still a dig across the valley.
         assert!(!ac.check_block_edit(400, 30, 400, slice).is_allowed(), "reach is not asked of a dig");

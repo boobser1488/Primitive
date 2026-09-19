@@ -907,6 +907,18 @@ impl Server {
         }
     }
 
+    /// How far along the drying of the wet thing at `at` is, on the wet
+    /// walls' list (`logic::walls`), and `None` for a cell not on it.
+    pub fn drying_progress(&self, at: (i32, i32, i32)) -> Option<f32> {
+        self.ctx.walls.lock().unwrap_or_else(|e| e.into_inner()).progress_at(at)
+    }
+
+    /// Sets it outright: a scenario puts a wet log a breath from dry and
+    /// watches the ordinary step finish it, rather than waiting the minutes.
+    pub fn set_drying_progress(&self, at: (i32, i32, i32), progress: f32) {
+        self.ctx.walls.lock().unwrap_or_else(|e| e.into_inner()).set_progress(at, progress);
+    }
+
     /// Fills a hearth's room with smoke at once, `peat_progress`'s way: a
     /// scenario sets the room a breath from full and watches the ordinary
     /// step keep it there or clear it, rather than waiting the minute and a
@@ -1832,6 +1844,37 @@ async fn tick_loop(ctx: Arc<Context>) {
                 if !mechanics.is_empty() {
                     changes.extend(mechanics.step(&*ctx.world, tick_duration.as_secs_f32()));
                 }
+                // **A heap running water took goes downstream as the handfuls
+                // it was** (`water::Carried`): put in the stream where it
+                // stood, moving the way the water was, and the current does
+                // the rest (`items::step_one`). Deleted, a trench bank washed
+                // out was earth that went nowhere.
+                let carried = mechanics.take_carried();
+                drop(mechanics);
+                if !carried.is_empty() {
+                    let mut items = ctx.items.lock().unwrap_or_else(|e| e.into_inner());
+                    for heap in carried {
+                        let Some((handful, count)) = primitive_shared::build::handfuls_left(heap.block) else {
+                            continue;
+                        };
+                        let centre = (heap.at.0 as f32 + 0.5, heap.at.1 as f32 + 0.25, heap.at.2 as f32 + 0.5);
+                        // A nudge the way the water goes, not its speed: a
+                        // spawn is a lob (`Items::spawn_worn`), and a
+                        // stream's two blocks a second as a lob threw the
+                        // earth out of the channel.
+                        let (vx, vz) = heap.velocity;
+                        let speed = (vx * vx + vz * vz).sqrt();
+                        let nudge = if speed > 0.0 { (vx / speed * 0.5, vz / speed * 0.5) } else { (0.0, 0.0) };
+                        items.spawn(
+                            handful,
+                            count,
+                            primitive_shared::geometry::wide(centre),
+                            (nudge.0, 0.0, nudge.1),
+                            None,
+                            Instant::now(),
+                        );
+                    }
+                }
             }
             // A column of sand sliding away takes whatever was growing
             // on top of it. Done here rather than inside the simulation
@@ -2439,6 +2482,12 @@ async fn tick_loop(ctx: Arc<Context>) {
                 let weather = ctx.sky.lock().unwrap_or_else(|e| e.into_inner()).weather();
                 let fires = ctx.fires.lock().unwrap_or_else(|e| e.into_inner());
                 let mut wet = ctx.walls.lock().unwrap_or_else(|e| e.into_inner());
+                // First whatever wet cells the chunks that came in since hold
+                // and the list does not: what a crash between the edits' save
+                // and `walls.bin`'s left wet for ever (`Walls::adopt`).
+                for pos in ctx.world.take_arrivals() {
+                    wet.adopt(ctx.world.edits_in(pos));
+                }
                 wet.step(&ctx.world, &fires, weather, ctx.clock.world_days(), dt)
             };
             for (at, now) in walls_changed {

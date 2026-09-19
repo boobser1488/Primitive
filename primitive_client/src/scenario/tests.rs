@@ -1770,7 +1770,205 @@ fn a_swim_soaks_the_kindling_and_a_fire_dries_it_again() {
     no_corrections(&s);
 }
 
+#[test]
+fn a_wet_log_laid_in_the_sun_stays_wet_dries_where_it_stands_and_breaks_out_dry() {
+    // A wet log laid in a wall and cut out again came back dry, which made a
+    // wall and an axe a two-second drying rack.
+    use primitive_shared::wet::{is_wet, wetted};
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.server().console_command("/weather clear");
+    s.server().console_command("/time noon");
+    s.stand_at(feet_on(x0, z));
+    let log = wetted(primitive_shared::wood::green(t::BLOCK_LOG));
+    s.give(log, 1);
+    s.give(t::BLOCK_STONE_AXE, 1);
+    // Laid on its side against a stone, the way timber goes into a wall --
+    // and the way an axe takes it out in a few swings rather than felling it.
+    let stone = (x0 + 3, GROUND + 1, z);
+    let cell = (x0 + 2, GROUND + 1, z);
+    s.build(&[(stone, t::BLOCK_STONE)]);
+    let lay = |s: &mut Scenario| {
+        s.select(log);
+        s.look_at_face(stone, (-1, 0, 0));
+        s.use_aimed();
+        assert!(s.until(3.0, |s| s.block(cell).is_some_and(|b| t::block_kind(b) == t::BLOCK_LOG)), "the log did not go down");
+        s.block(cell).unwrap_or(t::BLOCK_AIR)
+    };
+    let cut_out = |s: &mut Scenario| {
+        s.select(t::BLOCK_STONE_AXE);
+        s.look_at_face(cell, (0, 1, 0));
+        s.input.breaking = true;
+        let gone = s.until(30.0, |s| s.block(cell) == Some(t::BLOCK_AIR));
+        s.input.breaking = false;
+        assert!(gone, "the log never came out of the wall: {:?}, aimed {:?}, errors {:?}", s.block(cell), s.aimed(), s.heard.iter().filter(|m| matches!(m, ServerMessage::Error(_))).collect::<Vec<_>>());
+    };
+
+    let laid = lay(&mut s);
+    assert!(is_wet(laid) && t::block_kind(laid) == t::BLOCK_LOG, "the log went down as {laid:#x}");
+    assert!(s.server().drying_progress(cell).is_some(), "a wet log in the world is not drying");
+    // Cut out at once, it comes back as wet as it went in.
+    cut_out(&mut s);
+    // In the pack or lying where it fell: the drop, whichever.
+    let got = |s: &Scenario, block: t::BlockId| {
+        s.inventory.count(block)
+            + s.entities
+                .values()
+                .map(|e| match e.kind {
+                    primitive_shared::protocol::EntityKind::Item { block: b, count } if b == block => count,
+                    _ => 0,
+                })
+                .sum::<u32>()
+    };
+    assert!(s.until(5.0, |s| got(s, log) == 1), "a wet log cut out of the wall came back dry");
+    s.stand_at(feet_on(x0 + 2, z));
+    assert!(s.until(5.0, |s| s.inventory.count(log) == 1), "the wet log was never picked up");
+    s.stand_at(feet_on(x0, z));
+
+    // Laid again, a breath from dry in the noon sun: the ordinary step
+    // dries it where it stands, and it comes out a dry log.
+    lay(&mut s);
+    s.server().set_drying_progress(cell, 0.999);
+    let dried = s.until(8.0, |s| s.block(cell).is_some_and(|b| t::block_kind(b) == t::BLOCK_LOG && !is_wet(b)));
+    assert!(dried, "a wet log in the noon sun never dried: {:?}", s.server().drying_progress(cell));
+    cut_out(&mut s);
+    let dry = primitive_shared::wood::green(t::BLOCK_LOG);
+    assert!(s.until(5.0, |s| got(s, dry) == 1), "the dried log came out of the wall wet");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_flower_on_a_lip_stands_on_the_lip_and_not_over_it() {
+    // Tufts, flowers and tall plants on the lips the generator lays up a
+    // slope were drawn from the floor of their own cell: a quarter to three
+    // quarters of a block over the grass they grew in, daylight under every
+    // stem. Drawn now from the lip's real top (`types::stand_drop`).
+    use crate::engine::mesh::PLANTS_ON_THEIR_OWN_FLOOR;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let g = GROUND;
+    s.server().console_command("/time noon");
+    let fireweed = t::BLOCK_FIREWEED;
+    let plants = [t::BLOCK_TALL_GRASS, t::BLOCK_FLOWER, t::BLOCK_MUSHROOM, fireweed];
+    let mut stands = Vec::new();
+    for (i, &plant) in plants.iter().enumerate() {
+        for quarters in 1..=3u8 {
+            let (x, pz) = (x0 + 3 + quarters as i32, z - 3 + 2 * i as i32);
+            s.server().place_block(x, g, pz, primitive_shared::dig::lowered(t::BLOCK_GRASS, quarters));
+            s.server().place_block(x, g + 1, pz, plant);
+            if plant == fireweed {
+                s.server().place_block(x, g + 2, pz, plant | t::PLANT_TOP);
+            }
+            stands.push(((x, g + 1, pz), f32::from(quarters) / 4.0));
+        }
+    }
+    s.stand_at(feet_on(x0, z));
+    s.look_at(glam::DVec3::new(f64::from(x0 + 5), f64::from(g) + 1.0, f64::from(z) + 0.5));
+    assert!(s.until(5.0, |s| stands.iter().all(|&(c, _)| s.block(c).is_some_and(t::is_cross))), "the plants never arrived");
+
+    // The lowest sprite corner over each lip is the lip's top, to a hair.
+    let foot = |s: &Scenario, (x, y, pz): (i32, i32, i32)| {
+        let pos = ChunkPos::from_world(x, pz);
+        let mesh = s.mesh(pos);
+        let origin = [pos.x as f32 * 16.0, pos.z as f32 * 16.0];
+        mesh.indices[mesh.leaf_end as usize..mesh.sprite_end as usize]
+            .iter()
+            .map(|&i| mesh.vertices[i as usize].position)
+            .filter(|p| (p[0] + origin[0]).floor() as i32 == x && (p[2] + origin[1]).floor() as i32 == pz)
+            .filter(|p| p[1] >= y as f32 - 1.0 && p[1] < y as f32 + 1.0)
+            .map(|p| p[1])
+            .fold(f32::MAX, f32::min)
+    };
+    PLANTS_ON_THEIR_OWN_FLOOR.with(|c| c.set(true));
+    s.shot("tufts_on_lips_before");
+    PLANTS_ON_THEIR_OWN_FLOOR.with(|c| c.set(false));
+    s.shot("tufts_on_lips_after");
+    for &(cell, top) in &stands {
+        let lip = (cell.1 - 1) as f32 + top;
+        let at = foot(&s, cell);
+        assert!((at - lip).abs() < 0.01, "the plant at {cell:?} stands at {at}, the lip it grows on at {lip}");
+    }
+    no_corrections(&s);
+}
+
 // ---------------------------------------------------------------- water
+
+/// A pond four cells long in a stone basin, full to the field, with a bank
+/// of `bank` cells at its +x end and a dry trench past the bank.
+fn a_pond_with_a_bank(s: &mut Scenario, bank: t::BlockId) -> (i32, i32) {
+    let (x0, z) = FIELD;
+    let g = GROUND;
+    s.fill((x0 - 1, g - 2, z - 2), (x0 + 8, g, z + 2), t::BLOCK_STONE);
+    s.fill((x0 + 4, g, z - 1), (x0 + 4, g, z + 1), bank);
+    s.fill((x0 + 5, g, z - 1), (x0 + 7, g, z + 1), t::BLOCK_AIR);
+    s.fill((x0, g, z - 1), (x0 + 3, g, z + 1), t::BLOCK_AIR);
+    for x in x0..=x0 + 3 {
+        for dz in -1..=1 {
+            s.server().place_block(x, g, z + dz, t::BLOCK_WATER);
+        }
+    }
+    (x0, z)
+}
+
+#[test]
+fn a_trench_dug_down_beside_a_pond_is_filled_with_handfuls_and_holds_the_pond_back() {
+    // The bank between a pond and a trench, dug down to its last quarter --
+    // what a spade leaves -- used to be washed out by the still water beside
+    // it the moment it was cut, and the pond ran into the trench. Still
+    // water leaves a heap; the player heaps it back up a handful at a time.
+    let mut s = Scenario::new();
+    let g = GROUND;
+    s.stand_at(feet_on(FIELD.0 + 5, FIELD.1 + 2));
+    let (x0, z) = a_pond_with_a_bank(&mut s, primitive_shared::dig::heaped(t::BLOCK_DIRT));
+    s.give(t::BLOCK_HANDFUL_EARTH, 3);
+    s.select(t::BLOCK_HANDFUL_EARTH);
+    s.seconds(3.0);
+    for dz in -1..=1 {
+        assert!(
+            s.block((x0 + 4, g, z + dz)).is_some_and(primitive_shared::dig::is_dug),
+            "still water took the heap at {dz}: {:?}",
+            s.block((x0 + 4, g, z + dz)).map(t::block_name)
+        );
+    }
+    let bank = (x0 + 4, g, z);
+    let stages = lay_on(&mut s, (bank.0, g - 1, bank.2), bank, 3);
+    assert_eq!(stages.last().copied(), Some(t::BLOCK_DIRT), "three handfuls heaped into {stages:?}");
+    s.seconds(3.0);
+    for dz in -1..=1 {
+        let trench = (x0 + 5, g, z + dz);
+        assert_eq!(s.block(trench), Some(t::BLOCK_AIR), "the pond got past the bank into the trench at {dz}");
+    }
+    s.shot("a_trench_by_a_pond_holds");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_heap_in_a_running_stream_is_carried_downstream_as_its_handfuls() {
+    // Running water still takes a heap -- and now what it takes goes down
+    // the stream as the earth it was, rather than out of the world.
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let g = GROUND;
+    s.stand_at(feet_on(x0 + 6, z + 3));
+    // A channel a cell wide, sixteen long, with a pond at its head.
+    s.fill((x0 - 1, g - 2, z - 1), (x0 + 16, g, z + 1), t::BLOCK_STONE);
+    s.fill((x0, g, z), (x0 + 15, g, z), t::BLOCK_AIR);
+    let heap = (x0 + 6, g, z);
+    s.server().place_block(heap.0, heap.1, heap.2, primitive_shared::dig::heaped(t::BLOCK_DIRT));
+    for x in x0..=x0 + 3 {
+        s.server().place_block(x, g, z, t::BLOCK_WATER);
+    }
+    let washed = s.until(20.0, |s| s.block(heap).is_some_and(|b| !primitive_shared::dig::is_dug(b)));
+    assert!(washed, "the stream ran round a heap in its bed");
+    let carried = |s: &Scenario| {
+        s.entities.values().any(|e| {
+            matches!(e.kind, primitive_shared::protocol::EntityKind::Item { block, .. } if block == t::BLOCK_HANDFUL_EARTH)
+                && e.x >= f64::from(heap.0)
+        })
+    };
+    assert!(s.until(5.0, carried), "the heap went out of the world instead of down the stream");
+    no_corrections(&s);
+}
 
 #[test]
 fn two_pools_joined_by_a_trench_come_to_one_level() {

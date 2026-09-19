@@ -463,8 +463,11 @@ pub fn block_box_for_aim_near(
     // (`types::rest_drop`): the box of its own cell's floor was a wafer of
     // air a quarter of a block over the snow, and a sweep of the hand at the
     // white went through to the turf under it.
-    if crate::types::is_flat(block) {
-        let drop = crate::types::rest_drop(block, near(0, -1, 0));
+    // ...and a flower on a lip is aimed at on the lip, for the same reason
+    // (`types::stand_drop`): a plant is drawn on the real top of its ground.
+    if crate::types::is_flat(block) || crate::types::is_cross(block) {
+        let under = if crate::types::is_plant_top(block) { near(0, -2, 0) } else { crate::types::BLOCK_AIR };
+        let drop = crate::types::stand_drop(block, near(0, -1, 0), under);
         let (mut min, mut max) = block_box_for_aim(block, bx, by, bz, include_liquid)?;
         min[1] -= drop;
         max[1] -= drop;

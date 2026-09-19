@@ -18,6 +18,21 @@
 //! peat's. A cell that is no longer a wet wall -- dried, washed, broken, built
 //! over -- is dropped the next time it is looked at.
 //!
+//! **And anything put down wet** (`wet`, "Put down wet"): a wet log in a
+//! wall, a wet torch on it. Same list, same weather, same file -- the
+//! question each asks of the sky is the same one, and a second list would be
+//! a second file and a second place a crash could lose -- with two things
+//! its own: it takes `wet::PLACED_DRIES_SECONDS`, and rain only takes its
+//! drying back to nothing, never past it. Wood is not washed off a wall.
+//!
+//! **A chunk that arrives is searched for wet cells the list does not
+//! hold** ([`Walls::adopt`]). The list is saved on the peat's clock and the
+//! world's edits on their own, so a crash between the two left a wet lift in
+//! the world and no entry for it -- and a wall that is not on the list is a
+//! wall that is never looked at, wet for ever. Only the chunk's edits are
+//! read: everything wet in a cell was put there by a player, and the
+//! generator lays nothing wet.
+//!
 //! Rejected: **a roll per step and no list**, a wall that dries with some
 //! chance each interval. It needs nothing saved, and it is a wall that might
 //! be dry in a minute or wet at the end of a week in the same weather: a
@@ -31,6 +46,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use primitive_shared::build;
+use primitive_shared::wet;
 use primitive_shared::types::BlockId;
 use primitive_shared::weather::Weather;
 
@@ -90,6 +106,21 @@ impl Walls {
         self.dirty = true;
     }
 
+    /// Enrols every wet cell in `cells` the list does not already hold, from
+    /// nothing: a chunk has just arrived, and these are its edits. What is
+    /// already listed keeps its progress -- a wall saved half dry is half dry.
+    pub fn adopt(&mut self, cells: impl IntoIterator<Item = (WallPos, BlockId)>) -> usize {
+        let mut adopted = 0;
+        for (at, block) in cells {
+            if dries_here(block) && !self.progress.contains_key(&at) {
+                self.progress.insert(at, 0.0);
+                adopted += 1;
+            }
+        }
+        self.dirty |= adopted > 0;
+        adopted
+    }
+
     /// Sets a wall's progress outright: the tests, and nothing a player does.
     pub fn set_progress(&mut self, at: WallPos, progress: f32) {
         self.progress.insert(at, if progress.is_finite() { progress.clamp(WASHES_AT, 1.0) } else { 0.0 });
@@ -119,7 +150,7 @@ impl Walls {
         for at in cells {
             let block = match world.cached_block(at.0, at.1, at.2) {
                 None => continue, // nobody has this chunk; it waits
-                Some(block) if build::is_wet(block) => block,
+                Some(block) if dries_here(block) => block,
                 Some(_) => {
                     self.progress.remove(&at);
                     self.dirty = true;
@@ -132,14 +163,24 @@ impl Walls {
             if rate == 0.0 {
                 continue;
             }
+            // Mud or a wet thing: its time, and how far back rain may take it.
+            let (seconds, floor) = if build::is_wet(block) {
+                (build::dry_seconds(block), WASHES_AT)
+            } else {
+                (wet::PLACED_DRIES_SECONDS, 0.0)
+            };
             let progress = {
                 let progress = self.progress.entry(at).or_insert(0.0);
-                *progress = (*progress + rate * elapsed / build::dry_seconds(block)).clamp(WASHES_AT, 1.0);
+                *progress = (*progress + rate * elapsed / seconds).clamp(floor, 1.0);
                 *progress
             };
             self.dirty = true;
             let now = if progress >= 1.0 {
-                build::dried(block)
+                if build::is_wet(block) {
+                    build::dried(block)
+                } else {
+                    wet::dried(block)
+                }
             } else if progress <= WASHES_AT {
                 build::washed(block)
             } else {
@@ -196,10 +237,15 @@ impl Walls {
     }
 }
 
+/// Does this cell dry on this list: a wet wall, or a wet thing put down?
+pub fn dries_here(block: BlockId) -> bool {
+    build::is_wet(block) || wet::is_wet(block)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use primitive_shared::types::{BLOCK_AIR, BLOCK_COB, BLOCK_GRASS, BLOCK_STONE};
+    use primitive_shared::types::{BLOCK_AIR, BLOCK_COB, BLOCK_GRASS, BLOCK_LOG, BLOCK_STONE};
 
     const AT: WallPos = (5, primitive_shared::showcase::GROUND_Y + 1, -3);
     /// Noon on the world's first day: the sun at its height.
@@ -250,6 +296,36 @@ mod tests {
         walls.set_progress(AT, WASHES_AT + 0.0001);
         let changed = step_a_while(&mut walls, &world, Weather::Storm);
         assert_eq!(changed, vec![(AT, build::washed(lift))]);
+    }
+
+    #[test]
+    fn a_wet_log_in_a_wall_dries_in_the_sun_and_the_rain_only_stops_it() {
+        let (world, _) = a_wet_lift_at(AT);
+        let log = primitive_shared::wet::wetted(BLOCK_LOG);
+        world.set_block(AT.0, AT.1, AT.2, log);
+        let mut walls = Walls::new();
+        walls.lay(AT);
+        assert!(step_a_while(&mut walls, &world, Weather::Storm).is_empty(), "rain dried a log");
+        assert_eq!(walls.progress_at(AT), Some(0.0), "rain took a log past wet, toward washing it off");
+        walls.set_progress(AT, 0.999);
+        assert_eq!(step_a_while(&mut walls, &world, Weather::Clear), vec![(AT, BLOCK_LOG)]);
+        assert!(walls.is_empty());
+    }
+
+    #[test]
+    fn a_wet_wall_the_list_forgot_is_found_when_its_chunk_arrives() {
+        let (world, lift) = a_wet_lift_at(AT);
+        let pos = primitive_shared::types::ChunkPos::from_global(AT.0, AT.2).0;
+        let mut walls = Walls::new();
+        // The crash: the lift in the world's edits, nothing in `walls.bin`.
+        assert_eq!(walls.adopt(world.edits_in(pos)), 1);
+        assert_eq!(walls.progress_at(AT), Some(0.0));
+        // ...and what is listed keeps where it had got to.
+        walls.set_progress(AT, 0.5);
+        assert_eq!(walls.adopt(world.edits_in(pos)), 0);
+        assert_eq!(walls.progress_at(AT), Some(0.5));
+        walls.set_progress(AT, 0.999);
+        assert_eq!(step_a_while(&mut walls, &world, Weather::Clear), vec![(AT, build::dried(lift))]);
     }
 
     #[test]

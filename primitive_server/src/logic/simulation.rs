@@ -73,6 +73,13 @@ pub trait CellMechanic: Send {
     /// How much work is waiting. Reported in `/stats`, and the reason a
     /// growing queue is visible rather than mysterious.
     fn pending(&self) -> usize;
+
+    /// What this mechanic has taken out of the world since it was last asked
+    /// and the server has to put back as items: the handfuls running water
+    /// carried off a heap (`water::Carried`). Nothing, for anything else.
+    fn take_carried(&mut self) -> Vec<crate::logic::water::Carried> {
+        Vec::new()
+    }
 }
 
 /// Every mechanic the server is running, stepped together.
@@ -101,6 +108,11 @@ impl Mechanics {
     }
 
     /// Names and queue lengths, for `/stats`.
+    /// Everything every mechanic has carried off since the last call.
+    pub fn take_carried(&mut self) -> Vec<crate::logic::water::Carried> {
+        self.mechanics.iter_mut().flat_map(|m| m.take_carried()).collect()
+    }
+
     pub fn pending(&self) -> Vec<(&'static str, usize)> {
         self.mechanics
             .iter()

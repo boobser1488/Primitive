@@ -372,7 +372,9 @@ impl Mining {
         // as the mesher draws it (`types::rest_drop`). The fitted box already
         // knows how far, having been asked with the world round it
         // (`fit_outline`), and a flat box starts at the floor it lies on.
-        let drop = if primitive_shared::types::is_flat(block) {
+        // ...and a plant, which is drawn on the real top of its ground
+        // (`types::stand_drop`) and fitted by the same aim.
+        let drop = if primitive_shared::types::is_flat(block) || primitive_shared::types::is_cross(block) {
             self.target_box(cell, block).map_or(0.0, |(min, _)| (cell.1 as f32 - min[1]).max(0.0))
         } else {
             0.0

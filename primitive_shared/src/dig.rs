@@ -646,6 +646,26 @@ mod tests {
     }
 
     #[test]
+    fn a_plant_on_a_lip_stands_on_the_lip_and_the_top_of_a_tall_one_goes_down_with_it() {
+        use crate::types::{
+            can_grow_on, stand_drop, BLOCK_AIR, BLOCK_FIREWEED, BLOCK_FLOWER, BLOCK_GRASS, BLOCK_KELP, BLOCK_SAND,
+            BLOCK_TALL_GRASS, BLOCK_TORCH, PLANT_TOP,
+        };
+        for quarters in 1..SLICES {
+            let lip = lowered(BLOCK_GRASS, quarters);
+            let drop = 1.0 - f32::from(quarters) / f32::from(SLICES);
+            for plant in [BLOCK_TALL_GRASS, BLOCK_FLOWER, BLOCK_FIREWEED] {
+                assert!(can_grow_on(plant, lip), "{plant} will not grow on {quarters} quarters of turf");
+                assert_eq!(stand_drop(plant, lip, BLOCK_AIR), drop, "{plant} hangs over {quarters} quarters of turf");
+            }
+            assert_eq!(stand_drop(BLOCK_FIREWEED | PLANT_TOP, BLOCK_FIREWEED, lip), drop, "the stalk parted at its seam");
+            assert_eq!(stand_drop(BLOCK_KELP, lowered(BLOCK_SAND, quarters), BLOCK_AIR), 0.0, "kelp came off its stem");
+        }
+        assert_eq!(stand_drop(BLOCK_FLOWER, BLOCK_GRASS, BLOCK_AIR), 0.0, "a flower on a whole turf was lowered");
+        assert_eq!(stand_drop(BLOCK_TORCH, lowered(BLOCK_GRASS, 2), BLOCK_AIR), 0.0, "a thing that stands was lowered");
+    }
+
+    #[test]
     fn the_first_swing_at_a_turf_lip_lifts_the_sod_and_leaves_earth_as_high_as_the_lip() {
         use crate::types::{collision_height, BLOCK_DIRT, BLOCK_GRASS};
         for quarters in 1..SLICES {

@@ -353,6 +353,21 @@ pub struct Water {
     /// one waits the same `SOAK_SECONDS`.
     thin: VecDeque<(Cell, f32)>,
     thin_set: HashSet<Cell>,
+    /// Handfuls running water has taken off a heap since the server last
+    /// asked ([`CellMechanic::take_carried`]), to go downstream as items.
+    carried: Vec<Carried>,
+}
+
+/// **A heap running water has taken**: where it was, what it was, and which
+/// way the water was going, for the server to put in the stream as the
+/// handfuls it was made of. This module has no items and no `Context`; the
+/// flow says what it took and the caller spawns it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Carried {
+    pub at: Cell,
+    pub block: BlockId,
+    /// Blocks a second along x and z (`fluid::running_velocity`).
+    pub velocity: (f32, f32),
 }
 
 impl Water {
@@ -698,7 +713,21 @@ impl Water {
     ///
     /// Only a *bitten* block: a whole one holds a lake back exactly as it
     /// always has, so nothing a player built leaks.
-    fn wash_out(&mut self, world: &dyn BlockWorld, cell: Cell, changes: &mut Vec<BlockChange>) {
+    ///
+    /// **A heap is washed only by water that is running** ([`Self::erodes`]),
+    /// and what it was made of goes downstream (`carried`). A heap -- a
+    /// handful set down, a floor dug down from the top, the same id -- is
+    /// what a player fills a trench with, and water standing beside one
+    /// took it the moment it was laid: a trench by a pond could not be
+    /// filled at all, and the handfuls went nowhere. Still water leaves
+    /// it; a stream carries it off and drops it where it slows. A face cut
+    /// into from the side is still the cistern above, and still gives
+    /// nothing.
+    fn wash_out(&mut self, world: &dyn BlockWorld, cell: Cell, water: Cell, changes: &mut Vec<BlockChange>) {
+        if let Some(block) = world.block(cell.0, cell.1, cell.2).filter(|&b| Self::is_heap(b)) {
+            let velocity = fluid::running_velocity(Self::running_at(world, water));
+            self.carried.push(Carried { at: cell, block, velocity });
+        }
         world.set(cell.0, cell.1, cell.2, BLOCK_AIR);
         changes.push(BlockChange {
             global_x: cell.0,
@@ -710,6 +739,33 @@ impl Water {
         // somewhere water can be, and nothing else is going to notice.
         self.push(cell);
         self.wake(cell);
+    }
+
+    /// A bite out of the top: a heap of handfuls, or a floor dug down, which
+    /// are one id (`dig::heaped`). Not a turf lip, which the roots hold.
+    fn is_heap(block: BlockId) -> bool {
+        matches!(primitive_shared::dig::bite(block), Some((primitive_shared::dig::Side::PosY, _)))
+            && !primitive_shared::dig::is_turf_lip(block)
+    }
+
+    /// Which way, and how hard, the water in `cell` is running
+    /// (`fluid::running`).
+    fn running_at(world: &dyn BlockWorld, (x, y, z): Cell) -> (f32, f32) {
+        fluid::running(x, y, z, &|x, y, z| world.block(x, y, z))
+    }
+
+    /// Does the water in `water` take the bitten block in `bitten`? A face
+    /// cut from the side or below, always (the cistern, `wash_out`); a heap,
+    /// only while the water is running.
+    fn erodes(world: &dyn BlockWorld, water: Cell, bitten: BlockId) -> bool {
+        if !primitive_shared::dig::is_dug(bitten) || primitive_shared::dig::is_turf_lip(bitten) {
+            return false;
+        }
+        if !Self::is_heap(bitten) {
+            return true;
+        }
+        let (px, pz) = Self::running_at(world, water);
+        px != 0.0 || pz != 0.0
     }
 
     /// One cell's worth of work: where does this cell's water go?
@@ -778,8 +834,9 @@ impl Water {
             // ...but not a turf lip (`dig::is_turf_lip`): the roots hold
             // it, and a stream let down a meadow runs over the slope rather
             // than cutting a gully through the lip of every rise.
-            Some(under) if primitive_shared::dig::is_dug(under) && !primitive_shared::dig::is_turf_lip(under) => {
-                self.wash_out(world, below, changes);
+            // ...and a heap only under water that is running (`erodes`).
+            Some(under) if Self::erodes(world, cell, under) => {
+                self.wash_out(world, below, cell, changes);
                 return;
             }
             Some(under) if Self::holds_water(under) => {
@@ -837,10 +894,8 @@ impl Water {
                 // The side is left out of this pass's arithmetic -- it is
                 // rock until the wash lands -- so nothing is promised to a
                 // cell that is not yet somewhere water can be.
-                Some(there_block)
-                    if primitive_shared::dig::is_dug(there_block) && !primitive_shared::dig::is_turf_lip(there_block) =>
-                {
-                    self.wash_out(world, side, changes);
+                Some(there_block) if Self::erodes(world, cell, there_block) => {
+                    self.wash_out(world, side, cell, changes);
                 }
                 Some(there_block) if Self::holds_water(there_block) => {
                     let there = fluid::depth(there_block);
@@ -1677,6 +1732,10 @@ impl CellMechanic for Water {
         }
     }
 
+    fn take_carried(&mut self) -> Vec<Carried> {
+        std::mem::take(&mut self.carried)
+    }
+
     fn step(&mut self, world: &dyn BlockWorld, dt: f32, budget: usize) -> Vec<BlockChange> {
         self.since_step += dt;
         if self.since_step < FLOW_INTERVAL {
@@ -2410,6 +2469,58 @@ mod tests {
         for cell in [(1, 1, 0), (0, 1, 1), (0, 0, 0)] {
             assert_eq!(world.get(cell.0, cell.1, cell.2), lip, "the water washed out the lip at {cell:?}");
         }
+    }
+
+    #[test]
+    fn a_heap_beside_still_water_holds_and_nothing_is_carried() {
+        // A trench by a pond, filled with handfuls: the heap nearest the
+        // water used to be taken the moment it was laid, and the pond ran
+        // into the trench behind it.
+        use primitive_shared::dig;
+        use primitive_shared::types::BLOCK_DIRT;
+        let world = floored();
+        let heap = dig::heaped(BLOCK_DIRT);
+        for (x, z) in [(-1, 0), (0, 1), (0, -1)] {
+            world.put(x, 1, z, BLOCK_STONE);
+        }
+        world.put(0, 1, 0, BLOCK_WATER);
+        world.put(1, 1, 0, heap);
+
+        let mut sim = Water::new();
+        sim.on_block_changed(1, 1, 0);
+        sim.on_block_changed(0, 1, 0);
+        settle(&mut sim, &world, 4_000);
+
+        assert_eq!(world.get(1, 1, 0), heap, "still water washed out the heap beside it");
+        assert!(sim.take_carried().is_empty(), "still water carried something off");
+    }
+
+    #[test]
+    fn a_heap_in_running_water_is_carried_off_downstream_as_what_it_was() {
+        use primitive_shared::dig;
+        use primitive_shared::types::BLOCK_DIRT;
+        let world = floored();
+        // A channel along +x, walled, with a pond at its head.
+        for x in -1..=10 {
+            world.put(x, 1, 1, BLOCK_STONE);
+            world.put(x, 1, -1, BLOCK_STONE);
+        }
+        world.put(-1, 1, 0, BLOCK_STONE);
+        world.put(0, 1, 0, BLOCK_WATER);
+        world.put(1, 1, 0, BLOCK_WATER);
+        let heap = dig::heaped(BLOCK_DIRT);
+        world.put(3, 1, 0, heap);
+
+        let mut sim = Water::new();
+        sim.on_block_changed(1, 1, 0);
+        settle(&mut sim, &world, 4_000);
+
+        assert!(!dig::is_dug(world.get(3, 1, 0)), "the stream ran round a heap in its bed");
+        let carried = sim.take_carried();
+        assert_eq!(carried.len(), 1, "the heap went, and not downstream: {carried:?}");
+        assert_eq!((carried[0].at, carried[0].block), ((3, 1, 0), heap));
+        assert!(carried[0].velocity.0 > 0.0, "carried upstream: {:?}", carried[0].velocity);
+        assert!(sim.take_carried().is_empty(), "one heap was carried twice");
     }
 
     #[test]
