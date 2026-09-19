@@ -1413,6 +1413,9 @@ pub struct PlayerSign {
     /// What is in their hand, if anything: feed held out is a lure to an
     /// animal that eats it (`lure`).
     pub held: Option<primitive_shared::types::BlockId>,
+    /// How far their smell carries against a person's, from what they wear
+    /// (`equipment::reek`): one, or a tarred coat's half again.
+    pub reek: f32,
 }
 
 /// Under this, in blocks a second, a person is standing still.
@@ -1536,6 +1539,8 @@ struct Figure {
     wounded: bool,
     /// What is in their hand: see `PlayerSign::held`.
     held: Option<primitive_shared::types::BlockId>,
+    /// How far their smell carries: see `PlayerSign::reek`.
+    reek: f32,
 }
 
 /// One player's movement over the running `GAIT_WINDOW`.
@@ -3147,6 +3152,17 @@ impl Animals {
             .collect()
     }
 
+    /// Where every living animal heavy enough to break a pit's cover is
+    /// standing (`pitfall::breaks_through`). Asked once a tick, after the
+    /// step, by the server's `collapse_pit_covers`.
+    pub fn heavy_feet(&self) -> Vec<(f32, f32, f32)> {
+        self.animals
+            .iter()
+            .filter(|a| primitive_shared::pitfall::breaks_through(a.species))
+            .map(|a| primitive_shared::geometry::narrow(a.position))
+            .collect()
+    }
+
     /// Everything to draw: the living, and the dead still going down.
     pub fn states(&self) -> Vec<EntityState> {
         self.animals.iter().chain(&self.falling).map(|a| a.state()).collect()
@@ -3521,6 +3537,7 @@ impl Animals {
                 facing: sign.map(|s| s.facing),
                 wounded: sign.is_some_and(|s| s.wounded),
                 held: sign.and_then(|s| s.held),
+                reek: sign.map_or(1.0, |s| s.reek.clamp(1.0, primitive_shared::equipment::TAR_REEK)),
             });
         }
         figures
@@ -6767,7 +6784,7 @@ fn perceive(
     // Hearing and scent: distance only, and a maybe in the outer band.
     for reach in [
         species.hearing() * figure.loudness * keen * acuity,
-        species.nose() * scent_carry(wind, figure.at, animal.at()) * acuity,
+        species.nose() * scent_carry(wind, figure.at, animal.at()) * figure.reek * acuity,
     ] {
         if distance <= reach {
             if distance <= reach * ALERT_BAND {
@@ -6804,7 +6821,8 @@ fn perceive(
 /// nowhere near are skipped without asking.
 fn furthest_sense(species: Species, acuity: f32) -> f32 {
     let hear = species.hearing() * WORKING_LOUDNESS;
-    let smell = species.nose() * SCENT_RANGE.1;
+    // ...the smell as far as the rankest coat carries it (`equipment::reek`).
+    let smell = species.nose() * SCENT_RANGE.1 * primitive_shared::equipment::TAR_REEK;
     let see = species.awareness() * TORCH_AT_NIGHT * Gait::Running.visibility();
     hear.max(smell).max(see) * KEEN * acuity.max(0.0)
 }
@@ -14779,7 +14797,7 @@ mod tests {
     /// in the open, by day, standing, whole.
     fn figure_at(at: (f32, f32, f32), speed: f32) -> Figure {
         let gait = Gait::of_speed(speed);
-        Figure { who: 1, at, loudness: gait.loudness(), visibility: gait.visibility(), facing: None, wounded: false, held: None }
+        Figure { who: 1, at, loudness: gait.loudness(), visibility: gait.visibility(), facing: None, wounded: false, held: None, reek: 1.0 }
     }
 
     /// The furthest a person moving at `speed` is noticed by one of these,
@@ -14988,6 +15006,53 @@ mod tests {
     }
 
     #[test]
+    fn a_deer_winds_a_hunter_in_a_tarred_coat_from_further_off_than_one_in_leather() {
+        // The same downwind creep as above, once in plain leather and once in
+        // the tarred coat that keeps the rain out (`equipment::reek`).
+        let approach = |reek: f32| -> f32 {
+            let world = meadow(50);
+            for z in -3..=3 {
+                for x in -45..=45 {
+                    world.put(x, 21, z, primitive_shared::types::BLOCK_TALL_GRASS);
+                }
+            }
+            let mut animals = Animals::seeded(12);
+            animals.feel_wind((0.6, 0.0));
+            let id = animals.spawn(Species::Deer, (0.5, 21.0, 0.5)).expect("deer");
+            let mut distance = 45.0f32;
+            while distance > 1.0 {
+                animals.face_for_test(id, 0.0);
+                if let Some(deer) = animals.find_mut_for_test(id) {
+                    deer.position = (0.5, 21.0, 0.5);
+                    deer.next_thought = deer.next_thought.min(0.5);
+                }
+                animals.player_signs(vec![PlayerSign {
+                    who: 1,
+                    facing: 0.0,
+                    working: false,
+                    airborne: false,
+                    low: false,
+                    wounded: false,
+                    held: None,
+                    reek,
+                }]);
+                animals.step(&world, &player((0.5 - distance, 21.0, 0.5)), 0.05, NOON);
+                if matches!(animals.find(id).expect("alive").mind, Mind::Flee | Mind::Watch) {
+                    return distance;
+                }
+                distance -= 1.5 * 0.05;
+            }
+            0.0
+        };
+        let leather = approach(1.0);
+        let tarred = approach(primitive_shared::equipment::TAR_REEK);
+        assert!(
+            tarred > leather * 1.3,
+            "the deer knew the tarred coat at {tarred:.1} blocks and the leather at {leather:.1}"
+        );
+    }
+
+    #[test]
     fn a_herd_member_that_could_not_see_or_hear_the_player_bolts_when_one_that_could_does() {
         // The second deer is behind a wall of stone from the player and too
         // far off to smell or hear a person standing still -- and it goes
@@ -15177,6 +15242,7 @@ mod tests {
                     low: false,
                     wounded: false,
                     held: None,
+                    reek: 1.0,
                 }]);
                 animals.step(&world, &player((0.5, 21.0, 0.5)), 0.05, NOON);
                 if pack.iter().any(|&id| animals.find(id).expect("alive").mind == Mind::Charge) {
@@ -15197,7 +15263,7 @@ mod tests {
         let id = animals.spawn(Species::Wolf, (4.0, 21.0, 0.5)).expect("wolf");
         let mut charged = false;
         for _ in 0..200 {
-            animals.player_signs(vec![PlayerSign { who: 1, facing: 0.0, working: false, airborne: false, low: false, wounded: true, held: None }]);
+            animals.player_signs(vec![PlayerSign { who: 1, facing: 0.0, working: false, airborne: false, low: false, wounded: true, held: None, reek: 1.0 }]);
             animals.step(&world, &player((1.0, 21.0, 0.5)), 0.05, NOON);
             charged |= animals.find(id).expect("alive").mind == Mind::Charge;
         }
@@ -15811,6 +15877,7 @@ mod husbandry_tests {
             low: false,
             wounded: false,
             held,
+            reek: 1.0,
         }]);
     }
 

@@ -370,9 +370,62 @@ pub fn garment(block: BlockId) -> Option<Garment> {
         BLOCK_IRON_GREAVES => g(Slot::Legs, 5.4, 1.5, 0.95, 0.08),
         BLOCK_IRON_BOOTS => g(Slot::Feet, 4.2, 1.0, 0.95, 0.05),
 
+        // ---- tar ----
+        //
+        // **A leather tunic that sheds rain as a cuirass does, and stinks.**
+        // Worked with birch tar, the hide takes no water: nearly the metal's
+        // `shed_rain`, so the pack under it stays dry through a downpour
+        // (`wet::PACK_SOAKS_AT`) and the coat keeps its warmth when wool
+        // would have lost it. A little less warm than the plain tunic,
+        // because tar stiffens a hide and a stiff hide holds less air.
+        //
+        // What it costs is the nose of everything in the wood: see [`reek`].
+        // The coat that keeps a traveller dry is the coat a deer smells from
+        // across a valley, so the tarred coat is for the crossing and the
+        // plain one is for the hunt -- and a player carries both, or chooses.
+        BLOCK_TARRED_TUNIC => g(Slot::Chest, 1.6, 8.0, 0.97, 0.02),
+
+        // ---- snowshoes ----
+        //
+        // **Fast on snow and clumsy everywhere else.** The whole of what a
+        // snowshoe does is the drift it keeps a foot on top of
+        // (`types::surface_drag_shod`), and that is not a number in this
+        // table: it is the snow's drag lifted, in the physics. What is here is
+        // the price. Bulk, because a frame a yard long on each foot is a
+        // thing you walk round -- a tenth off every step on bare ground,
+        // "mal de raquette" -- and next to no warmth, because a lattice of
+        // cord is not a boot. So the feet are the one slot where a player in
+        // the north chooses between warm and fast, and the snow decides which
+        // was right.
+        BLOCK_SNOWSHOES => g(Slot::Feet, 0.0, 1.0, 0.05, 0.10),
+
         _ => None,
     }
 }
+
+/// How far this garment carries its wearer's smell, as a multiplier on an
+/// animal's nose (the server's `scent_carry`); one for everything that does
+/// not stink.
+///
+/// **The tarred coat, and only it.** Birch tar is smelled a long way off --
+/// it is what a boat yard smells of from the road -- and an animal that
+/// winds a person winds the tar first. Half again the reach: a deer that
+/// would have caught a walker's scent at twenty blocks downwind catches the
+/// tarred one at thirty, so the coat that makes a crossing in the rain safe
+/// makes a stalk in it hopeless.
+///
+/// Rejected: a smell for every garment -- the wolf's fur, the sheep's wool.
+/// A number on every row that moves nothing a player could learn is the
+/// mark nobody reads; one coat that reeks is a rule.
+pub fn reek(block: BlockId) -> f32 {
+    match crate::types::block_kind(block) {
+        crate::types::BLOCK_TARRED_TUNIC => TAR_REEK,
+        _ => 1.0,
+    }
+}
+
+/// How much further a tarred coat is smelled. See [`reek`].
+pub const TAR_REEK: f32 = 1.5;
 
 /// Which slot this block goes in, if any.
 ///
@@ -575,6 +628,31 @@ mod tests {
             Some(BLOCK_CLOTH_TROUSERS),
             Some(BLOCK_CLOTH_WRAPS),
         ])
+    }
+
+    #[test]
+    fn a_tarred_coat_sheds_the_rain_nearly_as_metal_does_and_reeks_where_leather_does_not() {
+        let tarred = garment(BLOCK_TARRED_TUNIC).expect("a garment");
+        let leather = garment(BLOCK_LEATHER_TUNIC).expect("a garment");
+        let bronze = garment(BLOCK_BRONZE_CUIRASS).expect("a garment");
+        assert!(tarred.shed_rain > leather.shed_rain + 0.3);
+        assert!(tarred.shed_rain >= bronze.shed_rain - 0.05, "the tar kept out less rain than bronze");
+        assert!(tarred.insulation <= leather.insulation, "the tar made the hide warmer");
+        assert!(reek(BLOCK_TARRED_TUNIC) > 1.0 && reek(BLOCK_LEATHER_TUNIC) == 1.0);
+    }
+
+    #[test]
+    fn snowshoes_cost_every_step_off_the_snow_and_hold_in_almost_nothing() {
+        let shoes = garment(BLOCK_SNOWSHOES).expect("a garment");
+        let boots = garment(BLOCK_LEATHER_BOOTS).expect("a garment");
+        assert_eq!(shoes.slot, Slot::Feet);
+        assert!(shoes.bulk > boots.bulk, "snowshoes were as easy as boots on bare ground");
+        assert!(shoes.insulation < boots.insulation / 3.0, "a lattice of cord kept feet warm");
+        // ...and on snow, and only on snow, the stride comes back.
+        use crate::types::{surface_drag, surface_drag_shod, BLOCK_GRASS, BLOCK_SNOW};
+        assert!(surface_drag_shod(BLOCK_SNOW, true) > surface_drag(BLOCK_SNOW) * 1.5);
+        assert_eq!(surface_drag_shod(BLOCK_GRASS, true), surface_drag(BLOCK_GRASS));
+        assert_eq!(surface_drag_shod(BLOCK_SNOW, false), surface_drag(BLOCK_SNOW));
     }
 
     #[test]

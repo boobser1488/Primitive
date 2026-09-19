@@ -941,7 +941,10 @@ mod extended_api_tests {
     #[test]
     fn an_unknown_block_name_is_minus_one_rather_than_a_valid_block() {
         let (mut host, _dir) =
-            host_with("fn on_tick(t) { log(\"\" + block_id(\"cheese\")); }");
+            // Not "cheese" any more: the game makes cheese now
+            // (`types::BLOCK_CHEESE`), and the unknown name has to stay
+            // unknown.
+            host_with("fn on_tick(t) { log(\"\" + block_id(\"moon_cheese\")); }");
         let (_, effects) = host.fire("on_tick", vec![Value::Int(1)], &view());
         let logged = effects.iter().find_map(|e| match e {
             Effect::Log { text, .. } => Some(text.clone()),

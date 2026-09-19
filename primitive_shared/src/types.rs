@@ -2867,9 +2867,34 @@ pub fn nettle_stings(block: BlockId, held: Option<BlockId>) -> bool {
         })
 }
 
+/// Does cutting this with what is in the hand give a strip of nettle bast
+/// rather than a handful of fibre?
+///
+/// **A grown nettle, cut with a blade.** The knife that spares the hand the
+/// sting is the knife that splits the stalk and strips the bast out whole;
+/// pulled up by the fist it is a tangle of fibre, as any stand of weeds is.
+/// So the nettle bed gives one or the other, and the player chooses at the
+/// bed: fibre for cord and every hand row, or bast for the cloth the north
+/// has no cotton for (`crafting`, "nettle cloth"). A young nettle has no
+/// bast worth the stripping and gives what it always gave.
+#[inline]
+pub fn strips_bast(block: BlockId, held: Option<BlockId>) -> bool {
+    block_kind(block) == BLOCK_NETTLE && block & PLANT_YOUNG == 0 && !nettle_stings(block, held)
+}
+
 #[cfg(test)]
 mod wild_plant_tests {
     use super::*;
+
+    #[test]
+    fn a_knife_strips_bast_off_a_grown_nettle_and_a_fist_does_not() {
+        use crate::types::BLOCK_FLINT_KNIFE;
+        assert!(strips_bast(BLOCK_NETTLE, Some(BLOCK_FLINT_KNIFE)));
+        assert!(strips_bast(BLOCK_NETTLE | PLANT_TOP, Some(BLOCK_FLINT_KNIFE)));
+        assert!(!strips_bast(BLOCK_NETTLE, None), "a fist stripped bast");
+        assert!(!strips_bast(BLOCK_NETTLE | PLANT_YOUNG, Some(BLOCK_FLINT_KNIFE)), "a seedling gave bast");
+        assert!(!strips_bast(BLOCK_FIREWEED, Some(BLOCK_FLINT_KNIFE)));
+    }
 
     #[test]
     fn a_birch_piece_is_the_oak_piece_of_its_width_in_birch_bark_and_fells_as_birch() {
@@ -3471,6 +3496,78 @@ pub const BLOCK_DRY_STONE_WALL: BlockId = 426;
 pub const BLOCK_WATTLE: BlockId = 427;
 /// **A cob wall**, one to four lifts, the top one wet or dry.
 pub const BLOCK_COB_WALL: BlockId = 428;
+
+// ---- the larder, the trapline and the pack: ten old answers ----
+//
+// **Numbered 397 to 414**, the top of the empty run under the handfuls (415),
+// for the handfuls' own reason: the saws took 380 and up from the bottom of
+// the same run, and two changes counting through one gap from the same end
+// meet in a save file. What each one is for is written at its module --
+// `ferment`, `snare`, `pitfall`, `saltpan` -- or at its row.
+
+/// **Young cheese**: two bowls of milk curdled with salt and pressed. Not a
+/// food that keeps, and not yet the one that does: it ripens into
+/// [`BLOCK_CHEESE`] in the cool and goes off in the warm (`ferment`).
+pub const BLOCK_CURD: BlockId = 400;
+/// **A ripe cheese**: milk that keeps. See `ferment` for the cellar it needs.
+pub const BLOCK_CHEESE: BlockId = 401;
+/// **A jug of must**: honey stirred into fresh water, working. It turns to
+/// mead in the warm and barely moves in the cold (`ferment`).
+pub const BLOCK_JUG_MUST: BlockId = 402;
+/// **A jug of mead**: drunk, it is water, a little food and a glow
+/// (`food::warmth_in`); the jug comes back.
+pub const BLOCK_JUG_MEAD: BlockId = 403;
+/// **Pemmican**: dried meat pounded into fat with berries. The traveller's
+/// food -- see its row in `food::nutrition`.
+pub const BLOCK_PEMMICAN: BlockId = 404;
+/// **Birch bark**, peeled off a standing birch with a knife (the server's
+/// `tap_trunk`). What tar is distilled from.
+pub const BLOCK_BIRCH_BARK: BlockId = 405;
+/// **Birch tar**: bark cooked in a sealed pot until the pitch runs out of it.
+pub const BLOCK_TAR: BlockId = 406;
+/// **A tarred coat**: a leather tunic worked with birch tar. Sheds the rain
+/// nearly as metal does, and reeks (`equipment::reek`).
+pub const BLOCK_TARRED_TUNIC: BlockId = 407;
+/// **Willow bark**, peeled off a standing willow. Bound on a bruise it
+/// takes the swelling down (`injury::Treatment::WillowBark`).
+pub const BLOCK_WILLOW_BARK: BlockId = 408;
+/// **A snare**: a noose of cord on two pegs, set on the ground for a hare.
+/// What is in it rides in its variant (`snare`).
+pub const BLOCK_SNARE: BlockId = 409;
+/// **A pit's cover**: boughs and leaves laid over a hole. It holds a hare
+/// and not a deer (`pitfall`).
+pub const BLOCK_PIT_COVER: BlockId = 410;
+/// **A salt pan**: a shallow bed of puddled clay on the shore, filled with
+/// the sea and left to the sun. What is in it rides in its variant
+/// (`saltpan`).
+pub const BLOCK_SALT_PAN: BlockId = 411;
+/// **Snowshoes**: a bent frame laced with cord, worn on the feet. See their
+/// row in `equipment::garment` and `types::surface_drag_shod`.
+pub const BLOCK_SNOWSHOES: BlockId = 412;
+/// **Nettle bast**: the fibre stripped out of nettle stalks, for cloth
+/// where no cotton grows. See the "nettle cloth" row in `crafting`.
+pub const BLOCK_NETTLE_BAST: BlockId = 413;
+/// **A salt pan full of the sea**, drying: how far it has gone is its
+/// variant (`saltpan`).
+///
+/// **Three ids for the pan's three states, and not one id with its state in
+/// the variant**, for the berry bush's reason (`BLOCK_BILBERRY_BARE`): a
+/// block's picture is chosen by its kind, and an empty pan, a pan of water
+/// and a pan of white crust are three pictures a player reads from across a
+/// beach -- the one that says "come back now" most of all.
+pub const BLOCK_SALT_PAN_BRINE: BlockId = 414;
+/// **A salt pan with the salt in it**: the sea dried to a crust, waiting to
+/// be scraped up. See [`BLOCK_SALT_PAN_BRINE`] for why it is its own id.
+pub const BLOCK_SALT_PAN_SALT: BlockId = 399;
+/// **A snare with a hare in it.** How long it has hung there is the variant
+/// (`snare`), because a catch left too long is somebody else's supper. Its
+/// own id for the salt pan's reason: a noose and a noose with a hare in it
+/// are read across a clearing.
+pub const BLOCK_SNARE_CAUGHT: BlockId = 398;
+/// **A snare that was robbed**: pulled out of true and emptied by whatever
+/// found the hare first. Reset by hand (`snare`).
+pub const BLOCK_SNARE_SPRUNG: BlockId = 397;
+
 // ---- the horse ----
 //
 // **Three ids out of the gap after the sundew (480)**, not the lowest free
@@ -3832,6 +3929,14 @@ pub fn rots_with_a_body(block: BlockId) -> bool {
             | BLOCK_CLOTH_WRAPS
             | BLOCK_FUR_HOOD
             | BLOCK_FUR_CLOAK
+            // Snowshoes go by their lacing: the frame would last, and a frame
+            // with no lacing is two bent sticks.
+            | BLOCK_SNOWSHOES
+            // **A tarred coat does not.** Tar is what keeps a boat's hide
+            // and a roof's shingles out of the weather for years, and a
+            // tarred hide in the grass is the one leather that is still a
+            // coat when its owner walks back for it -- the other half of
+            // what the tar costs in the nose of every deer (`equipment::reek`).
     )
 }
 
@@ -4896,6 +5001,26 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     // `BLOCK_CORPSE`.
     (BLOCK_CORPSE, "corpse"),
     (BLOCK_REMAINS, "remains"),
+    // The ten old answers: the larder, the trapline and the pack. See
+    // `BLOCK_CURD` and the modules each row names.
+    (BLOCK_CURD, "curd"),
+    (BLOCK_CHEESE, "cheese"),
+    (BLOCK_JUG_MUST, "jug_must"),
+    (BLOCK_JUG_MEAD, "jug_mead"),
+    (BLOCK_PEMMICAN, "pemmican"),
+    (BLOCK_BIRCH_BARK, "birch_bark"),
+    (BLOCK_TAR, "tar"),
+    (BLOCK_TARRED_TUNIC, "tarred_tunic"),
+    (BLOCK_WILLOW_BARK, "willow_bark"),
+    (BLOCK_SNARE, "snare"),
+    (BLOCK_PIT_COVER, "pit_cover"),
+    (BLOCK_SALT_PAN, "salt_pan"),
+    (BLOCK_SNOWSHOES, "snowshoes"),
+    (BLOCK_NETTLE_BAST, "nettle_bast"),
+    (BLOCK_SALT_PAN_BRINE, "salt_pan_brine"),
+    (BLOCK_SALT_PAN_SALT, "salt_pan_salt"),
+    (BLOCK_SNARE_CAUGHT, "snare_caught"),
+    (BLOCK_SNARE_SPRUNG, "snare_sprung"),
 ];
 
 /// What a player is allowed to put into the world: the client hotbar
@@ -5228,6 +5353,12 @@ pub const PLACEABLE_BLOCKS: &[BlockId] = &[
     // seed.
     BLOCK_WILD_MILLET,
     BLOCK_MILLET,
+    // The three things set on the ground and left: a snare for a hare, a
+    // cover over a pit, and a pan of the sea for the sun. See `snare`,
+    // `pitfall` and `saltpan`.
+    BLOCK_SNARE,
+    BLOCK_PIT_COVER,
+    BLOCK_SALT_PAN,
 ];
 
 // ---- what a block id carries besides its kind ----
@@ -6223,6 +6354,13 @@ fn may_carry_variant(kind: BlockId) -> bool {
         // (`bees::honey_in`). `is_known_block` holds it to what a hive holds
         // before this is asked; this is the list of what carries one at all.
         || kind == BLOCK_WILD_HIVE
+        // ...and the three counts of the larder and the trapline: how far a
+        // young cheese or a must has worked (`ferment`), how long a hare has
+        // hung in a snare (`snare`), how far a pan of the sea has dried
+        // (`saltpan`). `is_known_block` holds each to what it counts.
+        || crate::ferment::is_working(kind)
+        || kind == BLOCK_SNARE_CAUGHT
+        || kind == BLOCK_SALT_PAN_BRINE
 }
 
 /// How many fish are in this trap: nought for an empty one, and for
@@ -6769,6 +6907,36 @@ pub fn floats(id: BlockId) -> bool {
 #[inline]
 pub fn surface_drag(id: BlockId) -> f32 {
     crate::blocks::definition(id).drag
+}
+
+/// The same drag for a foot in a snowshoe: **snow is walked over, not
+/// waded**, and nothing else changes.
+///
+/// Snow and only snow -- a drift, a snow cover, a block of it -- because a
+/// snowshoe spreads a foot over what gives under it, and mud, sand and a
+/// ford do not give that way (a snowshoe in a river is a raft on a foot).
+/// Not all the way to a bare meadow's pace: the frame sinks a hand's depth
+/// and a stride in one is shorter (`SNOWSHOE_DRAG`).
+///
+/// Shared for `surface_drag`'s reason: the client moves by it and the server
+/// has to expect what it moves.
+#[inline]
+pub fn surface_drag_shod(id: BlockId, snowshoes: bool) -> f32 {
+    let drag = surface_drag(id);
+    if snowshoes && is_snow(id) {
+        drag.max(SNOWSHOE_DRAG)
+    } else {
+        drag
+    }
+}
+
+/// What a snowshoe leaves of a stride on snow. See [`surface_drag_shod`].
+pub const SNOWSHOE_DRAG: f32 = 0.9;
+
+/// Is this snow a foot sinks into: the block, a drift, the cover on a field?
+#[inline]
+pub fn is_snow(id: BlockId) -> bool {
+    matches!(block_kind(id), BLOCK_SNOW | BLOCK_SNOW_COVER)
 }
 
 /// How well a foot holds on this, as a multiplier on both friction and
@@ -7396,6 +7564,13 @@ pub fn garment_tint(id: BlockId) -> Option<[f32; 3]> {
         BLOCK_CLOTH_CAP | BLOCK_CLOTH_TUNIC | BLOCK_CLOTH_TROUSERS | BLOCK_CLOTH_WRAPS => {
             Some(CLOTH)
         }
+        // Tar: leather gone nearly black and a little warm, the colour of a
+        // boat's seams. Darker than fur by a clear step, because the two sit
+        // in the same slot and fur is the one coat it must not be taken for.
+        BLOCK_TARRED_TUNIC => Some([0.22, 0.17, 0.13]),
+        // Snowshoes: pale bent ash and rawhide, the colour of the frame and
+        // not of a boot -- the one pair of "boots" drawn in wood.
+        BLOCK_SNOWSHOES => Some([0.80, 0.68, 0.48]),
         _ => None,
     }
 }
@@ -8430,6 +8605,20 @@ pub fn is_known_block(id: BlockId) -> bool {
     // is a claim.
     if kind == BLOCK_WILD_HIVE {
         return (id & VARIANT_MASK) >> VARIANT_SHIFT <= BlockId::from(crate::bees::HIVE_FULL);
+    }
+    // ...and the ten old answers' three counts, each held to what it counts:
+    // a young cheese's or a must's stage (`ferment::STAGES`), how long a hare
+    // has hung (`snare::ROBBED_AFTER`), how far a pan has dried
+    // (`saltpan::STAGES`, which is all eight). The server writes every one of
+    // them on the rot clock, into packs and into the world.
+    if crate::ferment::is_working(kind) {
+        return (id & VARIANT_MASK) >> VARIANT_SHIFT < BlockId::from(crate::ferment::STAGES);
+    }
+    if kind == BLOCK_SNARE_CAUGHT {
+        return (id & VARIANT_MASK) >> VARIANT_SHIFT < BlockId::from(crate::snare::ROBBED_AFTER);
+    }
+    if kind == BLOCK_SALT_PAN_BRINE {
+        return (id & VARIANT_MASK) >> VARIANT_SHIFT < BlockId::from(crate::saltpan::STAGES);
     }
     // ...and a tall plant's cell is its lower half, its upper half or a
     // shoot, and nothing else (`PLANT_TOP`, `PLANT_YOUNG`).
@@ -9964,6 +10153,17 @@ mod mining_tests {
                 if block_kind(drop) == crate::types::BLOCK_DRYING_PEAT {
                     continue;
                 }
+                // ...and a must or a young cheese, for the same reason: it is
+                // not finished, and what finishes it is time (`ferment`).
+                if crate::ferment::is_working(drop) {
+                    continue;
+                }
+                // ...and what is set on the ground and left to work there: a
+                // snare, a pit's cover, a salt pan (`snare`, `pitfall`,
+                // `saltpan`) -- spent by the world, as a hoe is.
+                if crate::snare::is_snare(drop) || crate::saltpan::is_pan(drop) || block_kind(drop) == BLOCK_PIT_COVER {
+                    continue;
+                }
                 assert!(
                     crate::crafting::RECIPES
                         .iter()
@@ -10213,6 +10413,12 @@ mod depth_tests {
                 // like any other skeleton.
                 "corpse",
                 "remains",
+                // ...and a pit's cover, an eighth of leaves over a hole, and
+                // the salt pan's three states, a tray two eighths deep.
+                "pit_cover",
+                "salt_pan",
+                "salt_pan_brine",
+                "salt_pan_salt",
             ],
             "the list of blocks that are not a whole block has changed"
         );
@@ -11212,6 +11418,10 @@ mod corpse_tests {
                 // a player has *on* has to be decided about, whether or
                 // not it keeps them warm.
                 "rucksack",
+                // The tarred coat outlasts the grave and the snowshoes do
+                // not: see `rots_with_a_body`.
+                "tarred_tunic",
+                "snowshoes",
             ],
             "a garment was added or taken away: decide whether the ground takes it,\
              in `rots_with_a_body`, and then say so here"
@@ -11238,7 +11448,8 @@ mod corpse_tests {
             let metal = garment_tint(id) != Some([0.60, 0.40, 0.24]) // leather
                 && garment_tint(id) != Some([0.92, 0.89, 0.82]) // wool
                 && garment_tint(id) != Some([0.34, 0.28, 0.24]) // fur
-                && garment_tint(id) != Some([0.78, 0.76, 0.68]); // cloth
+                && garment_tint(id) != Some([0.78, 0.76, 0.68]) // cloth
+                && block_kind(id) != BLOCK_SNOWSHOES; // lacing, see `rots_with_a_body`
             assert_eq!(
                 rots_with_a_body(id),
                 !metal,

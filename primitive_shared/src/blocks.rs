@@ -12339,7 +12339,151 @@ pub const BLOCKS: &[BlockDef] = &[
     // (`types::blocks_the_sky`). Wood: it burns with the house.
     BlockDef { id: BLOCK_WATTLE, name: "wattle", opacity: 0, hardness: Some(1.0), work: Work::Wood, weight: 0.8, ..STAGE_ROW },
     BlockDef { id: BLOCK_COB_WALL, name: "cob_wall", hardness: Some(2.2), work: Work::Any, weight: 1.4, ..STAGE_ROW },
+    // ---- the larder, the trapline and the pack (`types::BLOCK_CURD`) ----
+    //
+    // The food first. A young cheese is two bowls of milk pressed, and a
+    // ripe one is lighter for the whey it lost; pemmican is the lightest
+    // meal there is for what it feeds -- the whole of what it is for.
+    BlockDef { id: BLOCK_CURD, name: "curd", drop: Some(BLOCK_CURD), weight: 0.5, ..ITEM_ROW },
+    BlockDef { id: BLOCK_CHEESE, name: "cheese", drop: Some(BLOCK_CHEESE), weight: 0.35, ..ITEM_ROW },
+    // A jug with something working in it, and one with mead: a jug's weight
+    // and a jug's one to a slot, because each is a jug of water with honey
+    // in it.
+    BlockDef { id: BLOCK_JUG_MUST, name: "jug_must", drop: Some(BLOCK_JUG_MUST), weight: 3.2, stack: ONE, ..ITEM_ROW },
+    BlockDef { id: BLOCK_JUG_MEAD, name: "jug_mead", drop: Some(BLOCK_JUG_MEAD), weight: 3.2, stack: ONE, ..ITEM_ROW },
+    BlockDef { id: BLOCK_PEMMICAN, name: "pemmican", drop: Some(BLOCK_PEMMICAN), weight: 0.15, ..ITEM_ROW },
+    // The two barks and what the one is cooked into.
+    BlockDef { id: BLOCK_BIRCH_BARK, name: "birch_bark", drop: Some(BLOCK_BIRCH_BARK), weight: 0.1, ..ITEM_ROW },
+    BlockDef { id: BLOCK_TAR, name: "tar", drop: Some(BLOCK_TAR), weight: 0.3, ..ITEM_ROW },
+    BlockDef { id: BLOCK_WILLOW_BARK, name: "willow_bark", drop: Some(BLOCK_WILLOW_BARK), weight: 0.1, ..ITEM_ROW },
+    // A tarred coat is the leather tunic's row with the tar's weight on it:
+    // the same hide, and it wears out as a tunic does.
+    BlockDef {
+        id: BLOCK_TARRED_TUNIC,
+        name: "tarred_tunic",
+        drop: Some(BLOCK_TARRED_TUNIC),
+        weight: 1.5,
+        stack: ONE,
+        durability: Some(200),
+        ..ITEM_ROW
+    },
+    // Snowshoes: a bent frame and lacing, light and not long-lived -- the
+    // lacing is what goes, on rock.
+    BlockDef {
+        id: BLOCK_SNOWSHOES,
+        name: "snowshoes",
+        drop: Some(BLOCK_SNOWSHOES),
+        weight: 0.9,
+        stack: ONE,
+        durability: Some(120),
+        ..ITEM_ROW
+    },
+    BlockDef { id: BLOCK_NETTLE_BAST, name: "nettle_bast", drop: Some(BLOCK_NETTLE_BAST), weight: 0.05, ..ITEM_ROW },
+    // **A snare is a thing on the ground, walked through**: the flint
+    // nodule's shape, so it lies flat and stops nobody, and a hand takes it
+    // up in a moment. Its two other states are the same noose with a hare in
+    // it and pulled out of true; both give the snare back, and neither is
+    // placed (`snare` for why the hare is not in the drop).
+    BlockDef {
+        id: BLOCK_SNARE,
+        name: "snare",
+        shape: Shape::Flat,
+        opacity: 0,
+        hardness: Some(0.2),
+        work: Work::Plant,
+        drop: Some(BLOCK_SNARE),
+        weight: 0.25,
+        placeable: true,
+        ..SET_ROW
+    },
+    BlockDef {
+        id: BLOCK_SNARE_CAUGHT,
+        name: "snare_caught",
+        shape: Shape::Flat,
+        opacity: 0,
+        hardness: Some(0.2),
+        work: Work::Plant,
+        drop: Some(BLOCK_SNARE),
+        weight: 0.25,
+        ..SET_ROW
+    },
+    BlockDef {
+        id: BLOCK_SNARE_SPRUNG,
+        name: "snare_sprung",
+        shape: Shape::Flat,
+        opacity: 0,
+        hardness: Some(0.2),
+        work: Work::Plant,
+        drop: Some(BLOCK_SNARE),
+        weight: 0.25,
+        ..SET_ROW
+    },
+    // **A pit's cover is a floor an eighth of a block deep**, and a floor
+    // is what it has to be: a cube, so a deer and a person stand on it as
+    // on the ground round it, until the server's `collapse_pit_covers`
+    // takes it away under them (`pitfall`). Opacity nought, as leaf litter
+    // is -- it is leaves.
+    BlockDef {
+        id: BLOCK_PIT_COVER,
+        name: "pit_cover",
+        thickness: 1,
+        opacity: 0,
+        hardness: Some(0.3),
+        work: Work::Plant,
+        drop: Some(BLOCK_PIT_COVER),
+        weight: 0.8,
+        placeable: true,
+        ..SET_ROW
+    },
+    // **A salt pan is a tray two eighths deep**: a floor of puddled clay
+    // with a rim, stood on, broken by hand. Only the empty one is placed and
+    // every state gives the empty pan back: what was in it -- the sea, or a
+    // crust -- is scraped up with the right hand (`saltpan`), and a pan
+    // kicked apart with brine in it has lost it.
+    BlockDef {
+        id: BLOCK_SALT_PAN,
+        name: "salt_pan",
+        thickness: 2,
+        opacity: 0,
+        hardness: Some(1.0),
+        work: Work::Any,
+        drop: Some(BLOCK_SALT_PAN),
+        weight: 3.0,
+        placeable: true,
+        ..SET_ROW
+    },
+    BlockDef {
+        id: BLOCK_SALT_PAN_BRINE,
+        name: "salt_pan_brine",
+        thickness: 2,
+        opacity: 0,
+        hardness: Some(1.0),
+        work: Work::Any,
+        drop: Some(BLOCK_SALT_PAN),
+        weight: 3.0,
+        ..SET_ROW
+    },
+    BlockDef {
+        id: BLOCK_SALT_PAN_SALT,
+        name: "salt_pan_salt",
+        thickness: 2,
+        opacity: 0,
+        hardness: Some(1.0),
+        work: Work::Any,
+        drop: Some(BLOCK_SALT_PAN),
+        weight: 3.0,
+        ..SET_ROW
+    },
 ];
+
+/// What every carried thing among the ten old answers is written against: an
+/// item, in the pack or dropped, never in the world as a block.
+const ITEM_ROW: BlockDef =
+    BlockDef { shape: Shape::Item, hardness: None, needs: Tier::Hand, work: Work::Any, placeable: false, weight: 0.2, ..COBBLE_ROW };
+
+/// ...and what is set on the ground and left there: broken by hand, nothing
+/// in it a fire or a tool reads, placed only where its row says so.
+const SET_ROW: BlockDef = BlockDef { needs: Tier::Hand, placeable: false, ..COBBLE_ROW };
 
 /// What every handful, lump and trowel of `build` is written against: an
 /// item, carried and never placed.

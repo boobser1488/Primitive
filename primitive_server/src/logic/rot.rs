@@ -250,7 +250,10 @@ impl Rot {
     }
 
     fn cures(block: primitive_shared::types::BlockId) -> bool {
-        clay::is_drying(block) || wood::is_green(block) || primitive_shared::wet::is_wet(block)
+        clay::is_drying(block)
+            || wood::is_green(block)
+            || primitive_shared::wet::is_wet(block)
+            || primitive_shared::ferment::is_working(block)
     }
 
     /// What one step of the world's clock, number `step`, makes of a stack
@@ -268,6 +271,15 @@ impl Rot {
     ///   pile, which is stepped on its own and faster, is how firewood is
     ///   seasoned outdoors (`pits::Pits::season_piles`).
     pub fn cured(block: primitive_shared::types::BlockId, step: u64, ambient: &Ambient) -> primitive_shared::types::BlockId {
+        // **A young cheese and a must work whatever the sky is doing**, and
+        // so before the rain's early return: a jug and a pressed curd keep
+        // the rain out, and what moves them on is the air (`ferment`). On
+        // the world's own step and not the cellar's slowed one -- the
+        // cellar's effect on them is `ferment`'s to say, and it says the
+        // opposite of what it says for meat: a cheese *ripens* there.
+        if primitive_shared::ferment::is_working(block) {
+            return primitive_shared::ferment::worked(block, step, ambient.temperature_c);
+        }
         if ambient.getting_wet {
             return block;
         }
@@ -922,6 +934,42 @@ mod tests {
         assert_eq!(dried_after(rained_on, 5), clay::Dryness::Wet, "a pot dried in the rain");
         let swamp = Ambient { humidity: 1.0, ..mild() };
         assert_eq!(dried_after(swamp, 2), clay::Dryness::LeatherHard, "damp air did not slow it");
+    }
+
+    #[test]
+    fn the_cellar_that_keeps_meat_is_the_cellar_that_ripens_cheese() {
+        assert_eq!(primitive_shared::ferment::CELLAR_BELOW_C, COOL_BELOW_C);
+        assert_eq!(primitive_shared::ferment::STILL_BELOW_C, KEEPS_BELOW_C);
+    }
+
+    #[test]
+    fn a_young_cheese_in_a_cellar_chest_is_cheese_in_two_days_and_rot_in_a_warm_one() {
+        use primitive_shared::types::{BLOCK_CHEESE, BLOCK_CURD};
+        let after = |ambient: Ambient, days: u32| {
+            let mut chest = Inventory::new();
+            chest.put_in_slot(2, Stack::new(BLOCK_CURD, 2));
+            for step in 1..=u64::from(ROT_STEPS_PER_DAY * days) {
+                Rot::cure_inventory(&mut chest, step, &ambient);
+            }
+            assert_eq!(chest.count_in(2), 2, "the cheeses moved or went missing");
+            chest.block_in(2).expect("the cheeses")
+        };
+        let cellar = Ambient { temperature_c: 8.0, ..Ambient::default() };
+        assert_eq!(after(cellar, 2), BLOCK_CHEESE);
+        assert_eq!(after(mild(), 1), BLOCK_ROTTEN);
+        assert_eq!(block_kind(after(freezing(), 9)), BLOCK_CURD, "a curd changed in the frost");
+    }
+
+    #[test]
+    fn a_must_by_the_fire_is_mead_by_the_next_day_even_in_the_rain() {
+        use primitive_shared::types::{BLOCK_JUG_MEAD, BLOCK_JUG_MUST};
+        let mut pack = Inventory::new();
+        pack.put_in_slot(0, Stack::new(BLOCK_JUG_MUST, 1));
+        let wet_evening = Ambient { getting_wet: true, ..mild() };
+        for step in 1..=u64::from(ROT_STEPS_PER_DAY) {
+            Rot::cure_inventory(&mut pack, step, &wet_evening);
+        }
+        assert_eq!(pack.block_in(0), Some(BLOCK_JUG_MEAD));
     }
 
     #[test]

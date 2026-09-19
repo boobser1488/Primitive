@@ -3072,6 +3072,12 @@ fn run(
                                     return;
                                 }
                             }
+                            // ...and a snare or a salt pan with nothing to
+                            // give, whatever is in the hand (`set_notice`).
+                            if let Some(said) = logic::fishing::set_notice(block, held) {
+                                notice = Some((settings.language.text(said.msg()).to_string(), Instant::now()));
+                                return;
+                            }
                         }
                         // **Fires in the ground, where the world decides.**
                         // `use_gesture` answers a pit kiln or a pile by its
@@ -4699,6 +4705,9 @@ fn run(
                             // anti-cheat check has ever complained
                             // about someone moving too slowly.
                             * input.stick_speed();
+                        // ...and snowshoes, which are not a speed but a
+                        // surface: see `types::surface_drag_shod`.
+                        player.snowshoes = equipment.snowshoes();
                         // ...and how much of the water's lift is left,
                         // off the same weight. **Not multiplied by the
                         // armour or the thumb**: those are about how
@@ -11146,6 +11155,17 @@ fn use_gesture(aimed: Option<BlockId>, held: Option<BlockId>) -> UseGesture {
         // (`fishing::trap_notice`).
         if block_kind(block) == primitive_shared::types::BLOCK_FISH_TRAP
             && primitive_shared::types::trap_catch(block) > 0
+        {
+            return UseGesture::Pick;
+        }
+        // **A snare or a salt pan with something for the hand**, whatever is
+        // in it, on the trap's argument: a hare to take, a robbed snare to
+        // set, salt to scrape, the sea to pour in. The rest -- a set snare,
+        // a pan still drying -- is said before this is asked
+        // (`fishing::set_notice`), and falls through here to be built
+        // against like any block.
+        if (primitive_shared::snare::is_snare(block) || primitive_shared::saltpan::is_pan(block))
+            && logic::fishing::set_notice(block, held).is_none()
         {
             return UseGesture::Pick;
         }

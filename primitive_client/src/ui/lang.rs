@@ -824,6 +824,17 @@ pub enum Msg {
     // The two new stations' headings. Their jobs are names, like the anvil's.
     SawhorseTitle,
     HoningTitle,
+    // ---- the larder, the trapline and the pack ----
+    //
+    // Willow bark on the mannequin, and what is said in place of a reach
+    // into a snare or a salt pan that would take nothing -- judged on the
+    // client from the block, as the fish trap's are (`logic::fishing`), so
+    // they are said in the player's language.
+    WoundBarked,
+    SnareEmpty,
+    PanDrying,
+    PanWantsSea,
+    PanFreshWater,
 }
 
 /// One line of interface text, in every language at once.
@@ -1341,6 +1352,11 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::StallBadOffer, en: "that is not a price", simple: "that swap cannot be", ru: "такой цены быть не может", pl: "to nie jest cena" },
     Line { msg: Msg::SawhorseTitle, en: "SAWHORSE", simple: "SAWING TRESTLE", ru: "КОЗЛЫ", pl: "KOZIOŁ STOLARSKI" },
     Line { msg: Msg::HoningTitle, en: "HONING STONE", simple: "SHARPENING STONE", ru: "ТОЧИЛЬНАЯ КОЛОДА", pl: "KAMIEŃ SZLIFIERSKI" },
+    Line { msg: Msg::WoundBarked, en: "bound with willow bark, going down", simple: "willow bark on it, getting better fast", ru: "под ивовой корой, спадает", pl: "pod korą wierzby, schodzi" },
+    Line { msg: Msg::SnareEmpty, en: "nothing has come to the snare yet", simple: "no hare in the snare yet -- come back later", ru: "в силок ещё никто не попался", pl: "nic jeszcze nie wpadło w sidła" },
+    Line { msg: Msg::PanDrying, en: "the pan is still drying: it wants sun and no rain", simple: "the salt is not ready -- it needs sun, and rain undoes it", ru: "соль ещё выпаривается: нужно солнце и ни капли дождя", pl: "panew jeszcze paruje: trzeba słońca i żadnego deszczu" },
+    Line { msg: Msg::PanWantsSea, en: "a salt pan is filled from a jug of the sea", simple: "pour a jug of sea water into it", ru: "солеварню наполняют кувшином морской воды", pl: "panew napełnia się dzbanem morskiej wody" },
+    Line { msg: Msg::PanFreshWater, en: "that is fresh water: it dries to nothing", simple: "that water has no salt in it", ru: "это пресная вода: от неё ничего не останется", pl: "to słodka woda: nic z niej nie zostanie" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as

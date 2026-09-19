@@ -647,6 +647,10 @@ pub struct Player {
     /// with a derived value means the setting is gone the moment
     /// anything recomputes it.
     pub speed_scale: f32,
+    /// Snowshoes on the feet: a drift is walked over rather than waded
+    /// (`types::surface_drag_shod`). Set beside `speed_scale`, from the same
+    /// equipment, by whoever drives this body.
+    pub snowshoes: bool,
     /// How much of the water's lift the player still gets, 1 (bobs) to
     /// 0 (goes straight down).
     ///
@@ -778,6 +782,7 @@ impl Player {
             swimming: false,
             submerged: false,
             speed_scale: 1.0,
+            snowshoes: false,
             buoyancy: 1.0,
             jumped: false,
             step_lag: 0.0,
@@ -1335,14 +1340,14 @@ impl Player {
             return 1.0;
         };
         let y = feet.y.floor() as i32;
-        let inside = primitive_shared::types::surface_drag(column.block(y));
+        let inside = primitive_shared::types::surface_drag_shod(column.block(y), self.snowshoes);
         if inside < 1.0 {
             return inside;
         }
         // A hair below the feet, so standing exactly on top of a block
         // reads as standing on it rather than as standing in the air
         // over it.
-        primitive_shared::types::surface_drag(column.block((feet.y - 0.05).floor() as i32))
+        primitive_shared::types::surface_drag_shod(column.block((feet.y - 0.05).floor() as i32), self.snowshoes)
     }
 
     /// How well the surface underfoot holds a foot, 0..1.

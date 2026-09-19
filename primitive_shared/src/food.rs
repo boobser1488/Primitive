@@ -220,6 +220,11 @@ pub fn group(block: BlockId) -> Option<Group> {
         | crate::types::BLOCK_DRIED_SALTED_MEAT
         | crate::types::BLOCK_DRIED_SALTED_FISH => Some(Group::Meat),
         crate::types::BLOCK_KELP_FROND | crate::types::BLOCK_DRIED_KELP => Some(Group::Plant),
+        // Cheese is the milk it was, young or ripe; pemmican is the meat it
+        // was pounded from -- the berry in it is a flavour, and one group a
+        // mouthful is the rule. Mead is the honey's group, as honey is.
+        crate::types::BLOCK_CURD | crate::types::BLOCK_CHEESE | crate::types::BLOCK_PEMMICAN => Some(Group::Meat),
+        crate::types::BLOCK_JUG_MEAD => Some(Group::Plant),
         _ => None,
     }
 }
@@ -394,6 +399,24 @@ pub fn nutrition(block: BlockId) -> Option<f32> {
         // your breath for.
         crate::types::BLOCK_KELP_FROND => Some(1.5),
         crate::types::BLOCK_DRIED_KELP => Some(2.5),
+        // **A young cheese is less than the two bowls it was made of**, and a
+        // ripe one nearly all of them. The whey is gone from both; what the
+        // cellar buys is the week, not the meal -- two bowls drunk today are
+        // ten, a cheese next week is nine (`ferment` for the cellar it
+        // needs, and the day in the warm that ruins it).
+        crate::types::BLOCK_CURD => Some(4.0),
+        crate::types::BLOCK_CHEESE => Some(9.0),
+        // **Pemmican is a roast that weighs nothing and keeps a month.** Two
+        // pieces out of two dried haunches, a lump of fat and a handful of
+        // berries: the meat's worth back and a little over for the fat, in a
+        // pack at a little over a third of a raw haunch's weight (`blocks`). Not better than
+        // the fire's meal -- what it is better at is being carried.
+        crate::types::BLOCK_PEMMICAN => Some(9.0),
+        // **Mead is a mouthful and a drink**: a little under one comb of the
+        // two in it, the rest gone to the yeast, and water as a jug is
+        // (`water_in`) with a warmth on top (`warmth_in`). Honey was always
+        // the better food; mead is the better thing to have in the snow.
+        crate::types::BLOCK_JUG_MEAD => Some(4.0),
         _ => None,
     };
     fresh.map(|worth| worth * freshness(block))
@@ -548,7 +571,13 @@ pub fn rot_per_step(block: BlockId) -> u8 {
         | BLOCK_DRIED_MEAT
         | crate::types::BLOCK_DRIED_FISH
         | crate::types::BLOCK_DRIED_SALTED_MEAT
-        | crate::types::BLOCK_DRIED_SALTED_FISH => 1,
+        | crate::types::BLOCK_DRIED_SALTED_FISH
+        // A ripe cheese and pemmican are the larder too, and go off as it
+        // does: slowly, a stage at a time (`rot_every`). The young cheese
+        // and the must are not here -- they are still working, and what the
+        // clock does to them is `ferment`'s.
+        | crate::types::BLOCK_CHEESE
+        | crate::types::BLOCK_PEMMICAN => 1,
         _ => 0,
     }
 }
@@ -600,6 +629,13 @@ pub fn rot_every(block: BlockId) -> u32 {
         BLOCK_BREAD => 2,
         BLOCK_DRIED_MEAT | crate::types::BLOCK_DRIED_FISH => 24,
         crate::types::BLOCK_DRIED_SALTED_MEAT | crate::types::BLOCK_DRIED_SALTED_FISH => 72,
+        // **A cheese keeps as the rack's meat keeps**, eight days in the warm
+        // and sixteen in the cellar it ripened in; pemmican as the salted and
+        // dried haunch does, a month. Both are the promise the thing was made
+        // for, and neither is for ever: a larder that never went off would
+        // leave the salt and the cellar nothing to buy.
+        crate::types::BLOCK_CHEESE => 24,
+        crate::types::BLOCK_PEMMICAN => 72,
         _ => 1,
     }
 }
@@ -788,6 +824,8 @@ pub fn is_food(block: BlockId) -> bool {
 pub fn served_in(block: BlockId) -> Option<BlockId> {
     match crate::types::block_kind(block) {
         crate::types::BLOCK_STEW | crate::types::BLOCK_BOWL_MILK => Some(crate::types::BLOCK_BOWL),
+        // ...and the jug a mead was drunk out of, for the same reason.
+        crate::types::BLOCK_JUG_MEAD => Some(crate::types::BLOCK_JUG),
         _ => None,
     }
 }
@@ -845,9 +883,39 @@ pub fn after_eating_made(have: f32, block: BlockId, quality: crate::quality::Qua
 pub fn water_in(block: BlockId) -> Option<f32> {
     match block_kind(block) {
         crate::types::BLOCK_COCONUT => Some(COCONUT_WATER),
+        // A jug of mead is most of a jug of water: it is one.
+        crate::types::BLOCK_JUG_MEAD => Some(MEAD_WATER),
         _ => None,
     }
 }
+
+/// The water in a jug of mead: two thirds of a jug of water
+/// (`body::JUG_HYDRATION`), the honey having taken the room of the rest.
+pub const MEAD_WATER: f32 = 600.0;
+
+/// Degrees a mouthful of this lifts a cold body by, at once, or `None`.
+///
+/// **Mead, and nothing else.** A hot stew would have a claim, and was
+/// weighed: but a stew is eaten at the fire that is already warming whoever
+/// eats it, and a warmth that arrives where a warmth already is buys
+/// nothing. Mead is carried away from the fire, and drunk where there is
+/// none -- which is what makes it the thing to take north.
+///
+/// **Up to the comfortable and no further** (the server's
+/// `Vitals::warm_by`): it takes the edge off a chill, and a player who is
+/// warm is not made hot by it. Rejected: a warmth that lasts, as a buff with
+/// a timer. That is a second body temperature with a clock on it, and the
+/// body already has one number for how warm it is -- this moves it.
+pub fn warmth_in(block: BlockId) -> Option<f32> {
+    match block_kind(block) {
+        crate::types::BLOCK_JUG_MEAD => Some(MEAD_WARMTH_C),
+        _ => None,
+    }
+}
+
+/// How far a jug of mead lifts a cold body, in degrees: a chilled player
+/// (`body::CHILLED`) most of the way back to comfortable.
+pub const MEAD_WARMTH_C: f32 = 4.0;
 
 /// The clean water in one coconut. See `water_in`.
 pub const COCONUT_WATER: f32 = 350.0;

@@ -4038,6 +4038,123 @@ pub const RECIPES: &[Recipe] = &[
         returns: &[],
         failure: 0.0,
     },
+    // ---- ten old answers: the larder, the trapline and the pack ----
+    //
+    // Appended, at the end, for the saddle's reason. Each row's argument is
+    // at the module it serves; what is here is what it costs.
+    //
+    // **A young cheese**: two bowls of milk and a handful of salt, pressed by
+    // hand, the bowls back. The salt is the price that makes it a choice --
+    // the same handful salts two haunches (`ferment`).
+    Recipe {
+        name: "press cheese",
+        inputs: &[(crate::types::BLOCK_BOWL_MILK, 2), (crate::types::BLOCK_SALT, 1)],
+        output: (crate::types::BLOCK_CURD, 1),
+        station: Station::Hands,
+        returns: &[(crate::types::BLOCK_BOWL, 2)],
+        failure: 0.0,
+    },
+    // **Must**: two combs stirred into a jug of fresh water. The jug is in
+    // the must and comes back when the mead is drunk (`food::served_in`); the
+    // sea is refused, as it is for dough (`refuses`).
+    Recipe {
+        name: "set mead",
+        inputs: &[(crate::types::BLOCK_HONEY, 2), (BLOCK_JUG_WATER, 1)],
+        output: (crate::types::BLOCK_JUG_MUST, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **Pemmican**: the rack's meat pounded into fat with a handful of
+    // berries. The fat is the price -- it is what a torch is wadded with --
+    // and the dried meat is the rack's, so pemmican is a second step on a
+    // larder, not a first one.
+    Recipe {
+        name: "pemmican",
+        inputs: &[(crate::types::BLOCK_DRIED_MEAT, 2), (BLOCK_FAT, 1), (crate::types::BLOCK_BERRIES, 1)],
+        output: (crate::types::BLOCK_PEMMICAN, 2),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **Tar is bark cooked with the air kept out**: four strips of birch
+    // bark in a fired pot at a fire, and the pot comes back blackened and
+    // whole. A pot and a fire, and not a kiln: a birch-bark fire in a pit
+    // under a pot is how it was first made, two hundred thousand years
+    // before anybody fired a kiln.
+    Recipe {
+        name: "distil tar",
+        inputs: &[(crate::types::BLOCK_BIRCH_BARK, 4), (BLOCK_VESSEL, 1)],
+        output: (crate::types::BLOCK_TAR, 1),
+        station: Station::Heat,
+        returns: &[(BLOCK_VESSEL, 1)],
+        failure: 0.0,
+    },
+    // **A tarred coat**: a leather tunic worked with two lumps of tar. See
+    // `equipment::reek` for what it costs to wear.
+    Recipe {
+        name: "tar coat",
+        inputs: &[(BLOCK_LEATHER_TUNIC, 1), (crate::types::BLOCK_TAR, 2)],
+        output: (crate::types::BLOCK_TARRED_TUNIC, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **A snare**: a noose of cord between two pegs. Cheap on purpose -- a
+    // trapline is several, and what limits it is the walk (`snare`).
+    Recipe {
+        name: "snare",
+        inputs: &[(BLOCK_CORD, 1), (BLOCK_STICK, 2)],
+        output: (crate::types::BLOCK_SNARE, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **A pit's cover**: sticks laid across and leaves over them. The pit
+    // itself is dug, not crafted (`pitfall`).
+    Recipe {
+        name: "pit cover",
+        inputs: &[(BLOCK_STICK, 4), (crate::types::BLOCK_LEAF_HANDFUL, 4)],
+        output: (crate::types::BLOCK_PIT_COVER, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **A salt pan**: two blocks of clay puddled flat and rimmed by hand.
+    // Unfired, because a pan in the sun on the shore is a bed of clay and
+    // not a pot, and a kiln between the player and the first pan would put
+    // the sun's salt behind the fire's.
+    Recipe {
+        name: "salt pan",
+        inputs: &[(BLOCK_CLAY, 2)],
+        output: (crate::types::BLOCK_SALT_PAN, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **Snowshoes**: four sticks bent into two frames, laced with cord.
+    Recipe {
+        name: "snowshoes",
+        inputs: &[(BLOCK_STICK, 4), (BLOCK_CORD, 2)],
+        output: (crate::types::BLOCK_SNOWSHOES, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **Nettle cloth**: six strips of bast to a bolt, where four bolls of
+    // cotton make one. Dearer because a nettle is a stalk with a strip of
+    // fibre in it and a boll is nothing but fibre -- and it is the cloth of
+    // the country cotton will not grow in, so the dearer bolt is the one
+    // within reach. The bast is a knife's work at the nettle bed (the
+    // server's `strip_nettle`).
+    Recipe {
+        name: "nettle cloth",
+        inputs: &[(crate::types::BLOCK_NETTLE_BAST, 6)],
+        output: (BLOCK_CLOTH, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
 ];
 
 /// Why a craft cannot happen, or that it can.
@@ -4207,7 +4324,9 @@ pub(crate) fn refuses(recipe: &Recipe, id: BlockId) -> bool {
         return false;
     }
     match block_kind(recipe.output.0) {
-        BLOCK_DOUGH => vessel_water(id) == crate::body::Water::Salt,
+        // ...and a must, for the dough's reason: honey in the sea is brine
+        // with a sweetness in it, and nothing ferments in brine.
+        BLOCK_DOUGH | crate::types::BLOCK_JUG_MUST => vessel_water(id) == crate::body::Water::Salt,
         // ...and the other way round for salt: boiling the river dry leaves
         // nothing, and a recipe that made salt out of it would make the coast
         // a detour nobody takes.
@@ -5016,6 +5135,11 @@ mod tests {
         // world rather than the world being wrong, which is exactly the
         // mistake a list like this invites.
         gettable.insert(block_kind(crate::types::BLOCK_TORCH_SPENT));
+        // ...a bowl held under a kept ewe (`husbandry`), and what a young
+        // cheese and a must become on their own (`ferment`).
+        gettable.insert(crate::types::BLOCK_BOWL_MILK);
+        gettable.insert(crate::types::BLOCK_CHEESE);
+        gettable.insert(crate::types::BLOCK_JUG_MEAD);
         for &(id, _) in crate::types::ALL_BLOCK_IDS {
             if let Some(ripe) = crate::types::ripens_into(id) {
                 gettable.insert(block_kind(ripe));
@@ -5395,8 +5519,17 @@ mod tests {
                 // ...and the fifteenth: tack, spent by being put on a horse.
                 // See `types::is_tack`.
                 let is_tack = crate::types::is_tack(r.output.0);
+                // ...and the sixteenth: a must or a young cheese, spent by
+                // becoming something else on its own (`ferment`) -- and the
+                // three things set on the ground and left to work
+                // (`snare`, `pitfall`, `saltpan`), spent by the world.
+                let is_working = crate::ferment::is_working(r.output.0)
+                    || crate::snare::is_snare(r.output.0)
+                    || crate::saltpan::is_pan(r.output.0)
+                    || crate::types::block_kind(r.output.0) == crate::types::BLOCK_PIT_COVER;
                 assert!(
                     is_tool
+                        || is_working
                         || is_tack
                         || is_instrument
                         || is_laid
@@ -7242,6 +7375,42 @@ mod tests {
             Crafted::Refused => None,
             made => Some(made),
         }
+    }
+
+    #[test]
+    fn mead_is_set_in_fresh_water_and_never_in_the_sea() {
+        use crate::types::{jug_of, BLOCK_HONEY, BLOCK_JUG_MUST};
+        let row = named("set mead");
+        let mut sea = Inventory::new();
+        sea.add(BLOCK_HONEY, 2);
+        sea.add(jug_of(crate::body::Water::Salt), 1);
+        assert!(!made(&mut sea, row, Heat::NONE), "honey was set to work in brine");
+        let mut river = Inventory::new();
+        river.add(BLOCK_HONEY, 2);
+        river.add(jug_of(crate::body::Water::Fresh), 1);
+        assert!(made(&mut river, row, Heat::NONE));
+        assert_eq!(river.count(BLOCK_JUG_MUST), 1);
+    }
+
+    #[test]
+    fn pemmican_feeds_what_its_meat_fed_keeps_a_month_and_weighs_a_fraction() {
+        use crate::food::{nutrition, rot_every, ROT_STAGES};
+        use crate::types::{block_weight, BLOCK_DRIED_MEAT, BLOCK_PEMMICAN};
+        let row = named("pemmican");
+        let made_worth = nutrition(BLOCK_PEMMICAN).unwrap() * row.output.1 as f32;
+        let meat_worth = nutrition(BLOCK_DRIED_MEAT).unwrap() * 2.0;
+        assert!(made_worth >= meat_worth, "pounding lost food: {made_worth} from {meat_worth}");
+        let days = rot_every(BLOCK_PEMMICAN) * u32::from(ROT_STAGES) / crate::food::ROT_STEPS_PER_DAY;
+        assert!(days >= 28, "pemmican keeps {days} days");
+        assert!(block_weight(BLOCK_PEMMICAN) < block_weight(BLOCK_DRIED_MEAT), "pemmican weighs more than the meat");
+    }
+
+    #[test]
+    fn a_nettle_bolt_costs_more_bast_than_a_cotton_bolt_costs_bolls() {
+        let nettle = named("nettle cloth");
+        let cotton = named("cloth");
+        assert_eq!(nettle.output, cotton.output, "the two rows make different cloth");
+        assert!(nettle.inputs[0].1 > cotton.inputs[0].1, "the north's cloth came cheaper than the south's");
     }
 
     #[test]

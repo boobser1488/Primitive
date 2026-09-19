@@ -1492,6 +1492,13 @@ mod tests {
                 // mouth would be a door that could not be opened.
                 "corpse",
                 "remains",
+                // ...and a pit's cover, which has to be walked onto as if it
+                // were the ground round it -- that is the trap (`pitfall`) --
+                // and a salt pan, a tray on the shore stepped into to fill it.
+                "pit_cover",
+                "salt_pan",
+                "salt_pan_brine",
+                "salt_pan_salt",
             ]
         );
         const { assert!(PLAYER_STEP_HEIGHT < 1.0) }; // or it walks up walls

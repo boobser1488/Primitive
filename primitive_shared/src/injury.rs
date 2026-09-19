@@ -63,7 +63,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{block_kind, BlockId, BLOCK_BANDAGE, BLOCK_POULTICE, BLOCK_SPLINT};
+use crate::types::{block_kind, BlockId, BLOCK_BANDAGE, BLOCK_POULTICE, BLOCK_SPLINT, BLOCK_WILLOW_BARK};
 
 /// How many parts a body is divided into.
 pub const PARTS: usize = 6;
@@ -173,6 +173,9 @@ pub enum Treatment {
     Bandage,
     Splint,
     Poultice,
+    /// Willow bark bound on a bruise. Last, because the wire and the saves
+    /// carry this by its place in the list.
+    WillowBark,
 }
 
 impl Treatment {
@@ -182,6 +185,7 @@ impl Treatment {
             BLOCK_BANDAGE => Some(Treatment::Bandage),
             BLOCK_SPLINT => Some(Treatment::Splint),
             BLOCK_POULTICE => Some(Treatment::Poultice),
+            BLOCK_WILLOW_BARK => Some(Treatment::WillowBark),
             _ => None,
         }
     }
@@ -198,6 +202,9 @@ impl Treatment {
             Treatment::Bandage => &[Kind::Cut, Kind::Burn],
             Treatment::Splint => &[Kind::Fracture],
             Treatment::Poultice => &[Kind::Burn],
+            // Bark on a bruise, and nothing else: it takes the swelling
+            // down, and it stops no blood and sets no bone.
+            Treatment::WillowBark => &[Kind::Bruise],
         }
     }
 
@@ -206,6 +213,7 @@ impl Treatment {
             Treatment::Bandage => "bandage",
             Treatment::Splint => "splint",
             Treatment::Poultice => "poultice",
+            Treatment::WillowBark => "willow bark",
         }
     }
 }
@@ -412,6 +420,20 @@ pub const BURN_MEND_SECONDS: f32 = 360.0;
 /// and a player who took the trouble to make the right thing for the job
 /// gets their health back sooner.
 pub const POULTICE_FACTOR: f32 = 3.0;
+
+/// How much faster willow bark bound on a bruise takes it down.
+///
+/// **Three times, and the reason is the next blow, not the health.** A
+/// bruise is the warning a break gives (`BRUISE_BREAKS_AT`): a heavy hit on
+/// a bruised limb breaks it. A bruise left alone is three minutes of a limb
+/// that will snap under the next boar; bark on it is one. So the bark is a
+/// decision about what to do between two fights -- stop and bind the leg, or
+/// walk on with the warning still on it -- and a player who carries a
+/// strip or two from the river's willows has the shorter answer.
+///
+/// Willow because the bark is what salicin was first taken from, chewed and
+/// bound on for pain and swelling long before it was a pill.
+pub const BARK_FACTOR: f32 = 3.0;
 
 // ---- falls ----
 
@@ -840,6 +862,7 @@ impl Injuries {
                 let seconds = match (kind, wound.dressed) {
                     (Kind::Cut, Some(_)) => Some(CUT_MEND_SECONDS),
                     (Kind::Cut, None) if heals_alone(kind, *wound) => Some(CUT_CLOT_SECONDS / CUT_CLOTS_BELOW),
+                    (Kind::Bruise, Some(Treatment::WillowBark)) => Some(BRUISE_SECONDS / BARK_FACTOR),
                     (Kind::Bruise, _) => Some(BRUISE_SECONDS),
                     (Kind::Fracture, Some(_)) => Some(crate::body::FRACTURE_SECONDS),
                     (Kind::Burn, Some(Treatment::Poultice)) => Some(BURN_MEND_SECONDS / POULTICE_FACTOR),
@@ -1015,6 +1038,24 @@ mod tests {
         // player could spend a stack on one bite.
         injuries.treat(Part::LeftLeg, BLOCK_BANDAGE).expect("the first one fits");
         assert_eq!(injuries.treat(Part::LeftLeg, BLOCK_BANDAGE), Err(Refusal::NothingItHelps));
+    }
+
+    #[test]
+    fn willow_bark_takes_a_bruise_down_in_a_third_of_the_time_and_dresses_nothing_else() {
+        let bruised = |bark: bool| {
+            let mut injuries = Injuries::default();
+            injuries.inflict(Part::LeftLeg, Kind::Bruise, 0.9);
+            if bark {
+                assert_eq!(injuries.treat(Part::LeftLeg, BLOCK_WILLOW_BARK), Ok(Kind::Bruise));
+            }
+            live(&mut injuries, 30.0, false);
+            injuries.wound(Part::LeftLeg, Kind::Bruise).severity
+        };
+        let (left, bound) = (0.9 - bruised(false), 0.9 - bruised(true));
+        assert!((bound / left - BARK_FACTOR).abs() < 0.05, "bark mended {bound} against {left}");
+        let mut cut = Injuries::default();
+        cut.inflict(Part::LeftArm, Kind::Cut, 0.5);
+        assert_eq!(cut.treat(Part::LeftArm, BLOCK_WILLOW_BARK), Err(Refusal::NothingItHelps), "bark stopped a bleed");
     }
 
     #[test]

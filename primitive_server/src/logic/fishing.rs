@@ -47,9 +47,35 @@ use std::time::Instant;
 use primitive_shared::fishing::{Strike, TRAP_HOLDS};
 use primitive_shared::protocol::{BlockChange, PlayerId};
 use primitive_shared::types::{block_kind, trap_catch, trap_holding, BlockId, BLOCK_FISH_TRAP};
+use primitive_shared::{saltpan, snare};
 use serde::{Deserialize, Serialize};
 
 use crate::logic::rng::Rng;
+
+/// What the place a set thing stands in is like, for one step of the clock:
+/// the three things this list steps, each asking its own question of the
+/// world (the tick's `fill_traps` asks it).
+///
+/// **One list for all three, and not a list each.** A snare and a salt pan
+/// are set and walked away from exactly as a fish trap is -- they fill on the
+/// rot clock, they must go on filling in a chunk nobody has loaded, and they
+/// join the list when they are set -- and the list, its file and its owed
+/// steps are already that. A second and third `traps.bin` would be the same
+/// code twice more with a different block in it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Setting {
+    /// A fish trap: the chance of a fish this step (`fishing::trap_chance`).
+    Water(f32),
+    /// A snare: the chance of a hare this step (`snare::catch_chance`).
+    Ground(f32),
+    /// A salt pan: the sky over it this step (`saltpan::step`).
+    Sky { rained_on: bool, roofed: bool, air_c: f32 },
+}
+
+/// Is this something the list steps: a fish trap, a snare, a salt pan?
+pub fn is_listed(block: BlockId) -> bool {
+    block_kind(block) == BLOCK_FISH_TRAP || snare::is_snare(block) || saltpan::is_pan(block)
+}
 
 /// Its own version, independent of the world's.
 const SAVE_FORMAT_VERSION: u32 = 1;
@@ -249,7 +275,7 @@ impl Fishing {
         let batch: Vec<TrapPos> = self.pending.drain(..budget.min(self.pending.len())).collect();
         for at in batch {
             let Some(block) = block_at(at) else { continue };
-            match (block_kind(block) == BLOCK_FISH_TRAP, self.traps.contains_key(&at)) {
+            match (is_listed(block), self.traps.contains_key(&at)) {
                 (true, false) => {
                     self.traps.insert(at, 0);
                     self.dirty = true;
@@ -264,26 +290,26 @@ impl Fishing {
     }
 
     /// One step of the rot clock over every trap. Hands back the traps that
-    /// took a fish, as the blocks to write.
+    /// changed, as the blocks to write.
     ///
-    /// `chance_at` answers what is in the cell and the chance of a fish in
-    /// one step there (`fishing::trap_chance`): `None` for a chunk nobody has
-    /// loaded, which is owed the step rather than skipped.
-    pub fn step_traps(
-        &mut self,
-        mut chance_at: impl FnMut(TrapPos) -> Option<(BlockId, f32)>,
-    ) -> Vec<BlockChange> {
+    /// `read` answers what is in the cell and what the place is like for
+    /// whatever is set there ([`Setting`]): `None` for a chunk nobody has
+    /// loaded, which is owed the step rather than skipped -- a snare and a
+    /// salt pan on the same terms as a fish trap, because each is a thing
+    /// set and walked away from.
+    pub fn step_traps(&mut self, mut read: impl FnMut(TrapPos) -> Option<(BlockId, Setting)>) -> Vec<BlockChange> {
         let mut changes = Vec::new();
         let mut gone = Vec::new();
+        let rng = &mut self.rng;
         for (&at, owed) in self.traps.iter_mut() {
-            let Some((block, chance)) = chance_at(at) else {
+            let Some((block, setting)) = read(at) else {
                 if *owed < OWED_STEPS_MAX {
                     *owed += 1;
                     self.dirty = true;
                 }
                 continue;
             };
-            if block_kind(block) != BLOCK_FISH_TRAP {
+            if !is_listed(block) {
                 gone.push(at);
                 continue;
             }
@@ -292,21 +318,32 @@ impl Fishing {
                 *owed = 0;
                 self.dirty = true;
             }
-            let mut fish = trap_catch(block);
+            let mut now = block;
             for _ in 0..steps {
-                if fish >= TRAP_HOLDS {
-                    break;
-                }
-                if self.rng.chance(chance) {
-                    fish += 1;
-                }
+                now = match (block_kind(now), setting) {
+                    (BLOCK_FISH_TRAP, Setting::Water(chance)) => {
+                        let fish = trap_catch(now);
+                        if fish < TRAP_HOLDS && rng.chance(chance) {
+                            trap_holding(fish + 1)
+                        } else {
+                            now
+                        }
+                    }
+                    (_, Setting::Ground(chance)) if snare::is_snare(now) => snare::step(now, chance, rng.next_f32()),
+                    (_, Setting::Sky { rained_on, roofed, air_c }) if saltpan::is_pan(now) => {
+                        saltpan::step(now, rained_on, roofed, air_c)
+                    }
+                    // A setting that does not fit the thing -- the world
+                    // changed between the read and here -- changes nothing.
+                    _ => now,
+                };
             }
-            if fish != trap_catch(block) {
+            if now != block {
                 changes.push(BlockChange {
                     global_x: at.0,
                     global_y: at.1,
                     global_z: at.2,
-                    block_id: trap_holding(fish),
+                    block_id: now,
                 });
             }
         }
@@ -589,12 +626,39 @@ mod tests {
     }
 
     #[test]
+    fn a_snare_and_a_salt_pan_are_listed_and_stepped_as_a_trap_is() {
+        use primitive_shared::types::{BLOCK_SALT_PAN_SALT, BLOCK_SNARE, BLOCK_SNARE_SPRUNG};
+        let mut fishing = Fishing::seeded(9);
+        listed(&mut fishing, BLOCK_SNARE);
+        assert_eq!(fishing.traps(), 1, "a snare was not listed");
+        // A certain catch, then a day in the noose: robbed.
+        let mut block = BLOCK_SNARE;
+        for _ in 0..8 {
+            for change in fishing.step_traps(|_| Some((block, Setting::Ground(1.0)))) {
+                block = change.block_id;
+            }
+        }
+        assert_eq!(block, BLOCK_SNARE_SPRUNG, "a hare left out for two days was still in the snare");
+        // A pan of the sea under a warm dry sky is a crust in a day, and owed
+        // steps count while nobody has the shore loaded.
+        let mut pans = Fishing::seeded(9);
+        let brine = saltpan::brine(0);
+        listed(&mut pans, brine);
+        for _ in 0..3 {
+            assert!(pans.step_traps(|_| None).is_empty());
+        }
+        let sky = Setting::Sky { rained_on: false, roofed: false, air_c: 28.0 };
+        let changes = pans.step_traps(|_| Some((brine, sky)));
+        assert_eq!(changes.first().map(|c| c.block_id), Some(BLOCK_SALT_PAN_SALT), "the owed sun dried nothing");
+    }
+
+    #[test]
     fn a_trap_in_good_water_fills_and_stops_at_what_it_holds() {
         let mut fishing = Fishing::seeded(5);
         listed(&mut fishing, BLOCK_FISH_TRAP);
         let mut block = BLOCK_FISH_TRAP;
         for _ in 0..100 {
-            for change in fishing.step_traps(|_| Some((block, 1.0))) {
+            for change in fishing.step_traps(|_| Some((block, Setting::Water(1.0)))) {
                 block = change.block_id;
             }
         }
@@ -607,7 +671,7 @@ mod tests {
         let mut fishing = Fishing::seeded(5);
         listed(&mut fishing, BLOCK_FISH_TRAP);
         for _ in 0..400 {
-            assert!(fishing.step_traps(|_| Some((BLOCK_FISH_TRAP, 0.0))).is_empty(), "a fish in a puddle");
+            assert!(fishing.step_traps(|_| Some((BLOCK_FISH_TRAP, Setting::Water(0.0)))).is_empty(), "a fish in a puddle");
         }
     }
 
@@ -618,11 +682,11 @@ mod tests {
         for _ in 0..OWED_STEPS_MAX + 5 {
             assert!(fishing.step_traps(|_| None).is_empty());
         }
-        let changes = fishing.step_traps(|_| Some((BLOCK_FISH_TRAP, 1.0)));
+        let changes = fishing.step_traps(|_| Some((BLOCK_FISH_TRAP, Setting::Water(1.0))));
         assert_eq!(changes.len(), 1, "a trap out of sight for three days came back empty");
         assert_eq!(trap_catch(changes[0].block_id), TRAP_HOLDS);
         // ...and what it was owed is paid once, not again.
-        let again = fishing.step_traps(|_| Some((BLOCK_FISH_TRAP, 0.0)));
+        let again = fishing.step_traps(|_| Some((BLOCK_FISH_TRAP, Setting::Water(0.0))));
         assert!(again.is_empty(), "the owed steps were paid twice");
     }
 

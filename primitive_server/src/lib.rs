@@ -891,6 +891,51 @@ impl Server {
         self.ctx.wildfire.lock().unwrap_or_else(|e| e.into_inner()).set_smoke(hearth, thickness);
     }
 
+    /// One step of the rot clock over every trap, snare and salt pan, now,
+    /// in the weather the sky has -- the step the tick loop's rot pass takes
+    /// four times a day (`fill_traps`). For the scenarios, which cannot wait
+    /// a quarter of a day for a hare.
+    pub fn step_traps(&self) {
+        let weather = self.ctx.sky.lock().unwrap_or_else(|e| e.into_inner()).weather();
+        fill_traps(&self.ctx, self.ctx.clock.time_of_day(), weather);
+    }
+
+    /// `steps` of the rot clock's slow changes -- a cheese ripening, a must
+    /// working, a pot drying (`rot::Rot::cure_inventory`) -- over the one
+    /// player's pack, in air at `temperature_c` and otherwise the air they
+    /// stand in. For the scenarios: a cellar is a temperature, and two days
+    /// in one is not a thing a test waits for.
+    pub fn work_pack(&self, steps: u64, temperature_c: f32) {
+        let Some(handle) = self.ctx.registry.handles().into_iter().next() else {
+            return;
+        };
+        {
+            let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+            let air = logic::climate::Ambient { temperature_c, ..state.ambient };
+            for step in 1..=steps {
+                logic::rot::Rot::cure_inventory(&mut state.inventory, step, &air);
+            }
+            state.inventory_dirty = true;
+        }
+        send_inventory(&handle);
+    }
+
+    /// The one player's body temperature, in `body`'s degrees.
+    pub fn player_body_c(&self) -> Option<f32> {
+        let handle = self.ctx.registry.handles().into_iter().next()?;
+        let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        Some(state.vitals.temperature())
+    }
+
+    /// Sets the one player's body temperature, as a cold night would have.
+    pub fn chill_player(&self, body_c: f32) {
+        if let Some(handle) = self.ctx.registry.handles().into_iter().next() {
+            let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+            let wet = state.vitals.wetness();
+            state.vitals.set_warmth(body_c, wet);
+        }
+    }
+
     /// Runs until something stops it (`/stop`, or `request_shutdown`),
     /// then disconnects players and saves.
     pub async fn wait(self) {
@@ -2166,6 +2211,7 @@ async fn tick_loop(ctx: Arc<Context>) {
                     low: state.sitting_on.is_some() || state.sleeping_in.is_some() || state.rowing.is_some(),
                     wounded: state.vitals.health() < logic::survival::MAX_HEALTH * 0.5,
                     held: state.inventory.block_in(state.selected_slot),
+                    reek: state.equipment.reek(),
                 });
                 // At the hearth, which is the station, with the hands a
                 // cook uses: see `quality::Maker::craft` for why no tool
@@ -2436,7 +2482,7 @@ async fn tick_loop(ctx: Arc<Context>) {
                     weather != primitive_shared::weather::Weather::Clear,
                 )
             };
-            let (blows, births, deaths, fallen, staked, dung) = {
+            let (blows, births, deaths, fallen, staked, dung, heavy) = {
                 let mut animals = ctx.animals.lock().unwrap_or_else(|e| e.into_inner());
                 animals.carrying_fire(std::mem::take(&mut fire_bearers));
                 animals.player_signs(std::mem::take(&mut player_signs));
@@ -2460,8 +2506,14 @@ async fn tick_loop(ctx: Arc<Context>) {
                     animals.take_fallen(),
                     animals.take_staked(),
                     animals.take_dung(),
+                    animals.heavy_feet(),
                 )
             };
+            // **A pit's cover gives way under a deer, and under a person**
+            // (`pitfall`): every heavy animal and every player, where they
+            // stand after the step. Written with the animals' lock let go,
+            // for the carcasses' reason.
+            collapse_pit_covers(&ctx, heavy.iter().chain(where_everyone_is.iter().map(|(_, at)| at)).copied());
             for at in staked {
                 broadcast_staked(&ctx, at);
             }
@@ -5695,6 +5747,17 @@ pub(crate) fn use_block(
         empty_trap(ctx, handle, at, block);
         return;
     }
+    // **A snare with a hare in it, or one a fox has robbed**, whatever is in
+    // the hand, on the trap's argument: see `tend_snare`.
+    if primitive_shared::snare::is_snare(block) {
+        tend_snare(ctx, handle, at, block);
+        return;
+    }
+    // **A salt pan**, filled from a jug of the sea or scraped: `tend_pan`.
+    if primitive_shared::saltpan::is_pan(block) {
+        tend_pan(ctx, handle, at, block);
+        return;
+    }
 
     // **A thing set down is taken back**, with whatever is in the hand: the
     // hand that laid a knife on a stone is usually holding the next thing.
@@ -6155,9 +6218,26 @@ pub(crate) fn tap_trunk(
     if !bleeding {
         return Some(Err("this trunk has been scored: it has no more resin for now"));
     }
+    // **A birch and a willow give their bark, and the rest their resin.**
+    // Neither is a resinous tree -- the pitch a torch is wadded with bleeds
+    // out of a conifer, and a birch's white bark is what tar is cooked from
+    // (`crafting`, "distil tar"), a willow's what a bruise is bound with
+    // (`injury::Treatment::WillowBark`). The same cut, the same ten minutes
+    // before the trunk gives again: the difference is which tree the
+    // player walked to, which is the whole of what makes a birch wood and a
+    // river's willows two places.
+    //
+    // Rejected: bark *and* resin off every trunk. A knife that took two
+    // things off one tree would make the tree a second answer to the
+    // question the other trees already answer.
+    let taken = match block_kind(block) {
+        primitive_shared::types::BLOCK_BIRCH_LOG => primitive_shared::types::BLOCK_BIRCH_BARK,
+        primitive_shared::types::BLOCK_WILLOW_LOG => primitive_shared::types::BLOCK_WILLOW_BARK,
+        _ => BLOCK_RESIN,
+    };
     let (spare, slot, held) = {
         let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-        let spare = state.inventory.add(BLOCK_RESIN, 1);
+        let spare = state.inventory.add(taken, 1);
         state.inventory_dirty = true;
         let slot = state.selected_slot;
         let _ = state.inventory.wear_tool(slot);
@@ -6166,7 +6246,7 @@ pub(crate) fn tap_trunk(
     if spare > 0 {
         let feet = handle.state.lock().unwrap_or_else(|e| e.into_inner()).position;
         ctx.items.lock().unwrap_or_else(|e| e.into_inner()).spawn(
-            BLOCK_RESIN,
+            taken,
             spare,
             (feet.0, (feet.1 + 0.5), feet.2),
             (0.0, 0.0, 0.0),
@@ -11025,6 +11105,149 @@ fn empty_trap(
     land_fish(ctx, handle, u32::from(caught));
 }
 
+/// Takes away every pit cover somebody heavy is standing on, if there is a
+/// hole under it (`pitfall::gives_way`), and says so to everybody.
+///
+/// **The cell the feet are in, read a hair below them**: a cover is an
+/// eighth of a block deep, so a deer standing on one has its feet an eighth
+/// above the cell's floor, inside the cover's cell. Only that cell -- a body
+/// is not asked about the four it overlaps, because a trap that caught
+/// whatever brushed its edge would be a trap nobody could walk round.
+pub(crate) fn collapse_pit_covers(ctx: &Arc<Context>, feet: impl Iterator<Item = (f32, f32, f32)>) {
+    let mut written = Vec::new();
+    for at in feet {
+        let (x, y, z) = (at.0.floor() as i32, (at.1 - 0.05).floor() as i32, at.2.floor() as i32);
+        let (Some(cover), Some(below)) = (ctx.world.cached_block(x, y, z), ctx.world.cached_block(x, y - 1, z)) else {
+            continue;
+        };
+        if !primitive_shared::pitfall::gives_way(cover, below) {
+            continue;
+        }
+        if !ctx.world.set_block(x, y, z, primitive_shared::types::BLOCK_AIR) {
+            continue;
+        }
+        ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+        notify_mechanics(ctx, x, y, z);
+        written.push(primitive_shared::protocol::BlockChange { global_x: x, global_y: y, global_z: z, block_id: primitive_shared::types::BLOCK_AIR });
+    }
+    if !written.is_empty() {
+        broadcast_changes(ctx, written);
+    }
+}
+
+/// A hand at a snare: the hare laid on the ground where it hung and the
+/// snare into the pack, or a robbed snare set again (`snare`).
+///
+/// **The hare is a carcass in the snare's own cell**, the one a speared hare
+/// would have left, and butchered there with a knife: the snare took the
+/// chase out of the hunt, not the knife. The snare goes into the pack rather
+/// than staying set, because the place it caught in is the place a player
+/// may now want to move it from -- and setting it again is one placement.
+pub(crate) fn tend_snare(
+    ctx: &Arc<Context>,
+    handle: &Arc<players::PlayerHandle>,
+    at: (i32, i32, i32),
+    block: primitive_shared::types::BlockId,
+) {
+    use primitive_shared::types::{block_kind, BLOCK_SNARE, BLOCK_SNARE_CAUGHT, BLOCK_SNARE_SPRUNG};
+    let now = match block_kind(block) {
+        BLOCK_SNARE_CAUGHT => primitive_shared::animals::carcass_at_stage(primitive_shared::animals::Species::Hare, 0),
+        BLOCK_SNARE_SPRUNG => BLOCK_SNARE,
+        _ => {
+            handle.send(ServerMessage::Error("nothing has come to the snare yet".to_string()));
+            return;
+        }
+    };
+    if !ctx.world.set_block(at.0, at.1, at.2, now) {
+        return;
+    }
+    ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+    notify_mechanics(ctx, at.0, at.1, at.2);
+    broadcast_block(ctx, at, now);
+    if block_kind(block) == BLOCK_SNARE_CAUGHT {
+        land_catch(ctx, handle, BLOCK_SNARE, 1);
+    }
+}
+
+/// A hand at a salt pan: a jug of the sea poured into an empty one, or the
+/// crust scraped out of a dry one (`saltpan`).
+///
+/// A jug of river water is refused and said so, as the boiling row refuses
+/// it: fresh water dries to nothing, and a pan that took it would be a day
+/// of waiting for a player to find that out.
+pub(crate) fn tend_pan(
+    ctx: &Arc<Context>,
+    handle: &Arc<players::PlayerHandle>,
+    at: (i32, i32, i32),
+    block: primitive_shared::types::BlockId,
+) {
+    use primitive_shared::types::{
+        block_kind, vessel_water, BLOCK_JUG, BLOCK_JUG_WATER, BLOCK_SALT, BLOCK_SALT_PAN, BLOCK_SALT_PAN_SALT,
+    };
+    match block_kind(block) {
+        BLOCK_SALT_PAN_SALT => {
+            if !ctx.world.set_block(at.0, at.1, at.2, BLOCK_SALT_PAN) {
+                return;
+            }
+            ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+            notify_mechanics(ctx, at.0, at.1, at.2);
+            broadcast_block(ctx, at, BLOCK_SALT_PAN);
+            land_catch(ctx, handle, BLOCK_SALT, primitive_shared::saltpan::YIELD);
+        }
+        BLOCK_SALT_PAN => {
+            let (slot, held) = {
+                let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+                (state.selected_slot, state.inventory.block_in(state.selected_slot))
+            };
+            let Some(jug) = held.filter(|&b| block_kind(b) == BLOCK_JUG_WATER) else {
+                handle.send(ServerMessage::Error("a salt pan is filled from a jug of the sea".to_string()));
+                return;
+            };
+            if vessel_water(jug) != primitive_shared::body::Water::Salt {
+                handle.send(ServerMessage::Error("that is fresh water: it dries to nothing".to_string()));
+                return;
+            }
+            let brine = primitive_shared::saltpan::brine(0);
+            if !ctx.world.set_block(at.0, at.1, at.2, brine) {
+                return;
+            }
+            ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+            notify_mechanics(ctx, at.0, at.1, at.2);
+            broadcast_block(ctx, at, brine);
+            let (spare, left, feet) = {
+                let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.inventory.take_from(slot, 1);
+                // Into the slot the full one left, if it is empty now; a
+                // stack of full jugs keeps its slot and the empty one goes
+                // wherever there is room.
+                let spare = if state.inventory.block_in(slot).is_none() {
+                    state.inventory.put_in_slot(slot, primitive_shared::inventory::Stack::new(BLOCK_JUG, 1)).map_or(0, |s| s.count)
+                } else {
+                    state.inventory.add(BLOCK_JUG, 1)
+                };
+                state.inventory_dirty = true;
+                (spare, state.inventory.block_in(slot), state.position)
+            };
+            if spare > 0 {
+                ctx.items.lock().unwrap_or_else(|e| e.into_inner()).spawn(
+                    BLOCK_JUG,
+                    spare,
+                    (feet.0, feet.1 + 0.5, feet.2),
+                    (0.0, 0.0, 0.0),
+                    None,
+                    Instant::now(),
+                );
+            }
+            held_slot_changed(ctx, handle.id, slot, left);
+            send_inventory(handle);
+            refresh_carried_weight(handle);
+        }
+        _ => {
+            handle.send(ServerMessage::Error("the pan is still drying".to_string()));
+        }
+    }
+}
+
 /// `count` raw fish into a player's pack, and what will not fit at their
 /// feet. What a trap ends in; a rod lands a *species*, whose drops are
 /// whatever that fish is worth -- see `land_catch`.
@@ -11086,12 +11309,59 @@ fn land_catch(
 /// the water) and then the traps. The blocks are written with both let go,
 /// because `notify_mechanics` takes the traps' lock again.
 pub(crate) fn fill_traps(ctx: &Arc<Context>, world_time: f32, weather: primitive_shared::weather::Weather) {
-    use primitive_shared::fishing;
+    use logic::fishing::Setting;
+    use primitive_shared::{fishing, saltpan, snare};
+    // Where everybody is, read before the locks below: a hare keeps off a
+    // person (`snare::KEEPS_OFF`), and no player's state is held under the
+    // traps' lock.
+    let people: Vec<(f32, f32, f32)> = ctx
+        .registry
+        .handles()
+        .iter()
+        .map(|h| primitive_shared::geometry::narrow(h.state.lock().unwrap_or_else(|e| e.into_inner()).position))
+        .collect();
     let changes = {
         let fires = ctx.fires.lock().unwrap_or_else(|e| e.into_inner());
         let mut traps = ctx.fishing.lock().unwrap_or_else(|e| e.into_inner());
         traps.step_traps(|at| {
             let block = ctx.world.cached_block(at.0, at.1, at.2)?;
+            let centre = (at.0 as f32 + 0.5, at.1 as f32 + 0.5, at.2 as f32 + 0.5);
+            // **A snare**: the cover round it, the snares beside it, and
+            // whether anybody is near enough for a hare to smell.
+            if snare::is_snare(block) {
+                let (mut cover, mut cells, mut neighbours) = (0u32, 0u32, 0u32);
+                let reach = snare::COVER_REACH.max(snare::SHARED_RUN);
+                for dx in -reach..=reach {
+                    for dz in -reach..=reach {
+                        if (dx, dz) == (0, 0) {
+                            continue;
+                        }
+                        let (x, z) = (at.0 + dx, at.2 + dz);
+                        if dx.abs() <= snare::COVER_REACH && dz.abs() <= snare::COVER_REACH {
+                            cells += 1;
+                            if (at.1..=at.1 + 1).any(|y| ctx.world.cached_block(x, y, z).is_some_and(snare::is_cover)) {
+                                cover += 1;
+                            }
+                        }
+                        if (at.1 - 1..=at.1 + 1).any(|y| ctx.world.cached_block(x, y, z).is_some_and(snare::is_snare)) {
+                            neighbours += 1;
+                        }
+                    }
+                }
+                let near = people.iter().any(|p| {
+                    (p.0 - centre.0).hypot(p.2 - centre.2) < snare::KEEPS_OFF && (p.1 - centre.1).abs() < snare::KEEPS_OFF
+                });
+                let chance = snare::catch_chance(cover as f32 / cells.max(1) as f32, near, neighbours);
+                return Some((block, Setting::Ground(chance)));
+            }
+            // **A salt pan**: the rain on it, a roof over it, the air.
+            if saltpan::is_pan(block) {
+                let air = climate::Ambient::of(&ctx.world, &fires, centre, world_time, weather);
+                return Some((
+                    block,
+                    Setting::Sky { rained_on: air.getting_wet, roofed: air.sheltered, air_c: air.temperature_c },
+                ));
+            }
             let chance = match fishing::trap_water(|x, y, z| ctx.world.cached_block(x, y, z), at) {
                 None => 0.0,
                 Some((spot, side)) => {
@@ -11110,7 +11380,7 @@ pub(crate) fn fill_traps(ctx: &Arc<Context>, world_time: f32, weather: primitive
                     fishing::trap_chance(spot, water_kind(ctx, side, water), air)
                 }
             };
-            Some((block, chance))
+            Some((block, Setting::Water(chance)))
         })
     };
     let mut written = Vec::with_capacity(changes.len());
@@ -13956,6 +14226,32 @@ pub(crate) const NETTLE_STING: f32 = 1.0;
 /// but to distrust the world; at two health or less the nettle is pulled and
 /// nothing happens, which a player that low has more pressing things to learn
 /// from.
+/// A nettle cut with a blade: one strip of bast where the stalk stood, in
+/// place of the handful of fibre the drop table gives. Answers whether it
+/// did, so the break path knows not to drop the fibre as well.
+///
+/// One strip for the whole plant -- the other half of a tall nettle goes
+/// with it giving nothing (`break_bed_partner`), as it always has.
+pub(crate) fn strip_nettle(
+    ctx: &Arc<Context>,
+    broken: primitive_shared::types::BlockId,
+    held: Option<primitive_shared::types::BlockId>,
+    at: (i32, i32, i32),
+) -> bool {
+    if !primitive_shared::types::strips_bast(broken, held) {
+        return false;
+    }
+    ctx.items.lock().unwrap_or_else(|e| e.into_inner()).spawn(
+        primitive_shared::types::BLOCK_NETTLE_BAST,
+        1,
+        (f64::from(at.0) + 0.5, f64::from(at.1) + 0.5, f64::from(at.2) + 0.5),
+        (0.0, 0.0, 0.0),
+        None,
+        Instant::now(),
+    );
+    true
+}
+
 pub(crate) fn sting_from_nettle(
     handle: &Arc<players::PlayerHandle>,
     broken: primitive_shared::types::BlockId,
@@ -17150,6 +17446,22 @@ mod fire_gesture_tests {
         // costs nothing.
         use_block(&ctx, &handle, FIRE);
         assert_eq!(handle.state.lock().unwrap().inventory.count(BLOCK_FLINT), 2, "a strike at a lit fire spent flint");
+    }
+
+    #[test]
+    fn a_knife_peels_bark_off_a_birch_and_a_willow_and_resin_off_the_rest() {
+        use primitive_shared::types::{
+            BLOCK_BIRCH_BARK, BLOCK_BIRCH_LOG, BLOCK_FLINT_KNIFE, BLOCK_RESIN, BLOCK_WILLOW_BARK, BLOCK_WILLOW_LOG,
+        };
+        for (trunk, yields) in [(BLOCK_BIRCH_LOG, BLOCK_BIRCH_BARK), (BLOCK_WILLOW_LOG, BLOCK_WILLOW_BARK)] {
+            let (ctx, handle, _rx) = a_hunter();
+            assert!(ctx.world.set_block(FIRE.0, FIRE.1, FIRE.2, trunk));
+            hold(&handle, Some(Stack::new(BLOCK_FLINT_KNIFE, 1)));
+            use_block(&ctx, &handle, FIRE);
+            let pack = &handle.state.lock().unwrap().inventory;
+            assert_eq!(pack.count(yields), 1, "the trunk gave no bark");
+            assert_eq!(pack.count(BLOCK_RESIN), 0, "a hardwood bled resin");
+        }
     }
 
     #[test]
