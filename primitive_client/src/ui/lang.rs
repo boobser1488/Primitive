@@ -812,6 +812,11 @@ pub enum Msg {
     StallNoRoom,
     StallTillFull,
     StallBadOffer,
+    // ---- the sawhorse and the honing stone ----
+    //
+    // The two new stations' headings. Their jobs are names, like the anvil's.
+    SawhorseTitle,
+    HoningTitle,
 }
 
 /// One line of interface text, in every language at once.
@@ -1323,6 +1328,8 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::StallNoRoom,  en: "no room in your pack", simple: "your bag is full", ru: "нет места в рюкзаке", pl: "brak miejsca w plecaku" },
     Line { msg: Msg::StallTillFull, en: "the takings are full - the owner must empty them", simple: "the table is full of payments - the owner must take them", ru: "выручке нет места - хозяину пора её забрать", pl: "utarg pełny - właściciel musi go zabrać" },
     Line { msg: Msg::StallBadOffer, en: "that is not a price", simple: "that swap cannot be", ru: "такой цены быть не может", pl: "to nie jest cena" },
+    Line { msg: Msg::SawhorseTitle, en: "SAWHORSE", simple: "SAWING TRESTLE", ru: "КОЗЛЫ", pl: "KOZIOŁ STOLARSKI" },
+    Line { msg: Msg::HoningTitle, en: "HONING STONE", simple: "SHARPENING STONE", ru: "ТОЧИЛЬНАЯ КОЛОДА", pl: "KAMIEŃ SZLIFIERSKI" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as

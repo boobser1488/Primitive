@@ -720,6 +720,14 @@ pub fn station_blow(game: primitive_shared::minigame::Game) -> Sfx {
     match game {
         Game::Anvil => Sfx::WorkAnvil,
         Game::Wheel => Sfx::WorkWheel,
+        // **Recordings the bank already has, and nothing drawn for the
+        // occasion.** A saw's stroke is the joiner's bench -- wood worked
+        // with an edge -- and a blade drawn along a slab of sandstone is the
+        // mason's block, stone rubbed on stone. A synthesised rasp would be
+        // the chiptune this game's sound refuses: a note taken, not a thing
+        // disturbed.
+        Game::Saw => Sfx::WorkBench,
+        Game::Whet => Sfx::WorkMason,
     }
 }
 

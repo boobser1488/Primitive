@@ -615,6 +615,11 @@ leather_bench = { all = "terrain/planks.png", item = "furniture/leather_bench_it
 # The barter stall: a model (`furniture/stall.bbmodel`), so its faces are the
 # crumbs' planks and its one picture of its own is the icon.
 stall = { all = "terrain/planks.png", item = "furniture/stall_item.png" }
+# The two stations of the edge: models (`workstations/sawhorse.bbmodel`,
+# `workstations/honing_stone.bbmodel`), so each face row is only the far
+# picture, and the one picture of each's own is the icon.
+sawhorse = { all = "terrain/planks.png", item = "furniture/sawhorse_item.png" }
+honing_stone = { all = "terrain/sandstone.png", item = "furniture/honing_stone_item.png" }
 
 # ---- the smith and the joiner ----
 #
@@ -634,6 +639,11 @@ bronze_hammer = "tools/bronze_hammer.png"
 iron_hammer = "tools/iron_hammer.png"
 flint_chisel = "tools/flint_chisel.png"
 bronze_chisel = "tools/bronze_chisel.png"
+# The saws: one picture recoloured three times, the knives' metals, because a
+# saw of another metal is the same saw.
+copper_saw = "tools/copper_saw.png"
+bronze_saw = "tools/bronze_saw.png"
+iron_saw = "tools/iron_saw.png"
 # Stairs and the three roofs (`types::BLOCK_PLANK_STAIRS`). A step wears one
 # picture on every face of its two boxes, cropped rather than squeezed, so
 # the planks and the cobbles are the wall's own and cost no layer; what a

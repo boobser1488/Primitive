@@ -136,13 +136,24 @@ pub const SPEAR_THRUST: f32 = 15.0;
 /// * the spears, whose point is a point and whose paste lives in the bit this
 ///   would need;
 /// * the two hoes, which are implements rather than tools (`types::is_implement`)
-///   and are worn by the furrow rather than by a swing.
+///   and are worn by the furrow rather than by a swing;
+/// * the flint chisel, for the flint knife's reason;
+/// * the hammers, which have a face and not an edge.
+///
+/// **The bronze chisel and the three saws are here**, and they are worn by
+/// the work they are held for (`crafting::used_tool`, the sawhorse) rather
+/// than by a swing -- a point of wear a board or a log. Their steps are
+/// counted on the same wear, so a saw dulls after thirty logs of copper as an
+/// axe does after thirty trees, and a dull one is what the sawhorse feels
+/// (`minigame::tolerance`) and the bench's quality roll reads
+/// (`crafting::tool_goodness`).
 pub fn edge_swings(id: BlockId) -> Option<u32> {
+    use crate::types::{BLOCK_BRONZE_CHISEL, BLOCK_BRONZE_SAW, BLOCK_COPPER_SAW, BLOCK_IRON_SAW};
     let base = match block_kind(id) {
         BLOCK_STONE_AXE | BLOCK_STONE_PICKAXE | BLOCK_WEDGED_AXE | BLOCK_WEDGED_PICKAXE => 30,
-        BLOCK_COPPER_KNIFE | BLOCK_COPPER_AXE | BLOCK_COPPER_PICKAXE | BLOCK_COPPER_SHOVEL => 30,
-        BLOCK_BRONZE_KNIFE | BLOCK_BRONZE_AXE | BLOCK_BRONZE_PICKAXE => 80,
-        BLOCK_IRON_KNIFE | BLOCK_IRON_AXE | BLOCK_IRON_PICKAXE => 70,
+        BLOCK_COPPER_KNIFE | BLOCK_COPPER_AXE | BLOCK_COPPER_PICKAXE | BLOCK_COPPER_SHOVEL | BLOCK_COPPER_SAW => 30,
+        BLOCK_BRONZE_KNIFE | BLOCK_BRONZE_AXE | BLOCK_BRONZE_PICKAXE | BLOCK_BRONZE_SAW | BLOCK_BRONZE_CHISEL => 80,
+        BLOCK_IRON_KNIFE | BLOCK_IRON_AXE | BLOCK_IRON_PICKAXE | BLOCK_IRON_SAW => 70,
         _ => return None,
     };
     Some(if is_hardened(id) { base * STEEL_EDGE } else { base })
@@ -268,6 +279,69 @@ pub fn hone(stack: Stack) -> Stack {
     .with_quality(stack.quality())
 }
 
+/// How much of a sharp tool's work this one still does, 0.5..1: the same
+/// share the edge takes off digging ([`speed`]) and cutting
+/// ([`blade_factor`]). One for anything that takes no edge.
+///
+/// Public for the places the edge reaches that are not a swing: the width
+/// of a saw's sweet spot at the sawhorse (`minigame::tolerance`) and how
+/// good a chisel's work is at the bench (`crafting::tool_goodness`).
+pub fn edge_factor(id: BlockId) -> f32 {
+    EDGE_SPEED[blunt_step(id) as usize]
+}
+
+/// A tool honed at the honing stone, by a hand whose run came to `verdict`
+/// (`minigame::Game::Whet`).
+///
+/// **A fair run is exactly the whetstone's hone** ([`hone`]): sharp, and
+/// worn on to the next boundary of its edge. The mini-game is never a worse
+/// deal than the menu -- the promise `minigame::verdict` makes for every
+/// station.
+///
+/// **A fine run takes the edge back with almost no metal**: sharp, and worn
+/// a quarter of the way to the boundary instead of all of it. What it gives
+/// up is the length of the new edge -- the next step still falls on the
+/// boundary (`after_a_swing` counts on the wear), so a tool honed finely
+/// dulls again sooner. That is the trade a careful grinder makes for real:
+/// a stroke that takes off a whisker of steel sets a fine edge on the old
+/// bevel, and it is the bevel that wears away. Over the life of the tool it
+/// is strictly more swings; in the day it is another trip to the stone.
+///
+/// **A ruined run grinds the metal and misses the bevel**: worn on to the
+/// boundary as the whetstone would, and only one step sharper.
+///
+/// Rejected: *a fine hone that also lengthened the new edge*. The edge is
+/// counted on the wear with no second counter (see the module note), so a
+/// longer edge could only be wear given back -- a tool that lived longer the
+/// more often it was sharpened, which is the "hone that restores wear"
+/// already turned down above.
+pub fn hone_by(stack: Stack, verdict: crate::minigame::Verdict) -> Stack {
+    use crate::minigame::Verdict;
+    let Some(edge) = edge_swings(stack.block) else {
+        return stack;
+    };
+    let step = blunt_step(stack.block);
+    match verdict {
+        Verdict::Fair => hone(stack),
+        Verdict::Ruined => {
+            let honed = hone(stack);
+            Stack { block: with_edge(honed.block, step.saturating_sub(1)), ..honed }
+        }
+        Verdict::Fine => {
+            let life = stack.life().unwrap_or(u32::MAX);
+            let wear = stack.wear();
+            let next = (wear / edge + 1).saturating_mul(edge);
+            let ground = (next - wear) / 4;
+            Stack {
+                block: with_edge(stack.block, 0),
+                count: stack.count,
+                damage: (wear + ground).min(life.saturating_sub(1)).max(wear),
+            }
+            .with_quality(stack.quality())
+        }
+    }
+}
+
 /// How hard a blade cuts, as a multiple of a punch, before the edge.
 ///
 /// **The numbers the hunt was balanced against**, kept when the mining ladder
@@ -354,6 +428,34 @@ mod tests {
             assert!(honed.damage >= damage, "honing at {damage} gave wear back");
             assert!(honed.damage < life, "honing at {damage} broke the pick");
         }
+    }
+
+    #[test]
+    fn a_fine_hand_at_the_stone_grinds_less_than_the_whetstone_and_a_ruined_one_no_less() {
+        use crate::minigame::Verdict;
+        let edge = edge_swings(BLOCK_BRONZE_AXE).unwrap();
+        let life = tool_durability(BLOCK_BRONZE_AXE).unwrap();
+        for wear in [edge, edge + 3, 2 * edge + edge / 2, life - 2] {
+            let dull = Stack::worn(with_edge(BLOCK_BRONZE_AXE, 2), 1, wear);
+            let fair = hone_by(dull, Verdict::Fair);
+            let fine = hone_by(dull, Verdict::Fine);
+            let ruined = hone_by(dull, Verdict::Ruined);
+            assert_eq!(fair, hone(dull), "a fair run is not the whetstone's hone");
+            assert!(fine.damage <= fair.damage, "a fine run at {wear} ground more than the whetstone");
+            assert!(fine.damage >= dull.damage, "a fine run at {wear} gave wear back");
+            assert!(fine.damage < life && fair.damage < life && ruined.damage < life, "a hone broke the axe");
+            assert_eq!(blunt_step(fine.block), 0);
+            assert_eq!(blunt_step(ruined.block), 1, "a ruined run sharpened as well as a good one");
+            assert!(ruined.damage >= fair.damage, "a ruined run was cheaper than a fair one");
+            // A fine edge dulls where the old one would have: on the boundary.
+            let next = (wear / edge + 1) * edge;
+            if next < life {
+                assert_eq!(blunt_step(after_a_swing(fine.block, next)), 1, "a fine hone moved the boundary");
+            }
+        }
+        // ...and a saw and a bronze chisel take an edge, where a flint chisel chips.
+        assert!(takes_an_edge(crate::types::BLOCK_COPPER_SAW) && takes_an_edge(crate::types::BLOCK_BRONZE_CHISEL));
+        assert!(!takes_an_edge(crate::types::BLOCK_FLINT_CHISEL) && !takes_an_edge(crate::types::BLOCK_STONE_HAMMER));
     }
 
     #[test]

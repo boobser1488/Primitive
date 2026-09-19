@@ -11062,7 +11062,10 @@ fn use_gesture(aimed: Option<BlockId>, held: Option<BlockId>) -> UseGesture {
         // the same pots (see `minigame`).
         if matches!(
             block_kind(block),
-            primitive_shared::types::BLOCK_ANVIL | primitive_shared::types::BLOCK_POTTERS_WHEEL
+            primitive_shared::types::BLOCK_ANVIL
+                | primitive_shared::types::BLOCK_POTTERS_WHEEL
+                | primitive_shared::types::BLOCK_SAWHORSE
+                | primitive_shared::types::BLOCK_HONING_STONE
         ) {
             return UseGesture::Station;
         }

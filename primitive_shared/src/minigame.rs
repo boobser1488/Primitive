@@ -63,6 +63,12 @@ pub enum Game {
     Anvil,
     /// The potter's wheel: draw the wall up and let go at the right width.
     Wheel,
+    /// The honing stone: lay the edge on the stone at its bevel, stroke by
+    /// stroke. Appended, so the two games before it keep the index they are
+    /// sent by.
+    Whet,
+    /// The sawhorse: cut to the line, the saw's stroke meeting the mark.
+    Saw,
 }
 
 impl Game {
@@ -77,6 +83,11 @@ impl Game {
         match self {
             Game::Anvil => 4,
             Game::Wheel => 3,
+            // Three strokes is what a grinder counts on a side, and a run
+            // that sharpens should be shorter than one that makes something.
+            Game::Whet => 3,
+            // Four cuts: the four ends of a joint.
+            Game::Saw => 4,
         }
     }
 
@@ -91,6 +102,12 @@ impl Game {
         match self {
             Game::Anvil => 1400,
             Game::Wheel => 1600,
+            // Slow, because a stroke on a stone is drawn the length of the
+            // slab and a hurried one rounds the bevel over.
+            Game::Whet => 1700,
+            // A saw's stroke is quicker than a potter's hands and slower
+            // than a hammer's fall.
+            Game::Saw => 1500,
         }
     }
 
@@ -167,12 +184,26 @@ pub fn target(seed: u32, step: usize) -> f32 {
 /// 700 ms, so a stone hammer's 0.18 is a window of about a quarter of a
 /// second and an iron one's 0.30 is about four tenths. The `None` case is the
 /// wheel, where the tool is a pair of hands.
+///
+/// **A saw is a hammer's ladder, and its edge narrows it.** A blunt saw binds
+/// in the kerf and wanders off the line, so the window shrinks by the share
+/// the edge takes off everything else (`tools::edge_factor`): a blunt copper
+/// saw is a stone hammer's window and less. That is where honing reaches the
+/// joiner -- a player can take a dull saw to the sawhorse and work harder for
+/// the same chair, or go to the stone first.
 pub fn tolerance(tool: Option<BlockId>) -> f32 {
-    use crate::types::{BLOCK_BRONZE_HAMMER, BLOCK_IRON_HAMMER, BLOCK_STONE_HAMMER};
+    use crate::types::{
+        BLOCK_BRONZE_HAMMER, BLOCK_BRONZE_SAW, BLOCK_COPPER_SAW, BLOCK_IRON_HAMMER, BLOCK_IRON_SAW,
+        BLOCK_STONE_HAMMER,
+    };
+    let edge = tool.map_or(1.0, crate::tools::edge_factor);
     match tool.map(block_kind) {
         Some(BLOCK_STONE_HAMMER) => 0.18,
         Some(BLOCK_BRONZE_HAMMER) => 0.24,
         Some(BLOCK_IRON_HAMMER) => 0.30,
+        Some(BLOCK_COPPER_SAW) => 0.22 * edge,
+        Some(BLOCK_BRONZE_SAW) => 0.26 * edge,
+        Some(BLOCK_IRON_SAW) => 0.30 * edge,
         // A potter has no tool and the clay forgives what a bar does not:
         // a wall pulled a little thin can be pulled back, and the only
         // unrecoverable mistake is a gross one.
@@ -184,6 +215,12 @@ pub fn tolerance(tool: Option<BlockId>) -> f32 {
 pub fn is_hammer(block: BlockId) -> bool {
     use crate::types::{BLOCK_BRONZE_HAMMER, BLOCK_IRON_HAMMER, BLOCK_STONE_HAMMER};
     matches!(block_kind(block), BLOCK_STONE_HAMMER | BLOCK_BRONZE_HAMMER | BLOCK_IRON_HAMMER)
+}
+
+/// Is this a saw -- the thing the sawhorse asks to be held?
+pub fn is_saw(block: BlockId) -> bool {
+    use crate::types::{BLOCK_BRONZE_SAW, BLOCK_COPPER_SAW, BLOCK_IRON_SAW};
+    matches!(block_kind(block), BLOCK_COPPER_SAW | BLOCK_BRONZE_SAW | BLOCK_IRON_SAW)
 }
 
 /// How a run turned out.
@@ -363,17 +400,85 @@ pub enum Job {
     /// wants most of. See `types::BLOCK_STEW` for why. Appended, so every
     /// job before it keeps the index it is sent by.
     Bowl,
+    /// **The edge of the tool in the hand, taken back on the honing stone.**
+    /// Nothing is spent and nothing is made: the run decides how much metal
+    /// the stone takes with the dullness (`tools::hone_by`), and the server
+    /// works the held stack rather than handing out a new one.
+    Hone,
+    // ---- the sawhorse ----
+    //
+    // **Each is a row of the crafting table, played** (`Job::recipe`): the
+    // same boards, frame and pegs the menu row takes, so the choice between
+    // the row and the game is a choice about skill and not about price --
+    // the wheel's rule (`Job::Vessel`). What the game adds is wood saved on
+    // a true cut and a better-made piece where the piece carries a judgement
+    // (`quality::takes_quality`).
+    /// A stool.
+    Stool,
+    /// A chair.
+    Chair,
+    /// A table.
+    Table,
+    /// A door.
+    Door,
+    /// The joined chest.
+    Chest,
+    /// A bed.
+    Bed,
+    /// A barrel.
+    Barrel,
 }
 
 impl Job {
     /// Every job, in the order the screens list them.
-    pub const ALL: [Job; 6] = [Job::Nails, Job::Helm, Job::Vessel, Job::Jug, Job::Mould, Job::Bowl];
+    pub const ALL: [Job; 14] = [
+        Job::Nails,
+        Job::Helm,
+        Job::Vessel,
+        Job::Jug,
+        Job::Mould,
+        Job::Bowl,
+        Job::Hone,
+        Job::Stool,
+        Job::Chair,
+        Job::Table,
+        Job::Door,
+        Job::Chest,
+        Job::Bed,
+        Job::Barrel,
+    ];
+
+    /// The row of the crafting table a sawhorse job plays, found by its
+    /// name. `None` for every other job.
+    ///
+    /// **By name and not by index**, because the index is the row's identity
+    /// on the wire and the name is the identity a person reads; a test below
+    /// holds every one of them to a row that exists and makes what the job
+    /// says it makes. Rejected: *a copy of each row's inputs in this file*,
+    /// which is two tables that must agree -- the wheel's vessel is checked
+    /// against its row by a test for exactly that reason, and seven of them
+    /// would be seven such tests.
+    pub fn recipe(self) -> Option<&'static crate::crafting::Recipe> {
+        let name = match self {
+            Job::Stool => "stool",
+            Job::Chair => "chair",
+            Job::Table => "table",
+            Job::Door => "door",
+            Job::Chest => "chest",
+            Job::Bed => "bed",
+            Job::Barrel => "barrel",
+            _ => return None,
+        };
+        crate::crafting::RECIPES.iter().find(|row| row.name == name)
+    }
 
     /// Which station does it.
     pub fn game(self) -> Game {
         match self {
             Job::Nails | Job::Helm => Game::Anvil,
             Job::Vessel | Job::Jug | Job::Mould | Job::Bowl => Game::Wheel,
+            Job::Hone => Game::Whet,
+            Job::Stool | Job::Chair | Job::Table | Job::Door | Job::Chest | Job::Bed | Job::Barrel => Game::Saw,
         }
     }
 
@@ -393,6 +498,12 @@ impl Job {
             Job::Mould => &[(BLOCK_CLAY, 3)],
             // The wheel row's two clay, for the reason the vessel's says.
             Job::Bowl => &[(BLOCK_CLAY, 2)],
+            // The tool is worked, not spent.
+            Job::Hone => &[],
+            // The row's own inputs. The server spends them through the row
+            // (`crafting::begin_piece`), so any wood's boards will do, as they
+            // do in the menu.
+            _ => self.recipe().map_or(&[], |row| row.inputs),
         }
     }
 
@@ -405,6 +516,14 @@ impl Job {
             Job::Jug => "jug_raw",
             Job::Mould => "mould_raw",
             Job::Bowl => "bowl_raw",
+            Job::Hone => "whetstone",
+            Job::Stool => "stool",
+            Job::Chair => "chair",
+            Job::Table => "table",
+            Job::Door => "door",
+            Job::Chest => "chest",
+            Job::Bed => "bed",
+            Job::Barrel => "barrel",
         }
     }
 }
@@ -493,6 +612,48 @@ pub fn outcome(job: Job, verdict: Verdict) -> Outcome {
             Outcome { made: Some((crate::types::BLOCK_BOWL_RAW, 1)), back: Vec::new(), extra_wear: 0 }
         }
         (Job::Bowl, Verdict::Ruined) => none(vec![(BLOCK_CLAY, 1)], 0),
+        // Nothing is made at the stone: the held tool is worked by the
+        // server (`tools::hone_by`).
+        (Job::Hone, _) => none(Vec::new(), 0),
+        (joinery, verdict) => joinery_outcome(joinery, verdict),
+    }
+}
+
+/// What a sawhorse run comes to.
+///
+/// **Boards, and only boards, are what a cut saves or spoils.** A true cut
+/// hands one board of the piece back -- the offcut is a board and not
+/// sawdust; a spoiled one leaves no piece, gives back half the boards (the
+/// other half are the wrong length now, and firewood) and every other input
+/// whole: a frame, pegs, leather and cord were never under the saw. A saw
+/// that bound in the cut takes two more points of wear.
+///
+/// The boards here are named as oak because a row names oak; the server
+/// hands back boards of the wood the piece was actually made of
+/// (`crafting::begin_piece`).
+fn joinery_outcome(job: Job, verdict: Verdict) -> Outcome {
+    use crate::types::BLOCK_PLANKS;
+    let Some(row) = job.recipe() else {
+        return Outcome { made: None, back: Vec::new(), extra_wear: 0 };
+    };
+    let boards = row.inputs.iter().find(|&&(block, _)| block_kind(block) == BLOCK_PLANKS).map_or(0, |&(_, n)| n);
+    match verdict {
+        Verdict::Fine => Outcome {
+            made: Some(row.output),
+            back: if boards > 0 { vec![(BLOCK_PLANKS, 1)] } else { Vec::new() },
+            extra_wear: 0,
+        },
+        Verdict::Fair => Outcome { made: Some(row.output), back: Vec::new(), extra_wear: 0 },
+        Verdict::Ruined => Outcome {
+            made: None,
+            back: row
+                .inputs
+                .iter()
+                .map(|&(block, n)| if block_kind(block) == BLOCK_PLANKS { (block, n / 2) } else { (block, n) })
+                .filter(|&(_, n)| n > 0)
+                .collect(),
+            extra_wear: 2,
+        },
     }
 }
 
@@ -505,7 +666,7 @@ mod tests {
         // Every press a player could make, in every rhythm: a cheap
         // generator walked over a spread of gaps, including the ones that
         // straddle a sweep's edge and the ones under the floors.
-        for game in [Game::Anvil, Game::Wheel] {
+        for game in [Game::Anvil, Game::Wheel, Game::Whet, Game::Saw] {
             let mut state = 0x1234_5678u32;
             for _ in 0..4000 {
                 let mut presses: Vec<u32> = Vec::new();
@@ -638,7 +799,7 @@ mod tests {
 
     #[test]
     fn the_marker_crosses_the_bar_and_comes_back_inside_one_press() {
-        for game in [Game::Anvil, Game::Wheel] {
+        for game in [Game::Anvil, Game::Wheel, Game::Whet, Game::Saw] {
             let step = game.step_ms();
             assert!(marker_at(game, 0) < 0.01, "the marker does not start at the end of the bar");
             assert!(marker_at(game, step / 2) > 0.99, "the marker does not reach the far end");
@@ -705,5 +866,28 @@ mod tests {
             .find(|r| r.name == "thrown vessel")
             .expect("the wheel's vessel row is gone");
         assert_eq!(row.inputs, Job::Vessel.inputs());
+    }
+
+    #[test]
+    fn every_sawhorse_job_is_a_row_of_the_table_and_a_fair_cut_is_that_row() {
+        for job in Job::ALL.into_iter().filter(|job| job.game() == Game::Saw) {
+            let row = job.recipe().unwrap_or_else(|| panic!("{job:?} plays no row of the table"));
+            assert_eq!(row.inputs, job.inputs(), "{job:?} costs something other than its row");
+            assert_eq!(outcome(job, Verdict::Fair).made, Some(row.output), "{job:?} makes something other than its row");
+            assert_eq!(crate::types::block_name(row.output.0), job.name(), "{job:?} is named for another piece");
+        }
+        // ...and nothing else pretends to be one.
+        assert!(Job::Nails.recipe().is_none() && Job::Hone.recipe().is_none());
+    }
+
+    #[test]
+    fn a_blunt_saw_is_a_narrower_window_than_a_sharp_one_and_iron_is_wider_than_copper() {
+        use crate::tools::{with_edge, BLUNTEST};
+        use crate::types::{BLOCK_COPPER_SAW, BLOCK_IRON_SAW};
+        let sharp = tolerance(Some(BLOCK_COPPER_SAW));
+        let blunt = tolerance(Some(with_edge(BLOCK_COPPER_SAW, BLUNTEST)));
+        assert!(blunt < sharp, "a blunt saw cuts as true as a sharp one: {blunt} vs {sharp}");
+        assert!(tolerance(Some(BLOCK_IRON_SAW)) > sharp, "iron forgives no more than copper");
+        assert!(is_saw(with_edge(BLOCK_IRON_SAW, 2)) && !is_saw(crate::types::BLOCK_IRON_HAMMER));
     }
 }
