@@ -198,13 +198,17 @@ fn walk_up_the_rise(s: &mut Scenario, x0: i32, line: &[(i32, f64, BlockId)]) {
             break;
         }
     }
+    // **Where the walk ended, read where it ended.** Read after the half
+    // second below, the body had coasted on from the middle of the last
+    // column to its far edge, and a body at the edge stands on the column
+    // beyond -- which is whatever the hill does next, half a block up in
+    // one full run: the check was of the coast, not the climb.
+    let (at, top) = (s.feet(), line[RISE_RUN as usize - 1].1);
     s.release_all();
     s.seconds(0.5);
-    let top = line[RISE_RUN as usize - 1].1;
     assert!(
-        s.feet().x > last_column as f64 && (s.feet().y - top).abs() < 0.05,
-        "the walk up the hill stopped at {:?}, the top is {top} at x {last_column}",
-        s.feet(),
+        at.x > last_column as f64 && (at.y - top).abs() < 0.05,
+        "the walk up the hill stopped at {at:?}, the top is {top} at x {last_column}",
     );
     let biggest = rises.iter().copied().fold(0.0, f64::max);
     assert!(biggest <= step + 0.02, "one frame lifted the player {biggest:.3} of a block: {rises:?}");
