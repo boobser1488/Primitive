@@ -8042,6 +8042,26 @@ fn try_place_block(
     // ...and a bed needs its second cell, behind the first, on the same
     // terms. The server refuses it with a reason; asked here as well so a
     // bed that cannot go down is never sent. See `types::BED_HEAD`.
+    // ...and a lean-to its fourteen, the server's question asked of what this
+    // client can see (`lean_to::partners`): free, nobody in them, and a whole
+    // floor under the ground row and under the mouth.
+    if primitive_shared::lean_to::is_lean_to(block_id) {
+        let floored = |(x, y, z): (i32, i32, i32)| {
+            chunks.block_at(x, y - 1, z).is_some_and(primitive_shared::types::has_full_top)
+        };
+        if !floored(target) {
+            return;
+        }
+        let feet = (player.position.x, player.position.y, player.position.z);
+        for (cell, shape) in primitive_shared::lean_to::partners(target, block_id) {
+            let free = chunks
+                .block_at(cell.0, cell.1, cell.2)
+                .is_some_and(|b| primitive_shared::types::layer_placement(b, shape).is_some());
+            if !free || (cell.1 == target.1 && !floored(cell)) || block_overlaps_player(feet, cell.0, cell.1, cell.2, shape) {
+                return;
+            }
+        }
+    }
     if let Some((head_at, head)) = primitive_shared::types::bed_partner(target, block_id) {
         let there = chunks.block_at(head_at.0, head_at.1, head_at.2);
         let under = chunks.block_at(head_at.0, head_at.1 - 1, head_at.2).unwrap_or(BLOCK_AIR);

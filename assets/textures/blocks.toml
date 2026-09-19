@@ -620,10 +620,11 @@ stall = { all = "terrain/planks.png", item = "furniture/stall_item.png" }
 # picture, and the one picture of each's own is the icon.
 sawhorse = { all = "terrain/planks.png", item = "furniture/sawhorse_item.png" }
 honing_stone = { all = "terrain/sandstone.png", item = "furniture/honing_stone_item.png" }
-# The lean-to: a model (`furniture/lean_to_head.bbmodel`) of the leaf litter's
-# own picture and the log's bark, so the face row is the litter -- no layer of
-# its own -- and the icon is the one new picture, a heap of those leaves over
-# crossed sticks seen from its open end.
+# The lean-to: a model (`furniture/lean_to.bbmodel`, the whole hut of fifteen
+# cells) of the leaf litter's own picture and the log's bark, so the face row
+# is the litter -- no layer of its own -- and the icon is the one picture of
+# its own: the hut from its mouth, three quarters on, the fork crossed over
+# the dark door and the heap running down to its tail.
 lean_to = { all = "plants/leaf_litter.png", item = "furniture/lean_to_item.png" }
 
 # ---- the smith and the joiner ----

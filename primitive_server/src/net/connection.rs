@@ -697,7 +697,41 @@ async fn read_loop(
                 // item is spent for the same reason as the rest, and
                 // refused with the reason -- the cell that is in the way is
                 // the one the player is not looking at. See `types::BED_HEAD`.
-                if block_id != BLOCK_AIR {
+                // **A lean-to takes fifteen** (`lean_to::cells_from_mouth`):
+                // the cell clicked is its mouth, and the hut runs back from it
+                // three long, three wide and two high over the front two rows.
+                // Every cell free and nobody in it, and a whole floor under
+                // every cell of the ground row -- a hut half over a ditch is a
+                // roof with a hole in it. Asked before the bed's question,
+                // which would ask the same of one cell of the fifteen, and
+                // before the item is spent.
+                if block_id != BLOCK_AIR && primitive_shared::lean_to::is_lean_to(block_id) {
+                    let mouth_floor = ctx.world.cached_block(global_x, global_y - 1, global_z).unwrap_or(BLOCK_AIR);
+                    let mut blocked = !primitive_shared::types::has_full_top(mouth_floor);
+                    for (cell, shape) in primitive_shared::lean_to::partners((global_x, global_y, global_z), block_id) {
+                        let free = ctx
+                            .world
+                            .cached_block(cell.0, cell.1, cell.2)
+                            .is_some_and(|b| primitive_shared::types::layer_placement(b, shape).is_some());
+                        let occupied = ctx.registry.player_occupying_block(cell.0, cell.1, cell.2, shape).is_some();
+                        let footed = cell.1 != global_y || {
+                            let under = ctx.world.cached_block(cell.0, cell.1 - 1, cell.2).unwrap_or(BLOCK_AIR);
+                            primitive_shared::types::has_full_top(under)
+                        };
+                        if !free || occupied || !footed {
+                            blocked = true;
+                            break;
+                        }
+                    }
+                    if blocked {
+                        handle.send(ServerMessage::Error(
+                            "a lean-to needs three by three cells of clear, level ground in front of you and room over them".to_string(),
+                        ));
+                        continue;
+                    }
+                }
+
+                if block_id != BLOCK_AIR && !primitive_shared::lean_to::is_lean_to(block_id) {
                     if let Some((head_at, head)) = primitive_shared::types::bed_partner(
                         (global_x, global_y, global_z),
                         block_id,
@@ -1098,6 +1132,17 @@ async fn read_loop(
                         // ...and a hand in a wild hive is stung, less if it
                         // held a torch or the tree was smoked (`bees`).
                         crate::sting_from_bees(&ctx, &handle, broken, (global_x, global_y, global_z), cut_with);
+                    }
+                } else if primitive_shared::lean_to::is_lean_to(written) {
+                    // The hut's other fourteen cells, checked free above.
+                    for (cell, shape) in primitive_shared::lean_to::partners((global_x, global_y, global_z), written) {
+                        if ctx.world.set_block(cell.0, cell.1, cell.2, shape) {
+                            crate::broadcast_block(&ctx, cell, shape);
+                            let mut sim = ctx.falling.lock().unwrap_or_else(|e| e.into_inner());
+                            sim.on_block_changed(cell.0, cell.1, cell.2);
+                            drop(sim);
+                            crate::notify_mechanics(&ctx, cell.0, cell.1, cell.2);
+                        }
                     }
                 } else if primitive_shared::rack::is_rack(written) {
                     // The rack's other three cells, checked free above.

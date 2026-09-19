@@ -843,7 +843,55 @@ impl World {
         if framed > 0 {
             println!("[world] {framed} lone drying rack(s) from an older save are hide frames now");
         }
+        let cleared = self.clear_old_lean_tos();
+        if cleared > 0 {
+            println!("[world] {cleared} cell(s) of two-cell lean-tos from an older build are gone");
+        }
         Ok(count)
+    }
+
+    /// **A lean-to of two cells, from a build before the hut had fifteen, is
+    /// taken down** as the world is read. Answers how many cells.
+    ///
+    /// Its two cells read now as the hut's mouth and middle (`lean_to::PARTS`),
+    /// and the middle draws the whole hut: fifteen cells of thatch over two
+    /// that collide, a roof a player walks through. Growing it into fifteen
+    /// is the rack's rejected answer again -- a tent put up against a wall
+    /// has no room to grow -- and a one-night shelter is worth less than the
+    /// question: it would have fallen in the next morning anyway. Only edits
+    /// are asked, because nothing generates a lean-to.
+    fn clear_old_lean_tos(&self) -> usize {
+        use primitive_shared::lean_to;
+        let mut old = Vec::new();
+        {
+            let edits = self.edits.read().unwrap_or_else(|e| e.into_inner());
+            let at_of = |pos: &ChunkPos, index: u32| {
+                let index = index as usize;
+                let x = index % CHUNK_SIZE_X;
+                let z = (index / CHUNK_SIZE_X) % CHUNK_SIZE_Z;
+                let y = index / (CHUNK_SIZE_X * CHUNK_SIZE_Z);
+                (pos.x * CHUNK_SIZE_X as i32 + x as i32, y as i32, pos.z * CHUNK_SIZE_Z as i32 + z as i32)
+            };
+            let edited = |cell: (i32, i32, i32)| {
+                if cell.1 < 0 || cell.1 as usize >= CHUNK_SIZE_Y {
+                    return None;
+                }
+                let (pos, lx, lz) = ChunkPos::from_global(cell.0, cell.2);
+                edits.get(&pos).and_then(|chunk| chunk.get(&(Chunk::index(lx, cell.1 as usize, lz) as u32))).copied()
+            };
+            for (pos, cells) in edits.iter() {
+                for (&index, &block) in cells {
+                    let at = at_of(pos, index);
+                    if lean_to::is_lean_to(block) && !lean_to::whole(at, block, edited) {
+                        old.push(at);
+                    }
+                }
+            }
+        }
+        for &(x, y, z) in &old {
+            self.set_block(x, y, z, primitive_shared::types::BLOCK_AIR);
+        }
+        old.len()
     }
 
     /// **Every lone cell of a drying rack becomes a hide frame**, as the
@@ -1099,6 +1147,38 @@ mod tests {
         }
         // ...and it is written back, so the next start has nothing to do.
         assert!(b.has_unsaved_changes(), "the frames would be framed again every start");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A two-cell lean-to from an older build is taken down on load, and a
+    /// whole hut is left standing.** The old tent's two cells are the hut's
+    /// mouth and middle to the rules now, and the middle would draw fifteen
+    /// cells of thatch over the two that collide.
+    #[test]
+    fn an_old_two_cell_lean_to_is_taken_down_on_load_and_a_whole_one_stands() {
+        use primitive_shared::types::{bed_half_of, Facing, BLOCK_AIR, BLOCK_LEAN_TO};
+        let dir = std::env::temp_dir().join(format!("primitive_test_lean_to_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let a = World::new(7, 128);
+        a.set_block(40, 200, 40, bed_half_of(BLOCK_LEAN_TO, Facing::South, false));
+        a.set_block(40, 200, 39, bed_half_of(BLOCK_LEAN_TO, Facing::South, true));
+        let hut = primitive_shared::lean_to::cells((60, 200, 60), Facing::East);
+        for ((x, y, z), cell) in hut {
+            a.set_block(x, y, z, cell);
+        }
+        a.save(&dir).unwrap();
+
+        let b = World::new(7, 128);
+        b.load(&dir).unwrap();
+        for at in [(40, 200, 40), (60, 200, 60)] {
+            b.insert(b.generate(ChunkPos::from_global(at.0, at.2).0));
+        }
+        assert_eq!(b.cached_block(40, 200, 40), Some(BLOCK_AIR), "the old tent's foot stayed");
+        assert_eq!(b.cached_block(40, 200, 39), Some(BLOCK_AIR), "the old tent's head stayed");
+        for ((x, y, z), cell) in hut {
+            assert_eq!(b.cached_block(x, y, z), Some(cell), "a cell of a whole hut changed");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1260,11 +1260,19 @@ fn a_gentled_horse_throws_its_rider_until_it_is_broken_and_then_it_is_theirs() {
 
 // ---------------------------------------------------------------- a night out, and the wet
 
-/// The lean-to's two cells, and whether both are standing.
-fn lean_to_at(s: &Scenario, cells: [(i32, i32, i32); 2]) -> bool {
-    cells.iter().all(|&c| s.block(c).is_some_and(|b| t::block_kind(b) == t::BLOCK_LEAN_TO))
+/// Whether every cell of a lean-to is standing, as this client has them.
+fn lean_to_at(s: &Scenario, cells: &[((i32, i32, i32), t::BlockId)]) -> bool {
+    cells.iter().all(|&(c, want)| s.block(c) == Some(want))
 }
 
+/// **A debris hut, from the item to the heap it leaves**: put down in front
+/// of the player it is fifteen cells running away from them; walked at, it
+/// stops them at its mouth, because the hollow is lower than a body; lain
+/// down in, it keeps the rain off; and in the morning it falls in, all of
+/// it, to half its sticks and leaves.
+///
+/// "какого хера шалаш размером с 2 блока": it was two cells and a body
+/// walked straight through its roof. This plays the hut it became.
 #[test]
 fn a_lean_to_keeps_its_sleeper_out_of_the_rain_and_falls_in_at_dawn() {
     let mut s = Scenario::new();
@@ -1277,11 +1285,29 @@ fn a_lean_to_keeps_its_sleeper_out_of_the_rain_and_falls_in_at_dawn() {
     s.face(0.0);
     s.look_at_face((x0 + 2, GROUND, z), (0, 1, 0));
     s.use_aimed();
-    // Put down lying away from the placer, like a pallet: the foot where
-    // it was aimed, the head a cell further on.
-    let cells = [(x0 + 2, GROUND + 1, z), (x0 + 3, GROUND + 1, z)];
-    assert!(s.until(3.0, |s| lean_to_at(s, cells)), "the lean-to was not put down: {:?}", cells.map(|c| s.block(c).map(t::block_name)));
+    // Its mouth where it was aimed, facing the placer (who looks along +x,
+    // so the hut faces west), and the rest of it running on away from them.
+    let mouth = (x0 + 2, GROUND + 1, z);
+    let cells = primitive_shared::lean_to::cells_from_mouth(mouth, t::Facing::West);
+    assert!(
+        s.until(3.0, |s| lean_to_at(s, &cells)),
+        "the lean-to was not put down whole: {:?}",
+        cells.map(|(c, _)| s.block(c).map(|b| format!("{b:#x}")))
+    );
+    assert_eq!(cells.iter().map(|&((x, _, _), _)| x).max(), Some(x0 + 4), "it is not three cells long");
+    assert_eq!(s.inventory.count(t::BLOCK_LEAN_TO), 0, "one item did not go to all fifteen cells");
     s.shot("lean_to");
+
+    // **Nobody walks in upright.** Straight at the mouth for two seconds: the
+    // player's middle never passes the mouth's end.
+    s.face(0.0);
+    s.hold(Action::Forward);
+    s.seconds(2.0);
+    s.release_all();
+    assert!(s.feet().x < (x0 + 2) as f64, "a standing body walked into the hut: {:?}", s.feet());
+    assert!(s.feet().x > (x0 + 1) as f64 + 0.3, "the mouth stopped the player a cell short: {:?}", s.feet());
+    s.shot("lean_to_mouth");
+
     // Caught out in it first: the rain is on the player.
     let name = s.name.clone();
     // A long ceiling, which costs nothing when the rain does its work: the
@@ -1289,9 +1315,8 @@ fn a_lean_to_keeps_its_sleeper_out_of_the_rain_and_falls_in_at_dawn() {
     // full test run takes fewer of them in six seconds of frames.
     assert!(s.until(20.0, |s| s.server().wetness_of(&name).unwrap_or(0.0) > 0.1), "standing in the rain wet nobody");
 
-    // In, and down.
-    // At the leaves, which are the pallet's two eighths high.
-    s.look_at(DVec3::new(cells[0].0 as f64 + 0.5, cells[0].1 as f64 + 0.06, cells[0].2 as f64 + 0.5));
+    // In, and down: at the bed of leaves inside the mouth.
+    s.look_at(DVec3::new(mouth.0 as f64 + 0.5, mouth.1 as f64 + 0.1, mouth.2 as f64 + 0.5));
     s.use_aimed();
     let down = s.until(3.0, |s| s.heard.iter().any(|m| matches!(m, ServerMessage::Asleep { asleep: true })));
     let said: Vec<&String> = s.heard.iter().filter_map(|m| match m {
@@ -1299,6 +1324,17 @@ fn a_lean_to_keeps_its_sleeper_out_of_the_rain_and_falls_in_at_dawn() {
         _ => None,
     }).collect();
     assert!(down, "the lean-to could not be slept in: aimed at {:?}, told {said:?}", s.aimed().map(|(c, b)| (c, t::block_name(b))));
+    // ...and down *inside* it: on the bed of leaves, not on the roof over it
+    // -- the cell is as tall as its thatch now -- and not outside the mouth.
+    let lying = s.server().position_of(&name).expect("the sleeper is somewhere");
+    assert!(
+        lying.0 > (x0 + 2) as f64 && lying.0 < (x0 + 4) as f64 && (lying.2 - (z as f64 + 0.5)).abs() < 0.1,
+        "the sleeper was laid down outside the hut: {lying:?}"
+    );
+    assert!(
+        (lying.1 - (GROUND + 1) as f64 - f64::from(primitive_shared::lean_to::BED_TOP)).abs() < 0.05,
+        "the sleeper was laid on the roof, not on the bed: {lying:?}"
+    );
     // Every sample while the leaves are still over the sleeper: none of
     // them wetter than the one before. (The sample taken as the player lay
     // down may have been read where they stood, so it is let go.) The night
@@ -1316,8 +1352,7 @@ fn a_lean_to_keeps_its_sleeper_out_of_the_rain_and_falls_in_at_dawn() {
     // at the default rate), and each reading kept only if the server still
     // had the sleeper under a standing roof *after* it was read.
     let roofed = |s: &Scenario| {
-        s.server().asleep(&name)
-            && cells.iter().all(|&(x, y, z)| s.server().block_at(x, y, z).is_some_and(|b| t::block_kind(b) == t::BLOCK_LEAN_TO))
+        s.server().asleep(&name) && cells.iter().all(|&((x, y, z), want)| s.server().block_at(x, y, z) == Some(want))
     };
     let lay_down_at = s.server().ticks();
     assert!(s.until(10.0, |s| s.server().ticks() >= lay_down_at + 12 || !roofed(s)), "the server stopped ticking");
@@ -1335,11 +1370,33 @@ fn a_lean_to_keeps_its_sleeper_out_of_the_rain_and_falls_in_at_dawn() {
         "it rained into the lean-to: {under:?}"
     );
 
-    // The night passes -- everybody is asleep -- and the roof comes down
-    // with the morning, and the sleeper is on their feet beside the heap.
-    let gone = s.until(30.0, |s| cells.iter().all(|&c| s.block(c) == Some(t::BLOCK_AIR)));
-    assert!(gone, "the lean-to stood through the morning: {:?}", cells.map(|c| s.block(c).map(t::block_name)));
+    // The night passes -- everybody is asleep -- and the whole hut comes
+    // down with the morning, the sleeper on their feet outside its mouth.
+    let gone = s.until(30.0, |s| cells.iter().all(|&(c, _)| s.block(c) == Some(t::BLOCK_AIR)));
+    assert!(gone, "the lean-to stood through the morning: {:?}", cells.map(|(c, _)| s.block(c).map(t::block_name)));
     s.seconds(0.5);
+    let standing = s.feet();
+    assert!(standing.x < (x0 + 2) as f64 + 0.05, "the sleeper woke inside the fallen hut, not out of its mouth: {standing:?}");
+    // ...beside what is left of it: half its sticks and half its leaves,
+    // lying there or already in the pack.
+    let heaped = |s: &Scenario, block: t::BlockId| {
+        s.inventory.count(block)
+            + s.entities
+                .values()
+                .map(|e| match e.kind {
+                    primitive_shared::protocol::EntityKind::Item { block: b, count } if b == block => count,
+                    _ => 0,
+                })
+                .sum::<u32>()
+    };
+    for (block, count) in t::LEAN_TO_REMAINS {
+        assert!(
+            s.until(5.0, |s| heaped(s, block) >= count),
+            "the fallen hut left {} of {count} {}",
+            heaped(&s, block),
+            t::block_name(block)
+        );
+    }
     s.shot("lean_to_fallen");
     no_corrections(&s);
 }

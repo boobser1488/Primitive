@@ -1855,6 +1855,15 @@ pub(crate) fn look_of(block: BlockId, at: (i32, i32, i32), quarters: u32) -> Loo
 /// which is what holds the table's `faces` to this.
 #[cfg(test)]
 pub(crate) fn what_a_quarter_turn_does(block: BlockId) -> QuarterTurn {
+    // A lean-to is drawn whole by its middle cell and by no other
+    // (`lean_to_block`), so the cell a player puts down -- its mouth, the
+    // bare id -- draws nothing alone, and nothing turned is nothing. Its
+    // middle, turned the same way, is the hut.
+    let block = if primitive_shared::lean_to::is_lean_to(block) {
+        primitive_shared::lean_to::cell(primitive_shared::types::block_facing(block), 8)
+    } else {
+        block
+    };
     let here = look_of(block, (8, 4, 8), 0);
     // **Several other cells, not one.** A cell's turn is two bits of a hash,
     // so any one other cell has a quarter chance of being laid exactly the
@@ -7668,7 +7677,7 @@ pub(crate) fn is_furniture(id: BlockId) -> bool {
         // ...and the two stations of the edge, models on legs and a stump.
         || block_kind(id) == primitive_shared::types::BLOCK_SAWHORSE
         || block_kind(id) == primitive_shared::types::BLOCK_HONING_STONE
-        // ...and the lean-to, a pallet of leaves under a roof of them.
+        // ...and the lean-to, a hut of sticks and leaves drawn by its middle.
         || block_kind(id) == primitive_shared::types::BLOCK_LEAN_TO
 }
 
@@ -7793,21 +7802,69 @@ pub(crate) fn furniture_block_hinged(
         // board, the grinder in front of the slab.
         primitive_shared::types::BLOCK_SAWHORSE => (Prop::Sawhorse, turned_from_north(block_facing(block))),
         primitive_shared::types::BLOCK_HONING_STONE => (Prop::HoningStone, turned_from_north(block_facing(block))),
-        // Written as the pallet is, so turned as the pallet is: the shut end
-        // at the head, the mouth at the foot where the sleeper crawled in.
-        primitive_shared::types::BLOCK_LEAN_TO if head => (Prop::LeanToHead, bed_quarters(block_facing(block))),
-        primitive_shared::types::BLOCK_LEAN_TO => (Prop::LeanToFoot, bed_quarters(block_facing(block))),
+        // **A lean-to is drawn whole by its middle cell** and by no other: the
+        // hut is fifteen cells (`lean_to::PARTS`), written as one model three
+        // cells long with its mouth toward +z where a bed's foot is, so turned
+        // as the bed is (`lean_to::quarters` is this count, and
+        // `a_lean_to_is_drawn_where_it_is_walked_into_whichever_way_it_faces`
+        // holds the two together). Drawn once rather than sliced into fifteen
+        // models that have to meet: the rack's reason (`rack_block`). **Not
+        // asked whether the other fourteen are there**, unlike the rack: the
+        // server puts down and takes away all fifteen together, and the one
+        // time a mesher sees fewer is a neighbouring chunk that has not
+        // arrived yet -- when a hut drawn whole is right and a hut drawn as
+        // nothing is a hole in the camp until it does.
+        primitive_shared::types::BLOCK_LEAN_TO if primitive_shared::lean_to::is_anchor(block) => {
+            lean_to_block(at, block, textures, light, vertices, indices);
+            return;
+        }
+        primitive_shared::types::BLOCK_LEAN_TO => return,
         _ => return,
     };
     // Face 4 is +z and 5 is -z, as the piece is written. Measured on the
     // boxes rather than named in the file, so a blanket lengthened to the
     // seam in Blockbench opens its end there too.
+    // Not a lean-to's: its model is the whole hut, and nothing in it runs
+    // into a partner's cell to be left open at the seam.
+    let bed = bed && block_kind(block) != primitive_shared::types::BLOCK_LEAN_TO;
     let open = |piece: &PropBox| match (bed && partnered, head) {
         (true, true) if piece.to[2] >= 16.0 => 1 << 4,
         (true, false) if piece.from[2] <= 0.0 => 1 << 5,
         _ => 0,
     };
     push_prop(at, prop(model), quarters, false, hinged, open, primitive_shared::types::furniture_wood(block), textures, light, vertices, indices);
+}
+
+/// **A lean-to, drawn whole by its middle cell** (`lean_to::is_anchor`):
+/// `furniture/lean_to.bbmodel`, turned as a bed is (`bed_quarters`, which is
+/// `lean_to::quarters`).
+///
+/// **Its `inside` is the hollow under the thatch, drawn always and in the
+/// shade.** In a chest the group is the lining a shut lid boxes in, so it is
+/// left out unless the lid is up (`push_prop`); a hut has no lid, and its
+/// bed, its ribs and the undersides of its leaves are what anybody looking
+/// in at the mouth sees. Lit by the cell as the rest of the model is, they
+/// were as bright as the grass outside -- a hut that was a heap of leaves
+/// round a sunlit floor. So they are drawn with a third of the sky and half
+/// the fire: dim enough to read as the inside of something roofed, not the
+/// black of a shut box, because a debris hut is open at one end.
+pub(crate) fn lean_to_block(
+    at: [f32; 3],
+    block: BlockId,
+    textures: &crate::engine::texture::FaceLayers,
+    light: u8,
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+) {
+    use crate::logic::models::{prop, Prop};
+    let quarters = bed_quarters(primitive_shared::types::block_facing(block));
+    let model = prop(Prop::LeanTo);
+    let outside: Vec<PropBox> = model.iter().filter(|piece| !piece.inside).copied().collect();
+    let under: Vec<PropBox> = model.iter().filter(|piece| piece.inside).map(|piece| PropBox { inside: false, ..*piece }).collect();
+    push_prop(at, &outside, quarters, false, Hinged::Whole, |_| 0, 0, textures, light, vertices, indices);
+    let (sky, fire) = (light & 0x0F, (light >> 4) & 0x0F);
+    let shaded = (sky / 3) | ((fire / 2) << 4);
+    push_prop(at, &under, quarters, false, Hinged::Whole, |_| 0, 0, textures, shaded, vertices, indices);
 }
 
 /// **A chest's lid alone, swung `angle` radians open**, in its cell's space
@@ -7892,6 +7949,10 @@ pub(crate) fn carried_model(
         barrel_block([0.0; 3], block, textures, OPEN_SKY, vertices, indices);
     } else if kind == t::BLOCK_JUG {
         jug_block([0.0; 3], block, textures, OPEN_SKY, vertices, indices);
+    } else if kind == t::BLOCK_LEAN_TO {
+        // **The whole hut**, drawn by its middle cell as it stands in the
+        // world: carried and dropped as one thing, and placed as fifteen.
+        furniture_block([0.0; 3], primitive_shared::lean_to::cell(t::Facing::South, 8), true, textures, OPEN_SKY, vertices, indices);
     } else if t::is_bed(block) {
         // **Both halves**, the head to the north of the foot and the seam
         // between them left open, as a bed stands in the world. A bed -- or a
