@@ -8142,9 +8142,15 @@ pub fn can_grow_on(plant: BlockId, ground: BlockId) -> bool {
     // ash and fallen leaves on a lip of any soil and on a floor dug down, at
     // its real height. A sheet with no thickness has no foot to hang over a
     // gap, which is the only reason a torch is refused one.
+    // ...and so does **every flat thing**, a pebble, a flint or a stick as
+    // much as a sheet of snow: it lies on the top and has no foot either, and
+    // it is drawn there (`rest_drop`). Asked of the coatings only, the
+    // stones of a scree and the sticks of a wood kept the whole block under
+    // them on every sand, gravel and earth lip the generator laid, a step
+    // left standing round each (`worldgen::lips`).
     let full_floor = has_full_top(ground)
         || crate::dig::is_turf_lip(ground)
-        || (is_covering_flat(plant) && coating_rests_at(ground).is_some());
+        || (is_flat(plant) && coating_rests_at(ground).is_some());
     // The whole id, for the one rule that asks what exactly is underneath:
     // the upper half of a tall plant stands on its own grown lower half.
     let whole = ground;
@@ -10702,11 +10708,14 @@ mod depth_tests {
                 if is_door(id) && is_door(ground) {
                     continue;
                 }
-                // A coating on a top dug down is not drawn from its own
+                // A flat thing on a top dug down is not drawn from its own
                 // floor but on that top (`rest_drop`), so it stands over
                 // nothing: snow and ash on a lip, which this list refused
-                // until every winter hillside was green.
-                if is_covering_flat(id) && rest_drop(id, ground) > 0.0 {
+                // until every winter hillside was green -- and a pebble, a
+                // flint or a stick on one, which it refused until every
+                // stone on a slope kept a step of its own
+                // (`worldgen::lips`).
+                if is_flat(id) && rest_drop(id, ground) > 0.0 {
                     continue;
                 }
                 if can_grow_on(id, ground) {

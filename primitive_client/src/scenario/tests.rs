@@ -351,6 +351,122 @@ fn a_winter_hillside_of_lips_is_white_all_over_is_walked_up_and_is_swept_back_to
     no_corrections(&s);
 }
 
+/// Is the cell the foot of a tree, a boulder or a bush that a lip met
+/// (`worldgen::lips`, "What stands on a lip"): the thing's own block in the
+/// cell the ground's lip would have been, standing on a whole floor, with a
+/// turf lip beside it at the same level and the thing going on up over it.
+fn met_by_a_lip(s: &Scenario, (x, y, z): (i32, i32, i32)) -> bool {
+    use primitive_shared::ground::{rock_of, Form};
+    let (Some(foot), Some(over), Some(floor)) = (s.block((x, y, z)), s.block((x, y + 1, z)), s.block((x, y - 1, z))) else {
+        return false;
+    };
+    let trunk = primitive_shared::wood::is_log(foot) && t::block_axis(foot) == t::Axis::Y && (t::is_branch(over) || primitive_shared::wood::is_log(over));
+    let stone = matches!(rock_of(foot), Some((_, None | Some(Form::Cobble)))) && over == foot;
+    let bush = t::block_kind(foot) == t::BLOCK_BUSH_LEAVES && t::block_kind(over) == t::BLOCK_BUSH_LEAVES;
+    let beside = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .iter()
+        .any(|&(dx, dz)| s.block((x + dx, y, z + dz)).is_some_and(primitive_shared::dig::is_turf_lip));
+    (trunk || stone || bush) && t::has_full_top(floor) && beside
+}
+
+#[test]
+fn a_wooded_hillside_is_walked_up_without_a_jump_past_trees_and_stones_rooted_in_its_lips() {
+    // **"Деревья растут только на полных блоках, камни также только так
+    // появляются."** The lips left a whole block under everything standing
+    // on a slope, so every tree and every stone on a hillside stood on a
+    // step of its own. A trunk now roots into the lip's cell, a boulder is
+    // bedded in it and a pebble or a stick lies on it (`worldgen::lips`).
+    // What a player has to be able to do there is what they do on a bare
+    // down: walk up with forward held, never jumping, never corrected --
+    // past the trees, up lips that things now lie on.
+    let mut s = landforms_world();
+    let spawn = cell_of(s.feet());
+    let step = f64::from(primitive_shared::geometry::PLAYER_STEP_HEIGHT);
+    let mut feet_in_lips = Vec::new();
+    for z in spawn.2 - 44..spawn.2 + 44 {
+        for x in spawn.0 - 44..spawn.0 + 44 {
+            if let Some(y) = (1..t::CHUNK_SIZE_Y as i32 - 2).rev().find(|&y| s.block((x, y, z)).is_some_and(t::is_collidable)) {
+                // The foot is a cell under the top of what stands on it.
+                if let Some(foot) = (y - 12..y).rev().find(|&fy| met_by_a_lip(&s, (x, fy, z))) {
+                    feet_in_lips.push((x, foot, z));
+                }
+            }
+        }
+    }
+    // A trunk's foot first, which is the picture the player described.
+    let trunk = |s: &Scenario, (x, y, z): (i32, i32, i32)| s.block((x, y, z)).is_some_and(primitive_shared::wood::is_log);
+    feet_in_lips.sort_by_key(|&cell| !trunk(&s, cell));
+    // A rise like `gentle_rise`'s with a tree, a stone or a bush rooted in a
+    // lip within three columns of it.
+    let near_a_foot = |x0: i32, z: i32| {
+        feet_in_lips.iter().copied().find(|&(fx, _, fz)| (fz - z).abs() <= 3 && fx >= x0 && fx < x0 + RISE_RUN)
+    };
+    let mut found = None;
+    'search: for z in spawn.2 - 40..spawn.2 + 40 {
+        for x0 in spawn.0 - 40..spawn.0 + 40 - RISE_RUN {
+            let Some(foot) = near_a_foot(x0, z) else { continue };
+            let Some(line) = (0..RISE_RUN).map(|k| meadow_top(&s, x0 + k, z)).collect::<Option<Vec<_>>>() else {
+                continue;
+            };
+            let walkable = line.windows(2).all(|w| (w[1].1 - w[0].1).abs() <= step);
+            let lips = line.iter().filter(|c| primitive_shared::dig::is_turf_lip(c.2)).count();
+            if walkable && line[RISE_RUN as usize - 1].0 - line[0].0 >= 1 && lips >= 2 {
+                if found.is_none() || trunk(&s, foot) {
+                    found = Some((x0, z, line, foot));
+                }
+                if trunk(&s, foot) {
+                    break 'search;
+                }
+            }
+        }
+    }
+    let Some((x0, z, line, foot)) = found else {
+        panic!("no wooded rise round the spawn of a landforms world: {} feet in lips", feet_in_lips.len());
+    };
+    let start = (x0 as f64 + 0.5, line[0].1, z as f64 + 0.5);
+    println!("the rise at {x0},{z}; a {} rooted in a lip at {foot:?}", t::block_name(s.block(foot).unwrap_or(t::BLOCK_AIR)));
+    let look_at_the_foot = |s: &mut Scenario| {
+        let target = DVec3::new(foot.0 as f64 + 0.5, foot.1 as f64 + 0.8, foot.2 as f64 + 0.5);
+        look_from(s, target + DVec3::new(-5.0, 2.2, if foot.2 >= z { -5.0 } else { 5.0 }), target);
+    };
+    s.stand_at(start);
+    s.face(0.0);
+    look_at_the_foot(&mut s);
+    s.shot("lip_features_after");
+    s.stand_at(start);
+    s.face(0.0);
+    walk_up_the_rise(&mut s, x0, &line);
+    no_corrections(&s);
+
+    // The same hillside as the lips left it before they were let under what
+    // stands on it: every foot in sight turned back into the turf it stood
+    // on, and every lip with a stone or a stick on it made whole -- from the
+    // same place, for the eye.
+    if std::env::var("PRIMITIVE_SCENARIO_SHOTS").is_ok() {
+        let mut stepped: Vec<_> = feet_in_lips
+            .iter()
+            .filter(|&&(fx, _, fz)| (fx - foot.0).abs() <= 12 && (fz - foot.2).abs() <= 12)
+            .map(|&cell| (cell, t::BLOCK_GRASS))
+            .collect();
+        for dz in -12..=12 {
+            for dx in -12..=12 {
+                let (x, z) = (foot.0 + dx, foot.2 + dz);
+                for y in foot.1 - 6..foot.1 + 6 {
+                    let (Some(ground), Some(on)) = (s.block((x, y, z)), s.block((x, y + 1, z))) else { continue };
+                    if primitive_shared::dig::is_dug(ground) && t::is_flat(on) {
+                        stepped.push(((x, y, z), primitive_shared::dig::whole(ground)));
+                    }
+                }
+            }
+        }
+        s.build(&stepped);
+        s.stand_at(start);
+        s.seconds(0.5);
+        look_at_the_foot(&mut s);
+        s.shot("lip_features_before");
+    }
+}
+
 /// Walks along +x at `z` from `x0` into whatever is in front, and says
 /// where the front of the body stopped.
 fn walk_into(s: &mut Scenario, x0: i32, z: i32) -> f64 {
