@@ -7396,14 +7396,15 @@ pub const BLOCKS: &[BlockDef] = &[
         turns: false,
         propped: true,
     },
-    // **The lean-to** (`types::BLOCK_LEAN_TO`): the straw pallet's row with
-    // a roof of sticks and leaves drawn over it. Two cells long and `faces`,
-    // for the pallet's reason -- a body lies in it -- and the pallet's two
-    // eighths of collider: the sticks and leaves over it are a roof a player
-    // crawls under, not a wall they walk into, and a lean-to that stopped a
-    // player at its mouth would be one nobody could get into to sleep. Taken
-    // apart by hand it comes back whole, as the pallet does; slept in, it
-    // falls in (`logic`, `collapse_lean_to` on the server).
+    // **The lean-to** (`types::BLOCK_LEAN_TO`): a debris hut of fifteen
+    // cells (`lean_to`), `faces` because its mouth is toward whoever built
+    // it. The row's two eighths are the pallet's and no longer what it
+    // collides as -- every cell is the thatch it holds (`lean_to::boxes`),
+    // which `types::collision_height` and `geometry` ask first -- and are
+    // kept so it hides nothing it stands against. The way in is lying down,
+    // not walking: the hollow is lower than a body. Taken apart by hand it
+    // comes back whole, one item for all fifteen cells; slept in, it falls
+    // in (`collapse_lean_to` on the server).
     BlockDef {
         id: BLOCK_LEAN_TO,
         name: "lean_to",

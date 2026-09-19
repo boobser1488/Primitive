@@ -4026,13 +4026,15 @@ pub const RECIPES: &[Recipe] = &[
         failure: 0.0,
     },
     // **The lean-to** (`types::BLOCK_LEAN_TO`): a night's roof by hand, from
-    // what any wood gives -- sticks for the frame, an armful of leaves for
-    // the thatch and the bed. Dearer than the straw pallet by the roof, and
-    // cheap beside a hut, because it is gone in the morning: the price is
-    // paid again every night a player sleeps away from home.
+    // what any wood gives -- sticks for the ridge, the fork and the ribs, a
+    // heap of leaves for the thatch and the bed. Dearer than the straw pallet
+    // by the roof, and cheap beside a hut, because it is gone in the morning:
+    // the price is paid again every night a player sleeps away from home.
+    // Twelve and sixteen since it became the hut three cells long it is drawn
+    // as (`lean_to`); six and eight bought a tent two cells long.
     Recipe {
         name: "lean-to",
-        inputs: &[(BLOCK_STICK, 6), (crate::types::BLOCK_LEAF_HANDFUL, 8)],
+        inputs: &[(BLOCK_STICK, 12), (crate::types::BLOCK_LEAF_HANDFUL, 16)],
         output: (crate::types::BLOCK_LEAN_TO, 1),
         station: Station::Hands,
         returns: &[],

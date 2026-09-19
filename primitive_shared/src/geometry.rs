@@ -77,6 +77,17 @@ pub fn for_each_block_box(
         }
         return;
     }
+    // **A cell of a lean-to is the thatch it holds** (`lean_to::boxes`): the
+    // hut's columns cut to the cell, the hollow over the bed left open. Its
+    // cell would be a cube of air round a slope of leaves, and the old
+    // pallet's two eighths let a body walk through the roof.
+    if crate::lean_to::is_lean_to(block) {
+        let (x, y, z) = (bx as f32, by as f32, bz as f32);
+        crate::lean_to::boxes(block, |min, max| {
+            visit([x + min[0], y + min[1], z + min[2]], [x + max[0], y + max[1], z + max[2]]);
+        });
+        return;
+    }
     // **A step is its boxes** (`step_boxes`), and never its cell: the
     // cell is a metre wall, and a staircase of walls is a thing a player
     // jumps up rather than walks. `block_box` still answers the whole cell,
@@ -537,6 +548,12 @@ pub fn block_box(block: BlockId, bx: i32, by: i32, bz: i32) -> Option<([f32; 3],
     // A pile of logs is the box round its logs: one log is a third of the
     // cell across, and the whole cell would be a metre of air a placement
     // beside a body is refused for.
+    // ...and a cell of a lean-to is the box round the thatch it holds, which
+    // is what a ray at it stops at (`lean_to::extent`).
+    if let Some((min, max)) = crate::lean_to::extent(block) {
+        let (x, y, z) = (bx as f32, by as f32, bz as f32);
+        return Some(([x + min[0], y + min[1], z + min[2]], [x + max[0], y + max[1], z + max[2]]));
+    }
     if let Some((min, max)) = crate::pit::pile_extent(block) {
         let (x, y, z) = (bx as f32, by as f32, bz as f32);
         return Some(([x + min[0], y + min[1], z + min[2]], [x + max[0], y + max[1], z + max[2]]));
@@ -778,6 +795,11 @@ pub fn block_box_for_aim(
     // ...and a pile of logs round its logs, for the same reason: a lone log
     // aimed at through a whole cell of outline was the cube it no longer is.
     if crate::pit::pile_extent(block).is_some() {
+        return block_box(block, bx, by, bz);
+    }
+    // ...and a cell of a lean-to round the thatch it holds (`lean_to::extent`):
+    // its row's two eighths would be a box on the floor under a roof.
+    if crate::lean_to::is_lean_to(block) {
         return block_box(block, bx, by, bz);
     }
 
@@ -1725,10 +1747,10 @@ mod tests {
                 "tile_slab",
                 "thatch_slab",
                 "branch_slab",
-                // ...and a lean-to, whose collider is its pallet of leaves:
-                // the roof over it is crawled under, never walked into
-                // (`types::BLOCK_LEAN_TO`).
-                "lean_to",
+                // The lean-to was here while its collider was a pallet of
+                // leaves a body walked through the roof over; it is the hut
+                // it is drawn as now (`lean_to::boxes`), and its mouth is
+                // a cell of thatch and hollow, not a step.
                 // ...and a dead player, in both of their states. The
                 // body is half a cell where the bag was and the bones
                 // two eighths, and a player must be able to step over

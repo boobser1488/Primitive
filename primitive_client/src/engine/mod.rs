@@ -51,6 +51,9 @@ pub mod frustum;
 pub mod gpu_timing;
 pub mod item_model;
 pub mod lamp_shadow;
+/// The lean-to's model held to its colliders, its aim and its light.
+#[cfg(test)]
+mod lean_to_tests;
 pub mod lighting;
 pub mod lod;
 pub mod mesh;

@@ -881,6 +881,14 @@ impl Server {
         self.named(name).is_some_and(|handle| handle.state.lock().unwrap_or_else(|e| e.into_inner()).sleeping_in.is_some())
     }
 
+    /// Where the server has the feet of the player called `name` -- which,
+    /// for a sleeper, is where `lying_place` put them and no client has
+    /// moved them from: what a scenario asks to know a body was laid in a
+    /// lean-to and not on its roof.
+    pub fn position_of(&self, name: &str) -> Option<(f64, f64, f64)> {
+        self.named(name).map(|handle| handle.state.lock().unwrap_or_else(|e| e.into_inner()).position)
+    }
+
     /// The server's own tick count: what a scenario waits on when it needs
     /// the server to have *done* something a number of times, rather than
     /// the client to have waited a while -- the two part company on a
@@ -13641,14 +13649,23 @@ fn sleep_through_to_dawn(ctx: &Arc<Context>, handles: &[Arc<players::PlayerHandl
 /// five. It is a number nobody could see in a heap of leaves, and "one
 /// night" is a rule a player plans a trip around.
 fn collapse_lean_to(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>) {
-    use primitive_shared::types::{block_kind, BLOCK_AIR, BLOCK_LEAN_TO, LEAN_TO_REMAINS};
+    use primitive_shared::types::{BLOCK_AIR, LEAN_TO_REMAINS};
     let Some(key) = handle.state.lock().unwrap_or_else(|e| e.into_inner()).sleeping_in else {
         return;
     };
-    if ctx.world.cached_block(key.0, key.1, key.2).map(block_kind) != Some(BLOCK_LEAN_TO) {
+    let Some(anchor) = ctx.world.cached_block(key.0, key.1, key.2).filter(|&b| primitive_shared::lean_to::is_lean_to(b)) else {
         return;
-    }
-    let cells = bed_cells(ctx, key);
+    };
+    // All fifteen cells that are still this hut, not the bed's two: the walls
+    // and the roof fall in with the bed they were over.
+    let cells: Vec<(i32, i32, i32)> = primitive_shared::lean_to::cells(
+        primitive_shared::lean_to::anchor(key, anchor),
+        primitive_shared::types::block_facing(anchor),
+    )
+    .into_iter()
+    .filter(|&(cell, shape)| ctx.world.cached_block(cell.0, cell.1, cell.2) == Some(shape))
+    .map(|(cell, _)| cell)
+    .collect();
     stand_up(ctx, handle, None);
     for &cell in &cells {
         if !ctx.world.set_block(cell.0, cell.1, cell.2, BLOCK_AIR) {
@@ -13868,6 +13885,16 @@ fn bed_key(
     at: (i32, i32, i32),
     block: primitive_shared::types::BlockId,
 ) -> (i32, i32, i32) {
+    // **A lean-to is known by its middle**, whichever of its fifteen cells was
+    // clicked: its walls and its roof are no bed (`types::is_bed`), and a
+    // sleeper named by the wall they clicked would be laid in the wall. The
+    // middle is the head of the bed it is, so what follows is the bed's.
+    if primitive_shared::lean_to::is_lean_to(block) {
+        let anchor = primitive_shared::lean_to::anchor(at, block);
+        if ctx.world.cached_block(anchor.0, anchor.1, anchor.2).is_some_and(primitive_shared::lean_to::is_anchor) {
+            return anchor;
+        }
+    }
     match primitive_shared::types::bed_partner(at, block) {
         Some((head, expected))
             if !primitive_shared::types::is_bed_head(block)
@@ -13914,11 +13941,16 @@ fn lying_place(
     let (sx, sz) = cells
         .iter()
         .fold((0.0, 0.0), |(x, z), c| (x + c.0 as f32 + 0.5, z + c.2 as f32 + 0.5));
-    let place = (
-        sx / count,
-        key.1 as f32 + primitive_shared::types::collision_height(block),
-        sz / count,
-    );
+    // On the bed's top -- which in a lean-to is the bed of leaves inside it,
+    // not the top of its cell: the cell is as tall as the thatch over the
+    // bed (`types::collision_height`), and a sleeper put there lay on the
+    // roof.
+    let lies_on = if primitive_shared::lean_to::is_lean_to(block) {
+        primitive_shared::lean_to::BED_TOP
+    } else {
+        primitive_shared::types::collision_height(block)
+    };
+    let place = (sx / count, key.1 as f32 + lies_on, sz / count);
     let yaw = if let [head, foot] = cells {
         ((head.2 - foot.2) as f32).atan2((head.0 - foot.0) as f32)
     } else if primitive_shared::types::is_bed(block) {
@@ -14197,6 +14229,26 @@ pub(crate) fn break_bed_partner(
     // standing would be a rack that is a rack to the eye and to nothing
     // else. The goods bits are left out of the match: what hangs on a
     // column does not decide whether a cell is part of this rack.
+    // ...and a lean-to all fifteen, on the same terms: one cell taken is the
+    // hut taken apart, and the one item it gave is the hut
+    // (`lean_to::partners`). Only the cells that still are this hut's go.
+    if primitive_shared::lean_to::is_lean_to(removed) {
+        for (cell, shape) in primitive_shared::lean_to::partners(at, removed) {
+            if ctx.world.cached_block(cell.0, cell.1, cell.2) != Some(shape) {
+                continue;
+            }
+            if !ctx.world.set_block(cell.0, cell.1, cell.2, primitive_shared::types::BLOCK_AIR) {
+                continue;
+            }
+            broadcast_block(ctx, cell, primitive_shared::types::BLOCK_AIR);
+            {
+                let mut sim = ctx.falling.lock().unwrap_or_else(|e| e.into_inner());
+                sim.on_block_changed(cell.0, cell.1, cell.2);
+            }
+            notify_mechanics(ctx, cell.0, cell.1, cell.2);
+        }
+        return;
+    }
     if primitive_shared::rack::is_rack(removed) {
         for (cell, shape) in primitive_shared::types::rack_partners(at, removed) {
             let there = ctx.world.cached_block(cell.0, cell.1, cell.2);

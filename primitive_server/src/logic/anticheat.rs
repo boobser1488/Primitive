@@ -603,6 +603,13 @@ impl AntiCheat {
         if primitive_shared::types::is_bed_head(block) {
             return self.flag(W_BAD_BLOCK, "a bed is placed by its foot".to_string());
         }
+        // ...and a lean-to by its mouth, the one cell of fifteen with no part
+        // bits (`lean_to::PARTS`): the server writes the other fourteen, and
+        // a client that put down a wall would be building a hut round a
+        // cell it chose.
+        if primitive_shared::lean_to::is_lean_to(block) && primitive_shared::lean_to::part_of(block) != 0 {
+            return self.flag(W_BAD_BLOCK, "a lean-to is placed by its mouth".to_string());
+        }
 
         self.check_reach(gx, gy, gz)
     }

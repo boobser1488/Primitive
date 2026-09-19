@@ -2656,16 +2656,23 @@ pub const BLOCK_SAWHORSE: BlockId = 383;
 /// pack grinds away the rest of the old edge every time (`tools::hone`).
 pub const BLOCK_HONING_STONE: BlockId = 384;
 
-/// **A lean-to**: a ridge pole on two forked sticks, more sticks laid down
-/// both sides and a heap of leaves thrown over them, with a bed of leaves
-/// inside -- a debris hut, the shelter a traveller builds at dusk and leaves
-/// at dawn. Two cells long like the straw pallet (`is_bed`), and slept in
-/// like one (`body::Rest::Straw`).
+/// **A lean-to**: a debris hut -- a ridge pole propped in a fork at the mouth
+/// and running down to the ground behind, ribs of sticks leaned on it from
+/// both sides, courses of leaves laid over the ribs with sticks thrown over
+/// them, and a bed of leaves inside: the shelter a traveller builds at dusk
+/// and leaves at dawn. Fifteen cells, three long, three wide and two high
+/// over its front two rows (`lean_to`, where the size and the shapes
+/// rejected are argued); the two a body lies across are the straw pallet's
+/// two halves (`is_bed`), and it is slept in like one (`body::Rest::Straw`).
+///
+/// It was those two cells and nothing else once, with a tent three quarters
+/// of a cell high drawn over them, and the player's word for it was
+/// "размером с 2 блока и не имеет нормальной модели".
 ///
 /// **What it is for is the night away from home.** Inside it the rain does
 /// not reach (`shelter::is_lean_to`), the night's chill is half kept out and
 /// a body rests better than on the open ground (`comfort`), which is most of
-/// what a hut gives -- for a dozen sticks and an armful of leaves. What it
+/// what a hut gives -- for a dozen sticks and a heap of leaves. What it
 /// costs is that it is **one night's**: the morning after it is slept in, it
 /// falls in, and gives back some of its sticks and leaves (`LEAN_TO_REMAINS`).
 /// So a trip out is a choice between carrying the makings of a camp every
@@ -2675,17 +2682,18 @@ pub const BLOCK_HONING_STONE: BlockId = 384;
 /// and the hut, the thatch and the walls would be a longer way to the same
 /// roof. Rejected too: *a lean-to you put a bed into*. The debris hut *is*
 /// the bed -- a hollow in the leaves under a roof of them -- and a separate
-/// pallet inside a structure a cell and a half high would be two things to
-/// build, place and line up for one night.
+/// pallet inside a structure would be two things to build, place and line up
+/// for one night.
 ///
 /// Id 637, in the empty run after the roofs (621–628), clear of the ids other
 /// changes in flight take from the bottom of the free list.
 pub const BLOCK_LEAN_TO: BlockId = 637;
 
-/// What a lean-to gives back when it falls in: about half its sticks and
-/// half its leaves. The rest is broken, trodden and blown -- which is why the
-/// next night's camp costs something again.
-pub const LEAN_TO_REMAINS: [(BlockId, u32); 2] = [(BLOCK_STICK, 3), (BLOCK_LEAF_HANDFUL, 4)];
+/// What a lean-to gives back when it falls in: half its sticks and half its
+/// leaves (its recipe is twelve and sixteen). The rest is broken, trodden and
+/// blown -- which is why the next night's camp costs something again. Held
+/// to the recipe by `a_fallen_lean_to_gives_back_half_of_what_it_took`.
+pub const LEAN_TO_REMAINS: [(BlockId, u32); 2] = [(BLOCK_STICK, 6), (BLOCK_LEAF_HANDFUL, 8)];
 
 /// The skeletons past the sixteenth species -- which, so far, is one rat.
 ///
@@ -5771,7 +5779,12 @@ pub const BED_HEAD: BlockId = 0b100 << VARIANT_SHIFT;
 /// asks this and never names a kind.
 #[inline]
 pub fn is_bed(id: BlockId) -> bool {
-    matches!(block_kind(id), BLOCK_BED | BLOCK_STRAW_BED | BLOCK_LEAN_TO)
+    matches!(block_kind(id), BLOCK_BED | BLOCK_STRAW_BED)
+        // ...and the two cells of a lean-to a body lies across, its mouth
+        // and its middle: the other thirteen are its walls and its roof
+        // (`lean_to::PARTS`), and a wall that answered "bed" would be paired
+        // with a cell beside it that is nobody's head.
+        || crate::lean_to::is_bed_part(id)
 }
 
 /// One half of a plank bed lying `facing`. See [`bed_half_of`].
@@ -6750,6 +6763,12 @@ pub fn collision_height(id: BlockId) -> f32 {
     // that read the table's whole cube would hold a player a metre over it.
     if let Some((_, top)) = crate::pit::pile_extent(id) {
         return top[1];
+    }
+    // ...and a cell of a lean-to is as tall as the thatch it holds
+    // (`lean_to::boxes`): a heap of leaves pitched to a ridge, not the
+    // pallet's two eighths it was.
+    if crate::lean_to::is_lean_to(id) {
+        return crate::lean_to::extent(id).map_or(0.0, |(_, top)| top[1]);
     }
     block_height(id)
 }
@@ -8492,6 +8511,12 @@ pub fn is_known_block(id: BlockId) -> bool {
     // before the wood, whose bits a rack spends on its goods and its column.
     if kind == BLOCK_DRYING_RACK {
         return true;
+    }
+    // ...and a lean-to's four spare bits say which of its fifteen cells this
+    // is (`lean_to::PART_MASK`), the two facing bits which way it looks. The
+    // sixteenth number is no part.
+    if kind == BLOCK_LEAN_TO {
+        return crate::lean_to::written_offset(id).is_some();
     }
     // **A wood only on furniture, and only a wood there is.** Before kinds
     // were ten bits the wood bits were part of the kind and an id with them
@@ -10405,8 +10430,10 @@ mod depth_tests {
                 "anvil",
                 "sawhorse",
                 "honing_stone",
-                // ...and the lean-to, two eighths of leaves like the pallet
-                // it is (`BLOCK_LEAN_TO`).
+                // ...and the lean-to, whose row is still the pallet's two
+                // eighths: a hut is a model and collides as its thatch
+                // (`lean_to::boxes`, `collision_height`), and the row only
+                // keeps it from hiding what it stands beside.
                 "lean_to",
                 // ...and a dead player: the body half a cell, like the
                 // bag it replaced, and what is left of it two eighths,

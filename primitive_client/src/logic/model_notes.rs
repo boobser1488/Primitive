@@ -615,29 +615,93 @@
 //!
 //! - **frayed end**: The foot end, where the straw thins out.
 //!
-//! ## furniture/lean_to_head.bbmodel
+//! ## furniture/lean_to.bbmodel
 //!
-//! The shut end of a lean-to (`types::BLOCK_LEAN_TO`), written as the straw
-//! pallet's head is: toward -z, the seam at z sixteen. Two sides of leaves
-//! leant in to a ridge pole, turned thirty degrees about z each way -- the
-//! one turn a box of a block has (`mesh::Swing`).
+//! A debris hut (`types::BLOCK_LEAN_TO`), all fifteen of its cells in one
+//! file, written round its middle cell -- the anchor, 0..16 -- with its mouth
+//! toward +z where a bed's foot is, so turned by `bed_quarters` as a bed is.
+//! Three cells long (z -16..32), three wide (x -16..32), and a little under
+//! two high; `lean_to` argues the size and the shapes that lost.
 //!
-//! - **leaf bed**: The hollow a body lies in, two sixteenths high: the
-//!   pallet's collider, so a sleeper lies on what is drawn.
+//! **The shape is the manuals'**: a ridge pole propped in a fork at the mouth
+//! and laid down to the ground behind, ribs leaned on it from both sides, the
+//! leaves over the ribs, and a bed of them inside. A wedge, tall at the mouth
+//! and running down to a tail, because the least roof over a lying body is
+//! the one that follows it down to its feet.
 //!
-//! - **back low**: The first of three courses of leaves heaped against the
-//!   back, each narrower and set a quarter further in so no two share a face
-//!   (`model_overlap`): the gable end a box cannot draw as a triangle.
+//! **Every piece of the thatch is one box turned about one axis** (`Swing`):
+//! a course of leaves lies along the rib plane, turned about the length of
+//! the hut, and the pole along the hut, turned about the width. A slope that
+//! falls both ways at once -- down the side and down the ridge -- is two
+//! turns, which a box of a block does not have; so the thatch is cut into
+//! slices half a cell long, each laid at the pitch the ridge has in its
+//! middle, and the steps between the slices are the heap of leaves getting
+//! lower toward the tail.
 //!
-//! - **fork**: The forked stick the ridge rests on, standing in the heap.
+//! **The file was written out of arithmetic** -- `hut.py` in the change that
+//! made it, not kept -- and the numbers that must agree with it are the
+//! slices in `lean_to::SLICES`, the collider. Move a course here and
+//! `a_lean_to_is_drawn_where_it_is_walked_into_whichever_way_it_faces` says
+//! which points of it now stand outside what a body walks into, or which
+//! wall of air is now too far from any leaf.
 //!
-//! ## furniture/lean_to_foot.bbmodel
+//! **The `inside` group is the hollow under the thatch**, not a chest's
+//! lining: the ribs, the lining of leaves between them, and the bed. It is
+//! always drawn, in a third of the sky (`mesh::lean_to_block`), because it
+//! is what anybody looking in at the mouth sees, and lit by the sky it was
+//! a sunlit floor inside a heap of leaves.
 //!
-//! ...and the open end, from the seam at z nought to the mouth at sixteen,
-//! where a sleeper crawls in. No wall: the dark under the ridge is the door.
+//! - **ridge pole**: Two sixteenths square, its top at twenty-one in the fork
+//!   and on the ground at z -13: the tail. Bark on, as every stick in a camp
+//!   is (`pole`).
 //!
-//! - **ridge pole**: Bark on, running the whole length -- what the leaves
-//!   are thrown over.
+//! - **fork leg left**: The fork is two poles crossed over the ridge in the
+//!   first ribs' plane, their tops four sixteenths out of the thatch -- the X
+//!   that says "shelter" from across a clearing, and the one piece of the
+//!   frame that shows from outside.
+//!
+//! - **rib 0 left**: Two sticks to a slice of thatch (one in the front slice,
+//!   the fork being the other), leaned from the ground to the pole at the
+//!   pole's own height where it touches, so the ribs shorten toward the tail
+//!   as the pole comes down. Set two sixteenths in from each slice's ends, and
+//!   every piece on the right a third of a sixteenth further along than its
+//!   fellow on the left: an end of a rib in the plane where a course ends,
+//!   or two sides' ends in one plane where they cross at the ridge, is two
+//!   faces fighting over one plane (`model_overlap`).
+//!
+//! - **lining 0 left**: A quarter of a sixteenth of leaves on the ribs: what
+//!   is seen between them from inside, in the shade with them.
+//!
+//! - **thatch 0 left course 0**: The skirt, heaped at the foot of the ribs
+//!   and laid first. Four courses a side, each lying further out than the
+//!   one under it and over its top edge -- the way thatch is laid from the
+//!   eaves up so the rain runs off the upper onto the lower -- and so each
+//!   a step out of the slope: the depth the flat plates of the old tent did
+//!   not have. At the mouth each course stops three quarters of a sixteenth
+//!   short of the one under it, so the end is steps of leaves.
+//!
+//! - **thatch 0 left course 3**: The top course, past the ridge, meeting the
+//!   other side's over it.
+//!
+//! - **holding stick 0 0 left**: Two sticks a side a slice thrown over the
+//!   leaves to keep them in a wind, which every debris hut in a photograph
+//!   has. Green boughs were the first thought; the one green picture in the
+//!   atlas that is opaque is the branch roofing's, and its laths read as a
+//!   window frame on a slope.
+//!
+//! - **ridge cap**: Leaves heaped along the top, following the pole, over the
+//!   steps the slices make at the ridge.
+//!
+//! - **tail heap 5**: The last slice is under a sixteenth of ridge: a low
+//!   heap over the butt of the pole.
+//!
+//! - **leaf bed**: Two sixteenths of leaves from the mouth to past the
+//!   middle, the collider's bed (`lean_to::BED_TOP`), so a sleeper lies on
+//!   what is drawn.
+//!
+//! - **leaf floor left**: The rest of the hollow's floor raked over, either side of
+//!   the bed and not under it (`model_overlap`), so the grass
+//!   under the hut does not show inside it.
 //!
 //! ## furniture/stool.bbmodel
 //!

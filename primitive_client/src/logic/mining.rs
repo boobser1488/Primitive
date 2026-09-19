@@ -584,6 +584,12 @@ fn model_faces(block: BlockId, cell: (i32, i32, i32), at: [f32; 3], lid: Option<
     } else if let (true, Some(angle)) = (kind == t::BLOCK_CHEST, lid) {
         mesh::furniture_block_hinged(at, block, false, mesh::Hinged::Bodied, layers, 0xFF, &mut vertices, &mut indices);
         mesh::chest_lid_block(at, block, angle, layers, 0xFF, &mut vertices, &mut indices);
+    } else if primitive_shared::lean_to::is_lean_to(block) {
+        // A cell of a lean-to cracks as the box round the thatch it holds:
+        // its model is the whole hut, drawn by one cell, and cracks over all
+        // fifteen for a blow at one would be a hut breaking where it was not
+        // hit.
+        return None;
     } else if mesh::is_furniture(block) {
         mesh::furniture_block(at, block, false, layers, 0xFF, &mut vertices, &mut indices);
     } else {
