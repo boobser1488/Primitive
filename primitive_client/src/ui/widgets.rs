@@ -1720,6 +1720,29 @@ impl Painter {
         self.label_in(rect, text, scale, colour);
     }
 
+    /// One tab of a strip: the page showing is a *well* lettered in the
+    /// accent, the others are buttons.
+    ///
+    /// **One function for every strip, and the lettering is the button's.**
+    /// The pack screen and a body's two pages each drew their own showing
+    /// tab, with `fitted_scale(text, 0.80, ...)` and a top worked out from
+    /// the whole cell -- while the tabs beside it were lettered by
+    /// `button_label_scale` and centred on the cap height. So the word on
+    /// the page you were on was a different size from its neighbours
+    /// (smaller on a phone, where the buttons grow with the finger floor;
+    /// larger on a desktop) and sat a pixel or two low: the one tab that is
+    /// supposed to look *chosen* looked like it came from another screen.
+    /// Only the face and the colour may differ between the two states.
+    pub fn tab(&mut self, rect: Rect, text: &str, showing: bool, hovered: bool, enabled: bool) {
+        if showing {
+            self.well(rect, self.theme.tray);
+            let scale = button_label_scale(rect, text, self.content);
+            self.label_in(rect, text, scale, self.theme.accent);
+        } else {
+            self.button(rect, text, hovered && enabled, enabled);
+        }
+    }
+
     /// One row of the settings screen: a label on the left, the current
     /// value on the right, and the widgets that change it in between.
     ///
@@ -2272,6 +2295,26 @@ mod tests {
     }
 
     use super::*;
+
+    /// **The tab you are on is lettered like the tabs you are not on.**
+    /// Same glyph size, same baseline: only the face and the ink change.
+    /// See `Painter::tab` for the strip where the chosen word was a size
+    /// of its own.
+    #[test]
+    fn a_showing_tab_is_lettered_exactly_like_its_neighbours() {
+        let glyphs = |showing: bool| {
+            let mut p = Painter::new(crate::engine::texture::FontAtlas::for_test());
+            p.tab(Rect::new(-0.3, 0.0, 0.3, 0.1), "ПОЖИТКИ", showing, false, true);
+            p.into_vertices()
+                .into_iter()
+                .filter(|v| v.tex_layer != crate::ui::hotbar::UNTEXTURED)
+                .map(|v| v.position)
+                .collect::<Vec<_>>()
+        };
+        let (chosen, other) = (glyphs(true), glyphs(false));
+        assert!(!chosen.is_empty(), "the showing tab wrote nothing");
+        assert_eq!(chosen, other, "the showing tab's word is drawn at another size or place");
+    }
 
     #[test]
     fn a_desktop_layout_leaves_every_number_exactly_as_it_was() {

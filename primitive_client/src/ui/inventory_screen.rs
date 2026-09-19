@@ -1472,21 +1472,8 @@ fn tab_strip(
         // moves when the player takes their pack off is a control they
         // have to find again.
         let enabled = tab != Tab::Backpack || backpack_on;
-        if tab == showing {
-            p.well(rect, widgets::TRAY);
-            let usable = (rect.width() - 0.03).max(0.0);
-            let scale = widgets::fitted_scale(text, 0.80, usable, 0.55);
-            p.text_centred(
-                text,
-                rect.centre_x(),
-                rect.centre_y() + widgets::cell_height(scale) / 2.0,
-                scale,
-                widgets::ACCENT,
-            );
-        } else {
-            let hovered = enabled && cursor.is_some_and(|(x, y)| rect.contains(x, y));
-            p.button(rect, text, hovered, enabled);
-        }
+        let hovered = cursor.is_some_and(|(x, y)| rect.contains(x, y));
+        p.tab(rect, text, tab == showing, hovered, enabled);
     }
 }
 
@@ -1585,6 +1572,130 @@ pub(crate) fn edge_corner(block: primitive_shared::types::BlockId) -> Option<[f3
         2 => Some(EDGE_DULL),
         3 => Some(WEAR_LOW),
         _ => None,
+    }
+}
+
+/// The corners of a slot, and whose each one is.
+///
+/// **One table, because four marks were placed by four hands.** The jug's
+/// contents took the top left, the edge mark took it too (they never
+/// meet: a jug takes no edge), quality took the top right, the wear bar
+/// the bottom and the count the bottom right. That left exactly one
+/// corner, and the next mark -- wetness, which is being added beside this
+/// -- would have had to find it by reading every other mark's comment.
+/// It is written down here instead: **the bottom left is wetness's**, and
+/// the wear bar starts to the right of it so the two cannot overlap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Corner {
+    /// The edge of a dulled tool, or a jug's contents.
+    TopLeft,
+    /// How well a piece was made.
+    TopRight,
+    /// Kept for wetness. Nothing else may draw here.
+    #[allow(dead_code)]
+    BottomLeft,
+}
+
+/// How big a corner mark is, as a fraction of the slot's side.
+const MARK: f32 = 0.16;
+/// The dark rim round it, so a gold mark shows on straw.
+const MARK_RIM: f32 = 0.03;
+
+/// Where a corner mark goes in `cell`, rim included.
+pub(crate) fn corner_rect(cell: Rect, corner: Corner) -> Rect {
+    let side = cell.width();
+    let reach = side * (MARK + MARK_RIM);
+    let (x0, x1, y0, y1) = (cell.x0 + widgets::BEVEL, cell.x1 - widgets::BEVEL, cell.y0 + widgets::BEVEL, cell.y1 - widgets::BEVEL);
+    match corner {
+        Corner::TopLeft => Rect::new(x0, y1 - reach, x0 + reach, y1),
+        Corner::TopRight => Rect::new(x1 - reach, y1 - reach, x1, y1),
+        Corner::BottomLeft => Rect::new(x0, y0, x0 + reach, y0 + reach),
+    }
+}
+
+/// A square mark in a corner, on its dark rim.
+pub(crate) fn corner_mark(p: &mut Painter, cell: Rect, corner: Corner, colour: [f32; 4]) {
+    let rim = corner_rect(cell, corner);
+    let inset = cell.width() * MARK_RIM;
+    p.quad(rim, WEAR_BACK);
+    let mark = match corner {
+        Corner::TopLeft => Rect::new(rim.x0, rim.y0 + inset, rim.x1 - inset, rim.y1),
+        Corner::TopRight => Rect::new(rim.x0 + inset, rim.y0 + inset, rim.x1, rim.y1),
+        Corner::BottomLeft => Rect::new(rim.x0, rim.y0, rim.x1 - inset, rim.y1 - inset),
+    };
+    p.quad(mark, colour);
+}
+
+/// The edge mark: the corner **chipped** rather than filled -- a stair of
+/// three steps from the corner inwards, the pixel-art shape of a nick in a
+/// blade.
+///
+/// **A shape, because the colours could not carry it alone.** Blunt is the
+/// wear bar's red and poor work is rust, and on the pack's grid the two
+/// were a red square top-left and a red square top-right: which one a
+/// slot had was a question about position that a player scanning a chest
+/// does not ask. A filled square now always means *how it was made*, and a
+/// chipped corner always means *the edge*.
+fn edge_mark(p: &mut Painter, cell: Rect, colour: [f32; 4]) {
+    let rim = corner_rect(cell, Corner::TopLeft);
+    let step = cell.width() * MARK / 3.0;
+    p.quad(rim, WEAR_BACK);
+    for row in 0..3 {
+        let top = rim.y1 - step * row as f32;
+        let width = step * (3 - row) as f32;
+        p.quad(Rect::new(rim.x0, top - step, rim.x0 + width, top), colour);
+    }
+}
+
+/// Every mark a slot can carry beyond its icon and its count: how well it
+/// was made, whether its edge is going, and how worn it is.
+///
+/// **Shared with the hotbar**, which drew none of them: the dull mark's
+/// whole reason (`EDGE_DULL`) is a player scanning the belt for the tool
+/// that needs the stone, and the belt during play is the one place that
+/// scan happens. The pack showed it and the bar did not.
+pub(crate) fn slot_marks(
+    p: &mut Painter,
+    cell: Rect,
+    block: primitive_shared::types::BlockId,
+    wear: Option<f32>,
+    quality: Option<primitive_shared::quality::Band>,
+) {
+    if let Some(colour) = quality_corner(quality) {
+        corner_mark(p, cell, Corner::TopRight, colour);
+    }
+    if let Some(colour) = edge_corner(block) {
+        edge_mark(p, cell, colour);
+    }
+    // The wear bar, under the icon of anything that wears out.
+    //
+    // Only for a tool that has actually been used: a bar under every
+    // fresh axe is a row of full bars saying nothing, and the thing a
+    // player wants to see at a glance is *which* of their tools is about
+    // to go. See `inventory::Stack::condition`.
+    //
+    // **It starts right of the bottom-left corner**, which is wetness's
+    // (see `Corner`): at the old `0.12` of a side the two would have been
+    // drawn over each other on a wet, worn axe.
+    if let Some(condition) = wear.filter(|&c| c < 1.0) {
+        let side = cell.width();
+        let bar = Rect::new(
+            corner_rect(cell, Corner::BottomLeft).x1 + side * 0.03,
+            cell.y0 + side * 0.10,
+            cell.x1 - side * 0.12,
+            cell.y0 + side * 0.16,
+        );
+        p.quad(bar, WEAR_BACK);
+        // Green through amber to red: the colour is the warning, and
+        // it has to be readable without reading the length.
+        let colour = if condition > 0.5 {
+            WEAR_GOOD
+        } else if condition > 0.2 {
+            WEAR_HALF
+        } else {
+            WEAR_LOW
+        };
+        p.quad(Rect::new(bar.x0, bar.y0, bar.x0 + bar.width() * condition.max(0.0), bar.y1), colour);
     }
 }
 
@@ -1687,53 +1798,7 @@ fn draw_slot_full(
         crate::ui::hotbar::icon_tint(block, [1.0, 1.0, 1.0, 1.0]),
     );
 
-    // The quality corner, over the icon so a dark picture cannot hide it,
-    // on a dark backing so a gold one shows on straw. See `QUALITY_FINE`.
-    if let Some(colour) = quality_corner(quality) {
-        let size = CELL * 0.16;
-        let (x1, y1) = (cell.x1 - widgets::BEVEL, cell.y1 - widgets::BEVEL);
-        p.quad(Rect::new(x1 - size - CELL * 0.03, y1 - size - CELL * 0.03, x1, y1), WEAR_BACK);
-        p.quad(Rect::new(x1 - size, y1 - size, x1, y1), colour);
-    }
-
-    // The edge mark, in the top-left corner, for a tool gone dull or blunt.
-    if let Some(colour) = edge_corner(block) {
-        let size = CELL * 0.16;
-        let (x0, y1) = (cell.x0 + widgets::BEVEL, cell.y1 - widgets::BEVEL);
-        p.quad(Rect::new(x0, y1 - size - CELL * 0.03, x0 + size + CELL * 0.03, y1), WEAR_BACK);
-        p.quad(Rect::new(x0, y1 - size, x0 + size, y1), colour);
-    }
-
-    // The wear bar, under the icon of anything that wears out.
-    //
-    // Only for a tool that has actually been used: a bar under every
-    // fresh axe is a row of full bars saying nothing, and the thing a
-    // player wants to see at a glance is *which* of their tools is about
-    // to go. See `inventory::Stack::condition`.
-    if let Some(condition) = wear {
-        if condition < 1.0 {
-            let bar = Rect::new(
-                cell.x0 + CELL * 0.12,
-                cell.y0 + CELL * 0.10,
-                cell.x1 - CELL * 0.12,
-                cell.y0 + CELL * 0.16,
-            );
-            p.quad(bar, WEAR_BACK);
-            // Green through amber to red: the colour is the warning, and
-            // it has to be readable without reading the length.
-            let colour = if condition > 0.5 {
-                WEAR_GOOD
-            } else if condition > 0.2 {
-                WEAR_HALF
-            } else {
-                WEAR_LOW
-            };
-            p.quad(
-                Rect::new(bar.x0, bar.y0, bar.x0 + bar.width() * condition, bar.y1),
-                colour,
-            );
-        }
-    }
+    slot_marks(p, cell, block, wear, quality);
 
     // The count sits on its own dark plate in the corner. Over a sand or
     // snow icon a plain white number is invisible, and a drop shadow
@@ -2970,6 +3035,40 @@ mod tests {
         let blunt = edge_corner(with_edge(BLOCK_COPPER_SAW, 3));
         assert!(dull.is_some() && blunt.is_some() && dull != blunt, "dull and blunt do not read apart: {dull:?} {blunt:?}");
         assert_eq!(edge_corner(BLOCK_JUG), None, "a jug's corner was taken by an edge");
+    }
+
+    /// **No two marks share ground, and wetness has a corner to go to.** A
+    /// fine, blunt, half-worn axe is every mark at once: each is inside the
+    /// slot, the three corners are apart, and the wear bar starts right of
+    /// the bottom-left one -- see `Corner` for whose each corner is.
+    #[test]
+    fn every_slot_mark_keeps_to_its_own_corner_and_leaves_one_for_wetness() {
+        use primitive_shared::quality::Quality;
+        use primitive_shared::tools::with_edge;
+        use primitive_shared::types::BLOCK_BRONZE_AXE;
+        let cell = Rect::new(0.0, 0.0, CELL, CELL);
+        let axe = primitive_shared::inventory::Stack::worn(with_edge(BLOCK_BRONZE_AXE, 3), 1, 400)
+            .with_quality(Quality::from_fraction(1.0));
+        assert!(axe.condition() < 1.0, "the fixture is not worn");
+        for v in drawn(axe) {
+            assert!((0.0..=CELL).contains(&v.position[0]) && (0.0..=CELL).contains(&v.position[1]), "drawn outside the slot at {:?}", v.position);
+        }
+        let apart = |a: Rect, b: Rect| a.x1 <= b.x0 || b.x1 <= a.x0 || a.y1 <= b.y0 || b.y1 <= a.y0;
+        let corners = [Corner::TopLeft, Corner::TopRight, Corner::BottomLeft].map(|c| corner_rect(cell, c));
+        for (i, a) in corners.iter().enumerate() {
+            for b in &corners[i + 1..] {
+                assert!(apart(*a, *b), "two corners overlap: {a:?} {b:?}");
+            }
+        }
+        // The bar's quads are the only ones below the corners' tops and to
+        // the right of the bottom-left corner; none may reach into it.
+        let wet = corner_rect(cell, Corner::BottomLeft);
+        let marks = drawn(axe);
+        let plain = drawn(primitive_shared::inventory::Stack::new(with_edge(BLOCK_BRONZE_AXE, 0), 1));
+        for v in &marks[plain.len()..] {
+            let [x, y] = v.position;
+            assert!(!(x > wet.x0 + 1e-6 && x < wet.x1 - 1e-6 && y > wet.y0 + 1e-6 && y < wet.y1 - 1e-6), "a mark is drawn in wetness's corner at {:?}", v.position);
+        }
     }
 
     #[test]

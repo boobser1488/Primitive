@@ -643,7 +643,7 @@ impl Emits {
             // no left and right shift on glass -- there is one button --
             // and a name that says there are two is a name that makes a
             // player look for the other. The word itself stays English
-            // like the rest of this row; it is the one modifier every
+            // in every language (see `label_in`); it is the one modifier every
             // phone keyboard also calls SHIFT, so it is not a word only
             // a desktop player knows. See [`Emits::label`] on why a
             // picture was not an option.
@@ -655,6 +655,32 @@ impl Emits {
             Emits::More => "...",
             Emits::Key(key) => crate::ui::keybinds::key_name(key),
         }
+    }
+
+    /// What is printed on the button, in the player's language.
+    ///
+    /// **The places are words, so they are translated.** [`Emits::label`]
+    /// is the English, and it was all the glass ever said: a phone set to
+    /// Russian -- the language this game is most played in on a phone --
+    /// showed `PACK`, `MAP` and `JUMP` over a pack screen headed
+    /// `ИНВЕНТАРЬ` and a map tab called `КАРТА`. The same place named in
+    /// two languages is two places to a player who reads one of them.
+    /// What stays is what is a key's name rather than a word: `SHIFT`
+    /// (see the note in `label`), the dots, and any key a player chose.
+    pub fn label_in(self, language: crate::ui::lang::Language) -> &'static str {
+        use crate::platform::Key;
+        use crate::ui::lang::Msg;
+        let msg = match self {
+            Emits::Mine => Msg::ThumbMine,
+            Emits::Place => Msg::ThumbPlace,
+            Emits::Key(Key::Escape) => Msg::ThumbMenu,
+            Emits::Key(Key::Enter) => Msg::ThumbChat,
+            Emits::Key(Key::Space) => Msg::ThumbJump,
+            Emits::Key(Key::KeyI) => Msg::ThumbPack,
+            Emits::Key(Key::KeyM) => Msg::ThumbMap,
+            _ => return self.label(),
+        };
+        language.text(msg)
     }
 }
 
@@ -1696,6 +1722,30 @@ mod tests {
     #[test]
     fn the_modifier_button_is_labelled_for_the_glass_and_not_for_a_keyboard() {
         assert_eq!(Emits::Key(crate::platform::Key::ShiftLeft).label(), "SHIFT");
+    }
+
+    /// A phone in Russian names its places in Russian, and every word on
+    /// the glass in every language is one the font can draw. The key names
+    /// stay what the key is called. See [`Emits::label_in`].
+    #[test]
+    fn a_thumb_button_names_its_place_in_the_players_language() {
+        use crate::platform::Key;
+        use crate::ui::lang::Language;
+        assert_eq!(Emits::Key(Key::KeyM).label_in(Language::Russian), "КАРТА");
+        assert_eq!(Emits::Key(Key::KeyI).label_in(Language::English), Emits::Key(Key::KeyI).label());
+        assert_eq!(Emits::Key(Key::ShiftLeft).label_in(Language::Russian), "SHIFT");
+        for language in Language::ALL.iter().copied() {
+            for emits in [Emits::Mine, Emits::Place, Emits::More]
+                .into_iter()
+                .chain([Key::Escape, Key::Enter, Key::Space, Key::KeyI, Key::KeyM, Key::ShiftLeft].map(Emits::Key))
+            {
+                let word = emits.label_in(language);
+                assert!(!word.is_empty(), "{emits:?} says nothing in {language:?}");
+                for c in word.chars() {
+                    assert!(crate::engine::texture::GLYPHS.contains(c), "{c:?} of {word:?} is not in the font");
+                }
+            }
+        }
     }
 
     #[test]

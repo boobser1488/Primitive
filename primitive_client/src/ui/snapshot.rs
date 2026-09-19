@@ -429,7 +429,7 @@ fn ui_snapshot() {
         // Half of them drawn as held, so a picture shows both faces a
         // button has -- the pale pressed one is where the label had to
         // change colour. See `a_thumb_button_can_be_read_against_the_world_behind_it`.
-        crate::ui::hud::touch_controls(&mut painter, &controls, |slot| slot % 2 == 1);
+        crate::ui::hud::touch_controls(&mut painter, &controls, |slot| slot % 2 == 1, Language::English);
         let mut vertices = painter.into_vertices();
 
         // ...and the hotbar beneath them, **grown the way the game
@@ -1309,7 +1309,7 @@ fn thumb_controls_snapshot() {
     for (held, tag) in [(None, "idle"), (modifier, "shift_held")] {
         let mut painter =
             crate::ui::widgets::Painter::onto(font, Vec::new());
-        crate::ui::hud::touch_controls(&mut painter, &layout, |slot| Some(slot) == held);
+        crate::ui::hud::touch_controls(&mut painter, &layout, |slot| Some(slot) == held, Language::English);
         write(
             &format!("{out}/thumb_controls_{tag}.png"),
             &painter.into_vertices(),
@@ -1982,4 +1982,246 @@ fn stall_snapshot() {
             );
         }
     }
+}
+
+/// Every screen a player can open, in English and in Russian, at whatever
+/// size `UI_SNAPSHOT_SIZE` says -- the audit's before-and-after.
+///
+/// **One test for all of them, because the argument is between them.** The
+/// tools above were each written beside one screen by whoever was building
+/// it, and each answers "does this screen look right"; none of them answers
+/// "do these screens look like one game", which is the question a folder of
+/// them side by side is for. Run once a size:
+///
+/// ```text
+/// UI_SNAPSHOT_SIZE=2712x1220 UI_SNAPSHOT_SCALE=1.5 PRIMITIVE_TOUCH_UI=1 \
+///   UI_SNAPSHOT_DIR=shots/ui_audit/after/phone cargo test -p primitive_client \
+///   --lib ui_audit_snapshot -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "a tool: writes PNGs of every screen for a person to look at"]
+fn ui_audit_snapshot() {
+    use crate::ui::inventory_screen::{Tab, Vitals};
+    use crate::ui::station_screen::{jobs_of, StationScreen};
+    use primitive_shared::minigame::{tolerance, Game};
+    use primitive_shared::quality::Quality;
+    use primitive_shared::tools::with_edge;
+    use primitive_shared::types::{BLOCK_BRONZE_AXE, BLOCK_COOKED_MEAT, BLOCK_COPPER_SAW};
+
+    let out = std::env::var("UI_SNAPSHOT_DIR").unwrap_or_else(|_| ".".to_string());
+    std::fs::create_dir_all(&out).expect("output directory");
+    let font = FontAtlas::for_size(32, 1_000);
+    let layers = FaceLayers::empty_for_test();
+    let aspect = width() as f32 / height() as f32;
+    let touch = crate::ui::widgets::touch_layout();
+
+    // A pack whose belt carries every mark a slot can wear, side by side:
+    // fine and poor, dull and blunt, worn, a jug with grain in it, and one
+    // tool that is all of dull, worn and fine at once -- the slot where the
+    // corners would fight if they were going to.
+    let mut pack = a_playing_pack();
+    pack.open_backpack();
+    for (slot, stack) in [
+        (0, Stack::new(BLOCK_COOKED_MEAT, 5).with_quality(Quality::from_fraction(0.97))),
+        (1, Stack::new(BLOCK_COOKED_MEAT, 2).with_quality(Quality::from_fraction(0.05))),
+        (2, Stack::new(with_edge(BLOCK_COPPER_SAW, 2), 1)),
+        (3, Stack::new(with_edge(BLOCK_BRONZE_AXE, 3), 1)),
+        (4, Stack::worn(with_edge(BLOCK_BRONZE_AXE, 2), 1, 400).with_quality(Quality::from_fraction(0.97))),
+        (5, primitive_shared::inventory::filled_jug(primitive_shared::types::BLOCK_SEEDS, 11)),
+    ] {
+        pack.take_slot(slot);
+        pack.put_in_slot(slot, stack);
+    }
+    for square in [0, 3, 7] {
+        pack.put_in_slot(primitive_shared::inventory::SLOTS + square, Stack::new(BLOCK_CLAY, 9 + square as u32));
+    }
+    let pack_scale = crate::ui::inventory_screen::grow_by(snapshot_layout());
+    let poorly = Vitals {
+        health: 0.35,
+        nourishment: 0.2,
+        stamina: 0.5,
+        body: crate::ui::hud::BodyGauges {
+            temperature_c: 33.0,
+            comfort: primitive_shared::body::Comfort::of(33.0),
+            hydration: 0.15,
+            fatigue: 0.8,
+            injuries: snapshot_wounds(),
+            wetness: 0.6,
+            grime: 0.5,
+            recovery: 0.6,
+            diet_groups: 1,
+            ..crate::ui::hud::BodyGauges::default()
+        },
+    };
+
+    for (language, lang) in [(Language::English, "en"), (Language::Russian, "ru")] {
+        let shot = |name: &str, vertices: &[HotbarVertex], grown: f32| {
+            write_grown(&format!("{out}/{name}_{lang}.png"), vertices, font, grown);
+        };
+
+        // The pack's three pages, and a slot tooltip over the marked belt.
+        for (tab, name) in [(Tab::Health, "inv_health"), (Tab::Pack, "inv_pack"), (Tab::Backpack, "inv_rucksack")] {
+            let mut screen = InventoryScreen::new();
+            screen.open = true;
+            screen.sync(&pack);
+            screen.set_tab(tab);
+            let hover = crate::ui::inventory_screen::slot_rect(4);
+            screen.set_cursor(Some((hover.centre_x(), hover.centre_y())));
+            let mut v = Vec::new();
+            screen.build_into(font, &layers, &pack, &primitive_shared::inventory::Equipment::new(), &snapshot_wounds(), &poorly, language, &mut v);
+            shot(name, &v, pack_scale);
+        }
+        {
+            let mut screen = InventoryScreen::new();
+            screen.open = true;
+            screen.sync(&pack);
+            let row = crate::ui::inventory_screen::recipe_rect(0, 0);
+            screen.set_cursor(Some((row.centre_x(), row.centre_y())));
+            shot("inv_recipe_tip", &screen.build(font, &layers, &pack, 0.7, language), pack_scale);
+        }
+
+        // Containers: chest, body with its rucksack page, bags, hearth, rack, stall.
+        let container = |kind: ContainerKind, contents: Inventory, block, name: &str, hover: Option<(f32, f32)>| {
+            let mut screen = ChestScreen::new();
+            screen.show((0, 0, 0), contents, Some(block), kind, None, None);
+            screen.set_cursor(hover);
+            shot(name, &screen.build(font, &layers, &pack, language), screen.grow_by(snapshot_layout()));
+        };
+        let chest_hover = crate::ui::chest_screen::slot_rect(primitive_shared::protocol::Side::Chest, 1);
+        container(ContainerKind::Chest, a_full_chest(), primitive_shared::types::BLOCK_CHEST, "chest", Some((chest_hover.centre_x(), chest_hover.centre_y())));
+        container(ContainerKind::Saddlebags, a_full_chest(), primitive_shared::types::BLOCK_SADDLEBAGS, "bags", None);
+        {
+            let mut contents = Inventory::body(true);
+            for offset in [0, 3, 11] {
+                contents.put_in_slot(primitive_shared::inventory::CORPSE_COMPARTMENT.start + offset, Stack::new(BLOCK_FLINT, 3));
+            }
+            let mut body = ChestScreen::new();
+            body.show((0, 0, 0), contents, Some(primitive_shared::types::BLOCK_CORPSE), ContainerKind::Chest, None, None);
+            let tab = crate::ui::chest_screen::page_tab_rect(true);
+            body.set_cursor(Some((tab.centre_x(), tab.centre_y())));
+            let _ = body.click(&pack, crate::ui::inventory_screen::Button::Left, false, false);
+            shot("corpse_rucksack", &body.build(font, &layers, &pack, language), body.grow_by(snapshot_layout()));
+        }
+        {
+            let mut kiln = ChestScreen::new();
+            kiln.show(
+                (0, 0, 0),
+                a_working_kiln(),
+                Some(primitive_shared::types::BLOCK_KILN_LIT),
+                ContainerKind::Hearth(hearth::Kind::Kiln),
+                Some(HearthState { fuel_left: 74.0, progress: 0.42, degrees: 1180.0, needs: hearth::COPPER_MELTS_C, wet: false }),
+                None,
+            );
+            shot("hearth", &kiln.build(font, &layers, &pack, language), kiln.grow_by(snapshot_layout()));
+            let mut rack = ChestScreen::new();
+            rack.show(
+                (0, 0, 0),
+                a_loaded_rack(),
+                Some(primitive_shared::types::BLOCK_DRYING_RACK),
+                ContainerKind::Rack,
+                None,
+                Some(RackState { progress: 0.38, rate: 0.0, wet: true, near_fire: false }),
+            );
+            shot("rack", &rack.build(font, &layers, &pack, language), rack.grow_by(snapshot_layout()));
+        }
+        {
+            use crate::ui::chest_screen::StallView;
+            use primitive_shared::stall::{Offer, STOCK};
+            let mut store = Inventory::chest();
+            store.add_within(STOCK, BLOCK_FLINT, 22);
+            let mut stall = ChestScreen::new();
+            stall.show_stall(StallView {
+                at: (0, 0, 0),
+                owner: "Ada".to_string(),
+                yours: false,
+                offers: vec![Some(Offer { give: BLOCK_FLINT, give_count: 4, take: primitive_shared::types::BLOCK_HIDE, take_count: 1 }), None, None],
+            });
+            stall.show((0, 0, 0), store, Some(primitive_shared::types::BLOCK_STALL), ContainerKind::Stall, None, None);
+            shot("stall_buyer", &stall.build(font, &layers, &pack, language), stall.grow_by(snapshot_layout()));
+        }
+
+        // The four stations, at rest and mid-run.
+        for (game, name) in [(Game::Anvil, "anvil"), (Game::Wheel, "wheel"), (Game::Whet, "whet"), (Game::Saw, "saw")] {
+            let mut list = StationScreen::new();
+            list.asked_to_open();
+            list.show(game, tolerance(None));
+            let row = crate::ui::station_screen::Panel::for_game(game).row(0);
+            list.set_cursor(Some((row.centre_x(), row.centre_y())));
+            let mut v = Vec::new();
+            list.build_into(font, &layers, language, &mut v);
+            shot(&format!("{name}_list"), &v, list.grow_by(snapshot_layout()));
+            if let Some(&job) = jobs_of(game).first() {
+                let run = StationScreen::mid_run(game, tolerance(None), job, 0x5EED, 900);
+                let mut v = Vec::new();
+                run.build_into(font, &layers, language, &mut v);
+                shot(&format!("{name}_run"), &v, run.grow_by(snapshot_layout()));
+            }
+        }
+
+        // The death notice.
+        {
+            let mut death = crate::ui::death::DeathScreen::new();
+            death.open("fell from a great height".to_string());
+            for _ in 0..40 {
+                death.tick(0.05);
+            }
+            shot("death", &death.build(font, language), snapshot_layout().fit(crate::ui::death::EXTENT));
+        }
+
+        // The whole HUD at once: every gauge in a bad state, a refusal, the
+        // line, the sail with the compass beside it, the sky's word and --
+        // on a phone -- the thumbs. Nobody plays with all of it up, and that
+        // is the point: anything that can collide does so here.
+        {
+            use crate::ui::hotbar::{BOTTOM, PAD, SLOT};
+            use crate::ui::widgets::{anchor, scale_about, Painter};
+            let mut v = Vec::new();
+            let box_quad = |v: &mut Vec<HotbarVertex>, x0: f32, y0: f32, x1: f32, y1: f32, tint: [f32; 4]| {
+                for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)] {
+                    v.push(HotbarVertex { position: [x, y], uv: [0.0, 0.0], tex_layer: UNTEXTURED, tint });
+                }
+            };
+            let total = (SLOT + 0.012) * 10.0 - 0.012;
+            box_quad(&mut v, -total / 2.0 - PAD, BOTTOM - PAD, total / 2.0 + PAD, BOTTOM + SLOT + PAD, [0.12, 0.12, 0.14, 0.92]);
+            for slot in 0..10 {
+                let centre = crate::ui::hotbar::slot_centre(slot, 10);
+                box_quad(&mut v, centre - SLOT / 2.0, BOTTOM, centre + SLOT / 2.0, BOTTOM + SLOT, [0.30, 0.31, 0.34, 1.0]);
+            }
+            let refusal = match language {
+                Language::Russian => "возвращён: слишком далеко от мира",
+                _ => "moved back: too far from the world",
+            };
+            v.extend(crate::ui::hud::build(font, 7.0, 20.0, 12.0, 0.2, false, 0.4, 0.15, poorly.body, &pack, Some((refusal, 1.0))));
+            scale_about(&mut v, anchor::BOTTOM(aspect), ui_scale());
+
+            let mut line = Painter::onto(font, Vec::new());
+            crate::ui::hud::line_gauge(&mut line, Some(0.6), Some(0.8));
+            let mut line = line.into_vertices();
+            scale_about(&mut line, anchor::CENTRE(aspect), ui_scale());
+            v.extend(line);
+
+            let mut top = Painter::onto(font, Vec::new());
+            crate::ui::hud::sail_gauge(&mut top, 0.7, 0.3, 0.8, false);
+            crate::ui::hud::compass_dial(&mut top, crate::logic::bearing::needle(0.4), crate::ui::hud::COMPASS_BESIDE_SAIL);
+            let hint = format!("{}: {}", language.text(crate::ui::lang::Msg::SkyByStars), language.text(crate::ui::lang::Msg::NorthBehind));
+            crate::ui::hud::sky_hint(&mut top, &hint);
+            let mut top = top.into_vertices();
+            scale_about(&mut top, anchor::TOP(aspect), ui_scale());
+            v.extend(top);
+
+            if touch {
+                let mut thumbs = Painter::onto(font, Vec::new());
+                let controls = crate::platform::touch::Layout::for_size(
+                    crate::platform::Size::new(width(), height()),
+                    crate::settings::TouchLayout::default(),
+                    ui_scale(),
+                    false,
+                );
+                crate::ui::hud::touch_controls(&mut thumbs, &controls, |_| false, language);
+                v.extend(thumbs.into_vertices());
+            }
+            write(&format!("{out}/hud_{lang}.png"), &v, font);
+        }
+    }
+    println!("wrote the audit to {out}");
 }

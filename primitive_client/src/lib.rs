@@ -6152,7 +6152,7 @@ fn run(
                             );
                             hud::touch_controls(&mut painter, touch.layout(), |control| {
                                 touch.is_held(control)
-                            });
+                            }, settings.language);
                             ui_vertices = painter.into_vertices();
                         }
 

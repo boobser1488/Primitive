@@ -430,6 +430,17 @@ pub enum Msg {
     No,
     Of,
     KgCarried,
+    /// The unit alone, after a weight in a tooltip or a container's summary.
+    Kg,
+    /// The words on the thumb controls that name a place or an act rather
+    /// than a key. See `settings::Emits::label_in`.
+    ThumbMine,
+    ThumbPlace,
+    ThumbMenu,
+    ThumbChat,
+    ThumbJump,
+    ThumbPack,
+    ThumbMap,
     Speed,
     // ---- chest screen ----
     Chest,
@@ -1064,7 +1075,11 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::RoleCode,     en: "CODE",         simple: "CODE",       ru: "КОД", pl: "KOD" },
     Line { msg: Msg::RoleEngine,   en: "ENGINE",       simple: "BUILT WITH", ru: "ДВИЖОК", pl: "SILNIK" },
 
-    Line { msg: Msg::Inventory,    en: "INVENTORY",    simple: "WHAT YOU CARRY", ru: "РЮКЗАК", pl: "EKWIPUNEK" },
+    // **Not "РЮКЗАК"**, which it was until the pack screen grew a third tab
+    // called exactly that (`Msg::TabBackpack`): the heading over the page
+    // of your own things and the tab for the bag on your back read the
+    // same word, and the tab looked like the page it was already on.
+    Line { msg: Msg::Inventory,    en: "INVENTORY",    simple: "WHAT YOU CARRY", ru: "ИНВЕНТАРЬ", pl: "EKWIPUNEK" },
     Line { msg: Msg::Crafting,     en: "CRAFTING",     simple: "MAKING THINGS", ru: "СОЗДАНИЕ", pl: "WYTWARZANIE" },
     // Short in every language: the column is one slot wide. See `Msg::Worn`.
     Line { msg: Msg::Worn,         en: "WORN",         simple: "ON YOU",     ru: "ТЕЛО", pl: "NA SOBIE" },
@@ -1101,6 +1116,22 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::No,           en: "no",           simple: "no",         ru: "нет", pl: "nie" },
     Line { msg: Msg::Of,           en: "OF",           simple: "OF",         ru: "ИЗ", pl: "Z" },
     Line { msg: Msg::KgCarried,    en: "kg carried",   simple: "kg carried", ru: "кг при себе", pl: "kg przy sobie" },
+    // The unit on its own. It was written into the format strings as a
+    // literal "kg", so a Russian tooltip said "1 kg" one line above a
+    // footer that said "229 кг при себе" -- two spellings of one unit on
+    // one screen.
+    Line { msg: Msg::Kg,           en: "kg",           simple: "kg",         ru: "кг", pl: "kg" },
+    // The thumb controls. Short, because a button is a square a thumb
+    // wide and `scale_to_fit` shrinks a long word until it is small: the
+    // Russian pack button is `ВЕЩИ`, not the screen's own `ИНВЕНТАРЬ`,
+    // for that reason and no other.
+    Line { msg: Msg::ThumbMine,    en: "MINE",         simple: "DIG",        ru: "КОПАТЬ", pl: "KOP" },
+    Line { msg: Msg::ThumbPlace,   en: "PLACE",        simple: "PUT",        ru: "СТАВИТЬ", pl: "POŁÓŻ" },
+    Line { msg: Msg::ThumbMenu,    en: "MENU",         simple: "MENU",       ru: "МЕНЮ", pl: "MENU" },
+    Line { msg: Msg::ThumbChat,    en: "CHAT",         simple: "TALK",       ru: "ЧАТ", pl: "CZAT" },
+    Line { msg: Msg::ThumbJump,    en: "JUMP",         simple: "JUMP",       ru: "ПРЫЖОК", pl: "SKOK" },
+    Line { msg: Msg::ThumbPack,    en: "PACK",         simple: "BAG",        ru: "ВЕЩИ", pl: "TORBA" },
+    Line { msg: Msg::ThumbMap,     en: "MAP",          simple: "MAP",        ru: "КАРТА", pl: "MAPA" },
     Line { msg: Msg::Speed,        en: "speed",        simple: "speed",      ru: "скорость", pl: "szybkość" },
 
     Line { msg: Msg::Chest,        en: "CHEST",        simple: "STORAGE BOX", ru: "СУНДУК", pl: "SKRZYNIA" },
@@ -1148,7 +1179,10 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::VitalRecovery, en: "recovery",    simple: "getting breath back", ru: "восстановление", pl: "regeneracja" },
     Line { msg: Msg::VitalInjuries, en: "INJURIES",    simple: "WHAT HURTS", ru: "ПОВРЕЖДЕНИЯ", pl: "OBRAŻENIA" },
     Line { msg: Msg::NoBackpack,   en: "no rucksack on your back", simple: "you have no bag on your back", ru: "на спине нет рюкзака", pl: "nie masz plecaka na plecach" },
-    Line { msg: Msg::Stored,       en: "STORED",       simple: "IN THE BOX", ru: "В СУНДУКЕ", pl: "W SKRZYNI" },
+    // **Not "В СУНДУКЕ"**: the same caption heads a body, a horse's bags and
+    // a stall's counter, and a dead player's own things captioned "in the
+    // chest" is a label that is wrong three screens out of four.
+    Line { msg: Msg::Stored,       en: "STORED",       simple: "INSIDE",     ru: "ВНУТРИ", pl: "W ŚRODKU" },
     Line { msg: Msg::Carried,      en: "CARRIED",      simple: "ON YOU",     ru: "ПРИ СЕБЕ", pl: "PRZY SOBIE" },
     Line { msg: Msg::StoreAll,     en: "STORE ALL ^",  simple: "PUT IN ^",   ru: "СЛОЖИТЬ ^", pl: "SCHOWAJ ^" },
     Line { msg: Msg::TakeAll,      en: "v TAKE ALL",   simple: "v TAKE OUT", ru: "v ЗАБРАТЬ", pl: "v ZABIERZ" },

@@ -3482,7 +3482,7 @@ impl Menu {
         // Drawn by the call the HUD makes, from the layout the game
         // hit-tests. See `placed_controls`.
         let touch = self.placed_controls(ctx.settings.ui_scale);
-        crate::ui::hud::touch_controls(p, &touch, |_| false);
+        crate::ui::hud::touch_controls(p, &touch, |_| false, ctx.settings.language);
 
         const EDGE: f32 = 1.0;
         self.title(p, say(ctx, Msg::ArrangeControls), EDGE - 0.10);
