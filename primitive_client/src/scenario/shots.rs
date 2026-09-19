@@ -25,7 +25,18 @@ pub(super) fn write(scenario: &Scenario, dir: &Path, name: &str) {
         return;
     };
     static TEXTURES: OnceLock<TextureManager> = OnceLock::new();
-    let settings = crate::settings::ClientSettings::default();
+    // **A reporting player's fov and filtering, when asked**:
+    // `PRIMITIVE_SCENARIO_FOV=95 PRIMITIVE_SCENARIO_ANISOTROPY=16`. A
+    // picture at the default seventy degrees is a picture from a place no
+    // player who reported the fault was standing.
+    let read = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<f32>().ok());
+    let mut settings = crate::settings::ClientSettings::default();
+    if let Some(fov) = read("PRIMITIVE_SCENARIO_FOV") {
+        settings.fov_degrees = fov;
+    }
+    if let Some(anisotropy) = read("PRIMITIVE_SCENARIO_ANISOTROPY") {
+        settings.anisotropy = anisotropy as _;
+    }
     let textures = TEXTURES.get_or_init(|| {
         let assets = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
         TextureManager::load(device, queue, assets, settings.anisotropy).expect("textures load")
@@ -60,6 +71,7 @@ pub(super) fn write(scenario: &Scenario, dir: &Path, name: &str) {
     let mut camera = crate::engine::camera::Camera::new(scenario.camera.position, SIZE.0 as f32 / SIZE.1 as f32);
     camera.yaw = scenario.camera.yaw;
     camera.pitch = scenario.camera.pitch;
+    camera.fov_y_radians = settings.fov_degrees.to_radians();
     let mut png = crate::engine::renderer::offscreen_repro::draw_scene(
         device,
         queue,

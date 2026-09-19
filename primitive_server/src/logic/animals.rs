@@ -201,6 +201,27 @@ fn stand_height(id: primitive_shared::types::BlockId) -> f32 {
     primitive_shared::types::collision_height(id)
 }
 
+/// The boxes of a step at `cell`, shaped by its neighbours as the player's
+/// collider shapes it (`geometry::step_boxes`), or `None` for anything
+/// else -- which an animal still meets as a whole cell `stand_height` tall.
+///
+/// Only steps, and not every shape `geometry` knows: an animal meets whole
+/// cells on purpose (see `stand_height`), and a step is the one partial
+/// block an animal is *meant* to walk on -- a flight of them is a way up,
+/// and read as a cube each one stood a body on its riser over a tread with
+/// half a block of air under it.
+fn step_boxes_at(
+    world: &dyn BlockWorld,
+    block: primitive_shared::types::BlockId,
+    (x, y, z): (i32, i32, i32),
+) -> Option<primitive_shared::geometry::StepBoxes> {
+    primitive_shared::types::is_step(block).then(|| {
+        primitive_shared::geometry::step_boxes(block, |dx, dy, dz| {
+            world.block(x + dx, y + dy, z + dz).unwrap_or(primitive_shared::types::BLOCK_AIR)
+        })
+    })
+}
+
 use primitive_shared::types::{
     can_grow_on, is_burning, is_liquid, is_lit_torch, BLOCK_GRASS, CHUNK_SIZE_Y,
 };
@@ -10179,6 +10200,23 @@ fn fits(world: &dyn BlockWorld, feet: (f64, f64, f64), frame: impl Into<Frame>) 
                 // overlapping it: an animal so surrounded by walls that
                 // it can neither walk nor fall, standing wherever it
                 // spawned forever.
+                // **A step is its tread and its riser**, not the cube its
+                // row is: read as a whole cell it stood a sheep on the
+                // top of the riser over the tread, half a block of air
+                // under its front hooves.
+                if let Some(boxes) = step_boxes_at(world, block, (x, y, z)) {
+                    let clear = boxes.iter().all(|(min, max)| {
+                        let across = f64::from(x) + f64::from(min[0]) < feet.0 + half
+                            && f64::from(x) + f64::from(max[0]) > feet.0 - half
+                            && f64::from(z) + f64::from(min[2]) < feet.2 + half
+                            && f64::from(z) + f64::from(max[2]) > feet.2 - half;
+                        !(across && y as f32 + max[1] > feet.1 && (y as f32 + min[1]) < feet.1 + height)
+                    });
+                    if !clear {
+                        return false;
+                    }
+                    continue;
+                }
                 let solid = stand_height(block);
                 if solid <= 0.0 {
                     continue;
@@ -10239,6 +10277,20 @@ fn resting_height(world: &dyn BlockWorld, at: (f64, f64, f64), low: f64, frame: 
                     continue;
                 };
                 if is_liquid(block) {
+                    continue;
+                }
+                // A step's boxes under the footprint, for `fits`'s reason.
+                if let Some(boxes) = step_boxes_at(world, block, (x, y, z)) {
+                    for (min, max) in boxes.iter() {
+                        let across = f64::from(x) + f64::from(min[0]) < at.0 + half
+                            && f64::from(x) + f64::from(max[0]) > at.0 - half
+                            && f64::from(z) + f64::from(min[2]) < at.2 + half
+                            && f64::from(z) + f64::from(max[2]) > at.2 - half;
+                        let top = y as f32 + max[1];
+                        if across && top <= was_at {
+                            highest = highest.max(top);
+                        }
+                    }
                     continue;
                 }
                 let solid = stand_height(block);
@@ -11914,6 +11966,32 @@ mod tests {
             at.0,
             at.1
         );
+    }
+
+    #[test]
+    fn an_animal_on_the_tread_of_a_step_stands_on_the_tread() {
+        // A step's row is a whole cube, and an animal read it as one: a
+        // body over the tread was held at the top of the riser, half a
+        // block of air under its hooves, and one coming down onto the tread
+        // stopped there. The tread and the riser are what it stands on now,
+        // as they are for a player (`geometry::step_boxes`).
+        use primitive_shared::geometry::STEP_TREAD;
+        use primitive_shared::types::{faced, Facing, BLOCK_PLANK_STAIRS};
+        let world = meadow(4);
+        // North-facing: the low side is -z, the riser at the back, +z.
+        world.put(0, 21, 0, faced(BLOCK_PLANK_STAIRS, Facing::North));
+        let frame = Frame { width: 0.4, height: 0.8 };
+        let over_tread = (0.5, 0.0, (STEP_TREAD * 0.5) as f64);
+        let at = |y: f64| (over_tread.0, y, over_tread.2);
+        assert!(fits(&world, at(21.5), frame), "a small body on the tread does not fit on it");
+        assert!(!fits(&world, at(21.45), frame), "a body sunk into the tread fits");
+        let rest = resting_height(&world, at(21.9), 21.4, frame);
+        assert!((rest - 21.5).abs() < 1e-6, "a fall onto the tread came to rest at {rest}");
+        // ...and over the riser, the riser's top.
+        let over_riser = (0.5, 22.3, 0.5 + (STEP_TREAD * 0.5) as f64);
+        assert!(!fits(&world, (over_riser.0, 21.5, over_riser.2), frame), "the riser is walked through");
+        let rest = resting_height(&world, over_riser, 21.9, frame);
+        assert!((rest - 22.0).abs() < 1e-6, "a fall onto the riser came to rest at {rest}");
     }
 
     #[test]

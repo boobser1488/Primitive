@@ -1965,6 +1965,137 @@ fn the_corners_of_a_flight_are_walked_up_and_down_on_the_diagonal_without_a_corr
     no_corrections(&s);
 }
 
+#[test]
+fn a_block_set_beside_a_step_keeps_the_face_the_step_does_not_cover() {
+    // **"если поставить с блоком, то грань блока будет пустая".** A step
+    // counted as a whole block to the mesher, so a cobblestone set beside
+    // one lost its whole face toward it -- and the step covers only the
+    // lower half of it and a quarter of the upper, so the rest was a hole
+    // into the cobblestone, with the grass beyond showing through. Every
+    // kind, every facing, a block on each of its four sides: the area of
+    // that block's face drawn toward the step is at least what the step
+    // leaves open of it.
+    let mut s = Scenario::new();
+    let (x0, z0) = FIELD;
+    let g = GROUND + 1;
+    s.stand_at(feet_on(x0, z0));
+    let mut cells = Vec::new();
+    let mut cases = Vec::new();
+    for (k, kind) in STEP_KINDS.into_iter().enumerate() {
+        for (f, facing) in FACINGS.into_iter().enumerate() {
+            let step = (x0 + 3 + 4 * k as i32, g, z0 + 3 + 4 * f as i32);
+            cells.push((step, t::faced(kind, facing)));
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let beside = (step.0 + dx, g, step.2 + dz);
+                cells.push((beside, t::BLOCK_COBBLESTONE));
+                cases.push((kind, facing, beside, (-dx, -dz)));
+            }
+        }
+    }
+    s.build(&cells);
+    s.seconds(0.5);
+    for (kind, facing, cell, (nx, nz)) in cases {
+        // The face of `cell` looking along (nx, nz), toward the step.
+        let plane = if nx > 0 || nz > 0 { 1024 } else { 0 };
+        let axis = if nx != 0 { 0 } else { 2 };
+        let at = [cell.0 * 1024, cell.1 * 1024, cell.2 * 1024];
+        let area: f64 = triangles_in(&s, cell, cell)
+            .iter()
+            .filter(|tri| tri.iter().all(|p| p[axis] - at[axis] == plane))
+            .map(|tri| {
+                let (s_axis, t_axis) = (if axis == 0 { 2 } else { 0 }, 1);
+                let a = [f64::from(tri[1][s_axis] - tri[0][s_axis]), f64::from(tri[1][t_axis] - tri[0][t_axis])];
+                let b = [f64::from(tri[2][s_axis] - tri[0][s_axis]), f64::from(tri[2][t_axis] - tri[0][t_axis])];
+                (a[0] * b[1] - a[1] * b[0]).abs() * 0.5 / (1024.0 * 1024.0)
+            })
+            .sum();
+        assert!(
+            area > 0.999,
+            "{} facing {facing:?}: the cobblestone at {cell:?} draws {area:.3} of its face toward the step",
+            t::block_name(kind)
+        );
+    }
+    let eye = DVec3::new(f64::from(x0) + 1.0, f64::from(g) + 1.62, f64::from(z0) + 1.0);
+    look_from(&mut s, eye, DVec3::new(f64::from(x0) + 5.0, f64::from(g) + 0.5, f64::from(z0) + 5.0));
+    s.shot("steps_beside_blocks");
+    no_corrections(&s);
+}
+
+#[test]
+fn nothing_is_put_or_set_down_over_the_air_of_a_partial_top() {
+    // **"исправь баг наложения мешей и 3D-моделей на неполные блоки".** A
+    // thing that rests on the block below is drawn from the floor of its own
+    // cell -- the top of a *whole* block. Put on a slab, the tread of a step,
+    // a floor dug down a quarter, a heap of a handful or a campfire, a chair
+    // stood half a block over the slab and a knife lay in the air over the
+    // tread, sunk into nothing and floating at once. They are refused there
+    // now (`types::has_full_top`, `types::can_grow_on`), and the same things
+    // on a whole floor still go down -- which is what says the refusal is
+    // the rule and not a harness that places nothing.
+    let mut s = Scenario::new();
+    let (x0, z0) = FIELD;
+    let g = GROUND + 1;
+    s.stand_at(feet_on(x0, z0));
+    let dug = primitive_shared::dig::next_bite(t::BLOCK_DIRT, primitive_shared::dig::Side::PosY).expect("dirt bites");
+    let grounds = [
+        t::BLOCK_STONE,
+        t::BLOCK_TILE_SLAB,
+        t::faced(t::BLOCK_PLANK_STAIRS, Facing::West),
+        dug,
+        primitive_shared::dig::heaped(t::BLOCK_DIRT),
+        t::BLOCK_CAMPFIRE,
+    ];
+    // Grounds along z, two cells in front of the player, one per row.
+    let ground_at = |i: usize| (x0 + 2, g, z0 - 5 + 2 * i as i32);
+    s.build(&grounds.iter().enumerate().map(|(i, &b)| (ground_at(i), b)).collect::<Vec<_>>());
+    s.give(t::BLOCK_CHAIR, 8);
+    s.give(t::BLOCK_BARREL, 8);
+    s.give(t::BLOCK_PEAT, 8);
+    for (i, &ground) in grounds.iter().enumerate() {
+        let cell = ground_at(i);
+        let over = (cell.0, cell.1 + 1, cell.2);
+        s.stand_at(feet_on(x0, cell.2));
+        // Where a player aims to put a thing on a step: its tread.
+        let aim = if t::is_step(ground) {
+            DVec3::new(f64::from(cell.0) + 0.25, f64::from(cell.1) + 0.5, f64::from(cell.2) + 0.5)
+        } else {
+            let top = f64::from(t::collision_height(ground));
+            DVec3::new(f64::from(cell.0) + 0.5, f64::from(cell.1) + top, f64::from(cell.2) + 0.5)
+        };
+        for (thing, set_down) in [(t::BLOCK_CHAIR, false), (t::BLOCK_BARREL, false), (t::BLOCK_PEAT, true)] {
+            s.select(thing);
+            s.look_at(aim);
+            assert_eq!(s.aimed().map(|(c, _)| c), Some(cell), "not aiming at the {}", t::block_name(ground));
+            if set_down {
+                s.hold(Action::Sprint);
+            }
+            s.use_aimed();
+            s.release_all();
+            s.seconds(0.6);
+            let there = s.server().block_at(over.0, over.1, over.2);
+            let whole = ground == t::BLOCK_STONE;
+            let went = there.is_some_and(|b| !t::is_air(b));
+            assert_eq!(
+                went,
+                whole,
+                "a {} {} a {}: the cell over it holds {:?}",
+                t::block_name(thing),
+                if whole { "was refused on" } else { "went down over" },
+                t::block_name(ground),
+                there.map(t::block_name)
+            );
+            if went {
+                s.server().place_block(over.0, over.1, over.2, t::BLOCK_AIR);
+                s.until(3.0, |s| s.block(over).is_some_and(t::is_air));
+            }
+        }
+    }
+    let eye = DVec3::new(f64::from(x0) - 1.0, f64::from(g) + 2.2, f64::from(z0));
+    look_from(&mut s, eye, DVec3::new(f64::from(x0) + 2.5, f64::from(g) + 0.5, f64::from(z0)));
+    s.shot("nothing_over_partial_tops");
+    no_corrections(&s);
+}
+
 /// Looks from `eye` at `target` for a picture, without moving the body.
 fn look_from(s: &mut Scenario, eye: DVec3, target: DVec3) {
     let dir = (target - eye).as_vec3().normalize();

@@ -177,20 +177,25 @@ fn standing_torch_top(block: BlockId) -> Option<f32> {
     }
 }
 
-/// How deep a step's tread is, from its front edge to the riser: eleven
-/// sixteenths.
+/// How deep a step's tread is, from its front edge to the riser: half a
+/// cell, so the two halves of a step are the same step twice.
 ///
-/// **Deeper than a body is wide** (`PLAYER_HALF_WIDTH` twice, 0.6), so a
-/// player can stop and stand on the lower half of a step. It was half a
-/// cell, narrower than the player: a body walking on met the riser before
-/// its middle was over the tread and was lifted onto the upper half a tenth
-/// of a second after the first, and there was no standing on the tread at
-/// all ("it puts me straight onto the second step"). Rejected: a narrower
-/// collider on steps only, which stands the player inside a riser drawn a
-/// tenth of a cell nearer than it collides. The cost is a shallower upper
-/// half, five sixteenths, which is a ledge a body overhangs rather than a
-/// floor -- a flight still walks up it, and a roof still reads as courses.
-pub const STEP_TREAD: f32 = 11.0 / 16.0;
+/// **It was eleven sixteenths, and the upper half five**, to let a body
+/// (`PLAYER_HALF_WIDTH` twice, 0.6) stand on the tread without its toes in
+/// the riser -- the cure for "it puts me straight onto the second step".
+/// That report had another cause, found in the same week:
+/// `physics::settle_onto_step` lifted a body onto any box in the cells it
+/// spanned, the riser included, touched or not. With that fixed a tread
+/// half a cell deep is stood on as a stair is anywhere -- the middle of
+/// the body over the tread, the heel over the edge -- and the deep tread
+/// was left costing what a player sees first: "вторая ступень слишком
+/// маленькая", an upper half a third the size of the lower, a ledge rather
+/// than a step, and a roof whose courses did not match.
+///
+/// Rejected: keeping the deep tread and drawing the riser deeper than it
+/// collides -- a step drawn one way and walked into another is the thing
+/// `a_step_is_drawn_exactly_where_it_is_walked_into` exists to refuse.
+pub const STEP_TREAD: f32 = 0.5;
 
 /// Which shape a step takes from the steps beside it, in its written pose
 /// (back to +z, as north's is): `Side` is the side of that pose, -x or +x,
@@ -1272,15 +1277,84 @@ mod tests {
         );
     }
 
+    /// **Nothing is a floor that has no whole floor at the top of its cell.**
+    ///
+    /// `types::has_full_top` is the one question everything that rests on
+    /// the block below asks -- a tuft, a torch, a drift of snow, a knife set
+    /// down, the snowfall -- and all of them are drawn from the floor of
+    /// their own cell, which is the top of the cell under them. A step
+    /// answered yes (collidable, eight layers by its row), and a drift of
+    /// snow landed on a roof of steps as a sheet at the height of the
+    /// ridge, hanging over every tread with nothing under it.
+    ///
+    /// Asked of the boxes the collider stands on, standing alone: at the
+    /// top of the cell, every sixteenth of the square is under a box that
+    /// reaches it.
+    #[test]
+    fn nothing_is_a_floor_that_has_no_whole_floor_at_the_top_of_its_cell() {
+        let mut wrong = Vec::new();
+        for id in 0..=u16::MAX {
+            let id = id as BlockId;
+            if !crate::types::is_known_block(id) || !crate::types::has_full_top(id) {
+                continue;
+            }
+            // Tree wood, left out on purpose: see `has_full_top`.
+            if is_branch(id) || block_kind(id) == BLOCK_PALM_TRUNK {
+                continue;
+            }
+            let mut boxes = Vec::new();
+            for_each_block_box(id, 0, 0, 0, |_, _, _| BLOCK_AIR, |min, max| boxes.push((min, max)));
+            let mut bare = 0;
+            for i in 0..16 {
+                for k in 0..16 {
+                    let (x, z) = ((i as f32 + 0.5) / 16.0, (k as f32 + 0.5) / 16.0);
+                    let held = boxes
+                        .iter()
+                        .any(|(min, max)| max[1] >= 1.0 - 1e-4 && (min[0]..=max[0]).contains(&x) && (min[2]..=max[2]).contains(&z));
+                    if !held {
+                        bare += 1;
+                    }
+                }
+            }
+            if bare > 0 {
+                wrong.push(format!("{} ({id}): {bare} of 256 sixteenths of its top are air", crate::types::block_name(id)));
+            }
+        }
+        assert!(wrong.is_empty(), "things stood on these hang over air:\n  {}", wrong.join("\n  "));
+    }
+
     #[test]
     fn a_player_can_stand_on_the_lower_half_of_a_step() {
-        const { assert!(STEP_TREAD > 2.0 * PLAYER_HALF_WIDTH) };
+        // The middle of a body over the tread with its front short of the
+        // riser: the tread has to be deeper than half a body, which is how
+        // a stair is stood on anywhere.
+        const { assert!(STEP_TREAD > PLAYER_HALF_WIDTH) };
         use crate::types::{faced, Facing, BLOCK_PLANK_STAIRS};
         let boxes = step_boxes(faced(BLOCK_PLANK_STAIRS, Facing::North), |_, _, _| BLOCK_AIR);
         let [tread, riser] = [boxes.boxes[0], boxes.boxes[1]];
         assert!(tread.1[1] <= 0.5 && riser.0[1] >= 0.5);
         let depth = (0..3).filter(|&a| a != 1).map(|a| riser.0[a].max(1.0 - riser.1[a])).fold(0.0_f32, f32::max);
-        assert!(depth > 2.0 * PLAYER_HALF_WIDTH, "a tread {depth} deep is narrower than a body");
+        assert!(depth > PLAYER_HALF_WIDTH, "a tread {depth} deep is shallower than half a body");
+    }
+
+    /// **"вторая ступень слишком маленькая"**: the two halves of a step are
+    /// one step twice -- the riser as deep as the tread in front of it and
+    /// as tall as it, for every kind, facing and shape. The upper half was
+    /// five sixteenths deep against the tread's eleven, a ledge a third the
+    /// size of the step under it.
+    #[test]
+    fn the_upper_half_of_a_step_is_as_big_a_step_as_the_lower() {
+        use crate::types::{faced, Facing, BLOCK_PLANK_STAIRS};
+        for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+            let boxes = step_boxes(faced(BLOCK_PLANK_STAIRS, facing), |_, _, _| BLOCK_AIR);
+            let [tread, riser] = [boxes.boxes[0], boxes.boxes[1]];
+            let rise = |b: ([f32; 3], [f32; 3])| b.1[1] - b.0[1];
+            let run = |b: ([f32; 3], [f32; 3])| (b.1[0] - b.0[0]).min(b.1[2] - b.0[2]);
+            // What of the tread shows in front of the riser.
+            let open = run(tread) - run(riser);
+            assert!((rise(tread) - rise(riser)).abs() < 1e-6, "{facing:?}: rises {} and {}", rise(tread), rise(riser));
+            assert!((open - run(riser)).abs() < 1e-6, "{facing:?}: a tread {open} deep under a riser {} deep", run(riser));
+        }
     }
 
     /// **Every riser in a flight meets the riser beside it face to face**,

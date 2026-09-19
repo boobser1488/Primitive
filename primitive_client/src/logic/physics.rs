@@ -3279,8 +3279,11 @@ pub(crate) mod tests {
         use primitive_shared::types::{Facing, BLOCK_PLANK_STAIRS};
         let chunks = floor_with_a_step(BLOCK_PLANK_STAIRS, Facing::North);
         // The low side of a north-facing step is -z: stand the player on the
-        // front of the tread, their back edge over its front edge.
-        let mut player = Player::new(Vec3::new(8.5, 10.5, 8.0 + PLAYER_HALF_WIDTH + 0.01).as_dvec3(), DEFAULT_MOVE_SPEED);
+        // tread with their toes a hair short of the riser -- the heel over
+        // the front edge, as a body stands on any stair.
+        use primitive_shared::geometry::STEP_TREAD;
+        let toes = 8.0 + STEP_TREAD - 0.01;
+        let mut player = Player::new(Vec3::new(8.5, 10.5, toes - PLAYER_HALF_WIDTH).as_dvec3(), DEFAULT_MOVE_SPEED);
         for _ in 0..60 {
             player.update(&chunks, &[], Vec3::ZERO, Vec3::Z, false, false, false, 1.0 / 60.0);
         }

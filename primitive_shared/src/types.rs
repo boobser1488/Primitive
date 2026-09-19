@@ -6797,10 +6797,33 @@ pub fn has_full_top(id: BlockId) -> bool {
     // (`pit::PILE_LOGS_AT`) -- six reach the top of the cell with one log.
     // ...and nothing on a wall part of the way up: its top is a course,
     // not a floor, and a heap or a wall is only started on a whole one.
+    // ...and nothing on a block whose row says "a whole cube" while its
+    // shape is less than that at the top: a step (the riser is the back
+    // half of the top; the front half is the tread, half a cell down), a
+    // door, a rack or a hide frame (a few sixteenths of it across the
+    // cell), a lattice, a pit prop, a hive, a standing torch. Everything
+    // that rests on the block under it -- a tuft, a torch, a knife set
+    // down, a drift of snow, the snowfall itself -- is drawn from the
+    // floor of its own cell, and on one of these that floor is mostly
+    // air: snow fell onto a roof of steps as a sheet at the height of the
+    // ridge, hanging over every tread. The boxes are the authority, and
+    // `geometry`'s `nothing_is_a_floor_that_has_no_whole_floor_at_the_top_of_its_cell`
+    // holds this list to them.
+    //
+    // Not the boughs and the palm's trunk, whose wood is also less than
+    // their cell: which pieces of a tree join is read off this answer
+    // (`branch::joins`), and the generator plants what it plants on it;
+    // changing it moves trees, which is a different change from this one.
     !crate::dig::is_part(id)
         && is_collidable(id)
         && block_layers(id) == LAYERS_PER_BLOCK
         && (crate::pit::pile_extent(id).is_none() || crate::pit::pile_logs(id) == Some(crate::pit::PILE_LOGS_MAX))
+        && !is_step(id)
+        && collision_depth(id).is_none()
+        && !is_lattice(id)
+        && !is_prop(id)
+        && !crate::bees::is_hive(id)
+        && !crate::wildfire::is_standing_torch(id)
 }
 
 /// Adding `added` layers to what is already in a cell.
@@ -8228,7 +8251,25 @@ pub fn can_grow_on(plant: BlockId, ground: BlockId) -> bool {
         // Fallen leaves on the earth of a wood's floor: turf, bare earth and
         // a swamp's mud, never stone or sand, where no crown stands.
         BLOCK_LEAF_LITTER => matches!(ground, BLOCK_GRASS | BLOCK_DIRT | BLOCK_MUD) && full_floor,
-        _ => true,
+        // **Anything else lying flat lies on a whole floor**, the pebble's
+        // rule for the pebble's reason: a pebble of every other rock, a
+        // snare, a skin of snow. They fell through to "anywhere" below, and
+        // a granite pebble on a slab lay half a block over it.
+        _ if is_flat(plant) => full_floor,
+        // **A lean-to holds itself up**: its upper cells stand on its lower
+        // ones, which are thatch and not a floor, and its ground row is asked
+        // for a whole floor over all nine cells where it is put down
+        // (`net::connection`), which is a question about the hut and not
+        // about one cell of it.
+        _ if crate::lean_to::is_lean_to(plant) => true,
+        // **And a thing that stands -- a chair, a barrel, a bed, a bench --
+        // does not stand on a top that is not whole.** Drawn from the floor
+        // of its own cell, on a slab, a step, a campfire or a bitten block
+        // it hung over the air where that top is not. What stays is what
+        // was always allowed: a thing put against a wall with nothing
+        // under it, which is plainly where somebody put it -- it is the
+        // half-supported one that reads as the world being wrong.
+        _ => full_floor || !is_collidable(ground),
     }
 }
 
@@ -8382,6 +8423,15 @@ pub fn is_opaque(id: BlockId) -> bool {
         // for the same reason it comes in through a drift of snow.
         // ...and a wall part way up is a bite the other way up (`build`).
         && !crate::dig::is_part(id)
+        // ...and a step is a tread and a riser, with the back half of its
+        // cell over the tread empty. Its row is a cube with a wall's
+        // opacity (so a roof of steps keeps the room under it dark), and
+        // that alone answered yes here: the mesher then culled every face
+        // of every block a stair was set against, and the half the riser
+        // does not reach was a hole straight into the block -- "если
+        // поставить с блоком, то грань блока будет пустая". The light is
+        // unchanged by this: a step's opacity still stops all of it.
+        && !is_step(id)
 }
 
 /// Drawn with alpha blending rather than in the opaque pass -- you can
@@ -10471,6 +10521,51 @@ mod depth_tests {
                 );
             }
         }
+    }
+
+    /// **Nothing that stands on the floor stands on a floor that is not
+    /// whole.** Everything held from below is drawn from the floor of its
+    /// own cell, which is the top of a *whole* block under it; on a slab, a
+    /// step, a campfire, a drift, a bitten block or a heap of handfuls that
+    /// floor is air, and the thing hangs over it. Asked of every id there
+    /// is against one of each.
+    #[test]
+    fn nothing_held_from_below_stands_on_a_top_that_is_not_whole() {
+        let dirt_bitten_on_top = crate::dig::next_bite(BLOCK_DIRT, crate::dig::Side::PosY).expect("dirt bites");
+        let dirt_bitten_on_a_side = crate::dig::next_bite(BLOCK_DIRT, crate::dig::Side::PosX).expect("dirt bites");
+        let grounds = [
+            BLOCK_TILE_SLAB,
+            faced(BLOCK_PLANK_STAIRS, Facing::North),
+            faced(BLOCK_TILE_ROOF, Facing::East),
+            BLOCK_CAMPFIRE,
+            dirt_bitten_on_top,
+            dirt_bitten_on_a_side,
+            crate::dig::heaped(BLOCK_DIRT),
+            faced(BLOCK_DOOR, Facing::North),
+            BLOCK_PROP,
+            BLOCK_WINDOW_LATTICE,
+        ];
+        let mut wrong = Vec::new();
+        for id in 0..=u16::MAX {
+            let id = id as BlockId;
+            // A lean-to's footing is asked of its whole ground row where it
+            // is put down, not cell by cell (see its arm in `can_grow_on`).
+            if !is_known_block(id) || !needs_support(id) || support_at(id) != (0, -1, 0) || crate::lean_to::is_lean_to(id) {
+                continue;
+            }
+            for ground in grounds {
+                // The top half of a door stands on its own lower half,
+                // which is the one thing it stands on (`door_partner`).
+                if is_door(id) && is_door(ground) {
+                    continue;
+                }
+                if can_grow_on(id, ground) {
+                    wrong.push(format!("{} ({id}) on {} ({ground})", block_name(id), block_name(ground)));
+                }
+            }
+        }
+        wrong.dedup_by(|a, b| a.split(' ').next() == b.split(' ').next());
+        assert!(wrong.is_empty(), "these stand over air:\n  {}", wrong.join("\n  "));
     }
 
     #[test]
