@@ -1647,8 +1647,11 @@ mod tests {
                 if id == BLOCK_AIR || !overwrite {
                     continue;
                 }
+                // ...and a turf the site laid on the ground may have been
+                // lowered at a rise afterwards (`lips`): the same turf, and
+                // lowered the same on both sides of the seam.
                 assert_eq!(
-                    block_at(&chunks, gx, y, gz),
+                    crate::dig::whole(block_at(&chunks, gx, y, gz)),
                     id,
                     "{:?} at ({gx},{y},{gz}) is not what its site planned",
                     site.kind

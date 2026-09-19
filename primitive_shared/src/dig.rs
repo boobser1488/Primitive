@@ -264,11 +264,76 @@ pub fn is_dug(id: BlockId) -> bool {
 /// client is free to invent them.
 #[inline]
 pub fn bite(id: BlockId) -> Option<(Side, u8)> {
-    if id & DUG == 0 || !digs_in_slices(id) {
+    if id & DUG == 0 {
         return None;
     }
     let side = Side::from_code((id & VARIANT_MASK) >> VARIANT_SHIFT)?;
+    // **The turf's one bite is its lip** ([`is_turf_lip`]): lowered from the
+    // top and from nowhere else. A spade never cuts one (`next_bite` lifts
+    // the sod first), so a turf bitten from a side is an id nobody writes,
+    // and answering `None` for it is what makes `is_known_block` refuse it.
+    if !digs_in_slices(id) && !(block_kind(id) == BLOCK_GRASS && side == Side::PosY) {
+        return None;
+    }
     Some((side, (((id & GONE_MASK) >> GONE_SHIFT) as u8) + 1))
+}
+
+/// **Can this kind carry a bite at all** -- the flag read as a bite rather
+/// than as whatever else the sixteenth bit means on it. What is quarried,
+/// and the turf, whose lip the generator lays on a slope ([`is_turf_lip`]).
+#[inline]
+pub fn may_be_bitten(kind: BlockId) -> bool {
+    digs_in_slices(kind) || block_kind(kind) == BLOCK_GRASS
+}
+
+/// **`block` lowered from the top to `quarters` of its height** (1 to 3 of
+/// [`SLICES`]; 4 or more is the whole block): the same id a floor dug down
+/// that far is, so the collider, the mesher, the water and the save need
+/// nothing new to know about it.
+///
+/// What the generator lays at the top of a slope (`worldgen`'s `lay_lips`),
+/// so walking up a gentle hill is a ramp of quarter steps and not a stair of
+/// whole blocks that has to be jumped.
+#[inline]
+pub fn lowered(block: BlockId, quarters: u8) -> BlockId {
+    if quarters >= SLICES || quarters == 0 {
+        return block_kind(block);
+    }
+    let gone = SLICES - quarters;
+    block_kind(block) | DUG | (BlockId::from(gone - 1) << GONE_SHIFT) | (Side::PosY.code() << VARIANT_SHIFT)
+}
+
+/// **A turf lip: grass on a block lowered from the top.** The meadow on a
+/// generated slope ([`lowered`]), and the one bitten block that is still
+/// ground rather than a hole in it.
+///
+/// Why the turf and not bare earth -- "учти голую землю". A lip laid as dirt
+/// would draw every slope of every meadow as a brown stripe with the grass
+/// stopping a block short of each rise, which is what a hillside a digger
+/// has been at looks like and not what a hillside looks like. So the grass
+/// keeps its kind, and the kind decides everything a lip is asked:
+///
+/// * **Drawn** as turf: the grass top, and the turf's side cropped to the
+///   lip's height, which keeps its fringe and shows the soil under it
+///   (`mesh`); never the chipped face a pick leaves.
+/// * **Grown on**: a plant roots in a lip as in the turf (`can_grow_on`),
+///   so the meadow's tufts do not stop at the edge of every rise.
+/// * **Dug**: the first swing lifts the sod and leaves the earth under it,
+///   the same height, which then comes away a quarter at a time
+///   ([`next_bite`]).
+/// * **Held against water**: the roots bind it, and water runs over it
+///   rather than washing it out, which a cut bite does not survive
+///   (`logic::water`).
+///
+/// Weighed and rejected: *a dirt lip with the grass drawn on it by the
+/// mesher.* Then the id says dirt and the picture says grass, and every
+/// rule that reads the id -- the spread of grass, the plants, the grazing,
+/// the sound of a footstep -- would disagree with what the player sees.
+/// *A new kind of block for a grassy lip* costs a kind for what is a
+/// shape, which is the argument the module doc already had about bites.
+#[inline]
+pub fn is_turf_lip(id: BlockId) -> bool {
+    block_kind(id) == BLOCK_GRASS && is_dug(id)
 }
 
 /// The block this bite is out of: the same cell with nothing taken off it
@@ -306,8 +371,13 @@ pub fn next_bite(block: BlockId, side: Side) -> Option<BlockId> {
     // the sod: the first swing leaves the earth under it, whole, and the
     // earth then comes away a quarter at a time like any other soil. Nothing
     // drops for the sod -- the blade of grass is not a thing to carry.
-    if block_kind(block) == BLOCK_GRASS && !is_dug(block) {
-        return Some(BLOCK_DIRT);
+    if block_kind(block) == BLOCK_GRASS {
+        // ...and off a lip the same: the earth left under the sod is the
+        // lip's own height, not a whole block grown back out of it.
+        return Some(match bite(block) {
+            Some((_, gone)) => lowered(BLOCK_DIRT, SLICES - gone),
+            None => BLOCK_DIRT,
+        });
     }
     if !digs_in_slices(block) {
         return None;
@@ -521,6 +591,38 @@ mod tests {
         }
         assert_eq!(swings, SLICES as usize - 1, "the earth under the turf did not come away a quarter at a time");
     }
+    #[test]
+    fn a_turf_lip_is_turf_lowered_from_the_top_and_from_nowhere_else() {
+        use crate::types::{can_grow_on, collision_height, has_full_top, is_known_block, BLOCK_GRASS, BLOCK_TALL_GRASS};
+        for quarters in 1..SLICES {
+            let lip = lowered(BLOCK_GRASS, quarters);
+            assert!(is_turf_lip(lip), "{quarters} quarters of turf is not a lip");
+            assert_eq!(block_kind(lip), BLOCK_GRASS, "the lip stopped being grass");
+            assert_eq!(collision_height(lip), f32::from(quarters) / f32::from(SLICES), "the lip is not as tall as it is drawn");
+            assert!(is_known_block(lip), "the server would refuse the generator's own lip");
+            // Ground for a tuft, not a floor to set a thing on.
+            assert!(can_grow_on(BLOCK_TALL_GRASS, lip), "the meadow's grass will not root in its own lip");
+            assert!(!has_full_top(lip), "a lip is a floor for a torch");
+        }
+        assert_eq!(lowered(BLOCK_GRASS, SLICES), BLOCK_GRASS, "a lip of the whole height is the whole block");
+        // Turf bitten from a side is an id nobody writes, and a claim.
+        let sideways = BLOCK_GRASS | DUG | (Side::PosX.code() << VARIANT_SHIFT);
+        assert!(!is_dug(sideways));
+        assert!(!is_known_block(sideways), "turf cut from the side was accepted");
+    }
+
+    #[test]
+    fn the_first_swing_at_a_turf_lip_lifts_the_sod_and_leaves_earth_as_high_as_the_lip() {
+        use crate::types::{collision_height, BLOCK_DIRT, BLOCK_GRASS};
+        for quarters in 1..SLICES {
+            let lip = lowered(BLOCK_GRASS, quarters);
+            let earth = next_bite(lip, Side::NegX).expect("the sod came away with the earth under it");
+            assert_eq!(block_kind(earth), BLOCK_DIRT, "the lip did not lose its grass to the spade");
+            assert_eq!(collision_height(earth), collision_height(lip), "lifting the sod changed the height of the ground");
+            assert!(!is_turf_lip(earth));
+        }
+    }
+
     use crate::types::{
         is_known_block, BLOCK_COBBLESTONE, BLOCK_GRANITE, BLOCK_LOG, BLOCK_PLANKS, BLOCK_SAND, BLOCK_STONE,
         BLOCK_TABLE,

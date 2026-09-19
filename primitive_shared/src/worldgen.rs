@@ -1249,6 +1249,12 @@ mod landforms;
 /// Its tests, apart for `surface_metal_tests`' reason.
 #[cfg(test)]
 mod landforms_tests;
+/// The top block at the edge of a gentle rise, lowered a quarter at a time,
+/// so a slope is a ramp and not a stair. See its module note.
+mod lips;
+/// Its tests, apart for `surface_metal_tests`' reason.
+#[cfg(test)]
+mod lips_tests;
 
 pub struct WorldGen {
     seed: u32,
@@ -5312,6 +5318,9 @@ impl WorldGen {
         self.place_ruins(&mut blocks, origin_x, origin_z, &columns);
         // Last, so a tuft never lands where a trunk is about to.
         self.place_ground_cover(&mut blocks, origin_x, origin_z, &columns);
+        // **The lips on the slopes** (`lips`): after everything that stands
+        // or lies on the ground, which keeps the whole block it was put on.
+        self.lay_lips(&mut blocks, &columns);
         // The water standing in caves: after every pass that writes near the
         // surface, so a cell it fills is one nothing else wanted, and before
         // the scatter and the dripstone, which then find water where a floor
