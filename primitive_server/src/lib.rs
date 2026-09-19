@@ -7910,7 +7910,7 @@ pub(crate) fn carcass_cell(
     block_at: impl Fn(i32, i32, i32) -> Option<primitive_shared::types::BlockId>,
 ) -> Option<(i32, i32, i32)> {
     use primitive_shared::blocks::{definition, Shape};
-    use primitive_shared::types::{is_air, is_collidable};
+    use primitive_shared::types::{has_full_top, is_air};
 
     let free = |block: primitive_shared::types::BlockId| {
         is_air(block) || matches!(definition(block).shape, Shape::Cross | Shape::Flat)
@@ -7920,10 +7920,16 @@ pub(crate) fn carcass_cell(
     // which is where a standing one is -- reads as *in* the cell above
     // the floor rather than in the floor.
     let feet = (at.1 + 0.01).floor() as i32;
+    // **On a whole floor**, which is what the carcass is drawn lying on:
+    // the floor of its own cell. It asked only for something solid, and a
+    // slab, a step, a campfire or a drift of snow is solid with its top
+    // short of the cell's -- a boar killed on a stair lay on the air over
+    // the tread. Where there is no whole floor the meat goes to the heap,
+    // the answer this already gives over water.
     (0..=3).map(|down| feet - down).find_map(|y| {
         let here = block_at(x, y, z)?;
         let under = block_at(x, y - 1, z)?;
-        (free(here) && is_collidable(under)).then_some((x, y, z))
+        (free(here) && has_full_top(under)).then_some((x, y, z))
     })
 }
 

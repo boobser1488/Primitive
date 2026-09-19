@@ -8286,6 +8286,169 @@ pub(crate) mod offscreen_repro {
         println!("turned block pictures in {out}");
     }
 
+    /// Steps beside whole blocks, and things standing on every partial top
+    /// there is, at the reporting player's fov and filtering.
+    ///
+    /// ```text
+    /// GPU_REPRO_DIR=C:/abs/shots/partials PARTIALS_TAG=after cargo test -p primitive_client --lib \
+    ///     what_partial_blocks_look_like -- --ignored --nocapture
+    /// ```
+    ///
+    /// **Give `GPU_REPRO_DIR` an absolute directory**: a test runs in the
+    /// crate's directory, and a relative one lands there.
+    ///
+    /// Three reports at once. "вторая ступень слишком маленькая": the row of
+    /// lone steps, one per facing, each with a cobblestone on its east side
+    /// -- the upper half against the lower. "если поставить с блоком, то
+    /// грань блока будет пустая": the same cobblestones, whose faces toward
+    /// the steps were culled whole, and the flight up to a wall of planks.
+    /// "наложение мешей и 3D-моделей на неполные блоки": a grid of grounds
+    /// (a slab, a step, a floor dug down a quarter, a heap of a handful, a
+    /// campfire) under things that rest on the floor of their cell (a tuft,
+    /// a pebble, a chair, a skin of snow, a barrel) -- written straight into
+    /// the chunk, as the game no longer lets a player or the weather put
+    /// them there, so that the picture shows what the refusal is for.
+    #[test]
+    #[ignore = "a tool: needs a GPU; draws steps and partial tops"]
+    fn what_partial_blocks_look_like() {
+        let Some((device, queue)) = gpu() else {
+            println!("no GPU adapter on this machine; skipping");
+            return;
+        };
+        let out = std::env::var("GPU_REPRO_DIR").unwrap_or_else(|_| ".".to_string());
+        let tag = std::env::var("PARTIALS_TAG").unwrap_or_else(|_| "now".to_string());
+        std::fs::create_dir_all(&out).expect("output directory");
+        let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
+        let settings = crate::settings::ClientSettings { anisotropy: 16, fov_degrees: 95.0, ..Default::default() };
+        let textures = TextureManager::load(device, queue, assets, settings.anisotropy).expect("textures load");
+
+        use crate::logic::chunk_manager::ChunkManager;
+        use primitive_shared::lighting::LightMap;
+        use primitive_shared::types::{
+            faced, Chunk, ChunkPos, Facing, BLOCK_AIR, BLOCK_BARREL, BLOCK_CAMPFIRE, BLOCK_CHAIR,
+            BLOCK_COBBLESTONE, BLOCK_COBBLESTONE_STAIRS, BLOCK_DIRT, BLOCK_GRASS, BLOCK_PLANKS,
+            BLOCK_PLANK_STAIRS, BLOCK_SNOW_COVER, BLOCK_TALL_GRASS, BLOCK_TILE_ROOF, BLOCK_TILE_SLAB,
+            CHUNK_SIZE_X, CHUNK_SIZE_Z, CHUNK_VOLUME,
+        };
+        let granite_pebble = primitive_shared::types::ALL_BLOCK_IDS
+            .iter()
+            .find(|&&(_, name)| name == "granite_pebble")
+            .map(|&(id, _)| id)
+            .expect("a granite pebble");
+        let pos = ChunkPos::new(0, 0);
+        let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+        for z in 0..CHUNK_SIZE_Z {
+            for x in 0..CHUNK_SIZE_X {
+                blocks[Chunk::index(x, 0, z)] = BLOCK_DIRT;
+                blocks[Chunk::index(x, 1, z)] = BLOCK_GRASS;
+            }
+        }
+        let g = 2;
+        // The lone steps, each with a cobblestone on its east side.
+        for (i, facing) in [Facing::North, Facing::East, Facing::South, Facing::West].into_iter().enumerate() {
+            let x = 1 + 3 * i;
+            blocks[Chunk::index(x, g, 2)] = faced(BLOCK_PLANK_STAIRS, facing);
+            blocks[Chunk::index(x + 1, g, 2)] = BLOCK_COBBLESTONE;
+        }
+        // A flight up to a wall, west-facing: planks under each step, a
+        // column of planks behind the top one.
+        for k in 0..3 {
+            for y in g..g + k {
+                blocks[Chunk::index(2 + k, y, 6)] = BLOCK_PLANKS;
+            }
+            blocks[Chunk::index(2 + k, g + k, 6)] = faced(BLOCK_COBBLESTONE_STAIRS, Facing::West);
+        }
+        for y in g..g + 4 {
+            blocks[Chunk::index(5, y, 6)] = BLOCK_PLANKS;
+        }
+        // A roof course against a gable: tile steps facing south beside a
+        // cobblestone wall.
+        for x in 8..12 {
+            blocks[Chunk::index(x, g, 6)] = faced(BLOCK_TILE_ROOF, Facing::South);
+        }
+        for y in g..g + 2 {
+            blocks[Chunk::index(12, y, 6)] = BLOCK_COBBLESTONE;
+        }
+        // The grid: grounds along x, what rests on them along z.
+        let dug = primitive_shared::dig::next_bite(BLOCK_DIRT, primitive_shared::dig::Side::PosY).expect("dirt bites");
+        let grounds = [
+            BLOCK_TILE_SLAB,
+            faced(BLOCK_PLANK_STAIRS, Facing::North),
+            dug,
+            primitive_shared::dig::heaped(BLOCK_DIRT),
+            BLOCK_CAMPFIRE,
+        ];
+        let things = [BLOCK_TALL_GRASS, granite_pebble, faced(BLOCK_CHAIR, Facing::North), BLOCK_SNOW_COVER, BLOCK_BARREL];
+        for (i, ground) in grounds.into_iter().enumerate() {
+            for (j, thing) in things.into_iter().enumerate() {
+                let (x, z) = (2 + 2 * i, 10 + j);
+                blocks[Chunk::index(x, g, z)] = ground;
+                blocks[Chunk::index(x, g + 1, z)] = thing;
+            }
+        }
+        let mut chunks = ChunkManager::new(4);
+        chunks.insert(Chunk { pos, blocks });
+        let mut light = LightMap::new();
+        light.load_chunk(&chunks, pos);
+        let mut cache = crate::engine::mesh::Neighbourhood::default();
+        cache.fill(pos, &chunks, &light);
+        let mut mesh = crate::engine::mesh::MeshBuffers::default();
+        crate::engine::mesh::build_mesh(
+            pos,
+            &cache,
+            &textures.face_layers(),
+            &primitive_shared::worldgen::WorldGen::new(0),
+            &mut mesh,
+        );
+        let meshes = vec![(pos, mesh)];
+        let sky = crate::engine::sky::Sky::new(0.5, 900.0);
+        let size = (1280u32, 720u32);
+        let shoot = |name: &str, eye: Vec3, at: Vec3| {
+            let mut camera = Camera::new(eye.as_dvec3(), size.0 as f32 / size.1 as f32);
+            let d = (at - eye).normalize();
+            camera.yaw = d.z.atan2(d.x);
+            camera.pitch = d.y.asin();
+            camera.fov_y_radians = settings.fov_degrees.to_radians();
+            let mut picture = draw_scene(
+                device,
+                queue,
+                &textures,
+                &settings,
+                &camera,
+                &sky,
+                &meshes,
+                size,
+                include_str!("shader.wgsl"),
+                None,
+                None,
+                false,
+                settings.msaa.max(1),
+            );
+            for pixel in picture.pixels_mut() {
+                pixel.0[3] = 255;
+            }
+            picture.save(format!("{out}/{tag}_{name}.png")).expect("write png");
+        };
+        let eye = g as f32 + 1.62;
+        // The lone steps: from where a player stands in front of them, then
+        // round all four sides of the row.
+        let steps = Vec3::new(6.0, g as f32 + 0.5, 2.5);
+        shoot("steps_player", Vec3::new(3.0, eye, -1.2), Vec3::new(4.5, g as f32 + 0.5, 2.5));
+        for (i, (dx, dz)) in [(-1.0f32, -0.7f32), (1.0, -0.7), (1.0, 0.9), (-1.0, 0.9)].into_iter().enumerate() {
+            shoot(&format!("steps_side{i}"), steps + Vec3::new(dx * 6.5, eye - steps.y, dz * 3.5), steps);
+        }
+        // The flight and the roof course.
+        let flight = Vec3::new(6.5, g as f32 + 1.0, 6.5);
+        shoot("flight_front", Vec3::new(0.5, eye + 0.6, 3.0), Vec3::new(3.5, g as f32 + 1.0, 6.5));
+        shoot("flight_side", flight + Vec3::new(0.5, 1.5, -5.0), flight);
+        shoot("roof_course", Vec3::new(10.0, eye, 10.5), Vec3::new(10.5, g as f32 + 0.5, 6.5));
+        // The grid, from its front and its side.
+        let grid = Vec3::new(6.5, g as f32 + 1.0, 12.5);
+        shoot("on_partials_front", Vec3::new(6.5, eye + 0.8, 7.0), grid);
+        shoot("on_partials_side", Vec3::new(14.5, eye + 0.4, 12.5), grid);
+        println!("partial block pictures in {out}, tagged {tag}");
+    }
+
     /// Finds the first ruin in a world and photographs it.
     ///
     /// ```text

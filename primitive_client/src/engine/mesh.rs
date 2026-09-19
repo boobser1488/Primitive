@@ -1914,6 +1914,23 @@ fn cover_table() -> &'static [u8; 1 << 16] {
             let id = id as BlockId;
             *slot = if is_opaque(id) || hides_its_cell_from_sight(id) {
                 FULL_COVER
+            } else if primitive_shared::types::is_step(id) {
+                // **A step covers what its tread covers**: the whole top of
+                // the block under it, and the lower half of every side --
+                // the tread is the whole lower half of the cell in every
+                // shape a step takes (`geometry::step_pose_boxes`), so a
+                // slab beside a stair is hidden where the two meet and
+                // nothing taller is. It was `FULL_COVER` by way of
+                // `is_opaque`, which culled the upper half of every face
+                // a stair stood against and left a hole there.
+                //
+                // Rejected: crediting the riser too, per facing. The back
+                // of a straight step is whole, but an outside corner cuts
+                // its riser to a post (`geometry::step_shape`), and the
+                // cover is a question about the pair of cells alone; a
+                // buried face behind a riser costs two triangles, a
+                // missing one is a hole.
+                FULL_COVER / 2
             } else if drawn_as_model(id) {
                 // **A carcass covers nothing, whatever its table row
                 // says.** Its row is a low cube -- that is what the
@@ -1932,6 +1949,90 @@ fn cover_table() -> &'static [u8; 1 << 16] {
         }
         table
     })
+}
+
+#[cfg(test)]
+mod cover_claim_tests {
+    use super::*;
+
+    /// Which way a face of the cube looks, as (axis, toward +).
+    fn face_dir(face: usize) -> (usize, bool) {
+        let n = faces()[face].neighbor;
+        let axis = (0..3).find(|&a| n[a] != 0).unwrap_or(1);
+        (axis, n[axis] > 0)
+    }
+
+    /// What `id`, standing alone, fails to draw of the side a neighbour's
+    /// `face` looks at, up to the height the cover table says it hides:
+    /// the number of `LOOK_GRID` cells of that side with nothing drawn in
+    /// the plane of the wall the two share.
+    fn undrawn_of_what_it_hides(id: BlockId, look: &Look, face: usize) -> usize {
+        let hidden = hidden_by(cover_of(id), face);
+        if hidden == 0 {
+            return 0;
+        }
+        // The neighbour's face looks along `dir`; what it looks at is this
+        // block's side facing back along it.
+        let (axis, toward_plus) = face_dir(face);
+        let side = axis * 2 + usize::from(toward_plus);
+        let plane = if toward_plus { 0 } else { 256 };
+        let (s, t) = match axis {
+            0 => (1, 2),
+            1 => (0, 2),
+            _ => (0, 1),
+        };
+        let reach = LOOK_GRID * hidden as usize / FULL_COVER as usize;
+        let mut undrawn = 0;
+        for i in 0..LOOK_GRID {
+            for j in 0..LOOK_GRID {
+                // How far up this cell of a side wall is: only as much of
+                // the wall as the cover reaches is claimed.
+                let up = if s == 1 { i } else if t == 1 { j } else { 0 };
+                if axis != 1 && up >= reach {
+                    continue;
+                }
+                if look[side][i * LOOK_GRID + j].map(|(depth, _)| depth) != Some(plane) {
+                    undrawn += 1;
+                }
+            }
+        }
+        undrawn
+    }
+
+    #[test]
+    fn nothing_hides_a_neighbours_face_it_does_not_draw_over_itself() {
+        // **"если поставить с блоком, то грань блока будет пустая".** A
+        // step's row is a cube with a wall's opacity, so `is_opaque` called
+        // it a whole block and the cover table said it hid every face beside
+        // it -- and the block a stair was set against lost the whole face,
+        // of which the stair draws only the tread's half: the upper half
+        // was a hole straight through into the block.
+        //
+        // Asked of every id that claims any cover at all, against what the
+        // mesher really draws of it standing alone: every face the table
+        // says it hides for a neighbour, it draws itself, in the plane of
+        // the wall the two share, as high as it claims.
+        let mut wrong = Vec::new();
+        for id in 0..=u16::MAX {
+            let id = id as BlockId;
+            if !primitive_shared::types::is_known_block(id) || cover_of(id) == 0 {
+                continue;
+            }
+            let look = look_of(id, (8, 4, 8), 0);
+            for face in 0..6 {
+                let undrawn = undrawn_of_what_it_hides(id, &look, face);
+                if undrawn > 0 {
+                    wrong.push(format!(
+                        "{} ({id}, cover {}): hides a neighbour's face {face} and leaves {undrawn} of {} of it undrawn",
+                        primitive_shared::types::block_name(id),
+                        cover_of(id),
+                        LOOK_GRID * LOOK_GRID
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "a hole where a face was culled:\n  {}", wrong.join("\n  "));
+    }
 }
 
 #[cfg(test)]
