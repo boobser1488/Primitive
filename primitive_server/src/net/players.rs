@@ -559,6 +559,24 @@ impl PlayerHandle {
         }
     }
 
+    /// The server was not running for a while (see `PAUSE_GAP` in the
+    /// crate root): whatever this player did or did not say in that time,
+    /// nobody was listening.
+    ///
+    /// Three things measure a player by the wall, and each would have
+    /// held the gap against them: the silence the keepalive times out on,
+    /// the messages dropped while nothing drained the queue (a count that
+    /// otherwise only ever grows, and kicks at `drop_threshold` as
+    /// "cannot keep up"), and how long the anticheat has seen them in the
+    /// air -- a player paused mid-jump would come back having "hovered"
+    /// for the whole pause.
+    pub fn forgive_pause(&self) {
+        self.dropped.store(0, Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.last_activity = Instant::now();
+        state.anticheat.forgive_pause();
+    }
+
     pub fn touch(&self) {
         self.state
             .lock()

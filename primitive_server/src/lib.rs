@@ -316,6 +316,13 @@ pub struct Context {
     /// ones a test starts and immediately stops.
     shutdown: tokio::sync::watch::Sender<bool>,
     pub started: Instant,
+    /// The embedded server is held still because its only player cannot
+    /// be there -- the Android activity went into the background, or the
+    /// desktop window stopped drawing. See `Server::set_paused`.
+    pub paused: std::sync::atomic::AtomicBool,
+    /// A test's simulated sleep, taken by the tick loop on its next tick.
+    /// See `Server::stall_tick_loop_for`.
+    stall: std::sync::Mutex<Option<Duration>>,
 }
 
 impl Context {
@@ -513,6 +520,44 @@ impl Server {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .active_count()
+    }
+
+    /// Holds the world still, or lets it go again.
+    ///
+    /// **For the embedded server, whose one player has stopped being
+    /// there without leaving.** The Android activity going into the
+    /// background, or a desktop window that has stopped drawing, is a
+    /// client that answers nothing and reads nothing -- and a server that
+    /// went on ticking meanwhile timed it out after `client_timeout_secs`
+    /// and filled its queue until it was kicked as "cannot keep up". The
+    /// player came back from checking a message to a failure screen, and
+    /// that was the "internal server error on minimising" bug. Paused, the
+    /// tick loop does nothing at all: no clock, no hunger, no weather, no
+    /// keepalive, no timeout -- a singleplayer world is not a place that
+    /// goes on without the only person in it.
+    ///
+    /// Rejected: running the tick loop and only skipping the timeout. The
+    /// player would come back starved, rained on and a day older, from a
+    /// glance at a notification; and the outgoing queue would still fill
+    /// with state nobody was reading.
+    ///
+    /// On the way back every player is forgiven the gap, exactly as for a
+    /// process the operating system froze -- see `forgive_the_pause`.
+    pub fn set_paused(&self, paused: bool) {
+        self.ctx.paused.store(paused, Ordering::Release);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.ctx.paused.load(Ordering::Acquire)
+    }
+
+    /// **Freezes the tick loop's thread for `how_long`**, the way a
+    /// sleeping computer freezes the whole process: for tests of what
+    /// happens when it wakes. Blocking on purpose -- a sleep the runtime
+    /// could schedule around would not be the stall being simulated.
+    #[doc(hidden)]
+    pub fn stall_tick_loop_for(&self, how_long: Duration) {
+        *self.ctx.stall.lock().unwrap_or_else(|e| e.into_inner()) = Some(how_long);
     }
 
     /// Asks the server to stop, without waiting for it.
@@ -1581,6 +1626,8 @@ fn build_context(settings: ServerSettings, options: RunOptions) -> anyhow::Resul
         world_dir,
         shutdown: tokio::sync::watch::channel(false).0,
         started: Instant::now(),
+        paused: std::sync::atomic::AtomicBool::new(false),
+        stall: std::sync::Mutex::new(None),
     });
 
     Ok(ctx)
@@ -1726,6 +1773,50 @@ fn stop_windows_from_ignoring_the_timer() {
 #[cfg(not(windows))]
 fn ask_for_a_finer_timer() {}
 
+/// A gap between two ticks longer than this was not a slow tick: the
+/// process was not running.
+///
+/// **A sleeping computer freezes the server and its clients together, and
+/// wakes them together -- but not in the same order.** `Instant` on
+/// Windows counts the sleep, so the first tick after the lid opens found
+/// every player silent for the whole night and timed them out, before the
+/// client in the same process had drawn the frame that would have
+/// answered. That was the "internal server error when the PC sleeps":
+/// "disconnected: timed out" on the failure screen, from a server that
+/// had itself been asleep. A debugger's breakpoint and a long stall in
+/// the operating system are the same event with smaller numbers.
+///
+/// **The rule the timeout keeps**: a player is timed out after
+/// `client_timeout_secs` *of the server's own running time* without a
+/// word. A server that was not running heard nothing because it was not
+/// listening, and it cannot hold that against anybody -- so the gap is
+/// forgiven and the clock starts again from the tick that noticed it. A
+/// client that froze while the server ran (a phone in a pocket, a laptop
+/// asleep while the dedicated server is not) is timed out at 30 s like
+/// any dead connection, and reconnects when it wakes; that is the
+/// client's half, in `primitive_client`.
+///
+/// Two seconds is forty ticks: no tick the server does is that slow, and
+/// forgiving a real hitch costs nothing -- a dead client gets two more
+/// seconds. Nothing is caught up either way: the ticker delays rather
+/// than bursts (`MissedTickBehavior::Delay`) and the world clock counts
+/// ticks, not the wall, so a night asleep is one tick late and not a day
+/// of simulation.
+const PAUSE_GAP: Duration = Duration::from_secs(2);
+
+/// Everything that measures a player by the wall, told the wall jumped.
+fn forgive_the_pause(ctx: &Context, gap: Duration) {
+    if ctx.options.logging {
+        println!(
+            "[server] {:.1} s passed between two ticks; the process was not running, and nobody is timed out for it",
+            gap.as_secs_f32()
+        );
+    }
+    for handle in ctx.registry.handles() {
+        handle.forgive_pause();
+    }
+}
+
 async fn tick_loop(ctx: Arc<Context>) {
     // Before the ticker is built, because it is the ticker this is for.
     ask_for_a_finer_timer();
@@ -1800,6 +1891,10 @@ async fn tick_loop(ctx: Arc<Context>) {
     // on `PlayerRuntime` would invite something to.
     let mut was_submerged: std::collections::HashMap<PlayerId, bool> =
         std::collections::HashMap::new();
+    // When the last tick ran, and whether the loop was held still since.
+    // See `PAUSE_GAP`.
+    let mut last_tick_at = Instant::now();
+    let mut was_paused = false;
 
     loop {
         // Every background loop exits on shutdown rather than running
@@ -1812,7 +1907,23 @@ async fn tick_loop(ctx: Arc<Context>) {
             _ = ticker.tick() => {}
             _ = ctx.shutdown_requested() => break,
         }
+        if let Some(stall) = ctx.stall.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            std::thread::sleep(stall);
+        }
+        // Held still: nothing is simulated, nobody is pinged or timed
+        // out, and the clock does not move. See `Server::set_paused`.
+        if ctx.paused.load(Ordering::Acquire) {
+            was_paused = true;
+            last_tick_at = Instant::now();
+            continue;
+        }
         let started = Instant::now();
+        let gap = started.saturating_duration_since(last_tick_at);
+        last_tick_at = started;
+        if was_paused || gap > PAUSE_GAP {
+            was_paused = false;
+            forgive_the_pause(&ctx, gap);
+        }
         ctx.world.refresh_clock();
         let tick = ctx.clock.advance();
         ctx.metrics.ticks.fetch_add(1, Ordering::Relaxed);

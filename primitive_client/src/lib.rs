@@ -1143,6 +1143,11 @@ fn run(
     // shutdown, a dropped connection. Handled after the frame's
     // borrows have ended.
     let mut end_session: Option<String> = None;
+    // When the world frame last got as far as drawing, and when it last
+    // woke from not running at all. See `hold_the_world` and
+    // `WOKE_RECONNECT_WINDOW`.
+    let mut last_world_frame = Instant::now();
+    let mut woke_at: Option<Instant> = None;
 
     // Dev affordance: `PRIMITIVE_AUTOSTART=<world name>` opens straight
     // into a singleplayer world, and turns the F3 dump on so frame
@@ -3339,6 +3344,20 @@ fn run(
                         release_cursor(&window, &mut input);
                         menu.open(Screen::Main);
                         menu.fail(reason);
+                        // **A session that ended because the game was not
+                        // running is joined again, once, by itself.** A
+                        // real server times out a client that froze while
+                        // it ran -- a phone in a pocket, a laptop asleep --
+                        // and it is right to (see `PAUSE_GAP` on the
+                        // server). What the player did was put the game
+                        // down, and what they should come back to is the
+                        // game, not a failure screen they have to press
+                        // RETRY on. Once: a server that refuses again is
+                        // saying something, and the screen says what.
+                        if woke_at.take().is_some_and(|at| at.elapsed() < WOKE_RECONNECT_WINDOW) {
+                            println!("the session ended right after the game woke; joining again");
+                            handle_action!(Action::Retry);
+                        }
                     }
 
                     // --- menus ---
@@ -3470,6 +3489,10 @@ fn run(
                                     sequence = 0;
                                     last_sent_transform = None;
                                     last_frame = Instant::now();
+                                    // A new session has not been away from
+                                    // anything: no hold, no reconnect.
+                                    last_world_frame = last_frame;
+                                    woke_at = None;
                                     paused = false;
                                     input.release_all();
                                     // Survival state belongs to the
@@ -3903,6 +3926,12 @@ fn run(
                     // exactly 100 ms, which hid how slow they really were.
                     let dt = frame_time.as_secs_f32().min(0.1);
                     last_frame = now;
+                    last_world_frame = now;
+                    // Drawing again: let the world go, if it was held.
+                    hold_the_world(local_server.as_ref(), Duration::ZERO);
+                    if frame_time > GAME_WAS_NOT_RUNNING {
+                        woke_at = Some(now);
+                    }
                     debug_stats.record_frame(frame_time);
 
                     let mut disconnected: Option<String> = None;
@@ -6755,6 +6784,17 @@ fn run(
                 // last word Android gives, and a walk that was never
                 // written down is a walk the map forgets.
                 journal.save_map();
+                // ...and then held still until the player is back. Not
+                // left ticking in the background: the loop stops here
+                // (`winit_backend::run_inner` blocks without a surface),
+                // so nothing answers the server's keepalives or drains
+                // what it sends, and a world that went on would time its
+                // only player out -- which is what "internal server error
+                // on minimising" was. See `Server::set_paused`; the frame
+                // that draws again lets it go.
+                if let Some(server) = local_server.as_ref() {
+                    server.set_paused(true);
+                }
                 input.release_all();
                 touch.release_all();
                 pointer.release();
@@ -6895,6 +6935,9 @@ fn run(
                 // left here is asking the platform and doing what it
                 // is told, which is the only part that needs a window.
                 reconcile_the_editor(&mut ime, &window, &mut menu, &mut chat, traced);
+                if net.is_some() {
+                    hold_the_world(local_server.as_ref(), last_world_frame.elapsed());
+                }
                 window.request_redraw()
             }
 
@@ -7336,6 +7379,36 @@ impl DigSignal {
         self.told = digging;
         self.last_sent = Some(now);
         Some(digging)
+    }
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::*;
+
+    #[test]
+    fn the_world_is_held_while_the_frame_does_not_run_and_let_go_when_it_does() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let settings = primitive_server::settings::ServerSettings {
+            bind_addr: "127.0.0.1:0".to_string(),
+            world_dir: String::new(),
+            plugin_dir: String::new(),
+            mod_dir: String::new(),
+            stats_interval_secs: 0.0,
+            ..Default::default()
+        };
+        let server = runtime
+            .block_on(primitive_server::start(settings, primitive_server::RunOptions::embedded()))
+            .unwrap();
+        // One refused image is not a pause: the clock must not stop for it.
+        hold_the_world(Some(&server), Duration::from_millis(100));
+        assert!(!server.is_paused());
+        hold_the_world(Some(&server), Duration::from_secs(3));
+        assert!(server.is_paused(), "a frame three seconds gone did not hold the world");
+        hold_the_world(Some(&server), Duration::ZERO);
+        assert!(!server.is_paused(), "drawing again did not let the world go");
+        hold_the_world(None, Duration::from_secs(3));
+        runtime.block_on(server.stop());
     }
 }
 
@@ -8229,6 +8302,45 @@ fn maybe_send_transform(
 /// player across a chunk boundary into terrain that is not loaded here.
 fn respawn_gate(chunks: &ChunkManager, x: f64, z: f64, world_ready: &mut bool) {
     *world_ready = chunks.is_area_ready(ChunkManager::chunk_for_world_pos(x, z));
+}
+
+/// A world frame this far behind the last one was not a slow frame: the
+/// game was not running -- minimised, backgrounded, asleep.
+const GAME_WAS_NOT_RUNNING: Duration = Duration::from_secs(2);
+
+/// How soon after waking a lost session is joined again by itself. Long
+/// enough for the server's kick to arrive and be read; short enough that
+/// a session lost for some other reason later is not.
+const WOKE_RECONNECT_WINDOW: Duration = Duration::from_secs(15);
+
+/// Holds the embedded server still while the world frame is not running,
+/// and lets it go when it is.
+///
+/// **The frame is the only thing that answers the server**: it drains the
+/// socket, answers the keepalive and sends where the player is. A frame
+/// that is not running -- no surface on a backgrounded activity, a
+/// minimised window whose swapchain will not hand out an image, a window
+/// the platform has stopped asking to redraw -- is a client the server
+/// times out after `client_timeout_secs`, and that was the failure screen
+/// the player came back to. In singleplayer that server is ours, so it is
+/// told to wait (`Server::set_paused`) rather than the frame being taught
+/// to half-run without a picture.
+///
+/// Rejected: draining the socket from the idle loop. It would keep a
+/// remote session alive through a minimised window, but it is a second
+/// copy of the frame's forty-argument `drain_network` call that has to be
+/// kept in step with the first, and on Android it would still not run --
+/// the loop blocks without a surface, deliberately. A remote session that
+/// does time out is joined again on waking instead (`WOKE_RECONNECT_WINDOW`).
+///
+/// Half a second before holding, so that one refused image (a resize, a
+/// monitor change) does not stop the world's clock for a frame.
+fn hold_the_world(local_server: Option<&primitive_server::Server>, since_last_frame: Duration) {
+    let Some(server) = local_server else { return };
+    let hold = since_last_frame > Duration::from_millis(500);
+    if server.is_paused() != hold {
+        server.set_paused(hold);
+    }
 }
 
 /// **Every argument is a piece of the frame's own state**, and that is

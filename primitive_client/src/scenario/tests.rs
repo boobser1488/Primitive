@@ -2753,3 +2753,90 @@ fn a_gallery_of_steps() {
     shoot(&mut s, "roof", c(f64::from(px) + 2.0, f64::from(pz) + 2.0), 6.0);
     shoot(&mut s, "wall", c(f64::from(wx) + 3.0, f64::from(wz) + 0.5), 6.0);
 }
+
+/// The same server with the keepalive and the timeout at their floor (a
+/// second and two), so a pause twice as long as the timeout is four
+/// seconds of a test rather than a minute -- what is being tested is the
+/// pause being longer than the timeout, not how long either is.
+fn impatient_world() -> Scenario {
+    Scenario::with(primitive_server::settings::ServerSettings {
+        keepalive_interval_secs: 1.0,
+        client_timeout_secs: 2.0,
+        ..super::scenario_settings()
+    })
+}
+
+fn kicks(s: &Scenario) -> Vec<&ServerMessage> {
+    s.heard.iter().filter(|m| matches!(m, ServerMessage::Kick(_))).collect()
+}
+
+fn around(s: &Scenario, feet: DVec3) -> Vec<Option<BlockId>> {
+    let (x, y, z) = (feet.x.floor() as i32, feet.y.floor() as i32, feet.z.floor() as i32);
+    let mut cells = Vec::new();
+    for dx in -2..=2 {
+        for dz in -2..=2 {
+            for dy in -2..=1 {
+                cells.push(s.block((x + dx, y + dy, z + dz)));
+            }
+        }
+    }
+    cells
+}
+
+/// What a player coming back to the game would check: still in it, still
+/// where they were, the ground still the ground, and nobody pulled them.
+fn came_back_to_the_same_world(s: &Scenario, feet: DVec3, ground: &[Option<BlockId>]) {
+    assert!(kicks(s).is_empty(), "the player was thrown out for putting the game down: {:?}", kicks(s));
+    let on_server = s.server().position_of("scenario").expect("the player is no longer on the server");
+    assert!(
+        DVec3::new(on_server.0, on_server.1, on_server.2).distance(feet) < 0.1,
+        "the server has the player somewhere else: {on_server:?}, not {feet:?}"
+    );
+    assert!(s.feet().distance(feet) < 0.1, "the player moved while the game was down: {:?}", s.feet());
+    assert_eq!(around(s, feet), ground, "the ground changed while the game was down");
+    no_corrections(s);
+}
+
+#[test]
+fn minimising_the_game_on_a_phone_is_not_a_disconnection() {
+    // "ошибка internal server error на Android при сворачивании": the
+    // activity went to the background, the loop stopped answering, and the
+    // embedded server -- still ticking -- timed its only player out. Now
+    // `Suspended` holds the server still (`hold_the_world`), and this is
+    // that: the frames stop, the server is held, the frames start again.
+    let mut s = impatient_world();
+    s.stand_at(feet_on(FIELD.0, FIELD.1));
+    s.seconds(1.0);
+    let feet = s.feet();
+    let ground = around(&s, feet);
+
+    s.server().set_paused(true);
+    std::thread::sleep(Duration::from_millis(200));
+    let held_at = s.server().ticks();
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(s.server().ticks() <= held_at + 1, "the world ran on while the game was in the background");
+    // Resumed: the first frame that draws lets the world go.
+    s.server().set_paused(false);
+    s.seconds(3.0);
+
+    came_back_to_the_same_world(&s, feet, &ground);
+}
+
+#[test]
+fn a_computer_that_slept_wakes_up_still_in_the_world() {
+    // "...или на ПК при сне": the whole process froze, the server's clock
+    // counted the sleep, and its first tick awake found the player silent
+    // for all of it. The tick loop's thread is stopped here the way sleep
+    // stops it, and the client says nothing for as long.
+    let mut s = impatient_world();
+    s.stand_at(feet_on(FIELD.0, FIELD.1));
+    s.seconds(1.0);
+    let feet = s.feet();
+    let ground = around(&s, feet);
+
+    s.server().stall_tick_loop_for(Duration::from_secs(4));
+    std::thread::sleep(Duration::from_secs(4));
+    s.seconds(3.0);
+
+    came_back_to_the_same_world(&s, feet, &ground);
+}

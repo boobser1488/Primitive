@@ -700,6 +700,12 @@ impl AntiCheat {
     /// left them: a player who has just been dropped out of the air is
     /// falling fast and through no fault of their own, and a stale
     /// ascent run or a spent movement budget would flag them for it.
+    /// The server was not running; the time in the air it measured is
+    /// the length of the pause, not a hover. See `PlayerHandle::forgive_pause`.
+    pub fn forgive_pause(&mut self) {
+        self.airborne_since = None;
+    }
+
     pub fn set_flying(&mut self, flying: bool) {
         self.flying = flying;
         self.ascent_run = 0.0;
