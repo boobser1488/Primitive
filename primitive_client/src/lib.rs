@@ -5627,7 +5627,16 @@ fn run(
                     // up, the frogs. A call of its own for the reason
                     // `Soundscape::wildlife` gives.
                     if world_ready {
-                        soundscape.wildlife(&audio, dt, &chunks, &entities.heard(), &critters.croaking(), &critters.buzzing(), &critters.flapping());
+                        soundscape.wildlife(
+                            &audio,
+                            dt,
+                            &chunks,
+                            &entities.heard(),
+                            &critters.croaking(),
+                            &critters.buzzing(),
+                            &critters.flapping(),
+                            critters.air_here(),
+                        );
                     }
                     // ...and whatever let go this frame. Drained here
                     // rather than where the snapshot is applied for the
@@ -8917,6 +8926,14 @@ fn drain_network(
                 Some(id) => match entities.horseback.as_mut().filter(|h| h.horse == id) {
                     Some(riding) => riding.told(wind, fettle),
                     None => {
+                        // **A horse takes a rider with a snort**: the one
+                        // moment a player is sure to be standing beside
+                        // one, and the sound a horse makes of a weight
+                        // settling on its back. Heard by nobody else, who
+                        // has only the animal's calm voice to go on.
+                        if let Some(snort) = audio::bank::voice_of(primitive_shared::animals::Species::Horse, audio::bank::Cry::Idle) {
+                            audio.play_at(snort, glam::DVec3::new(at.0, at.1 + 1.2, at.2), 0.6, 1.0);
+                        }
                         entities.horseback = Some(logic::horseback::Horseback::new(
                             id,
                             glam::DVec3::new(at.0, at.1, at.2),

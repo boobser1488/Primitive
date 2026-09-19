@@ -52,6 +52,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use primitive_shared::animals::Species;
+use primitive_shared::horse::Gait;
 use primitive_shared::blocks::{self, Matter, Work};
 use primitive_shared::types::{block_kind, block_name, BlockId};
 
@@ -80,6 +81,19 @@ pub const FIRE_FADE: f32 = 0.6;
 
 /// Where a resource pack puts its `.wav` files, under the assets folder.
 pub const SOUNDS_DIR: &str = "sounds";
+
+/// How long one piece of a horse's pace is: a walk's four beats, a trot's
+/// two strides, a gallop's two. The soundscape starts the next piece as
+/// this one ends (`soundscape::Hoofbeats`), so the files and these numbers
+/// are one decision -- `every_hoof_piece_is_as_long_as_it_is_laid` holds
+/// them together, as the rain's test holds its beds.
+pub fn hoof_piece_seconds(gait: Gait) -> f32 {
+    match gait {
+        Gait::Walk => 1.0,
+        Gait::Trot => 0.75,
+        Gait::Gallop => 0.96,
+    }
+}
 
 /// What a thing sounds like when it is struck.
 ///
@@ -477,6 +491,45 @@ pub enum Sfx {
 
     /// What an animal says, and when. See [`Cry`] and [`VOICES`].
     Animal(Species, Cry),
+
+    /// Crickets in the grass on a warm night: a bed, laid end over end
+    /// like the rain (`BED_SECONDS`), from somewhere a little way off in
+    /// the grass rather than in the player's ears. When and where is
+    /// `soundscape::cricket_chorus`.
+    ///
+    /// **A voice held to no note measure**, like the frog's: a cricket's
+    /// song is a file on one wing drawn across a scraper on the other --
+    /// a thing disturbed, which is this bank's whole rule -- and what
+    /// comes of it is nearly one pitch, because the wing rings. Scored as
+    /// a hiss it would fail for being what it is.
+    Crickets,
+    /// A horse's hooves: a piece of the walk, the trot or the gallop, laid
+    /// end over end for as long as the horse keeps that pace. See
+    /// `soundscape::Hoofbeats`.
+    Hoofs(Gait, Footing),
+}
+
+/// What a hoof lands on, as far as the ear can tell.
+///
+/// **Two, not the twelve materials a boot has.** A hoof is one hard
+/// thing, and what a listener hears of the ground under it is whether it
+/// gives: a thud on earth, turf, sand or snow, a clop on stone, a road or
+/// boards. Twelve would be a dozen downloads of the same horse for
+/// distinctions nobody on its back could name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Footing {
+    Soft,
+    Hard,
+}
+
+impl Footing {
+    /// Which footing a material under a hoof is.
+    pub fn of(material: Material) -> Footing {
+        match material {
+            Material::Stone | Material::Wood | Material::Metal | Material::Glass | Material::Ceramic => Footing::Hard,
+            _ => Footing::Soft,
+        }
+    }
 }
 
 /// What an animal is doing when it makes a sound.
@@ -582,6 +635,14 @@ pub const VOICES: &[(Species, Cry)] = &[
     (Species::Cod, Cry::Death),
     (Species::Gull, Cry::Hurt),
     (Species::Gull, Cry::Death),
+    // **Last, after the gull**, so every pair above keeps its place in the
+    // bank. A horse snorts and blows at rest, whinnies when it bolts,
+    // squeals at a blow and goes down on a long breath out; it does not
+    // threaten -- a horse that kicks is a horse getting away.
+    (Species::Horse, Cry::Idle),
+    (Species::Horse, Cry::Alarm),
+    (Species::Horse, Cry::Hurt),
+    (Species::Horse, Cry::Death),
 ];
 
 /// Which sound an animal makes for a cry, if it makes one.
@@ -620,16 +681,6 @@ pub fn voice_of(species: Species, cry: Cry) -> Option<Sfx> {
     // differs is when the soundscape asks for it (`idle_chance`).
     if species == Species::Rat {
         return voice_of(Species::Hare, if cry == Cry::Idle { Cry::Alarm } else { cry });
-    }
-    // **A horse is heard through the zebra's recordings**, which are a
-    // zebra's bray and a donkey's (`assets/sounds/SOURCES.md`): the nearest
-    // CC0 equids this repository already holds. A borrowed voice and not a
-    // gap, because a herd that bolts in silence is a herd nobody turns to
-    // look at -- and it is a stand-in, said so here and in SOURCES.md, until
-    // a CC0 recording of a horse itself is fetched and checked the way every
-    // other file was.
-    if species == Species::Horse {
-        return voice_of(Species::Zebra, cry);
     }
     VOICES
         .contains(&(species, cry))
@@ -791,9 +842,26 @@ fn float_base() -> usize {
     voice_base() + VOICES.len()
 }
 
+/// The crickets and the six hoofbeats, appended after the float for the
+/// reason every list here was appended after the one before it.
+const NIGHT_AND_HOOVES: [Sfx; 7] = [
+    Sfx::Crickets,
+    Sfx::Hoofs(Gait::Walk, Footing::Soft),
+    Sfx::Hoofs(Gait::Trot, Footing::Soft),
+    Sfx::Hoofs(Gait::Gallop, Footing::Soft),
+    Sfx::Hoofs(Gait::Walk, Footing::Hard),
+    Sfx::Hoofs(Gait::Trot, Footing::Hard),
+    Sfx::Hoofs(Gait::Gallop, Footing::Hard),
+];
+
+/// Where they begin.
+fn hoof_base() -> usize {
+    float_base() + FLOAT.len()
+}
+
 /// How many slots the bank has.
 fn slot_count() -> usize {
-    float_base() + FLOAT.len()
+    hoof_base() + NIGHT_AND_HOOVES.len()
 }
 
 /// Every sound, exactly once. The bank is a `Vec` indexed by
@@ -814,6 +882,7 @@ pub fn all() -> Vec<Sfx> {
     out.extend(CRUMBLES.iter().map(|&material| Sfx::Crumble(material)));
     out.extend(VOICES.iter().map(|&(species, cry)| Sfx::Animal(species, cry)));
     out.extend_from_slice(&FLOAT);
+    out.extend_from_slice(&NIGHT_AND_HOOVES);
     out
 }
 
@@ -841,6 +910,9 @@ impl Sfx {
             }
             Sfx::FloatPlop | Sfx::FloatBite => {
                 float_base() + FLOAT.iter().position(|s| *s == self).unwrap_or(0)
+            }
+            Sfx::Crickets | Sfx::Hoofs(..) => {
+                hoof_base() + NIGHT_AND_HOOVES.iter().position(|s| *s == self).unwrap_or(0)
             }
             other => {
                 let loose = LOOSE
@@ -919,6 +991,16 @@ impl Sfx {
             Sfx::Crumble(material) => format!("crumble.{}", material.key()),
             Sfx::FloatPlop => "fishing.plop".into(),
             Sfx::FloatBite => "fishing.bite".into(),
+            Sfx::Crickets => "world.crickets".into(),
+            Sfx::Hoofs(gait, footing) => format!(
+                "step.hoof_{}{}",
+                match gait {
+                    Gait::Walk => "walk",
+                    Gait::Trot => "trot",
+                    Gait::Gallop => "gallop",
+                },
+                if footing == Footing::Hard { "_hard" } else { "" }
+            ),
             Sfx::Animal(species, cry) => format!("wild.{}.{}", species.name(), cry.key()),
         }
     }
@@ -1554,6 +1636,8 @@ mod tests {
                 // The bite is the same single bubbles, and held to the same
                 // physics.
                 Sfx::Bubble | Sfx::FloatBite | Sfx::RainTick | Sfx::GullCall | Sfx::FrogCroak | Sfx::Animal(..) => continue,
+                // A wing drawn over a scraper rings: see `Sfx::Crickets`.
+                Sfx::Crickets => continue,
                 Sfx::Material(_, Material::Metal | Material::Glass | Material::Ceramic) => continue,
                 // An anvil is a tuned lump of steel and a hammer on it
                 // rings for a second and a half; that ring is the sound,
@@ -1570,7 +1654,9 @@ mod tests {
                 | Sfx::Staked
                 // A float striking the water is a thing struck, the way the
                 // hand in the pool it was cut from always was.
-                | Sfx::FloatPlop => 0.80,
+                | Sfx::FloatPlop
+                // A hoof on the ground is a blow, four to a stride.
+                | Sfx::Hoofs(..) => 0.80,
                 _ => 0.62,
             };
             for (variant, clip) in clips(sfx).iter().enumerate() {
@@ -1684,7 +1770,12 @@ mod tests {
     /// a second short is a quarter-second hole in the rain every three.
     #[test]
     fn every_bed_is_as_long_as_the_soundscape_lays_it() {
-        for (sfx, seconds) in [(Sfx::Rain, BED_SECONDS), (Sfx::RainSheltered, BED_SECONDS), (Sfx::FireCrackle, FIRE_SECONDS)] {
+        for (sfx, seconds) in [
+            (Sfx::Rain, BED_SECONDS),
+            (Sfx::RainSheltered, BED_SECONDS),
+            (Sfx::Crickets, BED_SECONDS),
+            (Sfx::FireCrackle, FIRE_SECONDS),
+        ] {
             for clip in clips(sfx) {
                 assert!(
                     (clip.seconds() - seconds).abs() < 0.02,
@@ -1694,6 +1785,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_hoof_piece_is_as_long_as_it_is_laid() {
+        for gait in [Gait::Walk, Gait::Trot, Gait::Gallop] {
+            for footing in [Footing::Soft, Footing::Hard] {
+                let sfx = Sfx::Hoofs(gait, footing);
+                let pieces = clips(sfx);
+                // Four at least: a horse at a walk plays one a second for as
+                // long as it is ridden, and three is a loop by the second
+                // minute.
+                assert!(pieces.len() >= 4, "{} has {} pieces", sfx.file_name(), pieces.len());
+                // A little slack past the beds' 20 ms: a Vorbis stream at
+                // 16 kHz decodes up to a block long, and a piece 30 ms over
+                // only overlaps the next one's fade.
+                for clip in pieces {
+                    assert!(
+                        (clip.seconds() - hoof_piece_seconds(gait)).abs() < 0.04,
+                        "{} lasts {:.2} s and is laid as {} s",
+                        sfx.file_name(),
+                        clip.seconds(),
+                        hoof_piece_seconds(gait)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_horse_speaks_with_its_own_voice_and_not_the_zebras() {
+        for cry in [Cry::Idle, Cry::Alarm, Cry::Hurt, Cry::Death] {
+            let horse = voice_of(Species::Horse, cry).expect("a horse has this cry");
+            assert_eq!(horse, Sfx::Animal(Species::Horse, cry));
+            assert_ne!(Some(horse), voice_of(Species::Zebra, cry));
+            assert!(clips(horse).len() >= 2, "{} has one recording", horse.file_name());
+        }
+        // A horse never threatens: see `VOICES`.
+        assert_eq!(voice_of(Species::Horse, Cry::Threat), None);
     }
 
     /// The soundscape lays a bed's pieces `SECONDS - FADE` apart. Laid that
@@ -1818,9 +1947,6 @@ mod tests {
             Species::Trout | Species::Pike | Species::Herring => Species::Fish,
             // ...and the rat, which is heard as a hare: see `voice_of`.
             Species::Rat => Species::Hare,
-            // ...and the horse, heard through the zebra's until a horse of
-            // its own is recorded (`voice_of`, `SOURCES.md`).
-            Species::Horse => Species::Zebra,
             other => other,
         };
         let mut owner: HashMap<usize, Species> = HashMap::new();

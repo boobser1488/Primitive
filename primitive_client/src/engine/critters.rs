@@ -430,6 +430,9 @@ pub struct Critters {
     /// Degrees over freezing at the player this frame (`warmth_now`), which
     /// every creature near enough to be alive is also standing in.
     warm_here: f32,
+    /// ...and the country the player is in, asked in the same call. Both
+    /// are handed to the soundscape for the crickets (`air_here`).
+    biome_here: Option<Biome>,
     last_player: Option<Vec3>,
     /// The wild hives near the player at the last look, and what was in them.
     hives: Vec<((i32, i32, i32), BlockId)>,
@@ -455,6 +458,7 @@ impl Critters {
             next_id: 0,
             look_in: 0.0,
             warm_here: f32::INFINITY,
+            biome_here: None,
             last_player: None,
             hives: Vec::new(),
             hive_look_in: 0.0,
@@ -474,6 +478,14 @@ impl Critters {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.live.is_empty()
+    }
+
+    /// The country under the player and how warm the air is there now, in
+    /// degrees over freezing -- for the crickets (`soundscape::cricket_chorus`),
+    /// which sing by the same air the frogs do. `None` before the first
+    /// frame in a world.
+    pub fn air_here(&self) -> Option<(Biome, f32)> {
+        self.biome_here.map(|biome| (biome, self.warm_here))
     }
 
     /// Where the frogs that are calling are, for the soundscape.
@@ -526,9 +538,10 @@ impl Critters {
         // alive here is within `FORGET_BEYOND` of the player, so the air at
         // the player is the air they are in; one closure call a frame, where
         // a call per critter would be forty.
-        let (_, temperature, swing) =
+        let (biome, temperature, swing) =
             (around.country)(around.player.x.floor() as i32, around.player.y.floor() as i32, around.player.z.floor() as i32);
         self.warm_here = warmth_now(temperature, around.world_time, swing);
+        self.biome_here = Some(biome);
 
         self.look_in -= dt;
         while self.look_in <= 0.0 {

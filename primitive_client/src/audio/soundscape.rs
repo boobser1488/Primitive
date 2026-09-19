@@ -31,12 +31,14 @@
 use glam::Vec3;
 
 use primitive_shared::animals::Species;
+use primitive_shared::horse::Gait;
+use primitive_shared::worldgen::Biome;
 use primitive_shared::raft;
 use primitive_shared::protocol::EntityId;
 use primitive_shared::types::{self, BlockId, CHUNK_SIZE_Y};
 use primitive_shared::weather::Weather;
 
-use super::bank::{self, crumble_of, voice_of, Cry, Impact, Material, Sfx};
+use super::bank::{self, crumble_of, voice_of, Cry, Footing, Impact, Material, Sfx};
 use super::music::Mood;
 use super::Audio;
 use crate::engine::camera::Camera;
@@ -224,6 +226,18 @@ pub struct Soundscape {
     /// Which birds near the player were in the air last frame -- what a
     /// take-off is read from. See `wildlife`.
     aloft: Vec<(EntityId, bool)>,
+    /// Seconds until the next piece of the crickets' bed, how far round the
+    /// player they have fallen silent, and where the ears were when that
+    /// was last asked. See `cricket_chorus` and `cricket_hush`.
+    cricket_left: f32,
+    hush: f32,
+    cricket_ear: glam::DVec3,
+    /// The sun's height and whether it is raining, as of this frame's
+    /// `update` -- for the crickets in `wildlife`.
+    sun: f32,
+    wet: bool,
+    /// Every horse's feet near the player. See [`Hoofbeats`].
+    hooves: Hoofbeats,
 
     /// Whether the sky is visible from where the player stands, and when
     /// that was last established. Answering it costs a column of block
@@ -303,6 +317,12 @@ impl Soundscape {
             bee_left: 0.0,
             bat_left: 0.0,
             aloft: Vec::new(),
+            cricket_left: 0.0,
+            hush: CRICKET_NEAREST,
+            cricket_ear: glam::DVec3::ZERO,
+            sun: 1.0,
+            wet: false,
+            hooves: Hoofbeats::new(),
             outdoors: true,
             shelter: Shelter::Open,
             roof_left: 0.0,
@@ -325,6 +345,8 @@ impl Soundscape {
         audio.set_submerged(frame.in_world && frame.player.submerged);
         self.ear = frame.camera.eye();
         self.night = frame.sky.sun_elevation() <= 0.0;
+        self.sun = frame.sky.sun_elevation();
+        self.wet = frame.weather.is_wet();
 
         if !frame.in_world {
             self.push_mood(audio, Mood::Menu, frame.dt);
@@ -665,7 +687,14 @@ impl Soundscape {
     ///   swarm laid over itself a little before the last one ends, from a
     ///   bee picked at random, so the hum is where the cloud is and a robbed
     ///   hive -- twice the bees -- is heard as the louder one;
-    /// * **bats** flutter from wherever one is on the wing.
+    /// * **bats** flutter from wherever one is on the wing;
+    /// * **crickets** sing in the grass on a warm night, from wherever the
+    ///   chorus is -- which is not within a few steps of a player who is
+    ///   moving (`cricket_chorus`, `cricket_hush`). `air` is the country
+    ///   under the player and how warm it is now, from `Critters`, which
+    ///   already asks the generator for the frogs;
+    /// * **hooves** drum under every horse that is going somewhere, ridden
+    ///   or not ([`Hoofbeats`]).
     ///
     /// One slice per kind of small life rather than a struct of them: each is
     /// a list `Critters` hands over as it is, and a struct built only to pass
@@ -680,6 +709,7 @@ impl Soundscape {
         croaking: &[Vec3],
         buzzing: &[Vec3],
         flapping: &[Vec3],
+        air: Option<(Biome, f32)>,
     ) {
         let mut aloft = Vec::with_capacity(self.aloft.len());
         for animal in animals.iter().filter(|a| a.species.flies()) {
@@ -763,6 +793,64 @@ impl Soundscape {
                 let loud = (0.08 * flapping.len() as f32).min(0.4);
                 audio.play_at(Sfx::WingBeats, at.as_dvec3(), loud, 1.5 * self.jitter(0.1));
             }
+        }
+
+        // ---- crickets ----
+        //
+        // **A bed, from somewhere in the grass.** Pieces laid end over end
+        // like the rain, but each from its own spot a little way off
+        // rather than in the ears, because a chorus is a field of singers
+        // and the nearest of them is where the ear places it. The spot is
+        // outside the hush, so a player walking through the meadow hears
+        // the singing stop round them and start again behind.
+        let moved = (self.ear - self.cricket_ear).with_y(0.0).length() as f32;
+        self.cricket_ear = self.ear;
+        let moving = dt > 0.0 && moved / dt > CRICKET_STILL && moved < 5.0;
+        self.hush = cricket_hush(self.hush, moving, dt);
+        self.cricket_left -= dt;
+        if self.cricket_left <= 0.0 {
+            self.cricket_left = (self.cricket_left + bank::BED_SECONDS - bank::BED_FADE).max(0.2);
+            let loud = air.map_or(0.0, |(biome, warmth)| {
+                cricket_chorus(&Night {
+                    sun: self.sun,
+                    warmth,
+                    biome,
+                    wet: self.wet,
+                    shelter: self.shelter,
+                    at_sea: self.water_share > AT_SEA,
+                })
+            });
+            if loud > 0.02 {
+                let angle = self.rng.range(0.0, std::f32::consts::TAU);
+                let distance = self.hush + self.rng.range(1.0, 5.0);
+                let at = self.ear
+                    + glam::DVec3::new(f64::from(angle.cos() * distance), -1.3, f64::from(angle.sin() * distance));
+                audio.play_at(Sfx::Crickets, at, loud, self.jitter(0.04));
+            }
+        }
+
+        // ---- hooves ----
+        let mut horses: Vec<Hoof> = animals
+            .iter()
+            .filter(|a| a.species == Species::Horse && (a.at - self.ear).length() < f64::from(HOOF_HEARING))
+            .map(|a| {
+                let feet = a.at.as_vec3() - Vec3::Y * (a.species.height() * 0.5);
+                let wading = chunks
+                    .block_at(feet.x.floor() as i32, (feet.y + 0.1).floor() as i32, feet.z.floor() as i32)
+                    .is_some_and(types::is_liquid);
+                Hoof {
+                    id: a.id,
+                    at: a.at,
+                    speed: if wading { 0.0 } else { a.speed },
+                    footing: Footing::of(self.ground_material(chunks, feet)),
+                }
+            })
+            .collect();
+        let ear = self.ear;
+        horses.sort_by(|a, b| (a.at - ear).length_squared().total_cmp(&(b.at - ear).length_squared()));
+        horses.truncate(HOOVES_HEARD);
+        for beat in self.hooves.hear(dt, &horses) {
+            audio.play_at(beat.sfx, beat.at, beat.gain, beat.pitch);
         }
     }
 
@@ -1307,6 +1395,14 @@ const IDLE_RANGE: f32 = 32.0;
 /// How close a charge has to start to be a threat to *you*.
 const THREAT_RANGE: f32 = 20.0;
 
+/// Blocks from the ears at which an animal that minds company is walked up to.
+const APPROACHED: f64 = 4.0;
+
+/// Does this animal say something when somebody walks up to it? See `hear`.
+fn snorts_at_company(species: Species) -> bool {
+    species == Species::Horse
+}
+
 /// How often one of a species, picked while calm, actually says something.
 ///
 /// **By what it is, and by the hour.** A sheep and a hen talk all day; a
@@ -1320,8 +1416,10 @@ fn idle_chance(species: Species, night: bool) -> f32 {
         Species::Boar => 0.35,
         Species::Deer => 0.12,
         Species::Zebra => 0.25,
-        // A herd that calls to itself now and then: a whinny across the
-        // grass is how a player on a hill learns there are horses below.
+        // A herd blowing and snorting as it grazes. The whinny is its alarm
+        // now that it has a voice of its own; a calm horse is the snort, and
+        // that is how a player on a hill learns there are horses below
+        // without the herd sounding frightened.
         Species::Horse => 0.2,
         Species::Antelope => 0.08,
         Species::Bear => 0.12,
@@ -1384,6 +1482,8 @@ struct Known {
     /// purpose: a boar that grunted a moment ago still snarls when it
     /// charges.
     cried_until: f32,
+    /// Within a few steps of the ears. See `snorts_at_company`.
+    near: bool,
 }
 
 /// Every animal's voice, read off what was drawn.
@@ -1458,6 +1558,7 @@ impl Voices {
                 // A herd walking into earshot does not all speak at once.
                 quiet_until: clock + rng.range(0.0, 4.0),
                 cried_until: clock,
+                near: false,
             });
 
             // ---- a wound ----
@@ -1506,6 +1607,31 @@ impl Voices {
                 }
             }
 
+            // ---- walked up to ----
+            //
+            // **A horse snorts at somebody coming up to it**: the blow down
+            // the nose that is a horse taking the measure of what is at its
+            // head. The one calm sound here that answers the player rather
+            // than the clock, and it answers "will it let me near" before
+            // the right click does. Not every calm animal: a sheep walked
+            // up to walks off, and the alarm already says so.
+            let distance = (animal.at - ear).length();
+            let near = if now.near { distance < APPROACHED * 1.5 } else { distance < APPROACHED };
+            if near
+                && !now.near
+                && before.is_some()
+                && !running
+                && snorts_at_company(animal.species)
+                && clock >= now.cried_until
+                && self.spend()
+            {
+                if let Some(sfx) = voice_of(animal.species, Cry::Idle) {
+                    said.push(Utterance { sfx, at: animal.at, gain: 0.6 });
+                    now.quiet_until = now.quiet_until.max(clock + 6.0);
+                }
+            }
+            now.near = near;
+
             now.running = running;
             now.at = animal.at;
             now.hurt = animal.hurt;
@@ -1551,6 +1677,227 @@ impl Voices {
             }
         }
         said
+    }
+}
+
+// ------------------------------------------------------------ crickets
+
+/// What the night is like where the player stands, as far as a cricket
+/// cares. A struct of facts for the reason `Surroundings` is one: whether
+/// the grass sings is a question a test should answer with a literal.
+#[derive(Debug, Clone, Copy)]
+pub struct Night {
+    /// `Sky::sun_elevation`: 1 at noon, 0 on the horizon, -1 at midnight.
+    pub sun: f32,
+    /// Degrees over freezing here and now, the night's cooling taken off
+    /// (`Critters::air_here`) -- the number the frogs wake by.
+    pub warmth: f32,
+    pub biome: Biome,
+    pub wet: bool,
+    pub shelter: Shelter,
+    /// Out on the water: the look around came back mostly water.
+    pub at_sea: bool,
+}
+
+/// Degrees over freezing the grass has to be for a cricket to sing at all,
+/// and for the whole field to. **Measured against the night, not the day**:
+/// a cricket is cold-blooded and its song slows and stops with the air it
+/// is in, so a mild autumn afternoon followed by a frost is a chorus that
+/// thins through the evening and is gone by midnight. The frogs learned
+/// this the hard way (`critters::FROG_WARMTH_C`, "лягушки игнорируют
+/// температуру"), and the floor is theirs: below eight the grass is silent.
+const CRICKET_COLD: f32 = 8.0;
+const CRICKET_WARM: f32 = 16.0;
+
+/// How loud the crickets are, 0 to 1.
+///
+/// **Grass, warmth and dark, and any one of them can silence it**, so the
+/// answer is a product:
+///
+/// * **the dark** -- a fade in from just before sunset to just after, and
+///   out again at dawn, so the evening has a moment where the day is over
+///   and the field has not yet started;
+/// * **the warmth** -- nothing below eight degrees over freezing and the
+///   whole field above sixteen, which is what makes winter, a cold spring
+///   and the north silent without a word about seasons here;
+/// * **the country** -- a meadow, a steppe and a savanna are the grass
+///   crickets live in; a wood sings less (its floor is litter, not grass), a
+///   marsh somewhat, a desert and a beach a little; the sea, the tundra and
+///   the peaks not at all;
+/// * **the weather and the roof** -- rain silences a field (a wet wing does
+///   not ring, and the rain is louder anyway); under a roof with the sky a
+///   step away the field is heard through the wall, and deep in a cave or a
+///   mine it is not heard at all.
+///
+/// Rejected: a clock ("crickets from nine till four"). A day is twenty
+/// minutes and the sun is what a player reads the evening by; a chorus that
+/// started by a clock would start on a bright horizon at midsummer.
+pub fn cricket_chorus(night: &Night) -> f32 {
+    let dark = ((0.08 - night.sun) / 0.2).clamp(0.0, 1.0);
+    let warm = ((night.warmth - CRICKET_COLD) / (CRICKET_WARM - CRICKET_COLD)).clamp(0.0, 1.0);
+    let grass = match night.biome {
+        Biome::Plains | Biome::Steppe | Biome::Savanna | Biome::Hills => 1.0,
+        Biome::Swamp | Biome::Bog | Biome::River => 0.55,
+        Biome::Forest | Biome::BirchForest | Biome::DeadForest => 0.4,
+        Biome::Taiga | Biome::Desert | Biome::Beach => 0.25,
+        Biome::Mountains => 0.15,
+        Biome::Ocean | Biome::Tundra | Biome::SnowyPeaks => 0.0,
+    };
+    let heard = match night.shelter {
+        Shelter::Open | Shelter::Canopy => 1.0,
+        Shelter::Roofed => 0.45,
+        Shelter::Enclosed => 0.0,
+    };
+    if night.wet || night.at_sea {
+        return 0.0;
+    }
+    dark * warm * grass * heard
+}
+
+/// How far round a moving player the crickets fall silent, in blocks. A
+/// cricket stops when the grass near it shakes, and it is the one thing in
+/// the night that tells a player they are being loud: walk and a ring of
+/// quiet walks with you, stand still and the field closes in again.
+const CRICKET_HUSH: f32 = 7.0;
+/// ...and where the nearest start again when nothing moves.
+const CRICKET_NEAREST: f32 = 1.5;
+/// Blocks a second the silence closes back in: several seconds of standing
+/// still before the near ones trust it.
+const CRICKET_TRUST: f32 = 0.8;
+/// Faster than this across the ground, in blocks a second, is moving --
+/// under a creep, because crickets do not know about sneaking.
+const CRICKET_STILL: f32 = 0.5;
+
+/// The hush after one frame: out at once when something moves, back slowly
+/// when it stops.
+pub fn cricket_hush(hush: f32, moving: bool, dt: f32) -> f32 {
+    if moving {
+        CRICKET_HUSH
+    } else {
+        (hush - CRICKET_TRUST * dt).max(CRICKET_NEAREST)
+    }
+}
+
+// -------------------------------------------------------------- hooves
+
+/// How far a horse's feet are heard, and how many horses at once. A herd
+/// of twelve galloping by is heard as the nearest four: past that the drum
+/// is one sound, and twelve beds of it are only twelve of the mixer's
+/// voices spent.
+const HOOF_HEARING: f32 = 40.0;
+const HOOVES_HEARD: usize = 4;
+
+/// Under this, in blocks a second, a horse is standing, and its feet say
+/// nothing: shifting its weight is not a stride.
+const HOOF_STANDING: f32 = 0.8;
+
+/// Which pace a horse is going at, from how fast it is going.
+///
+/// **From the speed, the one thing the client sees of every horse**, ridden
+/// or wild: a rider's gait is their reins, but a stranger's horse on a
+/// server is a speed in a snapshot, and one rule for both is one rule that
+/// cannot disagree with itself. The lines are halfway between the paces
+/// `horse::Gait` holds a horse to, so a horse coming down from a gallop is
+/// heard to trot when it has come most of the way down, not at the first
+/// stride less.
+pub fn pace_of(speed: f32) -> Option<Gait> {
+    use primitive_shared::horse::{GALLOP, TROT, WALK};
+    if speed < HOOF_STANDING {
+        None
+    } else if speed < (WALK + TROT) * 0.5 {
+        Some(Gait::Walk)
+    } else if speed < (TROT + GALLOP) * 0.5 {
+        Some(Gait::Trot)
+    } else {
+        Some(Gait::Gallop)
+    }
+}
+
+/// One horse, as its hooves need it.
+#[derive(Debug, Clone, Copy)]
+pub struct Hoof {
+    pub id: EntityId,
+    pub at: glam::DVec3,
+    /// Along the ground; nought for a horse in water, which splashes rather
+    /// than strikes.
+    pub speed: f32,
+    pub footing: Footing,
+}
+
+/// One piece of a pace, to be played.
+#[derive(Debug, Clone, Copy)]
+pub struct HoofBeat {
+    pub sfx: Sfx,
+    pub at: glam::DVec3,
+    pub gain: f32,
+    pub pitch: f32,
+}
+
+/// The hooves of every horse near the player.
+///
+/// **Pieces of a pace laid end over end, not a clop per stride.** The
+/// recordings are a stride or two of a real horse at a walk, a trot or a
+/// gallop (`bank::hoof_piece_seconds`), and each horse's next piece starts
+/// as its last one ends. A clop per footfall timed from the speed was the
+/// alternative, and it is a metronome: a walk is four beats in a lopsided
+/// rhythm and a gallop is three in a rush and a gap, and that rhythm is
+/// what a listener names the pace by. A change of pace plays at once
+/// rather than when the old piece ends, because the moment a horse breaks
+/// into a gallop is the moment worth hearing.
+///
+/// The rider's own horse is one of these like any other, heard from under
+/// the saddle: the player's own footsteps are silent on horseback (the
+/// body's velocity is nought there -- `lib.rs` puts it on the saddle), so
+/// these are the only feet.
+pub struct Hoofbeats {
+    /// Each horse's pace, and seconds until its next piece.
+    going: Vec<(EntityId, Gait, f32)>,
+}
+
+impl Default for Hoofbeats {
+    fn default() -> Self {
+        Hoofbeats::new()
+    }
+}
+
+impl Hoofbeats {
+    pub fn new() -> Hoofbeats {
+        Hoofbeats { going: Vec::new() }
+    }
+
+    /// One frame of listening to `horses`.
+    pub fn hear(&mut self, dt: f32, horses: &[Hoof]) -> Vec<HoofBeat> {
+        let mut going = Vec::with_capacity(horses.len());
+        let mut beats = Vec::new();
+        for horse in horses {
+            let Some(gait) = pace_of(horse.speed) else {
+                continue;
+            };
+            let left = match self.going.iter().find(|(id, _, _)| *id == horse.id) {
+                Some(&(_, was, left)) if was == gait => left - dt,
+                _ => 0.0,
+            };
+            let left = if left <= 0.0 {
+                // A little faster than the pace plays a little faster, within
+                // the few per cent a recording stretches before it sounds
+                // played rather than ridden.
+                let pitch = (horse.speed / gait.speed()).clamp(0.9, 1.12);
+                let gain = match gait {
+                    Gait::Walk => 0.5,
+                    Gait::Trot => 0.7,
+                    Gait::Gallop => 0.9,
+                };
+                beats.push(HoofBeat { sfx: Sfx::Hoofs(gait, horse.footing), at: horse.at, gain, pitch });
+                // The next piece starts as this one's last strike fades: the
+                // pieces carry a 30 ms fade at each end.
+                left + (bank::hoof_piece_seconds(gait) / pitch - 0.03).max(0.2)
+            } else {
+                left
+            };
+            going.push((horse.id, gait, left));
+        }
+        self.going = going;
+        beats
     }
 }
 
@@ -2201,5 +2548,157 @@ mod tests {
         scape.push_mood(&audio, Mood::Night, 0.1);
         scape.push_mood(&audio, Mood::Day, 2.0);
         assert_eq!(scape.mood, Mood::Cave);
+    }
+
+    fn summer_night() -> Night {
+        Night { sun: -0.6, warmth: 20.0, biome: Biome::Plains, wet: false, shelter: Shelter::Open, at_sea: false }
+    }
+
+    #[test]
+    fn crickets_sing_on_a_warm_night_in_the_grass() {
+        assert!(cricket_chorus(&summer_night()) > 0.9);
+        for biome in [Biome::Steppe, Biome::Savanna] {
+            assert!(cricket_chorus(&Night { biome, ..summer_night() }) > 0.9, "{biome:?} is silent");
+        }
+    }
+
+    #[test]
+    fn crickets_are_silent_by_day_in_the_cold_in_rain_underground_and_at_sea() {
+        let night = summer_night();
+        let silent = [
+            ("noon", Night { sun: 0.9, ..night }),
+            ("a frosty night", Night { warmth: 2.0, ..night }),
+            ("a winter night", Night { warmth: -10.0, ..night }),
+            ("rain", Night { wet: true, ..night }),
+            ("a mine", Night { shelter: Shelter::Enclosed, ..night }),
+            ("the sea", Night { at_sea: true, ..night }),
+            ("the ocean", Night { biome: Biome::Ocean, ..night }),
+            ("the tundra", Night { biome: Biome::Tundra, ..night }),
+        ];
+        for (what, n) in silent {
+            assert_eq!(cricket_chorus(&n), 0.0, "crickets sang in {what}");
+        }
+    }
+
+    #[test]
+    fn a_wood_a_desert_and_a_hut_hear_fewer_crickets_than_a_meadow() {
+        let meadow = cricket_chorus(&summer_night());
+        for (what, n) in [
+            ("a forest", Night { biome: Biome::Forest, ..summer_night() }),
+            ("a desert", Night { biome: Biome::Desert, ..summer_night() }),
+            ("a hut", Night { shelter: Shelter::Roofed, ..summer_night() }),
+        ] {
+            let there = cricket_chorus(&n);
+            assert!(there > 0.0 && there < meadow * 0.6, "{what} heard {there:.2} against a meadow's {meadow:.2}");
+        }
+    }
+
+    #[test]
+    fn the_crickets_fade_in_through_dusk_rather_than_switching_on() {
+        let at = |sun: f32| cricket_chorus(&Night { sun, ..summer_night() });
+        assert_eq!(at(0.2), 0.0, "singing in the evening sun");
+        let dusk = at(0.0);
+        assert!(dusk > 0.1 && dusk < 0.9, "at sunset the chorus is {dusk:.2}, not a fade");
+        assert!(at(-0.2) > 0.99);
+        // ...and a mild night is a thinner chorus than a hot one.
+        let mild = cricket_chorus(&Night { warmth: 11.0, ..summer_night() });
+        assert!(mild > 0.0 && mild < 0.6);
+    }
+
+    #[test]
+    fn the_crickets_hush_round_a_moving_player_and_come_back_when_they_stand_still() {
+        let dt = 1.0 / 60.0;
+        let mut hush = CRICKET_NEAREST;
+        hush = cricket_hush(hush, true, dt);
+        assert!(hush >= 6.0, "walking through the grass hushed only {hush:.1} blocks");
+        for _ in 0..60 {
+            hush = cricket_hush(hush, false, dt);
+        }
+        assert!(hush > 5.0, "the crickets trusted a player who stopped a second ago");
+        for _ in 0..(60 * 10) {
+            hush = cricket_hush(hush, false, dt);
+        }
+        assert_eq!(hush, CRICKET_NEAREST, "ten seconds of standing still and the near ones are still quiet");
+    }
+
+    #[test]
+    fn each_pace_of_a_horse_plays_its_own_hoofbeat() {
+        use primitive_shared::horse::{GALLOP, TROT, WALK};
+        assert_eq!(pace_of(0.0), None);
+        assert_eq!(pace_of(0.3), None, "a horse shifting its weight is striding");
+        assert_eq!(pace_of(WALK), Some(Gait::Walk));
+        assert_eq!(pace_of(TROT), Some(Gait::Trot));
+        assert_eq!(pace_of(GALLOP), Some(Gait::Gallop));
+        assert_eq!(pace_of(GALLOP * 0.9), Some(Gait::Gallop), "a gallop slowing a little is still a gallop");
+
+        for (speed, gait) in [(WALK, Gait::Walk), (TROT, Gait::Trot), (GALLOP, Gait::Gallop)] {
+            for footing in [Footing::Soft, Footing::Hard] {
+                let mut hooves = Hoofbeats::new();
+                let horse = Hoof { id: 7, at: glam::DVec3::ZERO, speed, footing };
+                let beats = hooves.hear(1.0 / 60.0, &[horse]);
+                assert_eq!(beats.len(), 1, "a horse setting off at {speed} played {} pieces", beats.len());
+                assert_eq!(beats[0].sfx, Sfx::Hoofs(gait, footing));
+            }
+        }
+    }
+
+    #[test]
+    fn hoofbeats_follow_one_another_without_a_gap_or_a_pile_up() {
+        let dt = 1.0 / 60.0;
+        let mut hooves = Hoofbeats::new();
+        let horse = Hoof { id: 1, at: glam::DVec3::ZERO, speed: primitive_shared::horse::TROT, footing: Footing::Soft };
+        let mut starts = Vec::new();
+        for frame in 0..(60 * 6) {
+            if !hooves.hear(dt, &[horse]).is_empty() {
+                starts.push(frame as f32 * dt);
+            }
+        }
+        let piece = bank::hoof_piece_seconds(Gait::Trot);
+        for pair in starts.windows(2) {
+            let gap = pair[1] - pair[0];
+            assert!((gap - (piece - 0.03)).abs() < 0.04, "trot pieces {gap:.2} s apart and {piece} s long");
+        }
+        // Standing: nothing. Breaking into a gallop: at once.
+        assert!(hooves.hear(dt, &[Hoof { speed: 0.0, ..horse }]).is_empty());
+        let gallop = Hoof { speed: primitive_shared::horse::GALLOP, ..horse };
+        hooves.hear(dt, &[Hoof { speed: primitive_shared::horse::TROT, ..horse }]);
+        let broke = hooves.hear(dt, &[gallop]);
+        assert_eq!(broke.len(), 1, "a horse breaking into a gallop waited for the trot to finish");
+        assert_eq!(broke[0].sfx, Sfx::Hoofs(Gait::Gallop, Footing::Soft));
+    }
+
+    #[test]
+    fn stone_and_boards_ring_under_a_hoof_and_earth_does_not() {
+        assert_eq!(Footing::of(Material::Stone), Footing::Hard);
+        assert_eq!(Footing::of(Material::Wood), Footing::Hard);
+        for soft in [Material::Dirt, Material::Grass, Material::Sand, Material::Snow, Material::Gravel] {
+            assert_eq!(Footing::of(soft), Footing::Soft, "{soft:?}");
+        }
+    }
+
+    #[test]
+    fn a_horse_snorts_at_a_player_walking_up_to_it_and_not_again_at_once() {
+        let mut voices = Voices::new();
+        let mut rng = Rng::new(3);
+        let dt = 1.0 / 60.0;
+        let far = [animal(1, Species::Horse, Vec3::new(10.0, 0.0, 0.0), 0.0, 0.0)];
+        let close = [animal(1, Species::Horse, Vec3::new(2.0, 0.0, 0.0), 0.0, 0.0)];
+        // Seen from a distance first. Half a second in all, well inside the
+        // second before the first calm call is even considered, so any snort
+        // here is the approach.
+        voices.hear(dt, &far, glam::DVec3::ZERO, false, &mut rng);
+        let said = voices.hear(dt, &close, glam::DVec3::ZERO, false, &mut rng);
+        assert!(
+            said.iter().any(|u| u.sfx == Sfx::Animal(Species::Horse, Cry::Idle)),
+            "a horse walked up to said nothing"
+        );
+        // Standing beside it is not walking up to it again.
+        let after: Vec<Utterance> = (0..30).flat_map(|_| voices.hear(dt, &close, glam::DVec3::ZERO, false, &mut rng)).collect();
+        assert!(after.is_empty(), "a horse snorted {} more times at somebody standing still", after.len());
+        // A sheep walked up to says nothing for it.
+        let mut voices = Voices::new();
+        voices.hear(dt, &[animal(2, Species::Sheep, Vec3::new(10.0, 0.0, 0.0), 0.0, 0.0)], glam::DVec3::ZERO, false, &mut rng);
+        let sheep = voices.hear(dt, &[animal(2, Species::Sheep, Vec3::new(2.0, 0.0, 0.0), 0.0, 0.0)], glam::DVec3::ZERO, false, &mut rng);
+        assert!(sheep.is_empty());
     }
 }

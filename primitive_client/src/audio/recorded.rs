@@ -49,8 +49,8 @@
 //!   for one format.
 //! * **Ogg Vorbis through `lewton`** -- chosen. Pure Rust (nothing for the
 //!   NDK to compile), one small crate plus `ogg`, and the whole set is
-//!   3.8 MB at quality 0.3 mono (0.1 to 0.2 at 24 kHz for the beds, winds
-//!   and animals), which on foley, rain and cries is not something anybody
+//!   3.95 MB at quality 0.3 mono (0.1 to 0.2 at 24 kHz for the beds, winds
+//!   and animals, 16 kHz for the horse), which on foley, rain and cries is not something anybody
 //!   can hear.
 //!
 //! Decoding happens once, on its own thread while the game starts (it
@@ -69,8 +69,9 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use primitive_shared::animals::Species;
+use primitive_shared::horse::Gait;
 
-use super::bank::{Cry, Impact, Material, Sfx};
+use super::bank::{Cry, Footing, Impact, Material, Sfx};
 use super::clip::Clip;
 
 /// One sound's recordings.
@@ -187,16 +188,16 @@ const WILD_BEAR_IDLE: &[&str] = &["wild/bear_idle_1.ogg", "wild/bear_idle_2.ogg"
 const WILD_BEAR_THREAT: &[&str] = &["wild/bear_threat_1.ogg", "wild/bear_threat_2.ogg", "wild/bear_threat_3.ogg"];
 const WILD_BOAR_ALARM: &[&str] = &["wild/boar_alarm_1.ogg", "wild/boar_alarm_2.ogg", "wild/boar_alarm_3.ogg"];
 const WILD_BOAR_DEATH: &[&str] = &["wild/boar_death_1.ogg", "wild/boar_death_2.ogg", "wild/boar_death_3.ogg"];
-const WILD_BOAR_HURT: &[&str] = &["wild/boar_hurt_1.ogg", "wild/boar_hurt_2.ogg", "wild/boar_hurt_3.ogg", "wild/boar_hurt_4.ogg"];
-const WILD_BOAR_IDLE: &[&str] = &["wild/boar_idle_1.ogg", "wild/boar_idle_2.ogg", "wild/boar_idle_3.ogg", "wild/boar_idle_4.ogg"];
+const WILD_BOAR_HURT: &[&str] = &["wild/boar_hurt_1.ogg", "wild/boar_hurt_2.ogg", "wild/boar_hurt_3.ogg"];
+const WILD_BOAR_IDLE: &[&str] = &["wild/boar_idle_1.ogg", "wild/boar_idle_2.ogg", "wild/boar_idle_3.ogg"];
 const WILD_BOAR_THREAT: &[&str] = &["wild/boar_threat_1.ogg", "wild/boar_threat_2.ogg", "wild/boar_threat_3.ogg"];
 const WILD_COD_ALARM: &[&str] = &["wild/cod_alarm_1.ogg", "wild/cod_alarm_2.ogg"];
 const WILD_COD_DEATH: &[&str] = &["wild/cod_death_1.ogg", "wild/cod_death_2.ogg"];
 const WILD_COD_HURT: &[&str] = &["wild/cod_hurt_1.ogg", "wild/cod_hurt_2.ogg"];
-const WILD_DEER_ALARM: &[&str] = &["wild/deer_alarm_1.ogg", "wild/deer_alarm_2.ogg", "wild/deer_alarm_3.ogg", "wild/deer_alarm_4.ogg"];
+const WILD_DEER_ALARM: &[&str] = &["wild/deer_alarm_1.ogg", "wild/deer_alarm_2.ogg", "wild/deer_alarm_3.ogg"];
 const WILD_DEER_DEATH: &[&str] = &["wild/deer_death_1.ogg", "wild/deer_death_2.ogg", "wild/deer_death_3.ogg"];
-const WILD_DEER_HURT: &[&str] = &["wild/deer_hurt_1.ogg", "wild/deer_hurt_2.ogg", "wild/deer_hurt_3.ogg", "wild/deer_hurt_4.ogg"];
-const WILD_DEER_IDLE: &[&str] = &["wild/deer_idle_1.ogg", "wild/deer_idle_2.ogg", "wild/deer_idle_3.ogg", "wild/deer_idle_4.ogg"];
+const WILD_DEER_HURT: &[&str] = &["wild/deer_hurt_1.ogg", "wild/deer_hurt_2.ogg", "wild/deer_hurt_3.ogg"];
+const WILD_DEER_IDLE: &[&str] = &["wild/deer_idle_1.ogg", "wild/deer_idle_2.ogg", "wild/deer_idle_3.ogg"];
 const WILD_FISH_ALARM: &[&str] = &["wild/fish_alarm_1.ogg", "wild/fish_alarm_2.ogg", "wild/fish_alarm_3.ogg"];
 const WILD_FISH_DEATH: &[&str] = &["wild/fish_death_1.ogg", "wild/fish_death_2.ogg"];
 const WILD_FISH_HURT: &[&str] = &["wild/fish_hurt_1.ogg", "wild/fish_hurt_2.ogg"];
@@ -218,15 +219,25 @@ const WILD_SHEEP_ALARM: &[&str] = &["wild/sheep_alarm_1.ogg", "wild/sheep_alarm_
 const WILD_SHEEP_DEATH: &[&str] = &["wild/sheep_death_1.ogg", "wild/sheep_death_2.ogg"];
 const WILD_SHEEP_HURT: &[&str] = &["wild/sheep_hurt_1.ogg", "wild/sheep_hurt_2.ogg", "wild/sheep_hurt_3.ogg"];
 const WILD_SHEEP_IDLE: &[&str] = &["wild/sheep_idle_1.ogg", "wild/sheep_idle_2.ogg", "wild/sheep_idle_3.ogg"];
-const WILD_WOLF_ALARM: &[&str] = &["wild/wolf_alarm_1.ogg", "wild/wolf_alarm_2.ogg", "wild/wolf_alarm_3.ogg", "wild/wolf_alarm_4.ogg"];
+const WILD_WOLF_ALARM: &[&str] = &["wild/wolf_alarm_1.ogg", "wild/wolf_alarm_2.ogg", "wild/wolf_alarm_3.ogg"];
 const WILD_WOLF_DEATH: &[&str] = &["wild/wolf_death_1.ogg", "wild/wolf_death_2.ogg", "wild/wolf_death_3.ogg"];
 const WILD_WOLF_HURT: &[&str] = &["wild/wolf_hurt_1.ogg", "wild/wolf_hurt_2.ogg", "wild/wolf_hurt_3.ogg"];
 const WILD_WOLF_IDLE: &[&str] = &["wild/wolf_idle_1.ogg", "wild/wolf_idle_2.ogg", "wild/wolf_idle_3.ogg"];
-const WILD_WOLF_THREAT: &[&str] = &["wild/wolf_threat_1.ogg", "wild/wolf_threat_2.ogg", "wild/wolf_threat_3.ogg", "wild/wolf_threat_4.ogg"];
+const WILD_WOLF_THREAT: &[&str] = &["wild/wolf_threat_1.ogg", "wild/wolf_threat_2.ogg", "wild/wolf_threat_3.ogg"];
 const WILD_ZEBRA_ALARM: &[&str] = &["wild/zebra_alarm_1.ogg", "wild/zebra_alarm_2.ogg", "wild/zebra_alarm_3.ogg"];
 const WILD_ZEBRA_DEATH: &[&str] = &["wild/zebra_death_1.ogg", "wild/zebra_death_2.ogg"];
 const WILD_ZEBRA_HURT: &[&str] = &["wild/zebra_hurt_1.ogg", "wild/zebra_hurt_2.ogg", "wild/zebra_hurt_3.ogg"];
 const WILD_ZEBRA_IDLE: &[&str] = &["wild/zebra_idle_1.ogg", "wild/zebra_idle_2.ogg"];
+const WILD_HORSE_ALARM: &[&str] = &["wild/horse_alarm_1.ogg", "wild/horse_alarm_2.ogg", "wild/horse_alarm_3.ogg"];
+const WILD_HORSE_DEATH: &[&str] = &["wild/horse_death_1.ogg", "wild/horse_death_2.ogg"];
+const WILD_HORSE_HURT: &[&str] = &["wild/horse_hurt_1.ogg", "wild/horse_hurt_2.ogg", "wild/horse_hurt_3.ogg"];
+const WILD_HORSE_IDLE: &[&str] = &["wild/horse_idle_1.ogg", "wild/horse_idle_2.ogg", "wild/horse_idle_3.ogg", "wild/horse_idle_4.ogg"];
+const WORLD_CRICKETS: &[&str] = &["world/crickets_1.ogg", "world/crickets_2.ogg", "world/crickets_3.ogg", "world/crickets_4.ogg"];
+const HOOF_WALK: &[&str] = &["step/hoof_walk_1.ogg", "step/hoof_walk_2.ogg", "step/hoof_walk_3.ogg", "step/hoof_walk_4.ogg"];
+const HOOF_TROT: &[&str] = &["step/hoof_trot_1.ogg", "step/hoof_trot_2.ogg", "step/hoof_trot_3.ogg", "step/hoof_trot_4.ogg"];
+const HOOF_GALLOP: &[&str] = &["step/hoof_gallop_1.ogg", "step/hoof_gallop_2.ogg", "step/hoof_gallop_3.ogg", "step/hoof_gallop_4.ogg"];
+const HOOF_WALK_HARD: &[&str] = &["step/hoof_walk_hard_1.ogg", "step/hoof_walk_hard_2.ogg", "step/hoof_walk_hard_3.ogg", "step/hoof_walk_hard_4.ogg"];
+const HOOF_TROT_HARD: &[&str] = &["step/hoof_trot_hard_1.ogg", "step/hoof_trot_hard_2.ogg", "step/hoof_trot_hard_3.ogg", "step/hoof_trot_hard_4.ogg"];
 const RUSTLE: &[&str] = &[
     "dig/grass_1.ogg", "dig/grass_2.ogg", "dig/grass_3.ogg", "dig/grass_4.ogg", "dig/grass_5.ogg",
     "break/grass_1.ogg", "break/grass_2.ogg", "break/grass_3.ogg", "break/grass_4.ogg", "break/grass_5.ogg",
@@ -532,6 +543,38 @@ pub const RECORDINGS: &[Recording] = &[
     one(Sfx::Animal(Species::Zebra, Cry::Death), 0.55, WILD_ZEBRA_DEATH),
     one(Sfx::Animal(Species::Zebra, Cry::Hurt), 0.55, WILD_ZEBRA_HURT),
     one(Sfx::Animal(Species::Zebra, Cry::Idle), 0.55, WILD_ZEBRA_IDLE),
+    // **The horse's own**, where it borrowed the zebra's bray and a
+    // donkey's. Snorts and blows for a horse at rest, three whinnies for
+    // one that bolts, the first breath of a whinny cut short for a blow, and
+    // a long breath out for the end. A whinny is loud next to a snort, as
+    // it is in a field: they are all levelled to one peak, and the snorts
+    // are what plays most.
+    one(Sfx::Animal(Species::Horse, Cry::Alarm), 0.6, WILD_HORSE_ALARM),
+    one(Sfx::Animal(Species::Horse, Cry::Death), 0.6, WILD_HORSE_DEATH),
+    one(Sfx::Animal(Species::Horse, Cry::Hurt), 0.6, WILD_HORSE_HURT),
+    one(Sfx::Animal(Species::Horse, Cry::Idle), 0.45, WILD_HORSE_IDLE),
+    // ---- the night, and the horse's feet ----
+    // Crickets in a field, high-passed at 2.5 kHz so no road or wind comes
+    // with them, cut as a bed like the rain (`bank::BED_SECONDS`) and
+    // levelled by energy. Four pieces from two fields: the soundscape lays
+    // one from wherever in the grass the chorus is, so a repeat is also a
+    // move, and never the same piece twice running.
+    one(Sfx::Crickets, 0.5, WORLD_CRICKETS),
+    // **A piece of each pace, not a clop at a time.** A walk is four beats
+    // in an uneven rhythm and a gallop three in a rush and a gap; timing
+    // single hoof strikes from a speed would be a metronome of whichever
+    // the code guessed. Pieces a stride or two long, cut from a real horse
+    // at that pace and laid end over end by `soundscape::Hoofbeats`, carry
+    // the rhythm in them.
+    one(Sfx::Hoofs(Gait::Walk, Footing::Soft), 0.4, HOOF_WALK),
+    one(Sfx::Hoofs(Gait::Trot, Footing::Soft), 0.45, HOOF_TROT),
+    one(Sfx::Hoofs(Gait::Gallop, Footing::Soft), 0.55, HOOF_GALLOP),
+    one(Sfx::Hoofs(Gait::Walk, Footing::Hard), 0.4, HOOF_WALK_HARD),
+    one(Sfx::Hoofs(Gait::Trot, Footing::Hard), 0.45, HOOF_TROT_HARD),
+    // **A gallop on stone is the gallop.** No CC0 gallop on a road was
+    // found, and at eleven blocks a second the drum of four hooves is what
+    // the ear takes; the clop of each is lost in it.
+    one(Sfx::Hoofs(Gait::Gallop, Footing::Hard), 0.6, HOOF_GALLOP),
 ];
 
 /// The sounds with no recording, and why. Each is silent: nothing is
@@ -751,6 +794,34 @@ mod tests {
     }
 
     #[test]
+    fn the_crickets_the_hooves_and_the_horse_each_have_room_not_to_repeat() {
+        // The crickets and the hooves are laid end over end for minutes at
+        // a time; a horse's snort is its calm call and its answer to being
+        // walked up to. Four is the least that does not come round again
+        // audibly with `next_variant` never playing one twice running.
+        let four = [
+            Sfx::Crickets,
+            Sfx::Hoofs(Gait::Walk, Footing::Soft),
+            Sfx::Hoofs(Gait::Trot, Footing::Soft),
+            Sfx::Hoofs(Gait::Gallop, Footing::Soft),
+            Sfx::Hoofs(Gait::Walk, Footing::Hard),
+            Sfx::Hoofs(Gait::Trot, Footing::Hard),
+            Sfx::Hoofs(Gait::Gallop, Footing::Hard),
+            Sfx::Animal(Species::Horse, Cry::Idle),
+        ];
+        for sfx in four {
+            let row = RECORDINGS.iter().find(|r| r.sfx == sfx).unwrap_or_else(|| panic!("{sfx:?} has no row"));
+            assert!(row.files.len() >= 4, "{} has {} recordings", sfx.file_name(), row.files.len());
+        }
+        // ...and a whinny, a wound and a death are rarer, and have more than one.
+        for cry in [Cry::Alarm, Cry::Hurt, Cry::Death] {
+            let row = RECORDINGS.iter().find(|r| r.sfx == Sfx::Animal(Species::Horse, cry)).unwrap();
+            assert!(row.files.len() >= 2 && row.files.iter().all(|f| f.starts_with("wild/horse_")));
+        }
+        assert_eq!(WORLD_CRICKETS.len(), 4);
+    }
+
+    #[test]
     fn wading_swimming_and_the_stakes_each_have_room_not_to_repeat() {
         // One or two clips a second, for as long as somebody is in the
         // water: fewer than six and the loop is audible.
@@ -765,9 +836,11 @@ mod tests {
     #[test]
     fn the_recordings_stay_a_modest_download() {
         // They are compiled into the executable and packed into the APK;
-        // 3.8 MB today -- half of it the fire, rain, winds and animals that
+        // 3.95 MB today -- half of it the fire, rain, winds and animals that
         // were recipes until the player asked for recordings of everything,
-        // and 0.4 MB of it the workshops and the crumbles.
+        // 0.4 MB of it the workshops and the crumbles, and 0.27 MB the horse
+        // and the crickets, which came in with seven rarely heard fourth
+        // variants dropped to make room (SOURCES.md says which).
         // A budget rather than a number, so the next recording has room and
         // the fifty after it do not.
         let total: usize = crate::embedded::SOUNDS.iter().map(|(_, b)| b.len()).sum();

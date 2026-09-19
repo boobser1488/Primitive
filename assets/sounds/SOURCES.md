@@ -42,12 +42,20 @@ yelp and whine for the wolf, rabbits for the hare, chickens, pheasants and
 junglefowl for wild fowl, a donkey for the zebra past its one bray, goats
 for a wounded antelope.
 
-**The horse has no recording of its own yet.** It is heard through the
-zebra's files above -- a zebra's bray and a donkey's, the nearest equids
-this repository holds under CC0 (`audio::bank::voice_of`). A CC0 horse
-whinny, snort and gallop were not fetched: a new download needs its page
-read for the licence the way every file here was, and that has not been
-done. Until it is, nothing under `wild/` is a horse.
+**The horse has its own recordings now** -- snorts, whinnies and a last
+breath under `wild/horse_*`, and hoofbeats at a walk, a trot and a gallop,
+on soft ground and on stone or wood, under `step/hoof_*`. It used to be
+heard through the zebra's bray and a donkey's. The crickets are
+`world/crickets_*`. All of them are the last sections here, fetched the
+same way: each page read for "Creative Commons 0" before the download, the
+high-quality preview cut, summed to mono, high-passed, and encoded at 16 kHz
+(the horse) or 24 kHz (the crickets, whose song is above 3 kHz).
+
+To keep the whole set inside its budget
+(`the_recordings_stay_a_modest_download`) the fourth variant of seven
+rarely heard cries was dropped when they came in: a boar's wound and its
+grunt, a deer's alarm, wound and call, a wolf's alarm and its snarl. Each
+of those still has three, and `next_variant` never plays one twice running.
 
 Licence: https://creativecommons.org/publicdomain/zero/1.0/
 
@@ -745,7 +753,6 @@ they came from is not lost.
 | file | cut from |
 |---|---|
 | `wild/boar_hurt_3.ogg` | 3.83-4.38 s |
-| `wild/boar_hurt_4.ogg` | 4.97-5.77 s |
 | `wild/boar_death_1.ogg` | 0.12-2.42 s |
 | `wild/boar_death_2.ogg` | 11.15-12.55 s |
 
@@ -761,7 +768,6 @@ they came from is not lost.
 | `wild/boar_idle_1.ogg` | 0.40-0.70 s |
 | `wild/boar_idle_2.ogg` | 10.50-10.92 s |
 | `wild/boar_idle_3.ogg` | 11.70-12.10 s |
-| `wild/boar_idle_4.ogg` | 19.10-19.65 s |
 
 ## Freesound 352698: Angry Pig Oinking
 
@@ -813,17 +819,6 @@ they came from is not lost.
 | `wild/deer_alarm_2.ogg` | 2.95-3.60 s |
 | `wild/deer_alarm_3.ogg` | 8.50-9.20 s |
 
-## Freesound 696774: Deer Call_1_s
-
-- Author: ferventtorpor (freesound.org)
-- Page: https://freesound.org/people/ferventtorpor/sounds/696774/
-- Download: https://cdn.freesound.org/previews/696/696774_9391615-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
-- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
-
-| file | cut from |
-|---|---|
-| `wild/deer_alarm_4.ogg` | 0.00-0.20 s |
-
 ## Freesound 653532: Deer rut - Brame Cerf .wav
 
 - Author: L.Finck (freesound.org)
@@ -834,17 +829,6 @@ they came from is not lost.
 | file | cut from |
 |---|---|
 | `wild/deer_death_3.ogg` | 19.60-21.15 s |
-
-## Freesound 696777: Deer_chucker_call_s
-
-- Author: ferventtorpor (freesound.org)
-- Page: https://freesound.org/people/ferventtorpor/sounds/696777/
-- Download: https://cdn.freesound.org/previews/696/696777_9391615-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
-- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
-
-| file | cut from |
-|---|---|
-| `wild/deer_hurt_4.ogg` | 0.00-0.42 s |
 
 ## Freesound 351113: Deer Meewing 01.wav
 
@@ -863,17 +847,6 @@ they came from is not lost.
 | `wild/deer_hurt_3.ogg` | 13.65-14.05 s |
 | `wild/deer_death_1.ogg` | 5.30-6.20 s |
 | `wild/deer_death_2.ogg` | 11.80-12.50 s |
-
-## Freesound 696775: Deer Call_2_s
-
-- Author: ferventtorpor (freesound.org)
-- Page: https://freesound.org/people/ferventtorpor/sounds/696775/
-- Download: https://cdn.freesound.org/previews/696/696775_9391615-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
-- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
-
-| file | cut from |
-|---|---|
-| `wild/deer_idle_4.ogg` | 0.00-0.50 s |
 
 ## Freesound 679389: Fish flopping over on sand
 
@@ -1271,17 +1244,6 @@ they came from is not lost.
 |---|---|
 | `wild/wolf_alarm_3.ogg` | 0.00-0.30 s |
 
-## Freesound 535457: Single bark of a dog
-
-- Author: exe2be (freesound.org)
-- Page: https://freesound.org/people/exe2be/sounds/535457/
-- Download: https://cdn.freesound.org/previews/535/535457_2587400-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
-- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
-
-| file | cut from |
-|---|---|
-| `wild/wolf_alarm_4.ogg` | 0.00-0.30 s |
-
 ## Freesound 826930: Impatient Whiny Dog
 
 - Author: qubodup (freesound.org)
@@ -1373,7 +1335,6 @@ they came from is not lost.
 |---|---|
 | `wild/wolf_threat_2.ogg` | 6.62-7.24 s |
 | `wild/wolf_threat_3.ogg` | 7.78-8.73 s |
-| `wild/wolf_threat_4.ogg` | 9.15-10.90 s |
 
 ## Freesound 842289: Donkeys - Two Donkeys Braying, Close Perspective
 
@@ -1969,3 +1930,193 @@ a horror film's stab and which the player called bad.
 | file | cut from |
 |---|---|
 | `player/stake_5.ogg` | 1.13-1.30 s |
+
+## Freesound 437111: G38-16-Four Horse Snorts.wav
+
+- Author: craigsmith (freesound.org)
+- Page: https://freesound.org/people/craigsmith/sounds/437111/
+- Download: https://cdn.freesound.org/previews/437/437111_2524442-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: four snorts of one horse, close; cut into the calm horse's blows (high-passed at 120 Hz, 16 kHz)
+
+| file | cut from |
+|---|---|
+| `wild/horse_idle_1.ogg` | 0.45-1.25 s |
+| `wild/horse_idle_2.ogg` | 2.00-2.50 s |
+| `wild/horse_idle_3.ogg` | 4.30-4.85 s |
+| `wild/horse_idle_4.ogg` | 6.12-6.75 s |
+
+## Freesound 437110: G38-15-Perfect Horse Whinny.wav
+
+- Author: craigsmith (freesound.org)
+- Page: https://freesound.org/people/craigsmith/sounds/437110/
+- Download: https://cdn.freesound.org/previews/437/437110_2524442-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: one full whinny, close; the whole of it is an alarm, its first 0.7 s a wound
+
+| file | cut from |
+|---|---|
+| `wild/horse_alarm_1.ogg` | 10.55-12.60 s |
+| `wild/horse_hurt_3.ogg` | 10.55-11.25 s |
+
+## Freesound 347036: horse's whinny
+
+- Author: Kubuzz (freesound.org)
+- Page: https://freesound.org/people/Kubuzz/sounds/347036/
+- Download: https://cdn.freesound.org/previews/347/347036_1708499-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: a horse's whinny; the whole of it is an alarm, its first 0.7 s a wound
+
+| file | cut from |
+|---|---|
+| `wild/horse_alarm_2.ogg` | 1.25-3.30 s |
+| `wild/horse_hurt_1.ogg` | 1.25-1.95 s |
+
+## Freesound 149024: Horse_Whinny.wav
+
+- Author: foxen10 (freesound.org)
+- Page: https://freesound.org/people/foxen10/sounds/149024/
+- Download: https://cdn.freesound.org/previews/149/149024_2581089-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: a whinny and the short blasts round it; the whinny is an alarm, the loud blast before it a wound
+
+| file | cut from |
+|---|---|
+| `wild/horse_alarm_3.ogg` | 3.45-5.25 s |
+| `wild/horse_hurt_2.ogg` | 2.25-2.70 s |
+
+## Freesound 479705: R13-33-Horse Breath and Snort.wav
+
+- Author: craigsmith (freesound.org)
+- Page: https://freesound.org/people/craigsmith/sounds/479705/
+- Download: https://cdn.freesound.org/previews/479/479705_2524442-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: a horse breathing out and snorting; the long breath and the last snort are its death
+
+| file | cut from |
+|---|---|
+| `wild/horse_death_1.ogg` | 8.00-9.70 s |
+| `wild/horse_death_2.ogg` | 20.15-21.00 s |
+
+## Freesound 481917: R26-18-Foley Horse Hooves Walking.wav
+
+- Author: craigsmith (freesound.org)
+- Page: https://freesound.org/people/craigsmith/sounds/481917/
+- Download: https://cdn.freesound.org/previews/481/481917_2524442-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: hooves walking on soft ground, recorded close as foley; pieces of the walk, levelled by energy
+
+| file | cut from |
+|---|---|
+| `step/hoof_walk_1.ogg` | 16.40-17.40 s |
+| `step/hoof_walk_2.ogg` | 19.20-20.20 s |
+| `step/hoof_walk_3.ogg` | 23.60-24.60 s |
+| `step/hoof_walk_4.ogg` | 31.20-32.20 s |
+
+## Freesound 675422: S01-01_Horse trots in on hard dirt; stops; trotting out.wav
+
+- Author: craigsmith (freesound.org)
+- Page: https://freesound.org/people/craigsmith/sounds/675422/
+- Download: https://cdn.freesound.org/previews/675/675422_2524442-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: a horse trotting in on hard dirt; pieces of the trot
+
+| file | cut from |
+|---|---|
+| `step/hoof_trot_1.ogg` | 5.25-6.00 s |
+| `step/hoof_trot_2.ogg` | 7.10-7.85 s |
+| `step/hoof_trot_3.ogg` | 9.00-9.75 s |
+| `step/hoof_trot_4.ogg` | 13.80-14.55 s |
+
+## Freesound 368583: horse_galloping.wav
+
+- Author: telezon (freesound.org)
+- Page: https://freesound.org/people/telezon/sounds/368583/
+- Download: https://cdn.freesound.org/previews/368/368583_5492735-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: a horse galloping; pieces two strides long
+
+| file | cut from |
+|---|---|
+| `step/hoof_gallop_1.ogg` | 3.55-4.51 s |
+| `step/hoof_gallop_2.ogg` | 11.90-12.86 s |
+
+## Freesound 175356: Horse Galloping.wav
+
+- Author: Max_Headroom (freesound.org)
+- Page: https://freesound.org/people/Max_Headroom/sounds/175356/
+- Download: https://cdn.freesound.org/previews/175/175356_2861652-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: a horse galloping; pieces two strides long
+
+| file | cut from |
+|---|---|
+| `step/hoof_gallop_3.ogg` | 2.10-3.06 s |
+| `step/hoof_gallop_4.ogg` | 3.20-4.16 s |
+
+## Freesound 182504: Horse Clip Clopping Downhill (stereo)
+
+- Author: swiftoid (freesound.org)
+- Page: https://freesound.org/people/swiftoid/sounds/182504/
+- Download: https://cdn.freesound.org/previews/182/182504_854782-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: a horse clip-clopping downhill on a hard road; pieces of a walk on stone
+
+| file | cut from |
+|---|---|
+| `step/hoof_walk_hard_1.ogg` | 6.40-7.40 s |
+| `step/hoof_walk_hard_2.ogg` | 9.80-10.80 s |
+
+## Freesound 479679: R13-07-Horse on Wood.wav
+
+- Author: craigsmith (freesound.org)
+- Page: https://freesound.org/people/craigsmith/sounds/479679/
+- Download: https://cdn.freesound.org/previews/479/479679_2524442-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: a horse walking on wooden boards; pieces of a walk on wood
+
+| file | cut from |
+|---|---|
+| `step/hoof_walk_hard_3.ogg` | 5.60-6.60 s |
+| `step/hoof_walk_hard_4.ogg` | 9.35-10.35 s |
+
+## Freesound 549882: Horses Pavement Then Cobblestone.m4a
+
+- Author: guynoland (freesound.org)
+- Page: https://freesound.org/people/guynoland/sounds/549882/
+- Download: https://cdn.freesound.org/previews/549/549882_8234803-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: horses on pavement and then cobblestones; pieces of the trot on stone
+
+| file | cut from |
+|---|---|
+| `step/hoof_trot_hard_1.ogg` | 15.10-15.85 s |
+| `step/hoof_trot_hard_2.ogg` | 18.00-18.75 s |
+| `step/hoof_trot_hard_3.ogg` | 20.20-20.95 s |
+| `step/hoof_trot_hard_4.ogg` | 31.30-32.05 s |
+
+## Freesound 637429: crickets field closeup high frequency.flac
+
+- Author: kyles (freesound.org)
+- Page: https://freesound.org/people/kyles/sounds/637429/
+- Download: https://cdn.freesound.org/previews/637/637429_612689-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: crickets in a field, close, high frequency; high-passed at 2.5 kHz, cut as a bed (3.2 s, equal-power fades of 0.8 s)
+
+| file | cut from |
+|---|---|
+| `world/crickets_1.ogg` | 2.00-5.20 s |
+| `world/crickets_2.ogg` | 30.00-33.20 s |
+
+## Freesound 265539: Night crickets @ Almargem.wav
+
+- Author: Refrain (freesound.org)
+- Page: https://freesound.org/people/Refrain/sounds/265539/
+- Download: https://cdn.freesound.org/previews/265/265539_4058337-hq.mp3 (the page's high-quality preview; the original needs an account, and none was used)
+- Licence: CC0 1.0 (the page says "Creative Commons 0" and links creativecommons.org/publicdomain/zero/1.0; checked when it was downloaded)
+- What it is: night crickets at Almargem, Portugal; high-passed at 2.5 kHz, cut as a bed (3.2 s, equal-power fades of 0.8 s)
+
+| file | cut from |
+|---|---|
+| `world/crickets_3.ogg` | 3.00-6.20 s |
+| `world/crickets_4.ogg` | 60.00-63.20 s |
