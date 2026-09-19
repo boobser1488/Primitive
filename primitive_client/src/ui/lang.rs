@@ -35,6 +35,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use primitive_shared::notice::Notice;
+
 /// A language the interface can be read in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -846,6 +848,9 @@ pub enum Msg {
     PanDrying,
     PanWantsSea,
     PanFreshWater,
+    /// What the server tells a player, as a code (`notice`): one row per
+    /// notice, checked against `Notice::ALL`.
+    Notice(primitive_shared::notice::Notice),
 }
 
 /// One line of interface text, in every language at once.
@@ -1391,6 +1396,74 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::PanDrying, en: "the pan is still drying: it wants sun and no rain", simple: "the salt is not ready -- it needs sun, and rain undoes it", ru: "соль ещё выпаривается: нужно солнце и ни капли дождя", pl: "panew jeszcze paruje: trzeba słońca i żadnego deszczu" },
     Line { msg: Msg::PanWantsSea, en: "a salt pan is filled from a jug of the sea", simple: "pour a jug of sea water into it", ru: "солеварню наполняют кувшином морской воды", pl: "panew napełnia się dzbanem morskiej wody" },
     Line { msg: Msg::PanFreshWater, en: "that is fresh water: it dries to nothing", simple: "that water has no salt in it", ru: "это пресная вода: от неё ничего не останется", pl: "to słodka woda: nic z niej nie zostanie" },
+    Line { msg: Msg::HoningTitle, en: "HONING STONE", simple: "SHARPENING STONE", ru: "ТОЧИЛЬНАЯ КОЛОДА", pl: "KAMIEŃ SZLIFIERSKI" },    // What the server tells a player (`ServerMessage::Notice`): its refusals and
+    // its news, which were English sentences on the wire. See `notice`.
+    Line { msg: Msg::Notice(Notice::NothingInHand), en: "you have nothing in your hand", simple: "your hand is empty", ru: "у тебя ничего нет в руке", pl: "nie masz nic w ręce" },
+    Line { msg: Msg::Notice(Notice::AnimalGone), en: "it is gone", simple: "it is not there any more", ru: "его уже нет", pl: "już go nie ma" },
+    Line { msg: Msg::Notice(Notice::TooFarAway), en: "too far away", simple: "too far away", ru: "слишком далеко", pl: "za daleko" },
+    Line { msg: Msg::Notice(Notice::CannotBeKept), en: "that animal cannot be kept", simple: "you cannot keep that animal", ru: "это животное не приручить", pl: "tego zwierzęcia nie da się oswoić" },
+    Line { msg: Msg::Notice(Notice::NothingToShear), en: "there is nothing on it to shear", simple: "it has no wool to cut", ru: "с него нечего стричь", pl: "nie ma z niego czego strzyc" },
+    Line { msg: Msg::Notice(Notice::TameItFirst), en: "it will not stand for the knife: tame it first", simple: "it will not let you cut it - tame it first", ru: "не даётся под нож: сначала приручи", pl: "nie da się ostrzyc: najpierw ją oswój" },
+    Line { msg: Msg::Notice(Notice::FleeceNotGrown), en: "the fleece has not grown back yet", simple: "the wool has not grown back yet", ru: "шерсть ещё не отросла", pl: "runo jeszcze nie odrosło" },
+    Line { msg: Msg::Notice(Notice::OnlyEweGivesMilk), en: "only a tame ewe with a lamb gives milk", simple: "only a tame mother sheep with a lamb gives milk", ru: "молоко даёт только ручная овца с ягнёнком", pl: "mleko daje tylko oswojona owca z jagnięciem" },
+    Line { msg: Msg::Notice(Notice::NoMilkYet), en: "she has no milk to give yet", simple: "she has no milk yet", ru: "у неё пока нет молока", pl: "nie ma jeszcze mleka" },
+    Line { msg: Msg::Notice(Notice::ShiesAway), en: "it shies away from you: come at it slowly", simple: "it is afraid - walk up to it slowly", ru: "шарахается от тебя: подходи медленно", pl: "płoszy się: podchodź powoli" },
+    Line { msg: Msg::Notice(Notice::NotHungry), en: "it is not hungry yet", simple: "it is not hungry yet", ru: "оно ещё не голодно", pl: "nie jest jeszcze głodne" },
+    Line { msg: Msg::Notice(Notice::DoesNotEatThat), en: "it does not eat that", simple: "it will not eat that", ru: "оно такое не ест", pl: "tego nie je" },
+    Line { msg: Msg::Notice(Notice::GoesOnAHorse), en: "that goes on a horse", simple: "that is for a horse", ru: "это надевают на лошадь", pl: "to zakłada się koniowi" },
+    Line { msg: Msg::Notice(Notice::BreakItFirst), en: "it will not stand for that: break it first", simple: "it will not let you - ride it in first", ru: "не даётся: сначала объезди", pl: "nie pozwoli: najpierw go ujeźdź" },
+    Line { msg: Msg::Notice(Notice::TooYoungToCarry), en: "it is too young to carry anything", simple: "it is too young to carry things", ru: "слишком молод, чтобы что-то нести", pl: "jest za młody, żeby coś nieść" },
+    Line { msg: Msg::Notice(Notice::AlreadySaddled), en: "it already wears a saddle", simple: "it has a saddle on already", ru: "седло на нём уже есть", pl: "już ma siodło" },
+    Line { msg: Msg::Notice(Notice::AlreadyBagged), en: "it already carries saddlebags", simple: "it has bags on already", ru: "перемётные сумы на нём уже есть", pl: "już ma juki" },
+    Line { msg: Msg::Notice(Notice::AlreadyRiding), en: "you are already riding", simple: "you are already riding", ru: "ты уже в седле", pl: "już jedziesz wierzchem" },
+    Line { msg: Msg::Notice(Notice::CannotRideThat), en: "you cannot ride that", simple: "you cannot ride that", ru: "на этом не поездишь", pl: "na tym nie pojedziesz" },
+    Line { msg: Msg::Notice(Notice::SomebodyOnIt), en: "somebody is already on it", simple: "somebody is riding it", ru: "на нём уже кто-то сидит", pl: "ktoś już na nim siedzi" },
+    Line { msg: Msg::Notice(Notice::TooYoungToRide), en: "it is too young to carry anybody", simple: "it is too young to ride", ru: "слишком молод, чтобы нести седока", pl: "jest za młody, żeby kogoś nieść" },
+    Line { msg: Msg::Notice(Notice::GentleItFirst), en: "it will not let you near its back: gentle it with food first", simple: "it will not let you on - feed it first", ru: "не подпускает к спине: сначала прикорми", pl: "nie da ci wsiąść: najpierw go dokarm" },
+    Line { msg: Msg::Notice(Notice::LetItSettle), en: "it is still wild-eyed from the last time: let it settle", simple: "it is still scared from last time - wait a little", ru: "ещё не успокоилась после прошлого раза: дай ей время", pl: "jeszcze się nie uspokoił: daj mu chwilę" },
+    Line { msg: Msg::Notice(Notice::HorseThrowsYou), en: "the horse throws you: let it settle, and try again", simple: "the horse threw you off - wait, then try again", ru: "лошадь сбросила тебя: дай ей успокоиться и попробуй снова", pl: "koń cię zrzucił: daj mu się uspokoić i spróbuj znowu" },
+    Line { msg: Msg::Notice(Notice::HorseIsYours), en: "the horse stands for you: it is yours now, and home is here", simple: "the horse lets you ride - it is yours now, and this is its home", ru: "лошадь стоит смирно: теперь она твоя, и её дом здесь", pl: "koń stoi spokojnie: jest teraz twój, a jego dom jest tutaj" },
+    Line { msg: Msg::Notice(Notice::HorseTakesFood), en: "the horse takes it from your hand: it may let you on its back now", simple: "the horse eats from your hand - you can try to ride it now", ru: "лошадь берёт с руки: теперь можно попробовать сесть верхом", pl: "koń je z ręki: możesz spróbować go dosiąść" },
+    Line { msg: Msg::Notice(Notice::NoBagsInReach), en: "there are no saddlebags within reach", simple: "there are no horse bags near you", ru: "рядом нет перемётных сум", pl: "w pobliżu nie ma juków" },
+    Line { msg: Msg::Notice(Notice::HorseGone), en: "your horse is gone", simple: "your horse is gone", ru: "твоей лошади больше нет", pl: "twojego konia już nie ma" },
+    Line { msg: Msg::Notice(Notice::NothingToUnbuckle), en: "it wears nothing to take off", simple: "there is nothing on it to take off", ru: "снимать с неё нечего", pl: "nie ma z niego czego zdjąć" },
+    Line { msg: Msg::Notice(Notice::PackCannotTakeBags), en: "your pack cannot take the saddlebags and their load", simple: "your bag has no room for the horse bags and what is in them", ru: "в рюкзак не влезут сумы с поклажей", pl: "juki z ładunkiem nie zmieszczą się w plecaku" },
+    Line { msg: Msg::Notice(Notice::WoodWet), en: "the wood is wet: dry it by a fire or in the sun first", simple: "the wood is wet - dry it by a fire or in the sun", ru: "дрова сырые: сначала просуши их у огня или на солнце", pl: "drewno jest mokre: najpierw wysusz je przy ogniu lub na słońcu" },
+    Line { msg: Msg::Notice(Notice::FuelWet), en: "the fuel is wet: dry it by a fire or in the sun first", simple: "the fuel is wet - dry it by a fire or in the sun", ru: "топливо сырое: сначала просуши его у огня или на солнце", pl: "opał jest mokry: najpierw wysusz go przy ogniu lub na słońcu" },
+    Line { msg: Msg::Notice(Notice::TorchWet), en: "the torch is wet: dry it by a fire or in the sun first", simple: "the torch is wet - dry it by a fire or in the sun", ru: "факел сырой: сначала просуши его у огня или на солнце", pl: "pochodnia jest mokra: najpierw wysusz ją przy ogniu lub na słońcu" },
+    Line { msg: Msg::Notice(Notice::PackFull), en: "your pack is full", simple: "your bag is full", ru: "рюкзак полон", pl: "plecak jest pełny" },
+    Line { msg: Msg::Notice(Notice::JugNotEmpty), en: "the jug has something in it", simple: "the jug is not empty", ru: "в кувшине что-то есть", pl: "w dzbanie coś jest" },
+    Line { msg: Msg::Notice(Notice::BarrelFull), en: "the barrel is full", simple: "the barrel is full", ru: "бочка полна", pl: "beczka jest pełna" },
+    Line { msg: Msg::Notice(Notice::BarrelEmpty), en: "the barrel is empty", simple: "the barrel is empty", ru: "бочка пуста", pl: "beczka jest pusta" },
+    Line { msg: Msg::Notice(Notice::EmptyRucksackFirst), en: "empty the rucksack first", simple: "take everything out of the rucksack first", ru: "сначала освободи рюкзак", pl: "najpierw opróżnij plecak" },
+    Line { msg: Msg::Notice(Notice::NowhereForBowl), en: "nowhere to put the bowl", simple: "there is no room for the bowl", ru: "миску некуда деть", pl: "nie ma gdzie odłożyć miski" },
+    Line { msg: Msg::Notice(Notice::ToolBroke), en: "your tool broke", simple: "your tool broke", ru: "инструмент сломался", pl: "narzędzie się złamało" },
+    Line { msg: Msg::Notice(Notice::NeedsAKnife), en: "it needs a knife", simple: "you need a knife for that", ru: "тут нужен нож", pl: "potrzebny jest nóż" },
+    Line { msg: Msg::Notice(Notice::NeedHammerAtAnvil), en: "you need a hammer to work at an anvil", simple: "you need a hammer to use the anvil", ru: "чтобы работать на наковальне, нужен молот", pl: "do pracy na kowadle potrzebny jest młot" },
+    Line { msg: Msg::Notice(Notice::NeedSawAtSawhorse), en: "you need a saw to work at a sawhorse", simple: "you need a saw to use the trestle", ru: "чтобы работать на козлах, нужна пила", pl: "do pracy na koźle potrzebna jest piła" },
+    Line { msg: Msg::Notice(Notice::HoldBladeToSharpen), en: "hold the blade you want to sharpen", simple: "hold the blade you want to sharpen", ru: "возьми в руку клинок, который хочешь наточить", pl: "weź do ręki ostrze, które chcesz naostrzyć" },
+    Line { msg: Msg::Notice(Notice::NotAtStation), en: "you are not at that station", simple: "you are not at that work place", ru: "ты не у этого верстака", pl: "nie jesteś przy tym stanowisku" },
+    Line { msg: Msg::Notice(Notice::NotARun), en: "that is not a run", simple: "that is not something you can make here", ru: "это здесь не сделать", pl: "tego się tu nie zrobi" },
+    Line { msg: Msg::Notice(Notice::NothingOnAnvil), en: "there is nothing on the anvil", simple: "the anvil is empty", ru: "на наковальне ничего нет", pl: "na kowadle nic nie ma" },
+    Line { msg: Msg::Notice(Notice::PieceWentCold), en: "the piece went cold", simple: "the metal went cold", ru: "заготовка остыла", pl: "odkuwka ostygła" },
+    Line { msg: Msg::Notice(Notice::FurrowHasAsh), en: "this furrow already has ash in it", simple: "this row already has ash in it", ru: "в этой борозде уже есть зола", pl: "w tej bruździe już jest popiół" },
+    Line { msg: Msg::Notice(Notice::AshDugIn), en: "ash dug into the furrow: the next crop here grows a third faster", simple: "ash is in the soil - the next crop here grows a third faster", ru: "зола в борозде: следующий урожай здесь вырастет на треть быстрее", pl: "popiół w bruździe: następny plon wyrośnie tu o jedną trzecią szybciej" },
+    Line { msg: Msg::Notice(Notice::AlreadyAsleep), en: "you are already asleep", simple: "you are already asleep", ru: "ты уже спишь", pl: "już śpisz" },
+    Line { msg: Msg::Notice(Notice::HurtCannotSleep), en: "you cannot sleep while something is hurting you", simple: "you cannot sleep while you are being hurt", ru: "нельзя уснуть, пока тебя ранят", pl: "nie zaśniesz, kiedy coś cię rani" },
+    Line { msg: Msg::Notice(Notice::TooHungryToSleep), en: "you are too hungry to sleep", simple: "you are too hungry to sleep", ru: "слишком голоден, чтобы уснуть", pl: "jesteś zbyt głodny, żeby zasnąć" },
+    Line { msg: Msg::Notice(Notice::TooThirstyToSleep), en: "you are too thirsty to sleep", simple: "you are too thirsty to sleep", ru: "слишком хочется пить, чтобы уснуть", pl: "jesteś zbyt spragniony, żeby zasnąć" },
+    Line { msg: Msg::Notice(Notice::BedTaken), en: "somebody is already asleep there", simple: "somebody is already sleeping there", ru: "там уже кто-то спит", pl: "ktoś już tam śpi" },
+    Line { msg: Msg::Notice(Notice::SeatTaken), en: "somebody is already sitting there", simple: "somebody is already sitting there", ru: "там уже кто-то сидит", pl: "ktoś już tam siedzi" },
+    Line { msg: Msg::Notice(Notice::NoRoomToSit), en: "there is no room to sit there", simple: "there is no room to sit there", ru: "там негде сесть", pl: "nie ma tam miejsca, żeby usiąść" },
+    Line { msg: Msg::Notice(Notice::StepAboardForOars), en: "step aboard to take the oars", simple: "get on the raft to row", ru: "чтобы грести, встань на плот", pl: "wejdź na tratwę, żeby wiosłować" },
+    Line { msg: Msg::Notice(Notice::RaftAlreadyThere), en: "there is already a raft there", simple: "there is a raft there already", ru: "там уже есть плот", pl: "tam już jest tratwa" },
+    Line { msg: Msg::Notice(Notice::TrapEmpty), en: "nothing has gone into the trap yet", simple: "the trap is still empty", ru: "в ловушку пока ничего не попало", pl: "w pułapkę jeszcze nic nie wpadło" },
+    Line { msg: Msg::Notice(Notice::LineParted), en: "the line parted: the rod is done", simple: "the line broke - the rod is finished", ru: "леска лопнула: удочке конец", pl: "żyłka pękła: wędka się skończyła" },
+    Line { msg: Msg::Notice(Notice::WillNotOpen), en: "it will not open", simple: "it does not open", ru: "не открывается", pl: "nie da się otworzyć" },
+    Line { msg: Msg::Notice(Notice::NoRoomToTakeOff), en: "no room to take that off", simple: "no room in your bag to take that off", ru: "некуда это снять", pl: "nie ma gdzie tego zdjąć" },
+    Line { msg: Msg::Notice(Notice::TooMuchLyingAround), en: "too much is already lying around to drop that", simple: "too many things are on the ground here already", ru: "здесь и так слишком много всего валяется", pl: "za dużo już tu leży, żeby to upuścić" },
+    Line { msg: Msg::Notice(Notice::SetDownOnSolidGround), en: "that is set down on top of solid ground, in an empty place", simple: "put that on solid ground, where nothing else is", ru: "это ставят на твёрдую землю, в пустое место", pl: "to stawia się na twardym gruncie, w pustym miejscu" },
+    Line { msg: Msg::Notice(Notice::RaftNeedsOpenWater), en: "a raft needs open water: three blocks long, two wide, and deep enough to float", simple: "a raft needs open water - three blocks long, two wide, and deep enough", ru: "плоту нужна чистая вода: три блока в длину, два в ширину и достаточно глубоко", pl: "tratwa potrzebuje otwartej wody: trzy bloki długości, dwa szerokości i dość głęboko" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as
@@ -1448,6 +1521,18 @@ mod tests {
                 let text = language.text(line.msg);
                 assert!(!text.is_empty(), "{:?} is empty in {language:?}", line.msg);
                 assert_ne!(text, "???", "{:?} has no row", line.msg);
+            }
+        }
+    }
+
+    /// **Every notice the server can send has its words**, in every
+    /// language: a notice with no row is `???` in the banner, and the server
+    /// sends codes now, not English (`notice`).
+    #[test]
+    fn every_notice_the_server_sends_has_words_in_every_language() {
+        for &notice in Notice::ALL {
+            for language in Language::ALL {
+                assert_ne!(language.text(Msg::Notice(notice)), "???", "{notice:?} has no words in {language:?}");
             }
         }
     }

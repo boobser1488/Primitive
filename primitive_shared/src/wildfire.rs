@@ -465,6 +465,55 @@ pub const SMOKE_CLEAR_PER_SECOND: f32 = 1.0 / 15.0;
 /// server). Under it, smoke is only something to see.
 pub const SMOKE_CHOKES: f32 = 0.5;
 
+/// How much more a fire burning green or wet fuel smokes than a dry one
+/// (`hearth::burns_green`): its room fills this much thicker and this much
+/// faster, its ceiling soots this much sooner, and the plume over it
+/// (`smoulders`) is this much denser.
+///
+/// **Twice, because the reason is a real one**: the water in a green log
+/// boils off as steam and unburnt tar, which is the thick yellow-grey smoke
+/// everybody who has lit a fire with the wood they cut that day has stood
+/// in. It was the fire's heat alone that knew about green wood
+/// (`GREEN_HEAT`), and a hut fire of fresh-cut alder filled its room
+/// exactly as a seasoned one did -- so the one thing a player would notice
+/// about green wood, the smoke, was the one thing it did not do. With it,
+/// dry wood is a reason to keep a woodshed, not only a number on the kiln.
+/// Not more: a closed hut at full smoke already chokes (`SMOKE_CHOKES`),
+/// and doubling a room that thin takes it to choking.
+pub const SMOULDER_SMOKE: f32 = 2.0;
+
+/// The bit on a lit campfire or fire pit that says it is burning green or
+/// wet fuel, for the client's plume (`smoulders`).
+///
+/// **On the block, for the client's sake.** The client knows a fire only as
+/// a block -- it has no list of fires, and finds them by sampling columns
+/// (`particles::find_hearths`) -- so what it draws over one has to be read
+/// off the block. Only the two open hearths carry it: a kiln and a bloomery
+/// keep their facing in the same field (`types::burnt_out`), and their smoke
+/// goes up a chimney rather than into anybody's face. Every rule that asks
+/// about a hearth asks its kind, so the bit changes nothing but the plume.
+pub const SMOULDERING: BlockId = 1 << crate::types::VARIANT_SHIFT;
+
+/// Is this an open fire burning green or wet fuel? See [`SMOULDERING`].
+#[inline]
+pub fn smoulders(block: BlockId) -> bool {
+    licks_as_a_hearth(block) && block & SMOULDERING != 0
+}
+
+/// `block` with the smouldering bit set or cleared, and anything that is not
+/// a lit open hearth handed back as it is.
+#[inline]
+pub fn with_smoulder(block: BlockId, on: bool) -> BlockId {
+    if !licks_as_a_hearth(block) {
+        return block;
+    }
+    if on {
+        block_kind(block) | SMOULDERING
+    } else {
+        block_kind(block)
+    }
+}
+
 /// What a fire's air is.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Room {
@@ -847,6 +896,23 @@ mod tests {
         BLOCK_STRIPPED_LOG,
     };
     use std::collections::HashMap;
+
+    /// The smouldering bit goes only on an open hearth that is alight, and
+    /// takes nothing else about it away: still a campfire to every rule that
+    /// asks, and a kiln's facing is never touched (`SMOULDERING`).
+    #[test]
+    fn only_a_lit_open_hearth_carries_the_smoulder_and_it_stays_what_it_was() {
+        use crate::types::{is_burning, BLOCK_CAMPFIRE_LIT};
+        let green = with_smoulder(BLOCK_CAMPFIRE_LIT, true);
+        assert!(smoulders(green) && !smoulders(BLOCK_CAMPFIRE_LIT));
+        assert_eq!(block_kind(green), BLOCK_CAMPFIRE_LIT);
+        assert!(licks_as_a_hearth(green) && is_burning(green) && crate::hearth::is_lit(green));
+        assert_eq!(crate::types::burnt_out(green), Some(BLOCK_CAMPFIRE), "a smouldering fire went out as something else");
+        assert_eq!(with_smoulder(green, false), BLOCK_CAMPFIRE_LIT);
+        for other in [BLOCK_CAMPFIRE, BLOCK_KILN_LIT, BLOCK_STONE] {
+            assert_eq!(with_smoulder(other, true), other, "{other} took the smoulder bit");
+        }
+    }
 
     #[test]
     fn a_cropped_furrow_tires_and_ash_or_rest_brings_it_back() {

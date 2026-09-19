@@ -385,7 +385,7 @@ async fn a_jug_poured_into_a_barrel_can_be_dipped_back_out_of_it() {
     client.send(use_barrel.clone()).await;
     let refused = client
         .wait_for(10, |m| match m {
-            ServerMessage::Error(text) if text.contains("empty") => Some(()),
+            ServerMessage::Notice { what: primitive_shared::notice::Notice::BarrelEmpty } => Some(()),
             _ => None,
         })
         .await;
@@ -1623,12 +1623,13 @@ async fn a_chair_is_sat_in_facing_its_way_seen_by_everyone_and_let_go_of_by_ever
     let refusal = watcher
         .wait_for(5, |m| match m {
             ServerMessage::Error(text) => Some(text.clone()),
+            ServerMessage::Notice { what } => Some(format!("{what:?}")),
             ServerMessage::Posture { posture: Posture::Sitting, .. } => Some("sat down".to_string()),
             _ => None,
         })
         .await;
     assert!(
-        refusal.as_deref().is_some_and(|text| text.contains("already sitting")),
+        refusal.as_deref() == Some("SeatTaken"),
         "a second player clicking an occupied chair got {refusal:?}"
     );
 

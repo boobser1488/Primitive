@@ -194,6 +194,17 @@ struct Fire {
     /// Whether rain reached it on the last tick. For the screen, which
     /// says so; not saved, because the next tick works it out again.
     exposed: bool,
+    /// Seconds of green or wet fuel still burning in it
+    /// (`hearth::burns_green`): what makes it smoke thick and soot the
+    /// ceiling fast (`Fires::smouldering_cells`).
+    ///
+    /// **Beside the loads rather than in them**, because a load is a heat
+    /// and green wood burns at `GREEN_HEAT` of what the same wood seasoned
+    /// does -- which is some other seasoned fuel's heat, so the two merge
+    /// into one load and the load cannot say which was which. Burnt down
+    /// with the fire, second for second. Not saved: a restart forgets a
+    /// minute of heavy smoke, which is the whole of what is lost.
+    smouldering: f32,
 }
 
 impl Fire {
@@ -205,6 +216,7 @@ impl Fire {
             degrees,
             draught: 0.0,
             exposed: false,
+            smouldering: 0.0,
         }
     }
 
@@ -420,6 +432,21 @@ impl Fires {
     /// this map mutably.
     pub fn burning_cells(&self) -> Vec<FirePos> {
         self.burning.keys().copied().collect()
+    }
+
+    /// Green or wet fuel went on the fire at `at`: `seconds` of it, which it
+    /// smokes through (`Fire::smouldering`). Called by whoever fed it, who
+    /// knows what the fuel was; the fire knows only its heat.
+    pub fn smoulder(&mut self, at: FirePos, seconds: f32) {
+        if let Some(fire) = self.burning.get_mut(&at) {
+            fire.smouldering = (fire.smouldering + seconds.max(0.0)).min(MAX_FUEL_SECONDS);
+        }
+    }
+
+    /// Every fire burning green or wet fuel now: the ones that smoke thick
+    /// (`wildfire`'s rooms and soot, and the plume the client draws).
+    pub fn smouldering_cells(&self) -> Vec<FirePos> {
+        self.burning.iter().filter(|(_, fire)| fire.smouldering > 0.0).map(|(&at, _)| at).collect()
     }
 
     /// Every hearth with any heat in it: the burning ones, and the ones
@@ -677,7 +704,9 @@ impl Fires {
                 fire.draught = kind.draught();
             }
             fire.exposed = weather_multiplier > 1.0 && open_to_the_sky(world, at);
-            fire.burn(dt * if fire.exposed { weather_multiplier } else { 1.0 });
+            let burnt = dt * if fire.exposed { weather_multiplier } else { 1.0 };
+            fire.burn(burnt);
+            fire.smouldering = (fire.smouldering - burnt).max(0.0);
             if fire.loads.is_empty() {
                 went_out.push((at, fire.degrees));
                 return false;
@@ -923,6 +952,24 @@ mod tests {
         assert_eq!(changes[0].block_id, BLOCK_CAMPFIRE);
         assert_eq!(world.get(AT.0, AT.1, AT.2), BLOCK_CAMPFIRE);
         assert!(fires.is_empty());
+    }
+
+    /// Green wood on the fire is smoke for as long as it burns
+    /// (`Fires::smoulder`), and not a second longer: the smoulder burns down
+    /// with the fire, and a fire on dry wood after it smokes as a dry one.
+    #[test]
+    fn a_fire_smoulders_while_its_green_wood_burns_and_then_stops() {
+        let world = lit_world();
+        let mut fires = Fires::new();
+        fires.light(AT);
+        assert!(fires.smouldering_cells().is_empty(), "a fire laid dry smoulders");
+        assert!(fires.feed(AT, 300.0));
+        fires.smoulder(AT, 20.0);
+        assert_eq!(fires.smouldering_cells(), vec![AT]);
+        let _ = fires.step(&world, 10.0, 16);
+        assert_eq!(fires.smouldering_cells(), vec![AT], "the green wood burnt away in half its time");
+        let _ = fires.step(&world, 11.0, 16);
+        assert!(fires.smouldering_cells().is_empty(), "the smoke outlived the green wood");
     }
 
     #[test]

@@ -2694,6 +2694,12 @@ pub enum ServerMessage {
         wind: f32,
         fettle: crate::horse::Fettle,
     },
+    /// **A refusal or a notice, as a code** the client says in the player's
+    /// language: see `notice` for why the server no longer sends these as
+    /// English in `Error`. Appended, so it rides fifty-seven's bump.
+    Notice {
+        what: crate::notice::Notice,
+    },
 }
 
 /// Trims/sanitises a username before it's shown to other players or

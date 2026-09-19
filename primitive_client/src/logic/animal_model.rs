@@ -45,7 +45,7 @@
 use glam::Vec3;
 
 use primitive_shared::animals::Species;
-use primitive_shared::horse::{TACK_BAGS, TACK_HALTER, TACK_RIDDEN, TACK_SADDLE, TACK_STALLION};
+use primitive_shared::horse::{TACK_BAGS, TACK_HALTER, TACK_RIDDEN, TACK_SADDLE, TACK_SHORN, TACK_STALLION};
 use primitive_shared::protocol::Attitude;
 
 use crate::engine::texture::FaceLayers;
@@ -631,6 +631,10 @@ pub(crate) fn build_parts(
     indices: &mut Vec<u32>,
 ) {
     let Motion { walked, speed, hurt, head, turning, age, youth, fallen, tack } = motion;
+    // A sheep's coat off (`horse::TACK_SHORN`), read before the byte is
+    // narrowed to the horse's: it is the one bit that means something on a
+    // sheep.
+    let shorn = species == Species::Sheep && tack & TACK_SHORN != 0;
     // Only a horse wears anything; a stray bit on another animal draws nothing.
     let tack = if species == Species::Horse { tack } else { 0 };
     // The death fall, eased so it goes slowly at first and hits the ground.
@@ -713,9 +717,16 @@ pub(crate) fn build_parts(
         let part = if tack & TACK_STALLION != 0 {
             heavier = stallion(part);
             &heavier
+        } else if shorn && part.name == FLEECE_PART {
+            heavier = cropped(part);
+            &heavier
         } else {
             part
         };
+        // The cropped fleece wears the hide under the wool, as the carcass's
+        // second stage does (`Dressing::Hide`): one look for "the wool is off"
+        // alive and dead.
+        let dressing = if shorn && part.name == FLEECE_PART { Dressing::Hide } else { Dressing::Coat };
         let angle = match part.gait {
             Gait::Folded => 0.0,
             // Not running on nothing, and not nodding to a stride it is not
@@ -737,7 +748,7 @@ pub(crate) fn build_parts(
             Gait::Still => secondary(part.name, age, phase, swing),
         };
         append_part_posed(
-            part, species, centre, yaw, angle, pose, Dressing::Coat, hurt, layers, light,
+            part, species, centre, yaw, angle, pose, dressing, hurt, layers, light,
             vertices, indices,
         );
     }
@@ -793,6 +804,25 @@ fn stallion(part: &Part) -> Part {
         heavier.size[0] += 0.8;
     }
     heavier
+}
+
+/// The sheep's part that is its fleece (`assets/models/animals/sheep.bbmodel`):
+/// the body box, which the legs and the head hang off.
+const FLEECE_PART: &str = "body";
+
+/// A shorn sheep's body: the fleece's box close-cropped -- a sixteenth off
+/// each flank and off the back and the belly, and nothing off its length.
+///
+/// **Not off its length**, because the head is hung at the body's front and
+/// the tail at its back: a shorter box opened a gap at the neck. And from the
+/// belly as well as the back, so more of the legs shows under it -- which is
+/// what a sheep just sheared looks like, and what tells one from a ewe in full
+/// fleece across a pen before the colour does.
+fn cropped(part: &Part) -> Part {
+    let mut bare = *part;
+    bare.size[0] -= 2.0;
+    bare.size[1] -= 2.0;
+    bare
 }
 
 /// What a piece of tack is made of.
@@ -2859,6 +2889,30 @@ mod tests {
     /// hair above the ground, not in it and not hanging over it, and the
     /// middle of its footprint on the cell's centre -- measured from the
     /// bones, not from the living body they were a narrower part of.
+    /// **A sheep sheared yesterday does not look like one ready today**
+    /// (`horse::TACK_SHORN`): its body is narrower and lower-backed, and the
+    /// same bit on any other animal changes nothing.
+    #[test]
+    fn a_shorn_sheep_is_drawn_slimmer_than_one_in_full_fleece() {
+        let layers = FaceLayers::empty_for_test();
+        let extent = |species: Species, tack: u8| {
+            let (mut v, mut i) = (Vec::new(), Vec::new());
+            build(species, Vec3::ZERO, 0.0, Motion { tack, ..Motion::default() }, &layers, (15, 0), &mut v, &mut i);
+            let (mut low, mut high) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for vertex in &v {
+                low = low.min(Vec3::from_array(vertex.position));
+                high = high.max(Vec3::from_array(vertex.position));
+            }
+            // Across the animal: at a yaw of nought its length lies along x.
+            (high.z - low.z, high.y)
+        };
+        let (full_width, full_top) = extent(Species::Sheep, 0);
+        let (bare_width, bare_top) = extent(Species::Sheep, TACK_SHORN);
+        assert!(bare_width < full_width - 0.05, "a shorn sheep is as broad as a fleeced one: {bare_width} against {full_width}");
+        assert!(bare_top <= full_top, "shearing a sheep made it taller");
+        assert_eq!(extent(Species::Deer, TACK_SHORN), extent(Species::Deer, 0), "the shorn bit reshaped a deer");
+    }
+
     #[test]
     fn a_skeleton_lies_on_the_ground_it_is_placed_on() {
         let layers = FaceLayers::empty_for_test();

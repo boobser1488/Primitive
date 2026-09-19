@@ -71,6 +71,7 @@ pub mod lighting;
 pub mod load;
 pub mod minigame;
 pub mod moon;
+pub mod notice;
 pub mod net;
 pub mod packed;
 pub mod palm;

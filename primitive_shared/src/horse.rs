@@ -54,6 +54,18 @@ pub const TACK_HALTER: u8 = 8;
 /// heavier neck and the darker mane, because the herd's keeper is the one a
 /// player should be able to pick out.
 pub const TACK_STALLION: u8 = 16;
+/// **A sheep whose fleece is not ready for the knife** (`husbandry::Keeping::
+/// fleece_ready`): drawn close-cropped, in the hide under the wool.
+///
+/// On the tack byte although a sheep wears no tack, because the byte is on
+/// every animal already and a sheep's is otherwise always nought: a second
+/// field on `EntityKind::Animal` for one bit of one species would be a
+/// protocol change for nothing. It was invisible before -- a sheep sheared
+/// yesterday looked exactly like one ready today, so the only way to find
+/// the one to shear was to try the knife on each. Shown until the coat is
+/// *ready*, not until it is a little grown, because "which of these can I
+/// shear" is the question the picture answers.
+pub const TACK_SHORN: u8 = 32;
 
 // ---- the gaits ----
 
