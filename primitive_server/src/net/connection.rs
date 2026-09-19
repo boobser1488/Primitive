@@ -400,6 +400,12 @@ async fn run_connection(
     // writer's queue only closes once the registry drops its handle),
     // and someone who reconnects inside that window would be restored
     // from a profile that had not been written yet.
+    //
+    // **Off the horse first**, so what is written is feet on the ground
+    // beside it (`horses::dismount`) and not the saddle: a rider who left in
+    // the saddle came back standing in the middle of their own horse, a
+    // metre and a half up.
+    crate::horses::dismount(&ctx, &handle, None);
     crate::store_profile(&ctx, &handle);
     // ...and off the oars of any raft, which would otherwise keep a rower
     // nobody can reach: nobody else could take them until the raft broke.
@@ -1666,7 +1672,7 @@ async fn read_loop(
             }
 
             ClientMessage::StationRun { presses } => {
-                crate::station_run(&handle, presses);
+                crate::station_run(&ctx, &handle, presses);
             }
 
             ClientMessage::CloseStation => {
@@ -2063,7 +2069,12 @@ fn build_in_place(ctx: &Arc<Context>, handle: &Arc<PlayerHandle>, at: (i32, i32,
         let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
         let slot = state.selected_slot;
         let held = state.inventory.block_in(slot).unwrap_or(BLOCK_AIR);
-        let have = state.inventory.count_in(slot);
+        // **The pack's, not the square's.** A course of field stone takes
+        // two and a wattle three rods, and a player with the last one in the
+        // hand and a stack beside it was told they were not carrying enough.
+        // Counted by kind, as a recipe counts: the one in the hand is what
+        // says which kind.
+        let have = if held == BLOCK_AIR { 0 } else { state.inventory.count(held) };
         let mortar = state.inventory.count(primitive_shared::types::BLOCK_MORTAR) > 0;
         (slot, held, have, mortar)
     };
@@ -2113,7 +2124,15 @@ fn build_in_place(ctx: &Arc<Context>, handle: &Arc<PlayerHandle>, at: (i32, i32,
     // players quietly lose things.
     {
         let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-        let spent = state.inventory.block_in(slot) == Some(held) && state.inventory.take_from(slot, laid.spends) == laid.spends;
+        // The hand first, then the rest of the pack for what it was short.
+        // Counted before either is touched, under the one lock, so the
+        // second take cannot come up short after the first has happened.
+        let enough = state.inventory.block_in(slot) == Some(held) && state.inventory.count(held) >= laid.spends;
+        let spent = enough && {
+            let in_hand = state.inventory.count_in(slot).min(laid.spends);
+            state.inventory.take_from(slot, in_hand) == in_hand
+                && (in_hand == laid.spends || state.inventory.take_exact(held, laid.spends - in_hand))
+        };
         let mortared = spent && (!laid.mortar || state.inventory.take_exact(primitive_shared::types::BLOCK_MORTAR, 1));
         if spent && !mortared {
             state.inventory.add(held, laid.spends);

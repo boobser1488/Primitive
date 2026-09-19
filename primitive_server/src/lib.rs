@@ -9243,7 +9243,7 @@ pub(crate) fn station_begin(
 }
 
 /// A player handing in a whole run: the timing of every blow.
-pub(crate) fn station_run(handle: &Arc<players::PlayerHandle>, presses: Vec<u32>) {
+pub(crate) fn station_run(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, presses: Vec<u32>) {
     use primitive_shared::minigame::{self, Game};
     // **Bounded before it is read.** `presses` came off the wire as a `Vec`,
     // and the length check inside `judge` is a rule about the *game*; this one
@@ -9294,7 +9294,13 @@ pub(crate) fn station_run(handle: &Arc<players::PlayerHandle>, presses: Vec<u32>
             }
         }
     }
-    {
+    // **What the pack has no room for falls at the player's feet.** The room
+    // was checked when the run began, and a run is seconds long -- long
+    // enough to walk over a heap and have the pack filled by it. Both adds
+    // below used to drop what they could not place, and a fine run into a
+    // full pack paid nothing: the clay spent, and the bowls nowhere.
+    let mut no_room: Vec<(primitive_shared::types::BlockId, u32, u32)> = Vec::new();
+    let feet = {
         let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
         // **The stone works the blade that was on it**, in the slot it was
         // in, and only if it is still the same kind of tool. What the run
@@ -9347,10 +9353,16 @@ pub(crate) fn station_run(handle: &Arc<players::PlayerHandle>, presses: Vec<u32>
                 // `quality::takes_quality` for what marking them costs.
                 0
             };
-            state.inventory.add_worn(block, count, word);
+            let left = state.inventory.add_worn(block, count, word);
+            if left > 0 {
+                no_room.push((block, left, word));
+            }
         }
         for &(block, amount) in &result.back {
-            state.inventory.add(block, amount);
+            let left = state.inventory.add(block, amount);
+            if left > 0 {
+                no_room.push((block, left, 0));
+            }
         }
         // **The hammer takes a blow's worth of wear, and more for a bad run.**
         // Worn from the selected slot, which is where the hand is: a player who
@@ -9375,6 +9387,13 @@ pub(crate) fn station_run(handle: &Arc<players::PlayerHandle>, presses: Vec<u32>
             }
         }
         state.inventory_dirty = true;
+        state.position
+    };
+    if !no_room.is_empty() {
+        let mut items = ctx.items.lock().unwrap_or_else(|e| e.into_inner());
+        for (block, count, word) in no_room {
+            items.spawn_worn(block, count, word, (feet.0, feet.1 + 0.5, feet.2), (0.0, 0.0, 0.0), None, Instant::now());
+        }
     }
     send_inventory(handle);
     refresh_carried_weight(handle);
@@ -15906,6 +15925,39 @@ mod dying_tests {
     }
 }
 
+#[cfg(test)]
+mod saddlebag_rot_tests {
+    use super::butchering_tests::{a_hunter, FLOOR};
+    use super::*;
+    use primitive_shared::types::BLOCK_COOKED_MEAT;
+
+    /// **A horse is not a larder.** The rot clock walked the packs, the
+    /// chests, the ground and the kills, and never the saddlebags: meat
+    /// carried on a horse kept for ever.
+    #[test]
+    fn meat_in_a_horses_saddlebags_goes_off_as_it_would_in_a_chest() {
+        let (ctx, _handle, _rx) = a_hunter();
+        let horse = {
+            let mut animals = ctx.animals.lock().unwrap();
+            let horse = animals.spawn(primitive_shared::animals::Species::Horse, (4.5, FLOOR as f32 + 1.0, 4.5)).expect("a horse");
+            let mut bags = primitive_shared::inventory::Inventory::new();
+            assert_eq!(bags.add(BLOCK_COOKED_MEAT, 4), 0);
+            let keep = primitive_shared::husbandry::Keeping { trust: 1.0, tame: true, ..Default::default() };
+            animals.put_keeping(horse, keep, Some(primitive_shared::horse::Gear { saddle: true, bags: Some(bags), rides: 0 }));
+            horse
+        };
+        let day = ctx.clock.day_length_seconds();
+        let seconds = logic::rot::Rot::step_seconds(day) * (primitive_shared::food::ROT_STEPS_PER_DAY as f32 * 2.0 + 1.0);
+        let mut rot = logic::rot::Rot::new();
+        for _ in 0..(seconds.ceil() as u32) {
+            rot.pass(&ctx, 1.0);
+        }
+        let bags = ctx.animals.lock().unwrap().gear(horse).and_then(|g| g.bags).expect("the bags went");
+        let meat = bags.slots().iter().flatten().next().expect("the meat went");
+        assert_ne!(meat.block, BLOCK_COOKED_MEAT, "two days in the saddlebags and the meat is as it went in");
+    }
+}
+
 /// What `/save` actually writes.
 ///
 /// Driven through `run_command` rather than by calling `save_everything`
@@ -19381,7 +19433,7 @@ mod station_round_trip_tests {
         }
         let presses = watched_blows(Game::Wheel, seed);
         assert_eq!(presses.len(), Game::Wheel.presses(), "the client dropped a watched blow");
-        station_run(&handle, presses);
+        station_run(&ctx, &handle, presses);
         let answer = drain(&mut rx);
         assert!(
             answer.iter().any(|m| matches!(m, ServerMessage::StationResult { verdict: Verdict::Fine, .. })),
@@ -19395,6 +19447,31 @@ mod station_round_trip_tests {
             drain(&mut rx).iter().any(|m| matches!(m, ServerMessage::StationBegun { .. })),
             "a second run could not begin after the first was judged"
         );
+    }
+
+    #[test]
+    fn bowls_thrown_into_a_pack_filled_during_the_run_fall_at_the_potters_feet() {
+        let (ctx, handle, mut rx) = at_the_wheel();
+        open_station(&ctx, &handle, WHEEL);
+        station_begin(&ctx, &handle, Job::Bowl);
+        let seed = drain(&mut rx)
+            .into_iter()
+            .find_map(|m| match m {
+                ServerMessage::StationBegun { seed } => Some(seed),
+                _ => None,
+            })
+            .expect("the run never began");
+        // Mid-run the pack fills: a heap walked over while the wheel spun.
+        while handle.state.lock().unwrap().inventory.add(BLOCK_STONE, 64) == 0 {}
+        if let Some(seat) = handle.state.lock().unwrap().station.as_mut() {
+            let (job, _, seed) = seat.run.expect("no run on the seat");
+            seat.run = Some((job, Instant::now() - Duration::from_millis(u64::from(Game::Wheel.run_ms()) + 100), seed));
+        }
+        station_run(&ctx, &handle, watched_blows(Game::Wheel, seed));
+        let in_pack = handle.state.lock().unwrap().inventory.count(BLOCK_BOWL_RAW);
+        let on_ground: u32 =
+            ctx.items.lock().unwrap().iter().filter(|item| item.block == BLOCK_BOWL_RAW).map(|item| item.count).sum();
+        assert_eq!(in_pack + on_ground, 2, "a fine run into a full pack paid {in_pack} in the pack and {on_ground} on the ground");
     }
 
     #[test]
@@ -19430,7 +19507,7 @@ mod station_round_trip_tests {
             // started a message's flight later than the server's did.
             seat.run = Some((job, Instant::now() - Duration::from_millis(u64::from(last) + 16), seed));
         }
-        station_run(&handle, presses);
+        station_run(&ctx, &handle, presses);
         let answer = drain(&mut rx);
         assert!(
             answer.iter().any(|m| matches!(m, ServerMessage::StationResult { .. })),

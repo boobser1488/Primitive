@@ -2206,7 +2206,7 @@ struct Ride {
 const JUMP_LATCH: f32 = 0.12;
 
 /// What a dead horse left, and where: see `Animals::take_spilled`.
-pub type Spilled = ((f64, f64, f64), Vec<(primitive_shared::types::BlockId, u32)>);
+pub type Spilled = ((f64, f64, f64), Vec<(primitive_shared::types::BlockId, u32, u32)>);
 
 /// How long a rider's last reins keep asking without another.
 ///
@@ -5136,6 +5136,41 @@ impl Animals {
             return None;
         }
         animal.gear.as_mut()?.bags.as_mut()
+    }
+
+    /// Every horse in the world whose bags hold something `changing` would
+    /// answer yes for, and where its bags are: the rot clock's list
+    /// (`rot::Rot::pass`). Parked horses are not on it, as a chest in a chunk
+    /// nobody has loaded is not.
+    pub fn bags_to_age(
+        &self,
+        changing: impl Fn(&primitive_shared::inventory::Inventory) -> bool,
+    ) -> Vec<(EntityId, (f32, f32, f32))> {
+        self.animals
+            .iter()
+            .filter(|a| a.gear.as_ref().and_then(|g| g.bags.as_ref()).is_some_and(&changing))
+            .map(|a| {
+                let at = a.at();
+                (a.id, (at.0, at.1 + 1.0, at.2))
+            })
+            .collect()
+    }
+
+    /// `edit` over the bags of each horse named, with what was sampled for
+    /// it. Answers the horses whose bags changed.
+    pub fn edit_bags<A>(
+        &mut self,
+        which: &[(EntityId, A)],
+        mut edit: impl FnMut(&mut primitive_shared::inventory::Inventory, &A) -> bool,
+    ) -> Vec<EntityId> {
+        let mut changed = Vec::new();
+        for (id, sampled) in which {
+            let bags = self.animals.iter_mut().find(|a| a.id == *id).and_then(|a| a.gear.as_mut()).and_then(|g| g.bags.as_mut());
+            if bags.is_some_and(|bags| edit(bags, sampled)) {
+                changed.push(*id);
+            }
+        }
+        changed
     }
 
     /// Puts a keeping and gear on an animal outright: scenarios and mods, for
@@ -16632,9 +16667,9 @@ mod horse_tests {
         animals.gear_for_test(horse).expect("gear").bags = Some(bags);
         animals.hurt(horse, 10_000.0).expect("it did not die");
         let spilled = animals.take_spilled();
-        let all: Vec<(primitive_shared::types::BlockId, u32)> = spilled.into_iter().flat_map(|(_, left)| left).collect();
-        assert!(all.contains(&(BLOCK_SADDLE, 1)) && all.contains(&(BLOCK_SADDLEBAGS, 1)), "the tack vanished: {all:?}");
-        assert_eq!(all.iter().filter(|(b, _)| *b == BLOCK_COPPER_ORE).map(|(_, n)| n).sum::<u32>(), 30);
+        let all: Vec<(primitive_shared::types::BlockId, u32, u32)> = spilled.into_iter().flat_map(|(_, left)| left).collect();
+        assert!(all.contains(&(BLOCK_SADDLE, 1, 0)) && all.contains(&(BLOCK_SADDLEBAGS, 1, 0)), "the tack vanished: {all:?}");
+        assert_eq!(all.iter().filter(|(b, _, _)| *b == BLOCK_COPPER_ORE).map(|(_, n, _)| n).sum::<u32>(), 30);
     }
 
     #[test]

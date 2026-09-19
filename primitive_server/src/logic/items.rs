@@ -716,6 +716,13 @@ fn step_one(item: &mut Item, world: &World, dt: f32) {
     // switch across it: timber rides six tenths under, fat nine, and
     // nothing chatters because nothing changes discontinuously.
     let wet = submerged(world, item.position);
+    // **What lies in the water is wet** (`wet`), as the pack of a swimmer
+    // is. A bundle of kindling thrown across the river, or a log floated
+    // down it, used to come out of the water as dry as it went in -- the
+    // crossing the wet pack makes a plan of was one throw.
+    if wet > 0.0 {
+        item.block = primitive_shared::wet::wetted(item.block);
+    }
     if wet > 0.0 {
         let ratio = primitive_shared::types::density(item.block)
             / primitive_shared::types::WATER_DENSITY;
@@ -1663,6 +1670,21 @@ mod tests {
             "the log is at {lowest:.3}, and the water's surface at {surface:.3} is not \
              between its bottom and its top"
         );
+    }
+
+    #[test]
+    fn kindling_thrown_into_a_pond_comes_out_wet_and_a_stone_comes_out_a_stone() {
+        use primitive_shared::types::{BLOCK_LOG, BLOCK_WATER};
+        let world = floor_topped_with(BLOCK_WATER);
+        let mut items = Items::new();
+        items.spawn(BLOCK_LOG, 1, (4.5, 12.5, 4.5), (0.0, 0.0, 0.0), None, now());
+        items.spawn(BLOCK_STONE, 1, (6.5, 12.5, 6.5), (0.0, 0.0, 0.0), None, now());
+        for _ in 0..40 {
+            items.step(&world, 1.0 / 20.0, now());
+        }
+        let log = items.iter().find(|i| primitive_shared::types::block_kind(i.block) == BLOCK_LOG).expect("the log");
+        assert!(primitive_shared::wet::is_wet(log.block), "a log that floated in a pond is dry");
+        assert!(items.iter().any(|i| i.block == BLOCK_STONE), "a stone came out of the water as something else");
     }
 
     /// **A drop beside a rack lies on the ground, not on the rack.**
