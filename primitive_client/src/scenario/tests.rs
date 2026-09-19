@@ -1405,9 +1405,14 @@ fn a_swimmer_beside_a_cut_in_a_pond_is_carried_toward_it() {
     for y in g - 3..=g - 1 {
         s.server().place_block(x0 + 6, y, z, t::BLOCK_AIR);
     }
-    s.seconds(2.5);
+    // **Until it has, not for a fixed while.** Two and a half seconds of
+    // wall clock was enough alone and not in a full run, where the server
+    // ticks behind a busy machine and the same pour takes longer to arrive:
+    // the property is that the water takes the swimmer, not how fast this
+    // machine is today.
+    let taken = s.until(8.0, |s| s.feet().x - before > 0.5);
     let carried = s.feet().x - before;
     s.shot("carried_to_the_cut");
-    assert!(carried > 0.5, "the pond poured out beside the swimmer and carried them {carried:.2} blocks");
+    assert!(taken, "the pond poured out beside the swimmer and carried them {carried:.2} blocks");
     no_corrections(&s);
 }
