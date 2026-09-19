@@ -1469,7 +1469,7 @@ fn build_context(settings: ServerSettings, options: RunOptions) -> anyhow::Resul
             // here rather than constructed with the world, because a
             // mechanic is a thing the server runs and not a thing the
             // world contains.
-            mechanics.register(Box::new(water::Water::new()));
+            mechanics.register(Box::new(water::Water::soaking()));
             mechanics
         }),
         spills: std::sync::Mutex::new(water::Spills::new()),

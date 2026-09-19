@@ -78,8 +78,19 @@
 //! not: it can move water in a state the neighbour rules call rest, so
 //! `wake` would have to reach `SEARCH_RANGE` in four directions instead
 //! of one cell. The whole argument, with what the two ways of paying for
-//! it were measured to cost, is in
-//! `a_pond_drains_down_to_a_wedge_and_no_further`.
+//! it were measured to cost, is on `level_one` -- which is how the wedge
+//! that rule was wanted for is levelled now, from a trigger of its own.
+//!
+//! ## A sheet of water is level
+//!
+//! And a fourth, which also is not in `fluid` for the same reason: every
+//! cell the flow writes goes on a list, and a couple of times a step one
+//! of them has the whole connected sheet of water it is part of levelled
+//! a little (`level_one`). The neighbour rules cannot split a difference
+//! of one, so without it a channel stood as a wedge and two joined ponds
+//! at two heights for ever. Its trigger is its own list rather than
+//! `wake`, which is the whole reason it could be added without paying
+//! what levelling at a distance was measured to cost.
 //!
 //! ## What conservation asks of the simulation, and how it is paid
 //!
@@ -108,6 +119,12 @@
 //!   goes down too; it is simply spread over so many cells that the
 //!   difference is under the one eighth the rule can move. See the note
 //!   in `fluid` for the whole argument.
+//! * **One exception, and only on the server** (`Water::soaking`): a
+//!   film of one eighth the flow has left on open ground soaks away
+//!   (`soaks_away`), so a pond let out over a meadow does not leave the
+//!   meadow ankle-deep for ever. The rain is what puts water back.
+//!   `Water::new` conserves to the eighth and every test of conservation
+//!   uses it.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -202,6 +219,44 @@ const MAX_QUEUE: usize = 64 * 1024;
 /// to drain a test lake a tenth faster is not a trade worth making.
 const SEARCH_RANGE: i32 = 6;
 
+/// How many sheets `level_one` levels a flow step, and the most cells one
+/// sheet may be.
+///
+/// **Two sheets of 256 cells** is a worst case of a few thousand reads a
+/// step (three a cell to find its floor and its lid, and one for each dry
+/// or solid cell round the edge) -- 2,447 was the worst step measured on
+/// the reference spill, against 413 for the flow alone, and a flow step
+/// examining its whole budget of cells can walk eighty-five apiece. Paid
+/// only while the flow has written something not yet found level; still
+/// water is never on the list. A sheet bigger than 256 -- a lake
+/// drained through a cut -- is levelled 256 cells at a time from whichever
+/// cell comes up, and the overlapping pieces agree in the end, because each
+/// pass lowers the same sum of squares whatever piece it is given.
+const SHEETS_PER_STEP: usize = 2;
+const SHEET_MAX: usize = 256;
+
+/// How many cells of the unlevelled list a step may look at to find its
+/// `SHEETS_PER_STEP` -- most of them, in a flood, are still running and go
+/// to the back.
+const SHEET_LOOKS: usize = 32;
+
+/// How long a film of water the flow has left on open ground stands before
+/// it soaks away, in seconds.
+///
+/// **Twenty, and not a spill's minute and a half** (`SPILL_DRIES_SECONDS`),
+/// because a film goes from its edges in: a one soaks, the two beside it
+/// levels into the hole and leaves two ones, and *those* wait their own
+/// time. At ninety a drained pond eleven cells across was still shining
+/// after six minutes, a ring every minute and a half
+/// (`a_pond_drained_through_its_bed_leaves_a_film_that_soaks_away`); at
+/// twenty the bed is seen wet, then seen drying from the rim, and is dry in
+/// a few minutes -- a puddle drying, rather than a puddle that is simply
+/// gone one moment.
+const SOAK_SECONDS: f32 = 20.0;
+
+/// The deepest water that counts as a film: one eighth. See `soaks_away`.
+const SOAKS_AT_OR_BELOW: u8 = 1;
+
 /// The four cells beside one, in a fixed order.
 const SIDES: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
@@ -271,15 +326,53 @@ pub struct Water {
     /// never holds more than a few dozen entries. Never read between
     /// calls; it is cleared on entry.
     search: Vec<(Cell, i32)>,
+    /// Cells the flow has written, waiting to have the sheet of water they
+    /// are part of levelled. See `level_one`.
+    ///
+    /// `unlevelled_set` is the truth and the deque only an order: a sheet
+    /// levelled from one cell takes every other cell of it off the set, and
+    /// the entries left behind in the deque are skipped when they come up.
+    unlevelled: VecDeque<Cell>,
+    unlevelled_set: HashSet<Cell>,
+    /// Scratch for `level_one`, for the reason `search` is kept.
+    sheet: Vec<Cell>,
+    sheet_seen: HashSet<Cell>,
+    sheet_depths: Vec<u8>,
+    /// Whether a thin film the flow leaves behind soaks away. Off in `new`,
+    /// which every test of conservation builds on; on in `soaking`, which
+    /// is what the server runs. See `SOAK_SECONDS`.
+    soaks: bool,
+    /// `SHEETS_PER_STEP`, as a field so the cost of levelling can be
+    /// measured against the flow alone in one binary
+    /// (`the_reference_spill_timed`). Nothing else sets it.
+    sheets_per_step: usize,
+    /// Seconds of flow steps so far: the clock `thin` is timed by.
+    clock: f32,
+    /// Films the flow has written, and the `clock` at which each is looked
+    /// at again to see if it is still a film. In that order, because every
+    /// one waits the same `SOAK_SECONDS`.
+    thin: VecDeque<(Cell, f32)>,
+    thin_set: HashSet<Cell>,
 }
 
 impl Water {
+    /// Water that is conserved to the eighth: nothing made, nothing lost.
     pub fn new() -> Self {
-        Self::default()
+        Self { sheets_per_step: SHEETS_PER_STEP, ..Self::default() }
     }
 
+    /// Water as the server runs it: conserved, except that a film of one
+    /// eighth the flow has left on open ground soaks away after
+    /// `SOAK_SECONDS`. See `soaks_away`.
+    pub fn soaking() -> Self {
+        Self { soaks: true, ..Self::new() }
+    }
+
+    /// Work still to do: cells to flow, and sheets to level. Not the films
+    /// waiting to soak away, which are on a clock rather than a queue --
+    /// the way a spill is (`Spills`).
     pub fn pending(&self) -> usize {
-        self.queue.len()
+        self.queue.len() + self.unlevelled_set.len()
     }
 
     /// Queue a cell, unless it is outside the world or already waiting.
@@ -315,8 +408,8 @@ impl Water {
     /// exactly as it did, and only the water travels further. Get that
     /// backwards -- write a rule whose *trigger* is a distant cell's
     /// depth -- and this list has to grow to the whole diamond; there is
-    /// a note in `a_pond_drains_down_to_a_wedge_and_no_further` about
-    /// what that was measured to cost when it was tried.
+    /// a note on `level_one` about what that was measured to cost when it
+    /// was tried, and what levels a sheet instead.
     ///
     /// Turning it round, a change at `p` matters to:
     ///
@@ -414,6 +507,175 @@ impl Water {
         // to the one above, a lower side to the four around it -- and
         // those are exactly what `wake` offers.
         self.wake(cell);
+        // ...and the sheet it is part of is no longer known to be level,
+        // and a film is no longer known not to be one. Only cells the flow
+        // has written: water nobody has disturbed -- every sea, every lake
+        // the generator laid -- is never looked at by either.
+        if depth > 0 && self.unlevelled.len() < MAX_QUEUE && self.unlevelled_set.insert(cell) {
+            self.unlevelled.push_back(cell);
+        }
+        if self.soaks && depth > 0 && depth <= SOAKS_AT_OR_BELOW && self.thin.len() < MAX_QUEUE && self.thin_set.insert(cell) {
+            self.thin.push_back((cell, self.clock + SOAK_SECONDS));
+        }
+    }
+
+    /// Is this a cell whose water is the top of a sheet: water, with a
+    /// floor under it that will not take any more, and no water over it?
+    /// Returns how deep it is.
+    ///
+    /// The floor is ground, or a full cell of water: anything else under it
+    /// is somewhere it can still fall, which is the flow's business and not
+    /// a sheet's. Nothing over it, because a cell with water over it is not
+    /// the surface -- its surface is further up. Unloaded counts as neither,
+    /// so a sheet stops at the edge of what is loaded rather than guessing.
+    ///
+    /// **Plain water only.** A drowned snag is liquid and has a depth, and
+    /// writing a depth back into its cell is writing water over the wood --
+    /// the flow never does that, because a full snag beside full water has
+    /// nothing to hand on, but a sheet levelled through it would.
+    fn sheet_depth(world: &dyn BlockWorld, (x, y, z): Cell) -> Option<u8> {
+        let block = world.block(x, y, z)?;
+        let here = fluid::depth(block);
+        if here == 0 || fluid::with_depth(here) != block {
+            return None;
+        }
+        let below = world.block(x, y - 1, z)?;
+        if Self::holds_water(below) && fluid::depth(below) < fluid::SOURCE_DEPTH {
+            return None;
+        }
+        if is_liquid(world.block(x, y + 1, z)?) {
+            return None;
+        }
+        Some(here)
+    }
+
+    /// Levels the sheet of water `start` is part of by one pass of
+    /// `fluid::level_sheet`: each of its deepest cells hands an eighth to
+    /// one of its shallowest.
+    ///
+    /// **Why the neighbour rules are not enough, and what this is.** They
+    /// cannot split a difference of one, so a surface sloping an eighth a
+    /// block is at rest under them -- and that wedge was the last thing
+    /// the water did that water does not: a channel poured full at one end
+    /// stopped five blocks short of its end, and two ponds joined by a
+    /// trench stood three quarters of a block apart for ever. Measured on
+    /// `a_channel_poured_at_one_end_levels_along_its_whole_length` before
+    /// this existed: `[7, 6, 5, 4, 4, 3, 2, 1, 0, 0, 0, 0, 0]`.
+    ///
+    /// A sheet is found breadth-first through water at one height, every
+    /// cell of it the top of its column (`sheet_depth`), up to `SHEET_MAX`
+    /// cells -- so, like `draw_on_the_body`, it only ever moves water
+    /// between cells joined by water, never over a bank or across a gap.
+    ///
+    /// **Rejected, and each was tried in this file:**
+    ///
+    /// * *Levelling at a distance from inside `flow_one`* -- the note in
+    ///   `a_pond_drains_down_to_a_wedge_and_no_further`, the test that
+    ///   asserted the wedge before this, said why: a wedge is a rest state of the neighbour rules, so a rule
+    ///   that can still move water there needs `wake` to reach the whole
+    ///   diamond, and that took the reference spill from 17,000 reads to
+    ///   101,000. This is the same idea with a trigger of its own -- a
+    ///   list of cells the flow has *written*, looked at a few sheets a
+    ///   step -- so `wake` stays six cells and a flow step costs what it
+    ///   did.
+    /// * *Writing the whole sheet to its mean at once.* Levels it, and
+    ///   snaps: a wedge eight deep jumped half a block at each end in one
+    ///   step. One eighth a pair a pass is a surface that settles while you
+    ///   watch it (`fluid::level_sheet`).
+    /// * *Finer units*, which would make the wedge shallower rather than
+    ///   gone, and are a save format and a vertex byte besides.
+    ///
+    /// It stops because every pair moves an eighth from one cell to
+    /// another at least two shallower, which lowers the same sum of squares
+    /// `level_transfer` lowers; a sheet within an eighth of level moves
+    /// nothing, is written nowhere, and puts nothing back on the list.
+    fn level_one(&mut self, world: &dyn BlockWorld, start: Cell, changes: &mut Vec<BlockChange>) {
+        let Some(depth) = Self::sheet_depth(world, start) else {
+            return;
+        };
+        let mut sheet = std::mem::take(&mut self.sheet);
+        let mut depths = std::mem::take(&mut self.sheet_depths);
+        sheet.clear();
+        depths.clear();
+        self.sheet_seen.clear();
+        sheet.push(start);
+        depths.push(depth);
+        self.sheet_seen.insert(start);
+        let mut head = 0;
+        while head < sheet.len() && sheet.len() < SHEET_MAX {
+            let (x, y, z) = sheet[head];
+            head += 1;
+            for (dx, dz) in SIDES {
+                let next = (x + dx, y, z + dz);
+                if sheet.len() >= SHEET_MAX || !self.sheet_seen.insert(next) {
+                    continue;
+                }
+                if let Some(there) = Self::sheet_depth(world, next) {
+                    sheet.push(next);
+                    depths.push(there);
+                }
+            }
+        }
+        // Every cell of it has been looked at now, whether it moves or not.
+        for cell in &sheet {
+            self.unlevelled_set.remove(cell);
+        }
+        let before = depths.clone();
+        if fluid::level_sheet(&mut depths) {
+            for (i, &cell) in sheet.iter().enumerate() {
+                if depths[i] != before[i] {
+                    // `set` puts it back on the list: the next pass looks
+                    // again, which is how an eighth a pass becomes level.
+                    self.set(world, cell, depths[i], changes);
+                    // ...and the cell itself goes to the flow, which `set`
+                    // leaves out because a cell the flow writes is one it
+                    // has just examined. This one has not been: the edge of
+                    // a sheet raised from one eighth to three is an edge
+                    // that now pours onto the dry floor beside it, and
+                    // without this it stood there at three for ever.
+                    self.push(cell);
+                }
+            }
+        }
+        self.sheet = sheet;
+        self.sheet_depths = depths;
+    }
+
+    /// Should this film of water soak away now?
+    ///
+    /// **One eighth, on ground, under nothing wet, beside nothing deeper
+    /// than two.** Conservation leaves films: a pond drained through a hole
+    /// keeps an eighth in every cell of its bed, and once `level_one`
+    /// spreads a spill as far as its water goes, a pond let out over a
+    /// field is a film over the field. An eighth of a block across a
+    /// meadow is still water to the collider, the fog and the frost, and it
+    /// never went anywhere -- the ankle-deep sea over everything a player
+    /// has ever drained, which this file has been through once already.
+    ///
+    /// *Beside nothing deeper than two* rather than nothing deeper than
+    /// one, because a sheet levelled to within an eighth is a mix of ones
+    /// and twos, and a one that had to wait for every two beside it would
+    /// wait for ever. When it goes, the twos level into the hole, and the
+    /// ones they leave go in their turn -- so a sheet a quarter of a block
+    /// deep or less on open ground soaks away from its edges, and anything
+    /// deeper is a pond and stays. Not ground under it (a fall's kept
+    /// eighth) and not water over it (the bottom of a column).
+    fn soaks_away(world: &dyn BlockWorld, (x, y, z): Cell) -> bool {
+        let Some(block) = world.block(x, y, z) else {
+            return false;
+        };
+        let here = fluid::depth(block);
+        if here == 0 || here > SOAKS_AT_OR_BELOW || fluid::with_depth(here) != block {
+            return false;
+        }
+        if world.block(x, y - 1, z).is_none_or(Self::holds_water) || world.block(x, y + 1, z).is_none_or(is_liquid) {
+            return false;
+        }
+        SIDES.iter().all(|(dx, dz)| {
+            world
+                .block(x + dx, y, z + dz)
+                .is_some_and(|beside| fluid::depth(beside) <= SOAKS_AT_OR_BELOW + 1)
+        })
     }
 
     /// Water that has reached a block somebody has been quarrying takes
@@ -1442,6 +1704,60 @@ impl CellMechanic for Water {
                 };
                 self.stalled_set.remove(&cell);
                 self.retry_one(world, cell);
+            }
+        }
+
+        // ...then a few sheets levelled, once the step's flowing is done,
+        // so what they write is looked at by the next step's.
+        //
+        // **Only from a cell the flow has finished with.** A cell still on
+        // the flow's queue is part of water that is still running, and the
+        // neighbour rules are already levelling it faster than a pass over
+        // the sheet would -- walking its sheet then is two hundred reads to move
+        // what the next step moves anyway. Measured on the reference spill:
+        // 58,229 reads and 3,293 writes levelling from every cell as it came
+        // up, 48,576 and 2,706 with this rule. Such a
+        // cell goes to the back of the list rather than off it, and the
+        // look is bounded (`SHEET_LOOKS`) so a flood that keeps every cell
+        // busy costs a few set lookups a step and nothing more.
+        let (mut levelled, mut looked) = (0, 0);
+        while levelled < self.sheets_per_step && looked < SHEET_LOOKS {
+            let Some(cell) = self.unlevelled.pop_front() else {
+                break;
+            };
+            looked += 1;
+            // Already taken off by a sheet levelled from another of its
+            // cells: nothing to do, and nothing spent.
+            if !self.unlevelled_set.contains(&cell) {
+                continue;
+            }
+            if self.queued.contains(&cell) {
+                self.unlevelled.push_back(cell);
+                continue;
+            }
+            self.unlevelled_set.remove(&cell);
+            self.level_one(world, cell, &mut changes);
+            levelled += 1;
+        }
+
+        // ...and the films whose time is up.
+        if self.soaks {
+            self.clock += FLOW_INTERVAL;
+            let mut looked = 0;
+            while looked < budget && self.thin.front().is_some_and(|&(_, due)| due <= self.clock) {
+                let Some((cell, _)) = self.thin.pop_front() else {
+                    break;
+                };
+                self.thin_set.remove(&cell);
+                looked += 1;
+                if self.queued.contains(&cell) {
+                    // Still being worked on: it has not stood as a film for
+                    // any time at all yet. Its time starts again.
+                    self.thin_set.insert(cell);
+                    self.thin.push_back((cell, self.clock + SOAK_SECONDS));
+                } else if Self::soaks_away(world, cell) {
+                    self.set(world, cell, 0, &mut changes);
+                }
             }
         }
         changes
@@ -3153,12 +3469,17 @@ mod tests {
         // |---|---|---|
         // | falling and levelling | 848 of 968 | 848 |
         // | ...and drawing on the body | 692 of 968 | 347 |
+        // | ...and levelling the sheet | 450 of 968 | 213 |
         //
-        // **Both of them stop**, and the wedge that stops them is the
-        // one honest limit of the model -- see
-        // `a_pond_drains_down_to_a_wedge_and_no_further`. What changed is
-        // how big it is: an eighth of the lake left through the cut
-        // before, and two thirds of it leaves now.
+        // (The middle row's 692 was at the old `FLOW_INTERVAL`; at 0.15 it
+        // is 599.) **All of them stop**, the first two at a wedge the
+        // neighbour rules cannot split and the last at a film of one or two
+        // eighths over the bed: an eighth of the lake left through the cut
+        // with the neighbour rules alone, and four fifths of it leaves now.
+        // This runs `Water::new`, without the soaking that takes the last
+        // film -- see
+        // `a_pond_drained_through_its_bed_leaves_a_film_that_soaks_away`
+        // for the lake as the server runs it.
         let world = walled_lake();
         let before = total_water(&world);
         let inside = water_in_the_lake(&world);
@@ -3190,56 +3511,20 @@ mod tests {
     }
 
     #[test]
-    fn a_pond_drains_down_to_a_wedge_and_no_further() {
-        // **The one price of whole eighths, written down as a test so
-        // that nobody has to rediscover it.** `level_transfer` will not
-        // move a difference of one -- it cannot, in whole units, without
-        // handing the same eighth back and forth for ever -- so a
-        // surface with somewhere to drain settles into a slope of one
-        // eighth per block leading to the drain, and stops there. A
-        // channel poured full at one end settles as
-        // [7, 6, 5, 4, 4, 3, 2, 1, 0, 0, 0, 0, 0]: thirty-two eighths
-        // that would cover thirteen cells two and a half deep stop after
-        // eight of them, and the last five stay dry.
-        //
-        // **It is not invisible, and the header in `fluid` used to claim
-        // it was.** The argument there was that `surface_height` returned
-        // the same height for every depth, so a wedge and a flat sheet
-        // were drawn identically -- true at the time, and beside the
-        // point. What a player sees is not the slope, it is the *reach*:
-        // a channel that stops five blocks short of where the water
-        // should have got to, and a drained pond with an eighth standing
-        // in every cell of it. Today the depths are drawn as well, so the
-        // wedge is a wedge on screen and the drained pond is a film.
-        //
-        // It is left alone anyway, and the reasons belong here because
-        // the obvious fixes have all been tried on this file:
-        //
-        // * **Move the last eighth.** Two cells at one and zero then
-        //   trade it at the tick rate for ever -- a film flickering
-        //   between two cells, a packet and a remesh each time, and an
-        //   autosave rewriting `edits.bin` over a world nobody is
-        //   touching. It is the exact failure both halves of
-        //   `level_transfer` exist to prevent.
-        // * **Level at a distance**: hand half a difference to a cell
-        //   two eighths shallower within reach rather than only to a
-        //   neighbour. It settles the wedge flat, and it costs the
-        //   proof. A wedge is a *rest state* of the neighbour rules, so
-        //   a rule that can still move water in one needs `wake` to
-        //   reach `SEARCH_RANGE` in every direction rather than one
-        //   cell. Waking only the path the search walked was not enough
-        //   -- the sweep in
-        //   `random_ground_comes_to_rest_where_the_rules_call_it_rest`
-        //   caught the queue draining with work left to do on its second
-        //   seed -- and waking the whole diamond took the reference
-        //   spill from 17,000 reads to 101,000.
-        // * **Finer units.** The depth rides in the same three bits as a
-        //   layer count (see `fluid`); widening it is a save format and
-        //   a vertex byte, not a rule.
-        //
-        // So the wedge stays, and what `draw_on_the_body` bought is that
-        // it is a far smaller one -- see the table in
-        // `a_cut_at_the_edge_of_a_lake_drains_it_rather_than_seeping`.
+    fn a_channel_poured_at_one_end_levels_along_its_whole_length() {
+        // **This test used to be called
+        // `a_pond_drains_down_to_a_wedge_and_no_further`**, and it asserted
+        // the wedge: `level_transfer` will not move a difference of one, so
+        // a channel poured full at one end settled as
+        // `[7, 6, 5, 4, 4, 3, 2, 1, 0, 0, 0, 0, 0]` -- thirty-two eighths
+        // that would cover thirteen cells two and a half deep stopped after
+        // eight of them, and the last five stayed dry. It was written down
+        // as the one honest limit of whole eighths, with the fixes that had
+        // been tried and why each went (moving the last eighth: a shimmer
+        // for ever; levelling at a distance inside the flow: 101,000 reads
+        // where 17,000 had done; finer units: a save format). `level_one`
+        // is the fix none of them was -- see it for why -- and this is the
+        // same channel with the opposite assertion.
         const FAR: i32 = 12;
         let world = floored();
         for x in -1..=FAR + 1 {
@@ -3259,19 +3544,83 @@ mod tests {
 
         let profile: Vec<u8> = (0..=FAR).map(|x| fluid::depth(world.get(x, 1, 0))).collect();
         println!("CHANNEL: {profile:?}");
-        // A wedge: never rising as it goes along, and never stepping
-        // down by more than the one eighth levelling cannot split.
-        for pair in profile.windows(2) {
-            assert!(
-                pair[0] >= pair[1] && pair[0] - pair[1] <= 1,
-                "the channel is no longer a wedge, which is better than this \
-                 test expects: {profile:?}"
-            );
+        let (low, high) = (profile.iter().min().unwrap(), profile.iter().max().unwrap());
+        assert!(*low >= 2 && high - low <= 1, "the channel did not level out along its length: {profile:?}");
+    }
+
+    #[test]
+    fn two_ponds_joined_by_a_trench_come_to_one_level() {
+        // A full pond and an empty one, five cells apart, and a trench cut
+        // between them. The neighbour rules alone left them standing three
+        // quarters of a block apart with a wedge in the trench.
+        let world = floored();
+        for x in -2..=14 {
+            for z in -2..=2 {
+                world.put(x, 1, z, BLOCK_STONE);
+            }
         }
-        assert_eq!(
-            profile[FAR as usize], 0,
-            "the water reached the far end, which this test says it cannot: {profile:?}"
-        );
+        // Two 3x3 ponds, and a one-wide trench from one to the other.
+        for x in -1..=13 {
+            for z in -1..=1 {
+                let pond = x <= 1 || x >= 11;
+                if pond || z == 0 {
+                    world.put(x, 1, z, BLOCK_AIR);
+                }
+            }
+        }
+        let mut sim = Water::new();
+        pour(&mut sim, &world, [-1, 1], 1, [-1, 1]);
+        let before = total_water(&world);
+        settle(&mut sim, &world, 20_000);
+        assert_eq!(total_water(&world), before);
+        assert_eq!(sim.pending(), 0, "the ponds never came to rest");
+        let near = fluid::depth(world.get(0, 1, 0));
+        let far = fluid::depth(world.get(12, 1, 0));
+        println!("PONDS: near {near}, far {far}");
+        assert!(near.abs_diff(far) <= 1, "two joined ponds rested {near} and {far} eighths deep");
+    }
+
+    #[test]
+    fn a_pond_drained_through_its_bed_leaves_a_film_that_soaks_away() {
+        // The bed cut at one corner: the lake runs down the hole, and what
+        // conservation leaves behind -- an eighth or two over the bed, which
+        // the header of `fluid` used to list as a known fault -- dries from
+        // its rim in. Measured a minute apart:
+        // `[968, 261, 179, 152, 119, 84, 46, 16, 1, 0]` -- the lake gone in
+        // the first minute, the film in the next seven. With `Water::new` it
+        // would stand for ever, and that is what every other test here
+        // relies on.
+        let world = walled_lake();
+        let mut sim = Water::soaking();
+        world.put(5, LAKE_Y - 1, 5, BLOCK_AIR);
+        sim.on_block_changed(5, LAKE_Y - 1, 5);
+        let steps = (900.0 / TICK) as usize;
+        let mut left_at = Vec::new();
+        for tick in 0..steps {
+            sim.step(&world, TICK, 4096);
+            if tick % 1200 == 0 {
+                left_at.push(water_in_the_lake(&world));
+            }
+        }
+        let left = water_in_the_lake(&world);
+        println!("SOAKED: {left_at:?} -> {left}");
+        assert_eq!(left, 0, "the drained lake kept {left} eighths standing in its bed");
+    }
+
+    #[test]
+    fn a_film_in_a_hollow_beside_deeper_water_does_not_soak_away() {
+        // The edge of a pond is not a film: a one beside a three is the
+        // shore of something, and the pond would be eaten from its edges.
+        let world = floored();
+        world.put(0, 1, 0, fluid::with_depth(1));
+        world.put(1, 1, 0, fluid::with_depth(3));
+        assert!(!Water::soaks_away(&world, (0, 1, 0)));
+        world.put(1, 1, 0, fluid::with_depth(2));
+        assert!(Water::soaks_away(&world, (0, 1, 0)));
+        // Water over it, or nothing under it, is a column and a fall.
+        world.put(0, 2, 0, fluid::with_depth(1));
+        assert!(!Water::soaks_away(&world, (0, 2, 0)), "a film over water soaked away");
+        assert!(!Water::soaks_away(&world, (0, 1, 0)), "the bottom of a column soaked away");
     }
 
     // ---- the rain ------------------------------------------------------
@@ -3403,9 +3752,7 @@ mod tests {
         //
         // The same pond is cut twice, once under a clear sky and once in
         // the rain, because the number that means anything is the
-        // difference. Where it stops is the wedge, and the wedge is the
-        // same wedge either way -- see
-        // `a_pond_drains_down_to_a_wedge_and_no_further`.
+        // difference. Where it stops is the same either way.
         const EDGE: i32 = 3;
         let pond = || {
             let world = floored();
@@ -3624,6 +3971,18 @@ mod tests {
                 "seed {seed}: the queue stopped while the rules still had work \
                  to do, and a dumb sweep found it in {rounds} rounds"
             );
+            // ...and no sheet anywhere is left unlevelled: the list that
+            // drives `level_one` missed nobody either.
+            let mut probe = Water::new();
+            let mut moved = Vec::new();
+            for x in -BOX_SIDE..=BOX_SIDE {
+                for z in -BOX_SIDE..=BOX_SIDE {
+                    for y in 0..BOX_TOP {
+                        probe.level_one(&world, (x, y, z), &mut moved);
+                    }
+                }
+            }
+            assert!(moved.is_empty(), "seed {seed}: a sheet was left sloping: {moved:?}");
         }
     }
 
@@ -3668,11 +4027,25 @@ mod tests {
         // | amounts, moved between cells | 475 | 16,999 | 1,571 | 55 |
         // | ...and drawing on the body within reach | 410 | 23,759 | 2,474 | 237 |
         // | ...and a fed fall keeping its last eighth | 282 | 22,367 | 2,171 | 2,171 |
+        // | ...and sheets levelled, an eighth a pair | 339 | 66,238 | 3,399 | 3,399 |
+        // | ...two eighths a pair, from settled cells | 264 | 48,576 | 2,706 | 2,706 |
         //
-        // (The last row is at `FLOW_INTERVAL` 0.15, where the row above it
-        // measures 246 ticks rather than 410; reads and writes do not
-        // depend on the interval. See `fluid::fall_keeping` for what the
-        // row bought -- a waterfall with no air in it.)
+        // (The last three rows are at `FLOW_INTERVAL` 0.15, where the row
+        // above them measures 246 ticks rather than 410; reads and writes do
+        // not depend on the interval. See `fluid::fall_keeping` for what the
+        // first of them bought -- a waterfall with no air in it.)
+        //
+        // **What the last row bought and what it cost.** The spill no
+        // longer stops at a wedge: it spreads until it is level
+        // (`level_one`), which is more cells wetted -- the writes -- and a
+        // walk of the sheet every pass -- most of the reads. The worst single
+        // step went from 413 reads to 2,447, which is what two walks of a
+        // 256-cell sheet cost and is bounded by `SHEETS_PER_STEP` and
+        // `SHEET_MAX` whatever the water does. In wall time, from an
+        // optimised build (`the_reference_spill_timed`, same binary, both
+        // ways): 2.3-2.6 ms for the whole spill without the sheets, 5.5-5.6 ms
+        // with them. Still water still costs nothing: it is never on the
+        // list.
         //
         // **The second one is cheaper than any of these and it is not
         // coming back**, because what it was cheap at was deciding that
@@ -3719,15 +4092,18 @@ mod tests {
         }
         let mut ticks = 0u32;
         let mut broadcast = 0usize;
+        let mut worst_step = 0u64;
         for _ in 0..200_000 {
             ticks += 1;
+            let before = counted.reads.get();
             broadcast += sim.step(&counted, TICK, 4096).len();
+            worst_step = worst_step.max(counted.reads.get() - before);
             if sim.pending() == 0 {
                 break;
             }
         }
         println!(
-            "SPILL: ticks={ticks} reads={} writes={} broadcast={broadcast}",
+            "SPILL: ticks={ticks} reads={} writes={} broadcast={broadcast} worst step={worst_step}",
             counted.reads.get(),
             counted.writes.get()
         );
@@ -3752,8 +4128,53 @@ mod tests {
             counted.writes.get()
         );
         assert!(ticks <= 1_000, "the spill took {ticks} ticks");
-        assert!(counted.reads.get() <= 36_000, "{} reads", counted.reads.get());
-        assert!(counted.writes.get() <= 3_700, "{} writes", counted.writes.get());
+        assert!(counted.reads.get() <= 73_000, "{} reads", counted.reads.get());
+        assert!(counted.writes.get() <= 4_100, "{} writes", counted.writes.get());
+        assert!(worst_step <= 6_000, "the worst step read the world {worst_step} times");
+    }
+
+    /// The reference spill in wall-clock time, with the sheets levelled and
+    /// without, in one binary. Ignored because a time is only worth reading
+    /// from an optimised build:
+    /// `cargo test --release -p primitive_server --lib the_reference_spill_timed -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn the_reference_spill_timed() {
+        for sheets in [0, SHEETS_PER_STEP] {
+            let (mut total, mut worst, mut runs) = (0u128, 0u128, 0u32);
+            for _ in 0..20 {
+                let world = floored();
+                const EDGE: i32 = 3;
+                for x in -EDGE..=EDGE {
+                    for z in -EDGE..=EDGE {
+                        let wall = x.abs() == EDGE || z.abs() == EDGE;
+                        for y in 1..=2 {
+                            world.put(x, y, z, if wall { BLOCK_STONE } else { BLOCK_WATER });
+                        }
+                    }
+                }
+                let mut sim = Water { sheets_per_step: sheets, ..Water::new() };
+                for y in 1..=2 {
+                    world.put(EDGE, y, 0, BLOCK_AIR);
+                    sim.on_block_changed(EDGE, y, 0);
+                }
+                // The flow's own settling, which is where the two agree to
+                // stop being comparable: without sheets the list never
+                // empties, so the queue is what is waited on.
+                for _ in 0..2_000 {
+                    let start = std::time::Instant::now();
+                    sim.step(&world, TICK, 4096);
+                    let took = start.elapsed().as_nanos();
+                    total += took;
+                    worst = worst.max(took);
+                    if sim.queue.is_empty() && (sheets == 0 || sim.pending() == 0) {
+                        break;
+                    }
+                }
+                runs += 1;
+            }
+            println!("TIMED sheets={sheets}: {} us a spill, worst step {} us", total / u128::from(runs) / 1000, worst / 1000);
+        }
     }
 
     // ---- a vessel knocked over ----

@@ -735,8 +735,23 @@ fn step_one(item: &mut Item, world: &World, dt: f32) {
         // cart. Only what floats: a stone on the bed stays where it sank,
         // and asking the generator for a field of sunk stone would be the
         // one cost here that grows with the number of drops.
+        //
+        // **And the water the simulation is moving**, which the generator
+        // knows nothing about: a log in a pond somebody has just cut into
+        // goes out through the cut with the water, and one on a settled
+        // pond stays where it is (`fluid::running`). Four reads, and only
+        // for a floating thing that is in water at all.
         let (flow_x, flow_z) = if primitive_shared::types::floats(item.block) {
-            world.generator().river_current(item.position.0 as f32, item.position.1 as f32, item.position.2 as f32)
+            let (rx, rz) =
+                world.generator().river_current(item.position.0 as f32, item.position.1 as f32, item.position.2 as f32);
+            let cell = (item.position.0.floor() as i32, item.position.1.floor() as i32, item.position.2.floor() as i32);
+            let (sx, sz) = primitive_shared::fluid::running_velocity(primitive_shared::fluid::running(
+                cell.0,
+                cell.1,
+                cell.2,
+                &|x, y, z| world.cached_block(x, y, z),
+            ));
+            (rx + sx, rz + sz)
         } else {
             (0.0, 0.0)
         };
