@@ -183,9 +183,24 @@ pub fn accepts(slot: usize, block: BlockId) -> bool {
 /// the client has to know what the fuel slot will accept before it lets
 /// a player drag something into it.
 pub fn fuel_seconds(block: BlockId) -> Option<f32> {
-    // A green log is gone sooner, for the heat's reason (`GREEN_HEAT`).
-    let green = if crate::wood::is_green(block) { GREEN_BURN } else { 1.0 };
+    // A green log is gone sooner, for the heat's reason (`GREEN_HEAT`) --
+    // and so is anything wet (`burns_green`).
+    let green = if burns_green(block) { GREEN_BURN } else { 1.0 };
     fuel_seconds_seasoned(block).map(|seconds| seconds * green)
+}
+
+/// Does this burn as green wood does: a log not yet seasoned, or any fuel
+/// that is wet (`wet`)?
+///
+/// **One penalty for both, and never twice.** A wet stick and a green log
+/// are the same thing to a fire -- water it has to boil off before it gives
+/// heat -- and a player who has learnt "green wood cooks supper and fires no
+/// pot" already knows what wet kindling does. A soaked green log is not
+/// greener than green: the factors are not multiplied, so no fuel falls
+/// below the line `green_wood_cooks_supper_and_fires_no_pot` draws.
+#[inline]
+pub fn burns_green(block: BlockId) -> bool {
+    crate::wood::is_green(block) || crate::wet::is_wet(block)
 }
 
 /// How much of a seasoned log's burn a green one gives: seven tenths.
@@ -317,7 +332,7 @@ pub fn is_fuel(block: BlockId) -> bool {
 /// and a hundred degrees short of the line with the hottest shaft there
 /// is (`molten_metal_wants_charcoal_whatever_the_hearth`).
 pub fn fuel_degrees(block: BlockId) -> Option<f32> {
-    let green = if crate::wood::is_green(block) { GREEN_HEAT } else { 1.0 };
+    let green = if burns_green(block) { GREEN_HEAT } else { 1.0 };
     fuel_degrees_seasoned(block).map(|degrees| degrees * green)
 }
 

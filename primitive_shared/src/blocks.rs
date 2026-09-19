@@ -7333,6 +7333,43 @@ pub const BLOCKS: &[BlockDef] = &[
         turns: false,
         propped: true,
     },
+    // **The lean-to** (`types::BLOCK_LEAN_TO`): the straw pallet's row with
+    // a roof of sticks and leaves drawn over it. Two cells long and `faces`,
+    // for the pallet's reason -- a body lies in it -- and the pallet's two
+    // eighths of collider: the sticks and leaves over it are a roof a player
+    // crawls under, not a wall they walk into, and a lean-to that stopped a
+    // player at its mouth would be one nobody could get into to sleep. Taken
+    // apart by hand it comes back whole, as the pallet does; slept in, it
+    // falls in (`logic`, `collapse_lean_to` on the server).
+    BlockDef {
+        id: BLOCK_LEAN_TO,
+        name: "lean_to",
+        shape: Shape::Cube,
+        thickness: 2,
+        matter: Matter::Solid,
+        opacity: 0,
+        emission: 0,
+        hardness: Some(0.3),
+        felled: None,
+        needs: Tier::Hand,
+        work: Work::Wood,
+        tool: None,
+        drop: Some(BLOCK_LEAN_TO),
+        leaves_behind: None,
+        weight: 4.0,
+        stack: crate::inventory::MAX_STACK,
+        durability: None,
+        drag: 1.0,
+        grip: 1.0,
+        placeable: true,
+        foliage: false,
+        orientable: false,
+        faces: true,
+        falls: false,
+        container: false,
+        turns: false,
+        propped: true,
+    },
     BlockDef {
         id: BLOCK_LEATHER_BENCH,
         name: "leather_bench",

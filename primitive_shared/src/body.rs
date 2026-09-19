@@ -165,7 +165,10 @@ impl Rest {
     /// What a block is to lie on, if it is anything.
     pub fn of(block: crate::types::BlockId) -> Option<Rest> {
         match crate::types::block_kind(block) {
-            crate::types::BLOCK_STRAW_BED => Some(Rest::Straw),
+            // A lean-to is a bed of leaves under a roof of them: straw's
+            // night, and what the roof adds is warmth and the rain kept off
+            // (`shelter::is_lean_to`), not a better sleep.
+            crate::types::BLOCK_STRAW_BED | crate::types::BLOCK_LEAN_TO => Some(Rest::Straw),
             crate::types::BLOCK_BED => Some(Rest::Bed),
             _ => None,
         }

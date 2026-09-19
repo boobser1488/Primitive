@@ -90,6 +90,7 @@ pub mod types;
 pub mod vermin;
 pub mod weather;
 pub mod weathering;
+pub mod wet;
 pub mod wildfire;
 pub mod wood;
 pub mod worldgen;

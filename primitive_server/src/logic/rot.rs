@@ -250,7 +250,7 @@ impl Rot {
     }
 
     fn cures(block: primitive_shared::types::BlockId) -> bool {
-        clay::is_drying(block) || wood::is_green(block)
+        clay::is_drying(block) || wood::is_green(block) || primitive_shared::wet::is_wet(block)
     }
 
     /// What one step of the world's clock, number `step`, makes of a stack
@@ -270,6 +270,19 @@ impl Rot {
     pub fn cured(block: primitive_shared::types::BlockId, step: u64, ambient: &Ambient) -> primitive_shared::types::BlockId {
         if ambient.getting_wet {
             return block;
+        }
+        // **Wet things dry where there is warmth to dry them**: a chest by
+        // the hearth, a bundle left in the sun (`wet`). On this slow clock
+        // for what is not carried -- a pack dries on the player's own sample
+        // (`wet::pack_weather`) -- and in one step, because wet is one bit.
+        // Not in a cold chest in the shade, which is how a store of tinder
+        // stays wet until somebody moves it to the fire.
+        if primitive_shared::wet::is_wet(block) {
+            return if ambient.near_fire || ambient.sun_c > 0.0 {
+                primitive_shared::wet::dried(block)
+            } else {
+                block
+            };
         }
         if clay::is_drying(block) {
             if ambient.temperature_c <= KEEPS_BELOW_C {

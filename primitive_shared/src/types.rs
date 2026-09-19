@@ -2656,6 +2656,37 @@ pub const BLOCK_SAWHORSE: BlockId = 383;
 /// pack grinds away the rest of the old edge every time (`tools::hone`).
 pub const BLOCK_HONING_STONE: BlockId = 384;
 
+/// **A lean-to**: a ridge pole on two forked sticks, more sticks laid down
+/// both sides and a heap of leaves thrown over them, with a bed of leaves
+/// inside -- a debris hut, the shelter a traveller builds at dusk and leaves
+/// at dawn. Two cells long like the straw pallet (`is_bed`), and slept in
+/// like one (`body::Rest::Straw`).
+///
+/// **What it is for is the night away from home.** Inside it the rain does
+/// not reach (`shelter::is_lean_to`), the night's chill is half kept out and
+/// a body rests better than on the open ground (`comfort`), which is most of
+/// what a hut gives -- for a dozen sticks and an armful of leaves. What it
+/// costs is that it is **one night's**: the morning after it is slept in, it
+/// falls in, and gives back some of its sticks and leaves (`LEAN_TO_REMAINS`).
+/// So a trip out is a choice between carrying the makings of a camp every
+/// night and building a hut that stays; a home is the second.
+///
+/// Rejected: *a lean-to that lasts*. It would be a hut for a dozen sticks,
+/// and the hut, the thatch and the walls would be a longer way to the same
+/// roof. Rejected too: *a lean-to you put a bed into*. The debris hut *is*
+/// the bed -- a hollow in the leaves under a roof of them -- and a separate
+/// pallet inside a structure a cell and a half high would be two things to
+/// build, place and line up for one night.
+///
+/// Id 637, in the empty run after the roofs (621–628), clear of the ids other
+/// changes in flight take from the bottom of the free list.
+pub const BLOCK_LEAN_TO: BlockId = 637;
+
+/// What a lean-to gives back when it falls in: about half its sticks and
+/// half its leaves. The rest is broken, trodden and blown -- which is why the
+/// next night's camp costs something again.
+pub const LEAN_TO_REMAINS: [(BlockId, u32); 2] = [(BLOCK_STICK, 3), (BLOCK_LEAF_HANDFUL, 4)];
+
 /// The skeletons past the sixteenth species -- which, so far, is one rat.
 ///
 /// **Not an argument for a species, an argument the note on
@@ -4821,6 +4852,8 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     (BLOCK_IRON_SAW, "iron_saw"),
     (BLOCK_SAWHORSE, "sawhorse"),
     (BLOCK_HONING_STONE, "honing_stone"),
+    // The one night's shelter. See `BLOCK_LEAN_TO`.
+    (BLOCK_LEAN_TO, "lean_to"),
     // What a death leaves, in its two states. The backpack above is
     // still in this list and still loads; nothing makes a new one. See
     // `BLOCK_CORPSE`.
@@ -5028,6 +5061,9 @@ pub const PLACEABLE_BLOCKS: &[BlockId] = &[
     // anvil does. See `BLOCK_SAWHORSE` and `BLOCK_HONING_STONE`.
     BLOCK_SAWHORSE,
     BLOCK_HONING_STONE,
+    // ...and a lean-to, put down like the pallet it is and taken back whole
+    // until it has been slept in (`BLOCK_LEAN_TO`).
+    BLOCK_LEAN_TO,
     // ...and a stall, which comes back whole with its goods in the owner's
     // pack or spilled for anybody else (`stall`).
     BLOCK_STALL,
@@ -5567,7 +5603,7 @@ pub const BED_HEAD: BlockId = 0b100 << VARIANT_SHIFT;
 /// asks this and never names a kind.
 #[inline]
 pub fn is_bed(id: BlockId) -> bool {
-    matches!(block_kind(id), BLOCK_BED | BLOCK_STRAW_BED)
+    matches!(block_kind(id), BLOCK_BED | BLOCK_STRAW_BED | BLOCK_LEAN_TO)
 }
 
 /// One half of a plank bed lying `facing`. See [`bed_half_of`].
@@ -5961,8 +5997,11 @@ pub fn oriented(id: BlockId, axis: Axis) -> BlockId {
 /// protect by refusing one: it checks the id, the support and the space,
 /// exactly as it does for a block that does not turn.
 pub fn placed(held: BlockId, yaw: f32, clicked: (i32, i32, i32)) -> BlockId {
-    // A log in the world carries no seasoning (`wood`, "seasoning").
-    let held = crate::wood::seasoned(held);
+    // A log in the world carries no seasoning (`wood`, "seasoning"), and
+    // nothing in the world carries the water it was carried in (`wet`): a
+    // wet torch on a wall is a torch, and the bit it would keep there is a
+    // wood or a bite on every other kind.
+    let held = crate::wet::dried(crate::wood::seasoned(held));
     let laid = match Axis::of_normal(clicked.0, clicked.1, clicked.2) {
         Some(axis) => oriented(held, axis),
         None => held,
@@ -6634,7 +6673,7 @@ pub fn density(id: BlockId) -> f32 {
         BLOCK_WILLOW_LOG | BLOCK_WILLOW_PLANKS | BLOCK_PEGGED_WILLOW_PLANKS => 450.0,
         // Grass, straw, wool, feathers: air held in a shape.
         BLOCK_FIBER | BLOCK_LEAF_HANDFUL | BLOCK_CORD | BLOCK_TALL_GRASS | BLOCK_DRY_GRASS | BLOCK_WOOL | BLOCK_FEATHER
-        | BLOCK_STRAW_BED | BLOCK_LEAVES | BLOCK_BIRCH_LEAVES | BLOCK_APPLE_LEAVES
+        | BLOCK_STRAW_BED | BLOCK_LEAN_TO | BLOCK_LEAVES | BLOCK_BIRCH_LEAVES | BLOCK_APPLE_LEAVES
         | BLOCK_FIR_NEEDLES | BLOCK_SAXAUL_LEAVES | BLOCK_PINE_NEEDLES | BLOCK_WILLOW_LEAVES
         | BLOCK_BUSH_LEAVES | BLOCK_ACACIA_LEAVES | BLOCK_MAPLE_LEAVES | BLOCK_NEST | BLOCK_NEST_EGGS
         // Cotton is the most air-in-a-shape thing there is, and a bolt of
@@ -8225,6 +8264,15 @@ pub fn is_known_block(id: BlockId) -> bool {
     }
     if crate::build::is_staged(kind) {
         return crate::build::is_valid(id);
+    }
+    // **A wet thing spends the sixteenth bit on the water in it** (`wet`),
+    // on the kinds that get wet and nowhere else -- none of which spends
+    // that bit on anything. Asked before the wood below, whose bits it
+    // shares, and answered for the thing dry. Wet flour ages where dry
+    // flour does not (`food::rot_per_step`), so any stage of it is flour.
+    if id & crate::wet::WET != 0 && crate::wet::gets_wet(kind) {
+        let dry = id & !crate::wet::WET;
+        return if kind == BLOCK_FLOUR { dry & !VARIANT_MASK == kind } else { is_known_block(dry) };
     }
     // **Every one of a rack's six bits means something**: a facing, which
     // of its four cells, and two bits of what hangs (`RACK_TOP`). Asked
@@ -10114,6 +10162,9 @@ mod depth_tests {
                 "anvil",
                 "sawhorse",
                 "honing_stone",
+                // ...and the lean-to, two eighths of leaves like the pallet
+                // it is (`BLOCK_LEAN_TO`).
+                "lean_to",
                 // ...and a dead player: the body half a cell, like the
                 // bag it replaced, and what is left of it two eighths,
                 // like any other skeleton.

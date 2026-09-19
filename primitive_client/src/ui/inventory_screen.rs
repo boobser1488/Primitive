@@ -1588,6 +1588,19 @@ pub(crate) fn edge_corner(block: primitive_shared::types::BlockId) -> Option<[f3
     }
 }
 
+/// The mark a wet stack carries in the grid: a drop of the river's blue, in
+/// the top-left corner, over the darkened icon (`hotbar::icon_tint`).
+///
+/// **The same corner as the edge mark, and they never meet**: nothing that
+/// gets wet takes an edge (`wet::gets_wet` is fuel, food and soft goods), so
+/// the corner is one question -- "is something wrong with this one" -- with
+/// two answers a player tells apart by colour.
+const WET_DROP: [f32; 4] = [0.30, 0.55, 0.95, 1.0];
+
+pub(crate) fn wet_corner(block: primitive_shared::types::BlockId) -> Option<[f32; 4]> {
+    primitive_shared::wet::is_wet(block).then_some(WET_DROP)
+}
+
 pub(crate) fn draw_slot(
     p: &mut Painter,
     cell: Rect,
@@ -1696,8 +1709,9 @@ fn draw_slot_full(
         p.quad(Rect::new(x1 - size, y1 - size, x1, y1), colour);
     }
 
-    // The edge mark, in the top-left corner, for a tool gone dull or blunt.
-    if let Some(colour) = edge_corner(block) {
+    // The edge mark, in the top-left corner, for a tool gone dull or blunt --
+    // or the drop, for something wet (`wet_corner`).
+    if let Some(colour) = edge_corner(block).or_else(|| wet_corner(block)) {
         let size = CELL * 0.16;
         let (x0, y1) = (cell.x0 + widgets::BEVEL, cell.y1 - widgets::BEVEL);
         p.quad(Rect::new(x0, y1 - size - CELL * 0.03, x0 + size + CELL * 0.03, y1), WEAR_BACK);
@@ -2958,6 +2972,19 @@ mod tests {
         assert!(drawn(meat(0.1)).len() > unmarked, "a poor piece carries no corner");
         assert!(drawn(meat(0.95)).len() > unmarked, "a fine piece carries no corner");
         assert_ne!(quality_corner(meat(0.1).quality().band()), quality_corner(meat(0.95).quality().band()), "poor and fine look the same");
+    }
+
+    #[test]
+    fn a_wet_stick_carries_the_drop_and_a_dry_one_or_a_wet_axe_does_not() {
+        use primitive_shared::types::{BLOCK_BRONZE_AXE, BLOCK_STICK};
+        use primitive_shared::wet::wetted;
+        assert_eq!(wet_corner(wetted(BLOCK_STICK)), Some(WET_DROP));
+        assert_eq!(wet_corner(BLOCK_STICK), None);
+        // An axe never gets wet, so the corner is the edge's alone.
+        assert_eq!(wet_corner(wetted(BLOCK_BRONZE_AXE)), None);
+        let dry = crate::ui::hotbar::icon_tint(BLOCK_STICK, [1.0; 4]);
+        let wet = crate::ui::hotbar::icon_tint(wetted(BLOCK_STICK), [1.0; 4]);
+        assert!(wet[0] < dry[0] && wet[1] < dry[1], "a wet stick is drawn as bright as a dry one");
     }
 
     #[test]

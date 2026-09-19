@@ -1479,6 +1479,10 @@ mod tests {
                 "tile_slab",
                 "thatch_slab",
                 "branch_slab",
+                // ...and a lean-to, whose collider is its pallet of leaves:
+                // the roof over it is crawled under, never walked into
+                // (`types::BLOCK_LEAN_TO`).
+                "lean_to",
                 // ...and a dead player, in both of their states. The
                 // body is half a cell where the bag was and the bones
                 // two eighths, and a player must be able to step over

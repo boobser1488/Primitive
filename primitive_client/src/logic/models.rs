@@ -146,10 +146,14 @@ pub(crate) enum Prop {
     Sawhorse,
     /// A slab of stone on a stump (`types::BLOCK_HONING_STONE`).
     HoningStone,
+    /// The shut end of a lean-to, and its open end (`types::BLOCK_LEAN_TO`):
+    /// two halves written as the straw pallet's are.
+    LeanToHead,
+    LeanToFoot,
 }
 
 impl Prop {
-    pub(crate) const ALL: [Prop; 21] = [
+    pub(crate) const ALL: [Prop; 23] = [
         Prop::BedHead,
         Prop::BedFoot,
         Prop::StrawBedHead,
@@ -171,6 +175,8 @@ impl Prop {
         Prop::Stall,
         Prop::Sawhorse,
         Prop::HoningStone,
+        Prop::LeanToHead,
+        Prop::LeanToFoot,
     ];
 
     /// Its file under `assets/models`.
@@ -197,6 +203,8 @@ impl Prop {
             Prop::Stall => "furniture/stall.bbmodel",
             Prop::Sawhorse => "workstations/sawhorse.bbmodel",
             Prop::HoningStone => "workstations/honing_stone.bbmodel",
+            Prop::LeanToHead => "furniture/lean_to_head.bbmodel",
+            Prop::LeanToFoot => "furniture/lean_to_foot.bbmodel",
         }
     }
 }

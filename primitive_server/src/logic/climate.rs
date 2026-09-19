@@ -174,6 +174,16 @@ pub const WATER_C: f32 = 12.0;
 
 /// ...and how much of a soaking a swimmer gets, per second in the water.
 pub const WETTING_PER_SECOND: f32 = 0.6;
+
+/// How wet wading gets a body, at most: the legs, and not the rest.
+///
+/// **Wading was swimming.** The water test was the feet's cell, so a player
+/// crossing a ford ankle-deep came out as soaked as one who swam the lake,
+/// and the ford -- the reason to walk upstream -- was worth nothing. A body
+/// with its head and chest out of the water is wet to the knees: a third of
+/// the coat's warmth gone (`body::felt_ambient`), not all of it, and the pack
+/// on its back dry (`wet::pack_weather`).
+pub const WADING_WETNESS: f32 = 0.35;
 /// How fast a player dries off out of the rain, per second.
 ///
 /// Much slower than getting wet, which is both true and the point: a
@@ -464,6 +474,14 @@ pub struct Ambient {
     pub sheltered: bool,
     /// Whether their feet are in water.
     pub in_water: bool,
+    /// Whether the body is in the water and not only the feet: swimming, as
+    /// against wading. What soaks a body through ([`WADING_WETNESS`]) and
+    /// the pack on its back (`wet::pack_weather`).
+    pub swimming: bool,
+    /// Whether rain is reaching them: no roof, no lean-to. Apart from
+    /// `getting_wet`, which is the rain *or* the water, because a coat sheds
+    /// one and not the other ([`Ambient::step_wetness_dressed`]).
+    pub rained_on: bool,
     /// Degrees the sun adds on bare skin where they stand: zero at night,
     /// in rain, in water, under a roof and under a canopy. Apart from
     /// `temperature_c`, never added into it -- see `body::Exposure` for
@@ -487,6 +505,8 @@ impl Default for Ambient {
             near_fire: false,
             sheltered: false,
             in_water: false,
+            swimming: false,
+            rained_on: false,
             sun_c: 0.0,
             drying_per_second: DRYING_PER_SECOND,
             humidity: 0.5,
@@ -622,13 +642,24 @@ impl Ambient {
         // upgrades a roof and never makes one: a player under their own
         // smoke hole has the sky over them, and the rain with it.
         let room = indoors.filter(|i| i.room.is_enclosed());
+        // **A lean-to is a roof the count cannot see** (`shelter::is_lean_to`):
+        // leaves over sticks, which the light passes and `has_roof` walks
+        // straight through, over a body lying in the cell under them. So it
+        // is asked by name, and it is a roof -- the rain does not reach, the
+        // sun does not either -- that keeps out more of the night than a roof
+        // on posts does and less than walls (`LEAN_TO_EVENS_OUT`).
+        let lean_to = primitive_shared::shelter::is_lean_to(|x, y, z| world.cached_block(x, y, z), (fx, fy, fz));
         let shelter = match shelter_at(world, fx, fy, fz) {
             Shelter::Roofed if room.is_some() => Shelter::Enclosed,
+            Shelter::Open if lean_to => Shelter::Roofed,
             Shelter::Open => Shelter::Open,
             counted => counted,
         };
         let room = room.filter(|_| shelter == Shelter::Enclosed);
-        let evens_out = room.map_or(shelter.evens_out(), |i| i.room.evens_out(i.wind));
+        let mut evens_out = room.map_or(shelter.evens_out(), |i| i.room.evens_out(i.wind));
+        if lean_to {
+            evens_out = evens_out.max(primitive_shared::shelter::LEAN_TO_EVENS_OUT);
+        }
         let (earth_daily, earth_annual) = if shelter.has_roof() {
             earth_shares(cover_over(world, fx, fy, fz))
         } else {
@@ -701,6 +732,12 @@ impl Ambient {
         if in_water {
             degrees = degrees.min(WATER_C);
         }
+        // The chest's cell as well: a body is two cells, and only one with
+        // water at both is in it rather than standing in it.
+        let swimming = in_water
+            && world
+                .cached_block(fx, fy + 1, fz)
+                .is_some_and(primitive_shared::types::is_liquid);
 
         // ---- the fire ----
         //
@@ -780,6 +817,8 @@ impl Ambient {
             near_fire,
             sheltered: shelter.has_roof(),
             in_water,
+            swimming,
+            rained_on: raining_on_me,
             sun_c,
             // With the fire in it, which is why sitting at a hearth dries
             // a soaked player -- the thing `body::WET_METABOLIC_LOSS`
@@ -802,12 +841,46 @@ impl Ambient {
     /// Wetness is 0..1 and lives on the player rather than here, because
     /// it has memory: climbing out of a lake does not dry you.
     pub fn step_wetness(&self, wetness: f32, dt: f32) -> f32 {
+        self.step_wetness_dressed(wetness, dt, 0.0)
+    }
+
+    /// [`Ambient::step_wetness`] in clothes that shed `shed_rain` of the
+    /// rain (`equipment::Worn::shed_rain`, 0..1).
+    ///
+    /// **The coat's shedding was a number nothing read.** Every garment has
+    /// said how much rain it keeps off since the clothes were made, and the
+    /// rain soaked a player in leather exactly as fast as one in wool -- so
+    /// the one thing wool is bad at cost nothing, and the rule the design
+    /// note on wool is written around ("the best coat in the game is the one
+    /// you cannot wear in the rain") was not true. Now the rain comes through
+    /// at what the coat leaves of it. Only the rain: a coat does not keep a
+    /// river out, and a swimmer in plate is as wet as a swimmer in nothing.
+    ///
+    /// **Wading soaks to the knees** ([`WADING_WETNESS`]) and no further; a
+    /// body already wetter than that is not dried by standing in a ford.
+    pub fn step_wetness_dressed(&self, wetness: f32, dt: f32, shed_rain: f32) -> f32 {
         let dt = dt.clamp(0.0, 1.0);
-        let next = if self.in_water {
+        let shed = if shed_rain.is_finite() { shed_rain.clamp(0.0, 1.0) } else { 0.0 };
+        // Rain soaks more slowly than a lake does, which is the difference
+        // between being caught out and going for a swim.
+        let rain = if self.rained_on { WETTING_PER_SECOND * 0.35 * (1.0 - shed) * dt } else { 0.0 };
+        let next = if self.swimming {
             wetness + WETTING_PER_SECOND * dt
+        } else if self.in_water {
+            // A ford in the rain: the legs from the water, the rest from the
+            // sky, and neither dries while the other is going on.
+            let legs = if wetness < WADING_WETNESS {
+                (wetness + WETTING_PER_SECOND * dt).min(WADING_WETNESS)
+            } else {
+                wetness
+            };
+            legs + rain
+        } else if self.rained_on {
+            wetness + rain
         } else if self.getting_wet {
-            // Rain soaks more slowly than a lake does, which is the
-            // difference between being caught out and going for a swim.
+            // Wet with neither water nor rain: a struct a rack built by
+            // hand, which says only that it is getting wet. At the rain's
+            // pace, as it always was.
             wetness + WETTING_PER_SECOND * 0.35 * dt
         } else {
             // A rate off a struct that the racks build by hand and a
@@ -1800,6 +1873,7 @@ mod tests {
     fn getting_wet_is_fast_and_drying_off_is_not() {
         let soaking = Ambient {
             in_water: true,
+            swimming: true,
             getting_wet: true,
             ..Ambient::default()
         };
@@ -2137,5 +2211,53 @@ mod tests {
             seconds
         };
         assert!(seconds_to_dry(desert) < seconds_to_dry(meadow));
+    }
+
+    #[test]
+    fn a_lean_to_keeps_the_rain_off_and_half_the_night_out() {
+        use primitive_shared::types::{bed_half_of, Facing, BLOCK_LEAN_TO};
+        let world = flat_world();
+        let fires = Fires::new();
+        let y = ground(&world);
+        let night = midwinter();
+        let open = sample(&world, &fires, (0.5, y + 0.125, 0.5), night, Weather::Rain);
+        assert!(open.getting_wet && open.rained_on);
+        world.set_block(0, y as i32, 0, bed_half_of(BLOCK_LEAN_TO, Facing::South, false));
+        let inside = sample(&world, &fires, (0.5, y + 0.125, 0.5), night, Weather::Rain);
+        assert!(inside.sheltered, "the leaves were not a roof");
+        assert!(!inside.getting_wet && !inside.rained_on, "it rained into a lean-to");
+        assert!(inside.temperature_c > open.temperature_c + 2.0, "a lean-to was no warmer than the open: {} vs {}", inside.temperature_c, open.temperature_c);
+        // ...and it is a lean-to, not a house: standing beside it is the rain.
+        let beside = sample(&world, &fires, (2.5, y, 0.5), night, Weather::Rain);
+        assert!(beside.rained_on, "the lean-to sheltered the cell next to it");
+    }
+
+    #[test]
+    fn a_ford_wets_the_legs_and_a_swim_wets_the_body() {
+        let wading = Ambient { in_water: true, getting_wet: true, ..Ambient::default() };
+        let swimming = Ambient { swimming: true, ..wading };
+        let (mut legs, mut body) = (0.0, 0.0);
+        for _ in 0..20 {
+            legs = wading.step_wetness(legs, 1.0);
+            body = swimming.step_wetness(body, 1.0);
+        }
+        assert_eq!(legs, WADING_WETNESS, "a minute in a ford soaked a body through");
+        assert_eq!(body, 1.0);
+        // A body already soaked is not dried by standing in a river.
+        assert_eq!(wading.step_wetness(0.9, 1.0), 0.9);
+    }
+
+    #[test]
+    fn a_coat_that_sheds_the_rain_keeps_its_wearer_drier_and_one_that_does_not_does_not() {
+        let rain = Ambient { getting_wet: true, rained_on: true, ..Ambient::default() };
+        let wool = primitive_shared::equipment::garment(primitive_shared::types::BLOCK_WOOL_TUNIC).unwrap().shed_rain;
+        let leather = primitive_shared::equipment::garment(primitive_shared::types::BLOCK_LEATHER_TUNIC).unwrap().shed_rain;
+        let after = |shed| (0..10).fold(0.0, |w, _| rain.step_wetness_dressed(w, 1.0, shed));
+        assert!(after(leather) < after(wool), "leather let the rain in as fast as wool");
+        assert!(after(wool) < after(0.0) + 1e-6);
+        assert_eq!(after(1.0), 0.0, "a coat that sheds everything let rain in");
+        // ...and no coat keeps a river out.
+        let swim = Ambient { in_water: true, swimming: true, getting_wet: true, ..Ambient::default() };
+        assert_eq!(swim.step_wetness_dressed(0.0, 1.0, 1.0), swim.step_wetness(0.0, 1.0));
     }
 }

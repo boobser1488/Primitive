@@ -536,6 +536,14 @@ impl AntiCheat {
         } else if block != BLOCK_AIR && (!is_placeable(block) || !is_known_block(block)) {
             return self.flag(W_BAD_BLOCK, format!("block id {block} is not placeable"));
         }
+        // **Wet is a fact about a thing carried, never about a cell**
+        // (`wet`): `types::placed` takes the water off, so a wet id in a
+        // placement is a client that did not ask the rules. Known it is --
+        // a wet log is a real thing in a pack -- and that is why it has to
+        // be asked here and not left to `is_known_block`.
+        if primitive_shared::wet::is_wet(block) && !primitive_shared::dig::is_dug(block) {
+            return self.flag(W_BAD_BLOCK, format!("block id {block} is wet, and nothing in the world is"));
+        }
 
         // ...and one variant bit that is legal on a block the *server*
         // writes and never on one a client asks for. A rack carries

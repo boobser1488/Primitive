@@ -3981,6 +3981,19 @@ pub const RECIPES: &[Recipe] = &[
         returns: &[(crate::types::BLOCK_WHETSTONE, 1)],
         failure: 0.0,
     },
+    // **The lean-to** (`types::BLOCK_LEAN_TO`): a night's roof by hand, from
+    // what any wood gives -- sticks for the frame, an armful of leaves for
+    // the thatch and the bed. Dearer than the straw pallet by the roof, and
+    // cheap beside a hut, because it is gone in the morning: the price is
+    // paid again every night a player sleeps away from home.
+    Recipe {
+        name: "lean-to",
+        inputs: &[(BLOCK_STICK, 6), (crate::types::BLOCK_LEAF_HANDFUL, 8)],
+        output: (crate::types::BLOCK_LEAN_TO, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
 ];
 
 /// Why a craft cannot happen, or that it can.
@@ -4138,6 +4151,14 @@ pub fn has_ingredients(inventory: &Inventory, recipe: &Recipe) -> bool {
 /// never started.
 pub(crate) fn refuses(recipe: &Recipe, id: BlockId) -> bool {
     use crate::types::{block_kind, vessel_water, BLOCK_DOUGH, BLOCK_SALT};
+    // **Wet leather, pelt, cloth and wool wait until they are dry** (`wet`),
+    // whatever the row: a sodden hide does not cut and wet wool does not
+    // spin. Refused here, so the row counts only the dry ones and takes only
+    // those -- a pack with a wet hide and a dry one makes one coat, from the
+    // dry one, and the menu says it is short of the other.
+    if crate::wet::must_dry_first(id) {
+        return true;
+    }
     if block_kind(id) != BLOCK_JUG_WATER {
         return false;
     }
