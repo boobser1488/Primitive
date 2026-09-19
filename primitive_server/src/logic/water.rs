@@ -2413,6 +2413,30 @@ mod tests {
     }
 
     #[test]
+    fn water_over_snow_on_a_turf_lip_leaves_the_lip_where_it_was() {
+        // Snow on a lip lies in the cell over it (`types::rest_drop`), where
+        // the water runs; the lip under the snow is the same turf the water
+        // ran over bare, and the roots still hold it.
+        use primitive_shared::dig;
+        use primitive_shared::types::{BLOCK_GRASS, BLOCK_SNOW_COVER};
+        let world = floored();
+        let lip = dig::lowered(BLOCK_GRASS, 1);
+        for x in 1..=3 {
+            world.put(x, 1, 0, lip);
+            world.put(x, 2, 0, BLOCK_SNOW_COVER);
+        }
+        world.put(0, 2, 0, BLOCK_WATER);
+
+        let mut sim = Water::new();
+        sim.on_block_changed(0, 2, 0);
+        settle(&mut sim, &world, 4_000);
+
+        for x in 1..=3 {
+            assert_eq!(world.get(x, 1, 0), lip, "the water washed out the snowy lip at x {x}");
+        }
+    }
+
+    #[test]
     fn a_pool_is_used_up_by_what_runs_out_of_it() {
         // **The half of Minecraft's model this one refuses, and the
         // whole reason it was rewritten.** There a source is endless:

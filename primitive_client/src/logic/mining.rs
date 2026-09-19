@@ -368,9 +368,18 @@ impl Mining {
         if self.break_stage().is_none() {
             return;
         }
+        // **A flat thing cracks where it lies**, lowered onto a lip under it
+        // as the mesher draws it (`types::rest_drop`). The fitted box already
+        // knows how far, having been asked with the world round it
+        // (`fit_outline`), and a flat box starts at the floor it lies on.
+        let drop = if primitive_shared::types::is_flat(block) {
+            self.target_box(cell, block).map_or(0.0, |(min, _)| (cell.1 as f32 - min[1]).max(0.0))
+        } else {
+            0.0
+        };
         let at = [
             cell.0 as f32 - origin.x,
-            cell.1 as f32 - origin.y,
+            cell.1 as f32 - origin.y - drop,
             cell.2 as f32 - origin.z,
         ];
 

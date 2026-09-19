@@ -6826,6 +6826,62 @@ pub fn has_full_top(id: BlockId) -> bool {
         && !crate::wildfire::is_standing_torch(id)
 }
 
+/// **The height a coating lying on this block rests at**, in the block's own
+/// cell: 1.0 on a whole top, the bite's height on a block lowered from the
+/// top (`dig::lowered` -- a lip on a generated slope, a floor dug down, a
+/// handful heaped), `None` where a coating cannot lie.
+///
+/// What snow and ash ask instead of `has_full_top`. A lowered top is a level
+/// square the width of the cell, a quarter, a half or three quarters up it,
+/// and a coating is a sheet with no thickness: laid on that square it lies
+/// on ground, where a torch or a stool would stand on it and hang its foot
+/// over nothing. Asked `has_full_top`, every lip on every hillside
+/// (`worldgen::lips`) stayed a green stripe through the whole of a winter,
+/// and a burnt slope was grey with a green ring round each rise.
+///
+/// The coating stays in the cell over the block, where it always was, and is
+/// drawn and aimed at lowered onto this height ([`rest_drop`]). Weighed and
+/// rejected:
+///
+/// * **A snowy lip** -- the bite and the snow in one id. The lip's sixteen
+///   bits are full (kind, `dig::DUG`, the face, the depth), so it would be a
+///   kind of its own, and then every rule that reads turf (the spread, the
+///   plants, the grazing, the spade lifting the sod) has to learn a second
+///   turf, and ash would want a third. It also has no answer for a floor a
+///   player dug down, which is the same id as a lip of earth.
+/// * **The coating moved down into the lip's own cell.** A cell holds one
+///   id; the lip is already in it.
+/// * **A step's tread** is not in this list: a step is two levels, the tread
+///   and the riser's top, and one sheet cannot lie on both.
+#[inline]
+pub fn coating_rests_at(ground: BlockId) -> Option<f32> {
+    if has_full_top(ground) {
+        return Some(1.0);
+    }
+    match crate::dig::bite(ground) {
+        Some((crate::dig::Side::PosY, _)) => Some(crate::dig::left(ground)),
+        _ => None,
+    }
+}
+
+/// **How far below the floor of its own cell a flat thing lying on `ground`
+/// is drawn, aimed at and cracked**: the part of a lowered top that is not
+/// there (`coating_rests_at`), and nought on anything else.
+///
+/// Every flat thing and not only the coatings: a pebble or a stick lies on a
+/// turf lip as it does on turf (`can_grow_on`), and drawn from the floor of
+/// its cell it floated a quarter of a block over the grass. The mesher, the
+/// aim (`geometry::block_box_for_aim_near`), the ray (`physics`) and the
+/// cracks all take this one number, so none of them can put the snow
+/// somewhere the others do not.
+#[inline]
+pub fn rest_drop(lying: BlockId, ground: BlockId) -> f32 {
+    if !is_flat(lying) || has_full_top(ground) {
+        return 0.0;
+    }
+    coating_rests_at(ground).map_or(0.0, |top| 1.0 - top)
+}
+
 /// Adding `added` layers to what is already in a cell.
 ///
 /// Returns the new block and whatever did not fit, so a caller with
@@ -8014,7 +8070,13 @@ pub fn can_grow_on(plant: BlockId, ground: BlockId) -> bool {
     // `has_full_top` themselves -- a lip is ground for roots, not for
     // things set down. A plant stands on the lip's real top
     // (`types::collision_height`), which is where it is drawn.
-    let full_floor = has_full_top(ground) || crate::dig::is_turf_lip(ground);
+    // ...and **a coating lies on any level top** (`coating_rests_at`): snow,
+    // ash and fallen leaves on a lip of any soil and on a floor dug down, at
+    // its real height. A sheet with no thickness has no foot to hang over a
+    // gap, which is the only reason a torch is refused one.
+    let full_floor = has_full_top(ground)
+        || crate::dig::is_turf_lip(ground)
+        || (is_covering_flat(plant) && coating_rests_at(ground).is_some());
     // The whole id, for the one rule that asks what exactly is underneath:
     // the upper half of a tall plant stands on its own grown lower half.
     let whole = ground;
@@ -10565,6 +10627,13 @@ mod depth_tests {
                 // The top half of a door stands on its own lower half,
                 // which is the one thing it stands on (`door_partner`).
                 if is_door(id) && is_door(ground) {
+                    continue;
+                }
+                // A coating on a top dug down is not drawn from its own
+                // floor but on that top (`rest_drop`), so it stands over
+                // nothing: snow and ash on a lip, which this list refused
+                // until every winter hillside was green.
+                if is_covering_flat(id) && rest_drop(id, ground) > 0.0 {
                     continue;
                 }
                 if can_grow_on(id, ground) {

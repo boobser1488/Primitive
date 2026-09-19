@@ -21,9 +21,12 @@
 //! wall a camp in. A cover is walked through, and a sweep of the hand clears a
 //! path.
 //!
-//! On a full top under open sky only. Not where a plant or a stone lies (the
-//! snow would have to delete it), not on leaves (a crown of white squares),
-//! not under a roof, not on water, which is the frost's (`water::Frost`).
+//! On a level top under open sky only: a whole one, or one lowered a
+//! quarter at a time (a lip on a generated slope, a floor dug down), where
+//! the cover lies on the real top (`types::coating_rests_at`). Not where a
+//! plant or a stone lies (the snow would have to delete it), not on leaves
+//! (a crown of white squares), not under a roof, not on water, which is the
+//! frost's (`water::Frost`).
 //!
 //! ## What thaws
 //!
@@ -42,7 +45,7 @@
 use primitive_shared::protocol::BlockChange;
 use primitive_shared::season;
 use primitive_shared::types::{
-    block_kind, blocks_the_sky, has_full_top, is_cross, is_flat, is_leafy, is_liquid, BlockId, BLOCK_AIR,
+    block_kind, blocks_the_sky, coating_rests_at, is_cross, is_flat, is_leafy, is_liquid, BlockId, BLOCK_AIR,
     BLOCK_SNOW_COVER, CHUNK_SIZE_Y,
 };
 
@@ -211,7 +214,14 @@ impl Snowfall {
                 return None;
             }
             // The cell over it was air, or the walk would have stopped there.
-            return (blocks_the_sky(block) && has_full_top(block) && y < top).then_some(Top::Bare((x, y + 1, z)));
+            //
+            // **A lowered top takes snow like a whole one** -- a lip on a
+            // hillside, a floor dug down (`types::coating_rests_at`). The
+            // cover goes in the cell over it as it always did and is drawn
+            // on the lip's real top (`types::rest_drop`). Asked for a whole
+            // top, every rise of a winter meadow stayed green.
+            return (blocks_the_sky(block) && coating_rests_at(block).is_some() && y < top)
+                .then_some(Top::Bare((x, y + 1, z)));
         }
         None
     }
@@ -291,6 +301,51 @@ mod tests {
         let mut rain = Snowfall::seeded(6);
         run(&mut rain, &warm, true, WARM, 1000);
         assert_eq!(warm.get(1, 21, 1), BLOCK_AIR, "rain in warm air laid snow");
+    }
+
+    #[test]
+    fn a_hillside_of_lips_is_snowed_on_to_the_last_lip_and_thawed_back_to_its_turf() {
+        // A lip on every column but a few, a quarter, a half and three
+        // quarters of a block of turf (`worldgen::lips`), and the earth a
+        // spade leaves under one: the snow covers them as it covers a field
+        // and the thaw takes it back, leaving each lip the lip it was.
+        use primitive_shared::dig::{self, Side};
+        let world = field(RADIUS);
+        let ground_at = |x: i32, z: i32| {
+            let quarters = x.rem_euclid(4) as u8;
+            let lip = dig::lowered(BLOCK_GRASS, quarters);
+            if z.rem_euclid(5) == 0 {
+                dig::next_bite(lip, Side::PosY).expect("the sod comes off a lip")
+            } else {
+                lip
+            }
+        };
+        for x in -RADIUS..=RADIUS {
+            for z in -RADIUS..=RADIUS {
+                world.put(x, 20, z, ground_at(x, z));
+            }
+        }
+        let mut snow = Snowfall::seeded(8);
+        run(&mut snow, &world, true, FREEZING, 1500);
+        let (mut covered, mut lips) = (0, 0);
+        for x in -10..=10 {
+            for z in -10..=10 {
+                assert_eq!(world.get(x, 20, z), ground_at(x, z), "the snow changed the ground at {x},{z}");
+                if dig::is_dug(ground_at(x, z)) {
+                    lips += 1;
+                    covered += usize::from(world.get(x, 21, z) == BLOCK_SNOW_COVER);
+                }
+            }
+        }
+        assert!(covered * 10 >= lips * 9, "only {covered} of {lips} lips under snow after a long fall");
+
+        run(&mut snow, &world, false, WARM, 1500);
+        for x in -10..=10 {
+            for z in -10..=10 {
+                assert_eq!(world.get(x, 21, z), BLOCK_AIR, "snow outlived a thaw on the lip at {x},{z}");
+                assert_eq!(world.get(x, 20, z), ground_at(x, z), "the thaw changed the lip at {x},{z}");
+            }
+        }
     }
 
     #[test]
