@@ -3695,14 +3695,20 @@ pub const BLOCKS: &[BlockDef] = &[
         needs: Tier::Hand,
         work: Work::Stone,
         tool: None,
-        drop: Some(BLOCK_BRICKS),
+        // **Bricks, and not all of them**: mortar that has set takes a brick
+        // in four with it when the wall is knocked down (`block_drop_count`).
+        // A dry-laid wall gives every brick back; that is its whole bargain.
+        drop: Some(BLOCK_BRICK),
         leaves_behind: None,
         weight: 9.0,
         stack: crate::inventory::MAX_STACK,
         durability: None,
         drag: 1.0,
         grip: 1.0,
-        placeable: true,
+        // **Laid, not put down** (`build`): a wall of brickwork in the world is
+        // four courses of brick in mortar, and this block is what the fourth
+        // one writes. Crafted, it is a part the bloomery is built from.
+        placeable: false,
         foliage: false,
         orientable: false,
         faces: false,
@@ -11977,7 +11983,53 @@ pub const BLOCKS: &[BlockDef] = &[
     BlockDef { id: BLOCK_THATCH_SLAB, name: "thatch_slab", drop: Some(BLOCK_THATCH_SLAB), hardness: Some(0.6), work: Work::Plant, weight: 0.2, thickness: 4, ..STEP_ROW },
     BlockDef { id: BLOCK_BRANCH_ROOF, name: "branch_roof", drop: Some(BLOCK_BRANCH_ROOF), hardness: Some(0.7), work: Work::Wood, weight: 0.3, faces: true, ..STEP_ROW },
     BlockDef { id: BLOCK_BRANCH_SLAB, name: "branch_slab", drop: Some(BLOCK_BRANCH_SLAB), hardness: Some(0.5), work: Work::Wood, weight: 0.2, thickness: 4, ..STEP_ROW },
+    // ---- building in stages (`build`) ----
+    //
+    // **Handfuls are items**, put down by the build path and never by the
+    // placement one (`placeable: false`): a handful set down is a quarter of
+    // a cell of its own material, which is a bite (`dig`), not a block of its
+    // own. Their weight here is a placeholder -- a handful weighs a quarter
+    // of the block it came out of, rock and all (`types::block_weight`).
+    BlockDef { id: BLOCK_HANDFUL_EARTH, name: "handful_earth", drop: Some(BLOCK_HANDFUL_EARTH), weight: 0.35, ..HANDFUL_ROW },
+    BlockDef { id: BLOCK_HANDFUL_SAND, name: "handful_sand", drop: Some(BLOCK_HANDFUL_SAND), weight: 0.4, ..HANDFUL_ROW },
+    BlockDef { id: BLOCK_HANDFUL_GRAVEL, name: "handful_gravel", drop: Some(BLOCK_HANDFUL_GRAVEL), weight: 0.48, ..HANDFUL_ROW },
+    BlockDef { id: BLOCK_HANDFUL_CLAY, name: "handful_clay", drop: Some(BLOCK_HANDFUL_CLAY), weight: 0.43, ..HANDFUL_ROW },
+    BlockDef { id: BLOCK_STONE_CHIPS, name: "stone_chips", drop: Some(BLOCK_STONE_CHIPS), weight: 0.6, ..HANDFUL_ROW },
+    BlockDef { id: BLOCK_QUICKLIME, name: "quicklime", drop: Some(BLOCK_QUICKLIME), weight: 0.5, ..HANDFUL_ROW },
+    BlockDef { id: BLOCK_MORTAR, name: "mortar", drop: Some(BLOCK_MORTAR), weight: 0.5, ..HANDFUL_ROW },
+    BlockDef { id: BLOCK_DAUB, name: "daub", drop: Some(BLOCK_DAUB), weight: 0.45, ..HANDFUL_ROW },
+    BlockDef { id: BLOCK_COB, name: "cob", drop: Some(BLOCK_COB), weight: 0.5, ..HANDFUL_ROW },
+    // **Walls in stages.** Cubes by their rows, so a finished wall is a wall
+    // to the light, the smoke and the mesher's culling like any other cube;
+    // a wall part of the way up is the box of what has been laid
+    // (`build::stage_box`), exactly as a bite is the box of what is left.
+    // Nothing is dropped by the row: what a wall gives back is what was laid
+    // into it (`build::refund`), which a row cannot say.
+    //
+    // Laid in mortar: the brick's own numbers (`BLOCK_BRICKS`), because the
+    // three courses under the fourth are the same work.
+    BlockDef { id: BLOCK_BRICK_COURSES, name: "brick_courses", hardness: Some(3.2), work: Work::Stone, weight: 6.0, ..STAGE_ROW },
+    // **Dry-laid bricks come down in a second**: nothing holds one brick to
+    // the next but its weight. A third of the mortared wall's time, by hand.
+    BlockDef { id: BLOCK_DRY_BRICKS, name: "dry_bricks", hardness: Some(1.0), work: Work::Stone, weight: 8.0, ..STAGE_ROW },
+    BlockDef { id: BLOCK_DRY_STONE_WALL, name: "dry_stone_wall", hardness: Some(2.5), work: Work::Stone, weight: 1.6, ..STAGE_ROW },
+    // A panel, and light goes through a panel of rods: opacity nought, and a
+    // daubed one still closes a room to the smoke and the sky
+    // (`types::blocks_the_sky`). Wood: it burns with the house.
+    BlockDef { id: BLOCK_WATTLE, name: "wattle", opacity: 0, hardness: Some(1.0), work: Work::Wood, weight: 0.8, ..STAGE_ROW },
+    BlockDef { id: BLOCK_COB_WALL, name: "cob_wall", hardness: Some(2.2), work: Work::Any, weight: 1.4, ..STAGE_ROW },
 ];
+
+/// What every handful, lump and trowel of `build` is written against: an
+/// item, carried and never placed.
+const HANDFUL_ROW: BlockDef =
+    BlockDef { shape: Shape::Item, hardness: None, needs: Tier::Hand, work: Work::Any, placeable: false, ..COBBLE_ROW };
+
+/// ...and every wall it builds: a solid cube broken by hand, put in the world
+/// only by the build path, and giving back what went into it rather than
+/// itself.
+const STAGE_ROW: BlockDef =
+    BlockDef { needs: Tier::Hand, drop: None, placeable: false, ..COBBLE_ROW };
 
 /// The row every step and roofing slab starts from: cobble's numbers, which
 /// are the plank's too (three and a half seconds by hand, `Work::Any`).

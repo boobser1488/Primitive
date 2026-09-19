@@ -48,7 +48,7 @@ pub mod settings;
 // file inside the crate is not a reason to break them.
 pub use logic::{
     animals, anticheat, carrion, chunkgen, climate, commands, containers, drying, falling, felling,
-    fire, growth, peat,
+    fire, growth, peat, walls,
     items, plugins, profiles, rafts, rng, simulation, smelting, survival, water, weather, world,
 };
 #[cfg(feature = "mods")]
@@ -266,6 +266,9 @@ pub struct Context {
     /// is (`logic::peat`). Beside the racks and saved with them: the same
     /// kind of wait, in the same weather, on the same slow clock.
     pub peat: std::sync::Mutex<peat::Peat>,
+    /// Daub and cob drying on the walls they were laid on, and how far along
+    /// each is (`logic::walls`): the peat's weather, and its file beside it.
+    pub walls: std::sync::Mutex<walls::Walls>,
     /// How far along each burning hearth is. Not saved: see
     /// `logic::smelting`.
     pub smelting: std::sync::Mutex<smelting::Smelting>,
@@ -1264,6 +1267,15 @@ fn build_context(settings: ServerSettings, options: RunOptions) -> anyhow::Resul
             Err(e) => eprintln!("[world] could not load the peat: {e}"),
         }
     }
+    // ...and the walls drying where they were laid.
+    let mut wet_walls = walls::Walls::new();
+    if let Some(dir) = &world_dir {
+        match wet_walls.load(dir) {
+            Ok(n) if options.logging && n > 0 => println!("[world] {n} wall(s) drying"),
+            Ok(_) => {}
+            Err(e) => eprintln!("[world] could not load the drying walls: {e}"),
+        }
+    }
 
     // ...and the hides the test world was built with already on its
     // racks.
@@ -1361,6 +1373,7 @@ fn build_context(settings: ServerSettings, options: RunOptions) -> anyhow::Resul
         chests: std::sync::Mutex::new(chests),
         drying: std::sync::Mutex::new(racks),
         peat: std::sync::Mutex::new(sods),
+        walls: std::sync::Mutex::new(wet_walls),
         smelting: std::sync::Mutex::new(smelting::Smelting::new()),
         #[cfg(feature = "mods")]
         mods: std::sync::Mutex::new(mods::ModHost::new()),
@@ -2231,6 +2244,23 @@ async fn tick_loop(ctx: Arc<Context>) {
             };
             for at in turned {
                 tell_set_down(&ctx, at);
+            }
+            // ...and the walls drying in it, which change what the cell *is*:
+            // a lift dry enough for the next, or daub washed off its rods.
+            // Written as any edit is, so a washed lift that leaves air lets
+            // the sand over it come down.
+            let walls_changed = {
+                let weather = ctx.sky.lock().unwrap_or_else(|e| e.into_inner()).weather();
+                let fires = ctx.fires.lock().unwrap_or_else(|e| e.into_inner());
+                let mut wet = ctx.walls.lock().unwrap_or_else(|e| e.into_inner());
+                wet.step(&ctx.world, &fires, weather, ctx.clock.world_days(), dt)
+            };
+            for (at, now) in walls_changed {
+                if ctx.world.set_block(at.0, at.1, at.2, now) {
+                    broadcast_block(&ctx, at, now);
+                    ctx.falling.lock().unwrap_or_else(|e| e.into_inner()).on_block_changed(at.0, at.1, at.2);
+                    notify_mechanics(&ctx, at.0, at.1, at.2);
+                }
             }
             for at in stepped.finished {
                 fire_plugin_hook(
@@ -3599,6 +3629,15 @@ fn save_racks(ctx: &Arc<Context>, dir: &std::path::Path) -> Option<usize> {
         if sods.is_dirty() {
             if let Err(e) = sods.save(dir) {
                 eprintln!("[world] peat save failed: {e}");
+            }
+        }
+    }
+    // ...and the walls drying, on the same terms (`walls.bin`).
+    {
+        let mut wet = ctx.walls.lock().unwrap_or_else(|e| e.into_inner());
+        if wet.is_dirty() {
+            if let Err(e) = wet.save(dir) {
+                eprintln!("[world] walls save failed: {e}");
             }
         }
     }
@@ -8023,6 +8062,16 @@ pub(crate) fn spawn_block_drop(ctx: &Arc<Context>, broken: u16, at: (i32, i32, i
             Instant::now(),
         );
     }
+    // **A wall in stages gives back what was laid into it** (`build::refund`),
+    // which its row cannot say: how many bricks depends on how many courses.
+    if let Some(refund) = primitive_shared::build::refund(broken) {
+        let centre = (at.0 as f32 + 0.5, at.1 as f32 + 0.5, at.2 as f32 + 0.5);
+        let mut items = ctx.items.lock().unwrap_or_else(|e| e.into_inner());
+        for (block, count) in refund {
+            items.spawn(block, count, primitive_shared::geometry::wide(centre), (0.0, 0.0, 0.0), None, Instant::now());
+        }
+        return;
+    }
     let Some(drop) = primitive_shared::types::block_drop(broken) else {
         return; // water and air leave nothing behind
     };
@@ -8081,6 +8130,14 @@ pub(crate) fn spawn_block_drop(ctx: &Arc<Context>, broken: u16, at: (i32, i32, i
     // Centre of the cell that was just emptied, so the drop pops out of
     // the hole rather than out of its floor.
     let centre = (at.0 as f32 + 0.5, at.1 as f32 + 0.5, at.2 as f32 + 0.5);
+    // **The last quarter of a bitten heap of loose ground is a handful**, and
+    // so is every quarter still standing when a bite is broken some other
+    // way -- the other three came off one a swing (`dig_one_slice`). A whole
+    // block broken whole still drops the block. See `build`.
+    if let Some((handful, count)) = primitive_shared::build::handfuls_left(broken) {
+        items.spawn(handful, count, primitive_shared::geometry::wide(centre), (0.0, 0.0, 0.0), None, Instant::now());
+        return;
+    }
     items.spawn(
         drop,
         u32::from(primitive_shared::types::block_drop_count(broken)),

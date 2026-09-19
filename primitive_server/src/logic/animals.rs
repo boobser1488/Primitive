@@ -9522,6 +9522,17 @@ fn fits(world: &dyn BlockWorld, feet: (f64, f64, f64), frame: impl Into<Frame>) 
                     return false;
                 }
             }
+            // **Nor on the cope stones of a finished dry stone wall**
+            // (`build::bars_animals`): a row of stones on edge is not a place
+            // an animal puts its feet, so it neither climbs onto one nor
+            // plans a route over it -- which is how a wall a player steps
+            // over holds a flock at one cell high. Asked here, of the cells
+            // under the feet, because this is the one question both the
+            // climb and the route (`footing`) put.
+            let resting = feet.1 - (y0 as f32) < 0.5;
+            if resting && world.block(x, y0 - 1, z).is_some_and(primitive_shared::build::bars_animals) {
+                return false;
+            }
         }
     }
     true
@@ -9821,6 +9832,31 @@ mod tests {
             deer.at().1,
             deer.at().0
         );
+    }
+
+    /// **A field wall of dry stone holds a flock at one cell high**, where a
+    /// bench of earth the same height is a step (the test above): its cope
+    /// stones are not a place an animal puts its feet (`build::bars_animals`).
+    #[test]
+    fn a_finished_dry_stone_wall_one_cell_high_is_not_climbed() {
+        use primitive_shared::build;
+        use primitive_shared::types::{BLOCK_PEBBLE, BLOCK_STONE};
+        let mut wall = BLOCK_PEBBLE;
+        for _ in 0..4 {
+            wall = build::lay(wall, BLOCK_PEBBLE, false, BLOCK_STONE, false).expect("a course").result;
+        }
+        assert!(build::bars_animals(wall));
+        let world = meadow(20);
+        for z in -20..=20 {
+            world.put(4, 21, z, wall);
+        }
+        let mut animals = Animals::seeded(3);
+        let id = animals.spawn(Species::Deer, (0.5, 21.0, 0.5)).expect("deer");
+        for _ in 0..400 {
+            animals.step(&world, &player((-6.0, 21.0, 0.5)), 0.05, NOON);
+        }
+        let deer = animals.find(id).expect("the deer vanished");
+        assert!(deer.at().1 < 22.0 && deer.at().0 < 4.0, "the deer got over the wall to {:?}", deer.at());
     }
 
     /// ...and it does it as a scramble rather than a teleport. A whole
