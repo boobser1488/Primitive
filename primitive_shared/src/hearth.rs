@@ -507,7 +507,10 @@ pub fn needs_degrees(recipe: &Recipe) -> Option<f32> {
         // A jug of the sea boiled dry: water's boil, which a cooking fire
         // is past.
         | BLOCK_SALT => COOKING_C,
-        BLOCK_COAL => CHARCOAL_C,
+        // ...and birch bark cooked to tar in a closed pot, which wants a
+        // charring heat: the tar runs out of the bark at the few hundred
+        // degrees wood chars at, and a pot at the cooking heat only warms it.
+        BLOCK_COAL | BLOCK_TAR => CHARCOAL_C,
         // ...and roof tiles, which are fired as a brick is.
         BLOCK_BRICK | BLOCK_VESSEL | BLOCK_MOULD | BLOCK_JUG | BLOCK_BOWL | BLOCK_TILE_SLAB => FIRING_C,
         BLOCK_QUICKLIME => LIME_C,

@@ -136,6 +136,7 @@ fn state_word(kind: Kind, wound: Wound) -> Msg {
         (Kind::Cut | Kind::Burn, Some(Treatment::Bandage)) => Msg::WoundBandaged,
         (_, Some(Treatment::Splint)) => Msg::WoundSplinted,
         (_, Some(Treatment::Poultice)) => Msg::WoundPoultice,
+        (_, Some(Treatment::WillowBark)) => Msg::WoundBarked,
         (_, Some(Treatment::Bandage)) => Msg::WoundBandaged,
         (_, None) if heals_alone(kind, wound) => Msg::WoundHealsAlone,
         (Kind::Cut, None) => Msg::WoundBleeding,
@@ -209,6 +210,9 @@ fn kind_colour(kind: Kind, dressed: Option<Treatment>) -> [f32; 3] {
         (_, Some(Treatment::Bandage)) => [0.88, 0.84, 0.74],
         (_, Some(Treatment::Splint)) => [0.66, 0.50, 0.30],
         (_, Some(Treatment::Poultice)) => [0.46, 0.62, 0.30],
+        // Willow bark: the grey-green of the inner bark, told from the
+        // poultice's leaf green by being paler and greyer.
+        (_, Some(Treatment::WillowBark)) => [0.62, 0.64, 0.50],
         (Kind::Cut, None) => [0.80, 0.14, 0.12],
         (Kind::Bruise, None) => [0.40, 0.38, 0.74],
         (Kind::Fracture, None) => [0.62, 0.20, 0.62],

@@ -126,6 +126,14 @@ pub enum Notice {
     TrapDry,
     /// The throw came down on land, or against something.
     NoWater,
+    /// A snare that is set and has nothing in it (`snare`).
+    SnareEmpty,
+    /// A salt pan of the sea, not dry yet (`saltpan`).
+    PanDrying,
+    /// An empty salt pan, and no jug of water in the hand.
+    PanWantsSea,
+    /// An empty salt pan, and a jug of fresh water in the hand.
+    PanFreshWater,
 }
 
 impl Notice {
@@ -138,6 +146,10 @@ impl Notice {
             Notice::TrapEmpty => Msg::FishTrapEmpty,
             Notice::TrapDry => Msg::FishTrapDry,
             Notice::NoWater => Msg::FishingNoWater,
+            Notice::SnareEmpty => Msg::SnareEmpty,
+            Notice::PanDrying => Msg::PanDrying,
+            Notice::PanWantsSea => Msg::PanWantsSea,
+            Notice::PanFreshWater => Msg::PanFreshWater,
         }
     }
 }
@@ -201,6 +213,29 @@ pub fn trap_notice(
     match fishing::trap_water(block_at, trap) {
         Some((spot, _)) if spot.holds_fish() => Some(Notice::TrapEmpty),
         _ => Some(Notice::TrapDry),
+    }
+}
+
+/// What to tell a player reaching into a snare or a salt pan that has
+/// nothing to give, holding `held` -- or `None` if the server has something
+/// to do there (a hare to take, a robbed snare to set, salt to scrape, the
+/// sea to pour in). The server's `tend_snare` and `tend_pan` refuse the same
+/// cases in English; this is so they are said, in the player's language, and
+/// never sent.
+///
+/// **Whatever is in the hand**, as the fish trap's reach is: a player back
+/// at the trapline is carrying the day.
+pub fn set_notice(block: BlockId, held: Option<BlockId>) -> Option<Notice> {
+    use primitive_shared::types::{vessel_water, BLOCK_JUG_WATER, BLOCK_SALT_PAN, BLOCK_SALT_PAN_BRINE, BLOCK_SNARE};
+    match block_kind(block) {
+        BLOCK_SNARE => Some(Notice::SnareEmpty),
+        BLOCK_SALT_PAN_BRINE => Some(Notice::PanDrying),
+        BLOCK_SALT_PAN => match held.filter(|&h| block_kind(h) == BLOCK_JUG_WATER) {
+            None => Some(Notice::PanWantsSea),
+            Some(jug) if vessel_water(jug) != primitive_shared::body::Water::Salt => Some(Notice::PanFreshWater),
+            Some(_) => None,
+        },
+        _ => None,
     }
 }
 
@@ -440,11 +475,38 @@ mod tests {
 
     #[test]
     fn every_fishing_notice_has_a_line_in_every_language() {
-        for notice in [Notice::TooSmall, Notice::TooShallow, Notice::TrapEmpty, Notice::TrapDry, Notice::NoWater] {
+        for notice in [
+            Notice::TooSmall,
+            Notice::TooShallow,
+            Notice::TrapEmpty,
+            Notice::TrapDry,
+            Notice::NoWater,
+            Notice::SnareEmpty,
+            Notice::PanDrying,
+            Notice::PanWantsSea,
+            Notice::PanFreshWater,
+        ] {
             for language in crate::ui::lang::Language::ALL {
                 assert!(!language.text(notice.msg()).is_empty(), "{notice:?} in {language:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_set_snare_and_a_drying_pan_are_said_and_a_full_one_is_left_to_the_server() {
+        use primitive_shared::types::{
+            jug_of, BLOCK_BREAD, BLOCK_SALT_PAN, BLOCK_SALT_PAN_SALT, BLOCK_SNARE, BLOCK_SNARE_SPRUNG,
+        };
+        assert_eq!(set_notice(BLOCK_SNARE, Some(BLOCK_BREAD)), Some(Notice::SnareEmpty));
+        assert_eq!(set_notice(primitive_shared::snare::caught(1), None), None, "a hare was not taken");
+        assert_eq!(set_notice(BLOCK_SNARE_SPRUNG, None), None, "a robbed snare could not be set again");
+        assert_eq!(set_notice(primitive_shared::saltpan::brine(3), None), Some(Notice::PanDrying));
+        assert_eq!(set_notice(BLOCK_SALT_PAN_SALT, None), None, "salt was not scraped");
+        assert_eq!(set_notice(BLOCK_SALT_PAN, None), Some(Notice::PanWantsSea));
+        let sea = jug_of(primitive_shared::body::Water::Salt);
+        let river = jug_of(primitive_shared::body::Water::Fresh);
+        assert_eq!(set_notice(BLOCK_SALT_PAN, Some(river)), Some(Notice::PanFreshWater));
+        assert_eq!(set_notice(BLOCK_SALT_PAN, Some(sea)), None, "the sea was not poured in");
     }
 
     #[test]

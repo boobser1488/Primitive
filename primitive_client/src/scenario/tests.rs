@@ -1416,3 +1416,275 @@ fn a_swimmer_beside_a_cut_in_a_pond_is_carried_toward_it() {
     assert!(taken, "the pond poured out beside the swimmer and carried them {carried:.2} blocks");
     no_corrections(&s);
 }
+
+// ---------------------------------------------------------------- the larder, the trapline and the pack
+
+/// Crafts the row called `name` once, from the pack, the way the menu does.
+fn craft(s: &mut Scenario, name: &str) {
+    let index = primitive_shared::crafting::RECIPES
+        .iter()
+        .position(|r| r.name == name)
+        .unwrap_or_else(|| panic!("no row called {name}"));
+    s.send(ClientMessage::Craft { index: index as u16, times: 1 });
+}
+
+/// The pack's slot holding something of `kind`.
+fn slot_of(s: &Scenario, kind: t::BlockId) -> Option<usize> {
+    (0..primitive_shared::inventory::SLOTS).find(|&i| s.inventory.block_in(i).map(t::block_kind) == Some(kind))
+}
+
+#[test]
+fn a_snare_in_the_long_grass_takes_a_hare_only_while_nobody_is_near_and_gives_it_up_as_a_carcass() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let cell = (x0 + 2, GROUND + 1, z);
+    s.stand_at(feet_on(x0, z));
+    s.give(t::BLOCK_SNARE, 1);
+    s.select(t::BLOCK_SNARE);
+    s.look_at_face((cell.0, GROUND, cell.2), (0, 1, 0));
+    s.use_aimed();
+    assert!(s.until(3.0, |s| s.block(cell) == Some(t::BLOCK_SNARE)), "the snare was not set: {:?}", s.block(cell).map(t::block_name));
+    // Long grass all round it: a run a hare keeps to. The two cells toward
+    // the trapper are left bare, so the snare can still be reached.
+    let mut grass = Vec::new();
+    for dx in -2..=2 {
+        for dz in -2..=2 {
+            if (dx, dz) != (0, 0) && (dx, dz) != (-2, 0) && (dx, dz) != (-1, 0) {
+                grass.push(((cell.0 + dx, cell.1, cell.2 + dz), t::BLOCK_TALL_GRASS));
+            }
+        }
+    }
+    s.build(&grass);
+    s.seconds(0.5);
+    // A day of the clock with the trapper standing beside it: nothing comes.
+    for _ in 0..8 {
+        s.server().step_traps();
+    }
+    assert_eq!(s.block(cell), Some(t::BLOCK_SNARE), "a hare came to a snare with somebody standing over it");
+    // Away across the field, out of the hare's nose, and the clock runs on.
+    s.stand_at(feet_on(x0 - 20, z));
+    s.seconds(0.3);
+    let mut steps = 0;
+    while s.block(cell).map(t::block_kind) != Some(t::BLOCK_SNARE_CAUGHT) && steps < 80 {
+        s.server().step_traps();
+        s.frame();
+        steps += 1;
+    }
+    s.seconds(0.3);
+    assert_eq!(s.block(cell).map(t::block_kind), Some(t::BLOCK_SNARE_CAUGHT), "no hare in {steps} steps in good cover");
+    s.shot("snare_caught");
+    // Back, and a hand at it: the hare lies where it hung, and the snare is
+    // in the pack to be set again.
+    s.stand_at(feet_on(x0, z));
+    s.look_at(DVec3::new(cell.0 as f64 + 0.5, cell.1 as f64 + 0.03, cell.2 as f64 + 0.5));
+    s.use_aimed();
+    let hare = primitive_shared::animals::carcass_at_stage(primitive_shared::animals::Species::Hare, 0);
+    assert!(s.until(3.0, |s| s.block(cell) == Some(hare)), "the hare was not laid down: {:?}", s.block(cell).map(t::block_name));
+    assert!(s.until(2.0, |s| s.inventory.count(t::BLOCK_SNARE) == 1), "the snare did not come back into the pack");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_salt_pan_of_the_sea_dries_to_salt_under_a_clear_sky_and_rain_puts_it_back() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let cell = (x0 + 2, GROUND + 1, z);
+    s.server().console_command("/weather clear");
+    s.server().console_command("/time noon");
+    s.stand_at(feet_on(x0, z));
+    s.give(t::BLOCK_SALT_PAN, 1);
+    s.select(t::BLOCK_SALT_PAN);
+    s.look_at_face((cell.0, GROUND, cell.2), (0, 1, 0));
+    s.use_aimed();
+    assert!(s.until(3.0, |s| s.block(cell) == Some(t::BLOCK_SALT_PAN)), "the pan was not laid");
+    // A jug of the sea, poured in: the jug comes back empty.
+    s.give(t::jug_of(primitive_shared::body::Water::Salt), 1);
+    s.select(t::BLOCK_JUG_WATER);
+    s.look_at(DVec3::new(cell.0 as f64 + 0.5, cell.1 as f64 + 0.2, cell.2 as f64 + 0.5));
+    s.use_aimed();
+    assert!(
+        s.until(3.0, |s| s.block(cell).map(t::block_kind) == Some(t::BLOCK_SALT_PAN_BRINE)),
+        "the sea was not poured in: {:?}",
+        s.block(cell).map(t::block_name)
+    );
+    assert!(s.until(2.0, |s| s.inventory.count(t::BLOCK_JUG) == 1), "the jug did not come back empty");
+    // Two steps of sun, then a shower: back to the beginning.
+    s.server().step_traps();
+    s.server().step_traps();
+    s.seconds(0.2);
+    let dried = s.block(cell).map(primitive_shared::saltpan::dried).unwrap_or(0);
+    assert!(dried > 0, "the noon sun dried nothing (the air is {:?})", s.server().player_ambient());
+    s.server().console_command("/weather rain");
+    s.seconds(1.0);
+    s.server().step_traps();
+    s.seconds(0.2);
+    assert_eq!(s.block(cell), Some(primitive_shared::saltpan::brine(0)), "the rain did not put the pan back to the sea");
+    // Clear again, and it dries through.
+    s.server().console_command("/weather clear");
+    s.seconds(1.0);
+    for _ in 0..16 {
+        if s.block(cell) == Some(t::BLOCK_SALT_PAN_SALT) {
+            break;
+        }
+        s.server().step_traps();
+        s.seconds(0.1);
+    }
+    assert_eq!(s.block(cell), Some(t::BLOCK_SALT_PAN_SALT), "two days of sun left no crust");
+    s.shot("salt_pan_salt");
+    s.select(t::BLOCK_JUG);
+    s.use_aimed();
+    assert!(
+        s.until(3.0, |s| s.inventory.count(t::BLOCK_SALT) == primitive_shared::saltpan::YIELD),
+        "the crust was not scraped into the pack"
+    );
+    assert!(s.until(2.0, |s| s.block(cell) == Some(t::BLOCK_SALT_PAN)), "the scraped pan was not empty");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_deer_that_steps_on_a_pit_cover_falls_in_and_stays_and_so_does_a_player() {
+    use primitive_shared::animals::Species;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    // Two pits two deep, each with a cover flush with the field.
+    let deer_pit = (x0 + 8, z);
+    let our_pit = (x0 + 3, z);
+    s.stand_at(feet_on(x0, z));
+    for (x, z) in [deer_pit, our_pit] {
+        s.fill((x, GROUND - 1, z), (x, GROUND, z), t::BLOCK_AIR);
+        s.server().place_block(x, GROUND + 1, z, t::BLOCK_PIT_COVER);
+    }
+    s.seconds(0.3);
+    let deer = s
+        .server()
+        .spawn_animal(Species::Deer, (deer_pit.0 as f32 + 0.5, GROUND as f32 + 1.2, deer_pit.1 as f32 + 0.5))
+        .expect("a deer");
+    let fell = s.until(4.0, |s| s.block((deer_pit.0, GROUND + 1, deer_pit.1)) == Some(t::BLOCK_AIR));
+    assert!(fell, "the cover held a deer");
+    s.seconds(3.0);
+    let at = s.server().animal_position(deer).expect("the deer");
+    assert!(at.1 < GROUND as f32 + 0.5, "the deer is not in the pit: {at:?}");
+    s.seconds(5.0);
+    let later = s.server().animal_position(deer).expect("the deer");
+    assert!(later.1 < GROUND as f32 + 0.5, "the deer climbed out of a pit two deep: {later:?}");
+    // The cover does not know who stands on it.
+    s.stand_at((our_pit.0 as f64 + 0.5, GROUND as f64 + 1.2, our_pit.1 as f64 + 0.5));
+    assert!(
+        s.until(3.0, |s| s.block((our_pit.0, GROUND + 1, our_pit.1)) == Some(t::BLOCK_AIR)),
+        "a player walked over a pit's cover"
+    );
+    assert!(s.until(3.0, |s| s.feet().y < GROUND as f64 + 0.5), "the player did not fall in: {:?}", s.feet());
+    s.shot("pit_trap");
+}
+
+#[test]
+fn snowshoes_cross_a_drift_far_faster_than_bare_feet() {
+    use primitive_shared::inventory::SLOTS;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0 - 4, z));
+    s.fill((x0 - 2, GROUND + 1, z - 2), (x0 + 30, GROUND + 1, z + 2), t::BLOCK_SNOW);
+    let walked = |s: &mut Scenario| {
+        s.stand_at((x0 as f64 + 0.5, GROUND as f64 + 2.0, z as f64 + 0.5));
+        s.seconds(0.4);
+        let start = s.feet().x;
+        s.face(0.0);
+        s.hold(Action::Forward);
+        s.seconds(2.0);
+        s.release_all();
+        s.seconds(0.2);
+        s.feet().x - start
+    };
+    let bare = walked(&mut s);
+    s.give(t::BLOCK_SNOWSHOES, 1);
+    let slot = (0..SLOTS).find(|&i| s.inventory.block_in(i) == Some(t::BLOCK_SNOWSHOES)).expect("snowshoes");
+    s.send(ClientMessage::Equip { slot: slot as u8 });
+    assert!(s.until(3.0, |s| s.equipment.snowshoes()), "the snowshoes did not go on");
+    let shod = walked(&mut s);
+    assert!(shod > bare * 1.3, "snowshoes walked {shod:.2} where bare feet walked {bare:.2}");
+    no_corrections(&s);
+}
+
+#[test]
+fn milk_pressed_with_salt_ripens_to_cheese_in_a_cellar_and_mead_warms_a_cold_drinker() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    // Cheese: two bowls and a handful of salt, the bowls back.
+    s.give(t::BLOCK_BOWL_MILK, 2);
+    s.give(t::BLOCK_SALT, 1);
+    craft(&mut s, "press cheese");
+    assert!(s.until(3.0, |s| slot_of(s, t::BLOCK_CURD).is_some()), "no young cheese was pressed");
+    assert_eq!(s.inventory.count(t::BLOCK_BOWL), 2, "the bowls were not given back");
+    // Two days in a cellar's air.
+    s.server().work_pack(8, 8.0);
+    assert!(s.until(2.0, |s| s.inventory.count(t::BLOCK_CHEESE) == 1), "two days in the cellar did not ripen it");
+    // Mead: two combs in a jug of the river, a day in the warm.
+    s.give(t::BLOCK_HONEY, 2);
+    s.give(t::jug_of(primitive_shared::body::Water::Fresh), 1);
+    craft(&mut s, "set mead");
+    assert!(s.until(3.0, |s| slot_of(s, t::BLOCK_JUG_MUST).is_some()), "no must was set");
+    s.server().work_pack(4, 20.0);
+    assert!(s.until(2.0, |s| s.inventory.count(t::BLOCK_JUG_MEAD) == 1), "a warm day did not make mead");
+    // Drunk cold, on a full stomach: warmer, and the jug back.
+    s.server().chill_player(primitive_shared::body::CHILLED);
+    let slot = slot_of(&s, t::BLOCK_JUG_MEAD).expect("the mead");
+    s.send(ClientMessage::Eat { slot: slot as u8 });
+    assert!(s.until(3.0, |s| s.inventory.count(t::BLOCK_JUG) == 1), "the mead was not drunk, or its jug kept");
+    let warm = s.server().player_body_c().expect("a body");
+    assert!(warm > primitive_shared::body::CHILLED + 2.0, "the mead warmed nobody: {warm}");
+    // Pemmican: the rack's meat, fat and berries, pounded by hand.
+    s.give(t::BLOCK_DRIED_MEAT, 2);
+    s.give(t::BLOCK_FAT, 1);
+    s.give(t::BLOCK_BERRIES, 1);
+    craft(&mut s, "pemmican");
+    assert!(s.until(3.0, |s| s.inventory.count(t::BLOCK_PEMMICAN) == 2), "no pemmican was pounded");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_knife_takes_bark_off_a_birch_and_a_willow_and_bast_off_a_nettle_and_the_bark_binds_a_bruise() {
+    use primitive_shared::injury::{Kind, Part, Treatment};
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.build(&[
+        ((x0 + 2, GROUND + 1, z), t::BLOCK_BIRCH_LOG),
+        ((x0 + 2, GROUND + 2, z), t::BLOCK_BIRCH_LOG),
+        ((x0, GROUND + 1, z + 2), t::BLOCK_WILLOW_LOG),
+        ((x0, GROUND + 2, z + 2), t::BLOCK_WILLOW_LOG),
+        ((x0 - 2, GROUND + 1, z), t::BLOCK_NETTLE),
+    ]);
+    s.give(t::BLOCK_FLINT_KNIFE, 1);
+    s.select(t::BLOCK_FLINT_KNIFE);
+    s.look_at(DVec3::new(x0 as f64 + 2.0, GROUND as f64 + 2.2, z as f64 + 0.5));
+    s.use_aimed();
+    assert!(s.until(3.0, |s| s.inventory.count(t::BLOCK_BIRCH_BARK) == 1), "the birch gave no bark");
+    s.look_at(DVec3::new(x0 as f64 + 0.5, GROUND as f64 + 2.2, z as f64 + 2.0));
+    s.use_aimed();
+    assert!(s.until(3.0, |s| s.inventory.count(t::BLOCK_WILLOW_BARK) == 1), "the willow gave no bark");
+    assert_eq!(s.inventory.count(t::BLOCK_RESIN), 0, "a hardwood bled resin");
+    // The nettle, cut with the knife: bast where the fibre would have been.
+    let nettle = (x0 - 2, GROUND + 1, z);
+    s.look_at(DVec3::new(nettle.0 as f64 + 0.5, nettle.1 as f64 + 0.3, nettle.2 as f64 + 0.5));
+    s.input.breaking = true;
+    let cut = s.until(8.0, |s| s.block(nettle) == Some(t::BLOCK_AIR));
+    s.input.breaking = false;
+    assert!(cut, "the nettle was not cut");
+    s.stand_at(feet_on(nettle.0, nettle.2));
+    assert!(s.until(4.0, |s| s.inventory.count(t::BLOCK_NETTLE_BAST) == 1), "the nettle gave no bast");
+    assert_eq!(s.inventory.count(t::BLOCK_FIBER), 0, "the knife took fibre as well as bast");
+    // A bruised leg, and the bark bound on it.
+    s.server().injure(Part::LeftLeg, Kind::Bruise, 0.8);
+    s.seconds(0.3);
+    let slot = slot_of(&s, t::BLOCK_WILLOW_BARK).expect("the bark");
+    s.send(ClientMessage::TreatInjury { slot: slot as u8, part: Part::LeftLeg.index() as u8 });
+    let bound = s.until(3.0, |s| {
+        s.server()
+            .player_injuries()
+            .is_some_and(|w| w.wound(Part::LeftLeg, Kind::Bruise).dressed == Some(Treatment::WillowBark))
+    });
+    assert!(bound, "the bark was not bound on the bruise");
+    assert!(s.until(2.0, |s| s.inventory.count(t::BLOCK_WILLOW_BARK) == 0), "the bark was not spent");
+    no_corrections(&s);
+}

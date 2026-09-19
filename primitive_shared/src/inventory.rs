@@ -597,6 +597,20 @@ impl Equipment {
         self.worn.get_mut(slot.index()).and_then(|s| s.take())
     }
 
+    /// How far this set carries its wearer's smell: the rankest piece on
+    /// (`equipment::reek`), not a sum -- a tarred coat is smelled as far as
+    /// it is smelled, whatever else is worn with it.
+    pub fn reek(&self) -> f32 {
+        self.worn.iter().flatten().map(|stack| crate::equipment::reek(stack.block)).fold(1.0, f32::max)
+    }
+
+    /// Are snowshoes on the feet? What the physics asks of a drift
+    /// (`types::surface_drag_shod`).
+    pub fn snowshoes(&self) -> bool {
+        self.in_slot(crate::equipment::Slot::Feet)
+            .is_some_and(|stack| crate::types::block_kind(stack.block) == crate::types::BLOCK_SNOWSHOES)
+    }
+
     /// What the whole set is worth. See [`crate::equipment::Worn`].
     pub fn worn(&self) -> crate::equipment::Worn {
         let mut pieces = [None; crate::equipment::SLOTS];

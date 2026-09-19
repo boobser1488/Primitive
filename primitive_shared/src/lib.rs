@@ -55,6 +55,7 @@ pub mod discovery;
 pub mod dripstone;
 pub mod spikes;
 pub mod equipment;
+pub mod ferment;
 pub mod fishing;
 pub mod fluid;
 pub mod food;
@@ -74,6 +75,7 @@ pub mod net;
 pub mod packed;
 pub mod palm;
 pub mod pit;
+pub mod pitfall;
 /// The ladder from bare hands to steel, walked and totalled. Test-only: it is
 /// a measurement of the recipe table, not a part of the game.
 #[cfg(test)]
@@ -82,10 +84,12 @@ pub mod protocol;
 pub mod quality;
 pub mod rack;
 pub mod raft;
+pub mod saltpan;
 pub mod season;
 pub mod shelter;
 pub mod stall;
 pub mod showcase;
+pub mod snare;
 pub mod tools;
 pub mod types;
 pub mod vermin;

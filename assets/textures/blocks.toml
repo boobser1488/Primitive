@@ -1196,3 +1196,35 @@ pine_bough = { top = "terrain/pine_log_top.png", bottom = "terrain/pine_log_top.
 willow_twig = "terrain/willow_log_side.png"
 willow_bough = { top = "terrain/willow_log_top.png", bottom = "terrain/willow_log_top.png", side = "terrain/willow_log_side.png" }
 moss = "plants/moss.png"
+
+# ---- the larder, the trapline and the pack (`types::BLOCK_CURD`) ----
+#
+# Every picture here is an older one recoloured, the copper tools' way: the
+# cheeses are the loaf, the jugs the jug of water with its mouth changed, the
+# barks the leather, the tar the fat, the bast the sinew, the snares the cord.
+curd = "food/curd.png"
+cheese = "food/cheese.png"
+jug_must = "food/jug_must.png"
+jug_mead = "food/jug_mead.png"
+pemmican = "food/pemmican.png"
+birch_bark = "plants/birch_bark.png"
+tar = "food/tar.png"
+willow_bark = "plants/willow_bark.png"
+nettle_bast = "hide/nettle_bast.png"
+# The two garments wear the worn set's pictures and are told apart by their
+# tint (`types::garment_tint`), as every garment is.
+tarred_tunic = "worn/tunic.png"
+snowshoes = "worn/boots.png"
+# A snare lies on the ground, drawn from above: the noose, the noose with a
+# hare in it, the noose pulled loose.
+snare = "tools/snare.png"
+snare_caught = "tools/snare_caught.png"
+snare_sprung = "tools/snare_sprung.png"
+# **A pit's cover is the forest floor's own picture**, on purpose: a pit that
+# could be told from the leaf litter round it is a pit nothing walks into
+# (`pitfall`). It costs no layer.
+pit_cover = "plants/leaf_litter.png"
+# A salt pan is puddled clay; what is in it is its top.
+salt_pan = "pottery/clay.png"
+salt_pan_brine = { top = "pottery/salt_pan_brine.png", all = "pottery/clay.png" }
+salt_pan_salt = { top = "pottery/salt_pan_salt.png", all = "pottery/clay.png" }

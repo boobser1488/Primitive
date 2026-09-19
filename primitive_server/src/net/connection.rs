@@ -1080,11 +1080,15 @@ async fn read_loop(
                         if primitive_shared::pit::is_pit_kiln(broken) || primitive_shared::pit::is_log_pile(broken) {
                             crate::spill_pit(&ctx, (global_x, global_y, global_z), broken);
                         }
-                        crate::spawn_block_drop(
-                            &ctx,
-                            broken,
-                            (global_x, global_y, global_z),
-                        );
+                        // A nettle cut with a knife gives its bast instead of
+                        // its fibre (`types::strips_bast`).
+                        if !crate::strip_nettle(&ctx, broken, cut_with, (global_x, global_y, global_z)) {
+                            crate::spawn_block_drop(
+                                &ctx,
+                                broken,
+                                (global_x, global_y, global_z),
+                            );
+                        }
                         // ...and the other half of a bed goes with it,
                         // giving nothing: the half broken gave the bed.
                         // (And the other half of a tall plant, the same way.)

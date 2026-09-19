@@ -1288,7 +1288,10 @@ impl Vitals {
         // full of water, the nut stays in the pack.
         let water = food::water_in(block).unwrap_or(0.0);
         let thirsty = water > 0.0 && self.hydration < body::MAX_HYDRATION - 1.0;
-        if self.dead || !(food::worth_eating(self.nourishment, block) || thirsty) {
+        // ...and mead is worth drinking on a full stomach if the body is
+        // cold, for the coconut's reason: what it is for is not the food.
+        let cold = food::warmth_in(block).is_some() && self.body_c < body::COMFORT_LOW;
+        if self.dead || !(food::worth_eating(self.nourishment, block) || thirsty || cold) {
             return Outcome::Unchanged;
         }
         if water > 0.0 {
@@ -1329,6 +1332,11 @@ impl Vitals {
         let illness = food::sickness_seconds(block);
         if illness > 0.0 {
             self.swallow_illness(illness);
+        }
+        // **And a jug of mead warms whoever drinks it**, at once and up to
+        // comfortable (`food::warmth_in`).
+        if let Some(warmth) = food::warmth_in(block) {
+            self.warm_by(warmth);
         }
         if let Some(harm) = food::harm(block) {
             return self.hurt(harm.health, "ate something they should not have");
@@ -1452,6 +1460,21 @@ impl Vitals {
     /// `set_health` shows: they come off a file an operator can edit,
     /// and a `NaN` body temperature is a player who can never be warm
     /// and never be cold.
+    /// Lifts a cold body by `degrees`, never past the top of comfortable and
+    /// never down: what a jug of mead does (`food::warmth_in`).
+    ///
+    /// **Capped at `body::COMFORT_HIGH` and not at neutral**, so a player
+    /// who is merely cool feels the whole of it; and a player already over
+    /// the line is left where they are, because a drink that cooled a hot
+    /// body would be a second rule nobody asked for.
+    pub fn warm_by(&mut self, degrees: f32) {
+        if self.dead || !degrees.is_finite() || degrees <= 0.0 {
+            return;
+        }
+        let ceiling = self.body_c.max(body::COMFORT_HIGH);
+        self.body_c = (self.body_c + degrees).min(ceiling);
+    }
+
     pub fn set_warmth(&mut self, body_c: f32, wetness: f32) {
         self.body_c = if body_c.is_finite() {
             body_c.clamp(body::MIN_BODY_C, body::MAX_BODY_C)
@@ -1828,6 +1851,20 @@ mod hunger_tests {
         for _ in 0..((seconds / dt) as usize) {
             vitals.digest(effort, dt);
         }
+    }
+
+    #[test]
+    fn a_jug_of_mead_warms_a_cold_body_on_a_full_stomach_and_never_past_comfortable() {
+        use primitive_shared::types::BLOCK_JUG_MEAD;
+        let mut vitals = Vitals::new();
+        vitals.set_warmth(body::CHILLED, 0.0);
+        assert_eq!(vitals.eat(BLOCK_JUG_MEAD), Outcome::Changed, "a cold player could not drink it");
+        assert!((vitals.body_c - (body::CHILLED + food::MEAD_WARMTH_C)).abs() < 1e-4);
+        // Warm already: no hotter.
+        let mut warm = Vitals::new();
+        warm.set_warmth(body::COMFORT_HIGH - 1.0, 0.0);
+        warm.warm_by(food::MEAD_WARMTH_C);
+        assert_eq!(warm.body_c, body::COMFORT_HIGH);
     }
 
     #[test]

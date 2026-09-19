@@ -650,6 +650,7 @@ impl Scenario {
         self.player.speed_scale = primitive_shared::load::speed_scale(carried)
             * self.equipment.worn().mobility()
             * self.injuries.speed_factor();
+        self.player.snowshoes = self.equipment.snowshoes();
         self.player.buoyancy = primitive_shared::load::buoyancy(carried);
         self.player.treading = frozen;
         let sprinting = !frozen && self.input.action_down(&self.binds, Action::Sprint) && self.injuries.may_sprint();

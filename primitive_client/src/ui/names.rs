@@ -211,6 +211,7 @@ fn rules_label(block: BlockId) -> Option<&'static str> {
         .or_else(|| primitive_shared::tools::label(block))
         .or_else(|| primitive_shared::clay::label(block))
         .or_else(|| primitive_shared::wood::seasoning_label(block))
+        .or_else(|| primitive_shared::ferment::label(block))
 }
 
 /// The tooltip's first line for a stack: name, condition, count, weight.
@@ -342,6 +343,12 @@ const CONDITIONS: &[Name] = &[
     Name { id: "bone-dry", en: "bone-dry", simple: "dry, ready to fire", ru: "сухая", pl: "sucha" },
     Name { id: "green", en: "green", simple: "fresh cut, wet", ru: "сырое", pl: "surowe" },
     Name { id: "seasoning", en: "seasoning", simple: "drying out", ru: "подсыхает", pl: "schnie" },
+    // A young cheese and a jug of must, by how far along they are
+    // (`ferment::label`). Both nouns are masculine in Russian and Polish
+    // (сыр, кувшин; ser, dzban), which is what lets one word serve both.
+    Name { id: "fresh", en: "fresh", simple: "just made", ru: "свежий", pl: "świeży" },
+    Name { id: "working", en: "working", simple: "ripening", ru: "зреет", pl: "dojrzewa" },
+    Name { id: "nearly done", en: "nearly done", simple: "almost ready", ru: "почти готов", pl: "prawie gotowy" },
     Name { id: "wet", en: "wet", simple: "wet, dry it first", ru: "мокрое", pl: "mokre" },
 ];
 
@@ -607,6 +614,24 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "sawhorse", en: "Sawhorse", simple: "Sawing trestle", ru: "Козлы", pl: "Kozioł stolarski" },
     Name { id: "lean_to", en: "Lean-to", simple: "Leaf hut for one night", ru: "Шалаш", pl: "Szałas" },
     Name { id: "honing_stone", en: "Honing stone", simple: "Big sharpening stone", ru: "Точильная колода", pl: "Kamień szlifierski" },
+    Name { id: "curd", en: "Young cheese", simple: "New cheese, not ripe", ru: "Молодой сыр", pl: "Młody ser" },
+    Name { id: "cheese", en: "Cheese", simple: "Ripe cheese", ru: "Сыр", pl: "Ser" },
+    Name { id: "jug_must", en: "Jug of must", simple: "Jug of honey water, working", ru: "Кувшин сусла", pl: "Dzban nastawu" },
+    Name { id: "jug_mead", en: "Jug of mead", simple: "Jug of honey drink", ru: "Кувшин медовухи", pl: "Dzban miodu pitnego" },
+    Name { id: "pemmican", en: "Pemmican", simple: "Dried meat pounded with fat", ru: "Пеммикан", pl: "Pemikan" },
+    Name { id: "birch_bark", en: "Birch bark", simple: "Birch bark", ru: "Берёста", pl: "Kora brzozy" },
+    Name { id: "tar", en: "Birch tar", simple: "Black sticky tar", ru: "Берёзовый дёготь", pl: "Dziegieć brzozowy" },
+    Name { id: "tarred_tunic", en: "Tarred coat", simple: "Leather coat that keeps out rain", ru: "Просмолённая куртка", pl: "Smołowana kurta" },
+    Name { id: "willow_bark", en: "Willow bark", simple: "Willow bark, for bruises", ru: "Ивовая кора", pl: "Kora wierzby" },
+    Name { id: "snare", en: "Snare", simple: "Rope trap for hares", ru: "Силок", pl: "Sidła" },
+    Name { id: "pit_cover", en: "Pit cover", simple: "Leaves over a hole", ru: "Настил над ямой", pl: "Przykrycie dołu" },
+    Name { id: "salt_pan", en: "Salt pan", simple: "Clay tray for sea salt", ru: "Солеварня", pl: "Panew solna" },
+    Name { id: "snowshoes", en: "Snowshoes", simple: "Shoes for deep snow", ru: "Снегоступы", pl: "Rakiety śnieżne" },
+    Name { id: "nettle_bast", en: "Nettle bast", simple: "Nettle fibre for cloth", ru: "Крапивное волокно", pl: "Łyko pokrzywy" },
+    Name { id: "salt_pan_brine", en: "Salt pan of sea water", simple: "Salt pan, drying", ru: "Солеварня с рассолом", pl: "Panew z solanką" },
+    Name { id: "salt_pan_salt", en: "Salt pan with salt", simple: "Salt pan, salt ready", ru: "Солеварня с солью", pl: "Panew z solą" },
+    Name { id: "snare_caught", en: "Snare with a hare", simple: "Snare, hare caught", ru: "Силок с зайцем", pl: "Sidła z zającem" },
+    Name { id: "snare_sprung", en: "Robbed snare", simple: "Snare, pulled loose", ru: "Сбитый силок", pl: "Zerwane sidła" },
     Name { id: "plank_stairs", en: "Plank stairs", simple: "Wooden steps", ru: "Деревянные ступени", pl: "Drewniane schody" },
     Name { id: "cobblestone_stairs", en: "Cobblestone stairs", simple: "Stone steps", ru: "Каменные ступени", pl: "Kamienne schody" },
     Name { id: "tile_roof", en: "Tiled roof", simple: "Clay roof", ru: "Черепичная крыша", pl: "Dach z dachówki" },
@@ -1029,6 +1054,16 @@ pub const RECIPES: &[Name] = &[
     Name { id: "sawhorse", en: "Sawhorse", simple: "Sawing trestle", ru: "Козлы", pl: "Kozioł stolarski" },
     Name { id: "lean-to", en: "Lean-to", simple: "Leaf hut for one night", ru: "Шалаш", pl: "Szałas" },
     Name { id: "honing stone", en: "Honing stone", simple: "Big sharpening stone", ru: "Точильная колода", pl: "Kamień szlifierski" },
+    Name { id: "press cheese", en: "Press cheese", simple: "Make cheese from milk", ru: "Отжать сыр", pl: "Odcisnąć ser" },
+    Name { id: "set mead", en: "Set mead", simple: "Mix honey and water to brew", ru: "Поставить медовуху", pl: "Nastawić miód pitny" },
+    Name { id: "pemmican", en: "Pemmican", simple: "Dried meat pounded with fat", ru: "Пеммикан", pl: "Pemikan" },
+    Name { id: "distil tar", en: "Distil tar", simple: "Cook tar out of birch bark", ru: "Выгнать дёготь", pl: "Wytopić dziegieć" },
+    Name { id: "tar coat", en: "Tar a coat", simple: "Rub tar into a leather coat", ru: "Просмолить куртку", pl: "Smołować kurtę" },
+    Name { id: "snare", en: "Snare", simple: "Rope trap for hares", ru: "Силок", pl: "Sidła" },
+    Name { id: "pit cover", en: "Pit cover", simple: "Leaves over a hole", ru: "Настил над ямой", pl: "Przykrycie dołu" },
+    Name { id: "salt pan", en: "Salt pan", simple: "Clay tray for sea salt", ru: "Солеварня", pl: "Panew solna" },
+    Name { id: "snowshoes", en: "Snowshoes", simple: "Shoes for deep snow", ru: "Снегоступы", pl: "Rakiety śnieżne" },
+    Name { id: "nettle cloth", en: "Nettle cloth", simple: "Cloth from nettles", ru: "Крапивное полотно", pl: "Płótno z pokrzywy" },
     Name { id: "fir planks", en: "Fir planks", simple: "Fir boards", ru: "Еловые доски", pl: "Jodłowe deski" },
     Name { id: "fir beam", en: "Fir beam", simple: "Fir log from boards", ru: "Еловый брус", pl: "Jodłowa belka" },
     Name { id: "pine planks", en: "Pine planks", simple: "Pine boards", ru: "Сосновые доски", pl: "Sosnowe deski" },

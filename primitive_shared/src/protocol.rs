@@ -551,6 +551,10 @@ pub type PlayerId = u64;
 /// `Mounted` back, `ContainerKind::Saddlebags`, `Posture::Mounted`, a `tack`
 /// byte on `EntityKind::Animal`, and a species appended to `Species` (its
 /// index is on the wire). All appended, and 57 for the reason the rest is.
+/// ...and the larder, the trapline and the pack: blocks at ids 397-414
+/// (`types::BLOCK_CURD`), eleven rows at the end of `RECIPES`, and
+/// `injury::Treatment::WillowBark` appended (a dressing's place is on the
+/// wire, in `Injuries`). 57 still.
 pub const PROTOCOL_VERSION: u32 = 57;
 
 /// What kind of container a screen is showing.
