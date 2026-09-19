@@ -300,7 +300,9 @@ impl Scenario {
         let all_there = self.until(5.0, |s| {
             cells.iter().all(|&((x, y, z), block)| s.chunks.block_at(x, y, z) == Some(block))
         });
-        assert!(all_there, "the client was never told about what was built");
+        let missing = cells.iter().find(|&&((x, y, z), block)| self.chunks.block_at(x, y, z) != Some(block));
+        let has = missing.map(|&((x, y, z), _)| (self.chunks.block_at(x, y, z), self.server().block_at(x, y, z)));
+        assert!(all_there, "the client was never told about what was built: {missing:?}, it has {has:?}");
     }
 
     /// A box of one block, corners inclusive.

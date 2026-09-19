@@ -84,10 +84,14 @@
 //! Both halves of [`level_transfer`] exist to make that impossible, and
 //! there are tests here and in the simulation that say so.
 //!
-//! **It does not level perfectly.** Whole eighths cannot split a
-//! difference of one, so a surface with somewhere to drain settles as a
-//! wedge -- one eighth per block, sloping to the drain -- rather than
-//! flat.
+//! **Neighbours do not level perfectly.** Whole eighths cannot split a
+//! difference of one, so under [`level_transfer`] alone a surface with
+//! somewhere to drain settles as a wedge -- one eighth per block, sloping
+//! to the drain -- rather than flat. The wedge is not the resting state
+//! any more: [`level_sheet`] levels a whole connected sheet to within an
+//! eighth, an eighth a pass, from a list of the cells the flow has
+//! written (`level_one` in the simulation). The paragraph below is how
+//! the wedge came to be seen, and is kept for that.
 //!
 //! **The wedge is drawn as a wedge now.** For a long time every depth
 //! was drawn at one height, and this header argued that the wedge was
@@ -100,10 +104,10 @@
 //! argument: the player asked for water to be *seen* to fall as it
 //! spreads. So [`surface_height`] follows the depth, and the mesher
 //! slopes each cell's corners to its neighbours so the eighths read as
-//! a slope rather than a staircase. Whether to move the last eighth
-//! anyway, and what the two ways of doing it were measured to cost, is
-//! argued out in `primitive_server::logic::water`, in
-//! `a_pond_drains_down_to_a_wedge_and_no_further`.
+//! a slope rather than a staircase. What was tried to get rid of the
+//! wedge, and what finally did, is argued out in
+//! `primitive_server::logic::water`, on `Water::level_one`; the eighth a
+//! drained pond keeps in its bed soaks away there (`soaks_away`).
 //!
 //! ## Why the depth is written the opposite way round from Minecraft's
 //!
@@ -128,7 +132,8 @@
 //! day's work rather than a month's.
 
 use crate::types::{
-    block_layers, is_air, is_liquid, with_layers, BlockId, BLOCK_AIR, BLOCK_WATER, LAYERS_PER_BLOCK,
+    block_layers, can_be_displaced_by_falling, is_air, is_liquid, with_layers, BlockId, BLOCK_AIR, BLOCK_WATER,
+    LAYERS_PER_BLOCK,
 };
 
 /// How far below the top of its cell a full cell of water is drawn.
@@ -618,6 +623,149 @@ pub fn rain_transfer(here: u8) -> u8 {
     } else {
         1
     }
+}
+
+/// One pass of levelling a whole surface at once: `depths` is every cell
+/// of one connected sheet of water at one height, in any order, and each
+/// of the deepest hands **an eighth or two** ([`SHEET_STEP`]) to one of the
+/// shallowest, pair by pair, for as long as the pair is two or more apart.
+/// Answers whether anything moved.
+///
+/// ## Why the neighbour rule needs this
+///
+/// [`level_transfer`] cannot split a difference of one, so a sheet whose
+/// every pair of *neighbours* is within an eighth is at rest -- and that
+/// includes a wedge, a surface sloping an eighth a block for eight blocks.
+/// That wedge was the one thing left in the water that a player could see
+/// was not water: a channel poured full at one end that stopped five
+/// blocks short of its end, two ponds joined by a trench standing three
+/// quarters of a block apart for ever. Whole eighths are why a pair of
+/// neighbours cannot level; they are no reason a *sheet* cannot, because
+/// across a sheet the difference is between its ends, and that is as big
+/// as the wedge is long.
+///
+/// ## Why a little a pair and not the average at once
+///
+/// Writing every cell to the mean in one pass also levels the sheet, and
+/// it is the obvious shape. It teleports: a wedge of eight over eight
+/// blocks would jump half a block at each end in one step, which is a
+/// surface that snaps rather than settles. A little a pair a pass moves
+/// each cell by a step or two of eighths, so the far end rises and the
+/// near end sinks while the player watches, the way a pond settles.
+///
+/// **Two where the pair is far apart**, because one was measured to cost
+/// too much: every pass is a walk of the whole sheet, and a wedge eight
+/// deep took eight of them. On the reference spill in the simulation
+/// (`the_reference_spill_costs_no_more_than_it_was_measured_to_cost`) an
+/// eighth a pair a pass was 66,238 reads where the flow alone is 22,367;
+/// see that test's table for what two costs. Two eighths a step is still
+/// half of what the neighbour rule hands a dry cell in one, so nothing is
+/// seen to jump that the flow does not already move as far.
+///
+/// ## Why it stops
+///
+/// Every move is at most half the difference between the pair, from the
+/// deeper to the shallower, which lowers the sum of the squares of the
+/// depths by at least two --
+/// the same quantity [`level_transfer`] lowers -- and that sum is a whole
+/// number that cannot go below zero. A sheet no pair of whose cells is
+/// two apart moves nothing, and that is the only state it rests in.
+/// Nothing is made or lost: the pairs trade one for one.
+pub fn level_sheet(depths: &mut [u8]) -> bool {
+    if depths.len() < 2 {
+        return false;
+    }
+    // Sorted by index rather than in place, so the caller's order -- which
+    // is the order of the cells it will write back -- is kept.
+    let mut order: Vec<usize> = (0..depths.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(depths[i]));
+    let (mut deep, mut shallow) = (0, order.len() - 1);
+    let mut moved = false;
+    while deep < shallow {
+        let (from, to) = (order[deep], order[shallow]);
+        if depths[from] < depths[to] + 2 {
+            break;
+        }
+        // Two eighths where the pair is four or more apart, one otherwise:
+        // never more than half the difference, so the pair never crosses.
+        let step = ((depths[from] - depths[to]) / 2).min(SHEET_STEP);
+        depths[from] -= step;
+        depths[to] += step;
+        moved = true;
+        deep += 1;
+        shallow -= 1;
+    }
+    moved
+}
+
+/// The most one pair hands on in one pass of [`level_sheet`].
+pub const SHEET_STEP: u8 = 2;
+
+/// Which way the rules are moving water out of this cell, as eighths a
+/// step along x and z: what [`level_transfer`] would hand to each side
+/// less what each side would hand back. Nothing at all for a cell that is
+/// not water, and nothing for water at rest -- which is the point.
+///
+/// **A swimmer and a floating log feel the water the simulation is
+/// actually moving**, and only that. A river's current is the
+/// generator's (`WorldGen::river_current`) and the sea's is the clock's
+/// ([`current_at`]); what neither knows about is a player's own work -- a
+/// cut in a lake bed, a channel dug from a pond, a pond running over a
+/// lip -- and that is where water is visibly running and nothing was
+/// carried by it.
+///
+/// **Counted only where the rules would move something**, not wherever
+/// two neighbours differ. A settled sheet keeps differences of one
+/// eighth ([`level_transfer`] cannot split them), and a push read off
+/// every difference drifted a raft across a still pond toward wherever
+/// the odd eighths happened to be. Water at rest pushes nothing because
+/// water at rest is not moving.
+///
+/// `block` is the world, as `raft::step` takes it: this module has none.
+pub fn running<F>(x: i32, y: i32, z: i32, block: &F) -> (f32, f32)
+where
+    F: Fn(i32, i32, i32) -> Option<BlockId>,
+{
+    let Some(here) = block(x, y, z).filter(|b| is_liquid(*b)) else {
+        return (0.0, 0.0);
+    };
+    let here = depth(here);
+    let mut push = (0.0f32, 0.0f32);
+    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        // Unloaded, or something water cannot be in: no flow that way.
+        let Some(side) = block(x + dx, y, z + dz).filter(|b| can_be_displaced_by_falling(*b)) else {
+            continue;
+        };
+        let there = depth(side);
+        let out = f32::from(level_transfer(here, there)) - f32::from(level_transfer(there, here));
+        push.0 += dx as f32 * out;
+        push.1 += dz as f32 * out;
+    }
+    push
+}
+
+/// How fast running water carries a body, in blocks a second, per eighth
+/// a step it is handing on ([`running`]).
+///
+/// Half a block a second an eighth: a draining channel, whose cells hand
+/// on one or two, is a stroll's drift; the lip of a cut pond, handing on
+/// four, is two blocks a second -- half a swimmer's pace, so a swimmer can
+/// fight clear of a lip they see coming and a log cannot.
+pub const RUNNING_SPEED_PER_EIGHTH: f32 = 0.5;
+
+/// The fastest running water carries anything, in blocks a second: a
+/// lip with water pouring over it on three sides is not a rapid.
+pub const RUNNING_SPEED_MAX: f32 = 2.5;
+
+/// [`running`] as a velocity, in blocks a second along x and z.
+pub fn running_velocity(eighths: (f32, f32)) -> (f32, f32) {
+    let (vx, vz) = (eighths.0 * RUNNING_SPEED_PER_EIGHTH, eighths.1 * RUNNING_SPEED_PER_EIGHTH);
+    let speed = (vx * vx + vz * vz).sqrt();
+    if !speed.is_finite() || speed == 0.0 {
+        return (0.0, 0.0);
+    }
+    let scale = speed.min(RUNNING_SPEED_MAX) / speed;
+    (vx * scale, vz * scale)
 }
 
 /// How fast the open sea carries what floats on it, in blocks a second.
@@ -1202,10 +1350,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_sheet_levels_to_within_an_eighth_without_making_or_losing_any() {
+        // Every wedge and every lopsided sheet a player can make, small
+        // enough to walk exhaustively: four cells, every depth.
+        for a in 0..=SOURCE_DEPTH {
+            for b in 0..=SOURCE_DEPTH {
+                for c in 0..=SOURCE_DEPTH {
+                    for d in 0..=SOURCE_DEPTH {
+                        let mut sheet = [a, b, c, d];
+                        let total: u32 = sheet.iter().map(|&x| u32::from(x)).sum();
+                        let mut passes = 0;
+                        while level_sheet(&mut sheet) {
+                            passes += 1;
+                            assert!(passes <= 16, "{a} {b} {c} {d} never came to rest: {sheet:?}");
+                            assert!(sheet.iter().all(|&x| x <= SOURCE_DEPTH), "a pass overfilled a cell: {sheet:?}");
+                        }
+                        assert_eq!(sheet.iter().map(|&x| u32::from(x)).sum::<u32>(), total);
+                        let (low, high) = (sheet.iter().min().unwrap(), sheet.iter().max().unwrap());
+                        assert!(high - low <= 1, "{a} {b} {c} {d} rested at {sheet:?}");
+                    }
+                }
+            }
+        }
+    }
 
+    #[test]
+    fn a_wedge_settles_a_little_a_pass_rather_than_snapping_flat() {
+        let mut wedge = [8, 7, 6, 5, 4, 3, 2, 1];
+        let before = wedge;
+        assert!(level_sheet(&mut wedge));
+        for (was, now) in before.iter().zip(&wedge) {
+            assert!(was.abs_diff(*now) <= SHEET_STEP, "a cell jumped: {before:?} -> {wedge:?}");
+        }
+        let mut flat = [3, 4, 3, 4, 4];
+        assert!(!level_sheet(&mut flat), "a sheet within an eighth still moved");
+        assert_eq!(flat, [3, 4, 3, 4, 4]);
+    }
 
+    /// A row of cells along x at height 0, with stone all round it.
+    fn row(depths: &[u8]) -> impl Fn(i32, i32, i32) -> Option<BlockId> + '_ {
+        move |x, y, z| {
+            if y != 0 || z != 0 || x < 0 || x as usize >= depths.len() {
+                return Some(BLOCK_STONE);
+            }
+            Some(with_depth(depths[x as usize]))
+        }
+    }
 
-
-
-
+    #[test]
+    fn running_water_carries_toward_where_it_is_going_and_still_water_carries_nothing() {
+        // A pond running out over a dry floor: the water moves toward +x.
+        let (vx, vz) = running(1, 0, 0, &row(&[8, 6, 0]));
+        assert!(vx > 0.0 && vz == 0.0, "a cell pouring toward +x pushed ({vx}, {vz})");
+        let (vx, _) = running_velocity(running(1, 0, 0, &row(&[8, 6, 0])));
+        assert!(vx > 0.0 && vx <= RUNNING_SPEED_MAX);
+        // A settled sheet keeps differences of one it cannot split, and
+        // they are not a current: a raft on a still pond stays put.
+        for x in 0..5 {
+            assert_eq!(running(x, 0, 0, &row(&[4, 3, 4, 4, 3])), (0.0, 0.0), "still water pushed at {x}");
+        }
+        // Stone, and water with nowhere to go, push nothing either.
+        assert_eq!(running(0, 1, 0, &row(&[8])), (0.0, 0.0));
+        assert_eq!(running(0, 0, 0, &row(&[8])), (0.0, 0.0));
+    }
 }

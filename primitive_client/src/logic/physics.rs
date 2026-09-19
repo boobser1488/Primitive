@@ -1030,10 +1030,20 @@ impl Player {
 
             // In the water's own frame from here to the drag: a river's
             // current is ground that slides. See `current`.
+            //
+            // **Plus whatever the flow simulation is moving where the body
+            // is** (`fluid::running`), which the generator's river knows
+            // nothing about: swimming in a pond somebody has cut into, you
+            // are drawn toward the cut, and a lip with the pond pouring
+            // over it takes you with it if you let it. Read here from the
+            // chunks rather than handed in like `current`, because it is
+            // the cell the body is in and the collider already has them;
+            // it is nothing at all in water at rest, which is every sea.
+            let running = self.running_water(chunks);
             let flow = Vec3::new(
-                if self.current.0.is_finite() { self.current.0 } else { 0.0 },
+                if self.current.0.is_finite() { self.current.0 } else { 0.0 } + running.0,
                 0.0,
-                if self.current.1.is_finite() { self.current.1 } else { 0.0 },
+                if self.current.1.is_finite() { self.current.1 } else { 0.0 } + running.1,
             );
             self.velocity -= flow;
 
@@ -1706,6 +1716,23 @@ impl Player {
     /// drowning check and the anti-cheat have both read since the day a
     /// player drowned on the sea floor found it. See the note at the
     /// maximum below for what the client's copy of that mistake cost.
+    /// What the flow simulation is moving past the body, in blocks a second
+    /// as (x, z): `fluid::running` read at the cell the feet are in, or the
+    /// one over it where the feet are below a full cell's water. Directions
+    /// are the same in the local frame as in the world's, so nothing needs
+    /// turning back.
+    fn running_water(&self, chunks: &impl Solids) -> (f32, f32) {
+        let (x, z) = (self.at.x.floor() as i32, self.at.z.floor() as i32);
+        let feet = self.at.y.floor() as i32;
+        for y in [feet, feet + 1] {
+            let push = primitive_shared::fluid::running(x, y, z, &|x, y, z| chunks.block_at(x, y, z));
+            if push != (0.0, 0.0) {
+                return primitive_shared::fluid::running_velocity(push);
+            }
+        }
+        (0.0, 0.0)
+    }
+
     fn refresh_fluid_state(&mut self, chunks: &impl Solids) {
         let feet = self.at;
         let Some(column) = chunks.column(feet.x.floor() as i32, feet.z.floor() as i32) else {

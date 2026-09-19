@@ -632,27 +632,24 @@ where
 /// Water here is conserved and runs from fuller cells into emptier ones, so
 /// a difference in depth between neighbours *is* the current -- no second
 /// flow field to keep in step with the one the simulation already has.
-/// Standing water is level and pushes nothing.
+/// Standing water pushes nothing.
+///
+/// **Read through `fluid::running`, which counts only what the rules would
+/// actually move.** This used to take every difference between neighbours,
+/// and a settled pond keeps differences of one eighth that whole eighths
+/// cannot split -- so a raft left on a pond somebody had once drained into
+/// drifted, slowly and for ever, toward wherever the odd eighths lay.
+/// `running` hands on half of a difference, so it is doubled back here to
+/// keep `CURRENT_PUSH` meaning what it says: per whole cell of difference.
 fn current<F>(body: &Body, block: &F) -> (f32, f32)
 where
     F: Fn(i32, i32, i32) -> Option<BlockId>,
 {
     let (ix, iz) = (body.x.floor() as i32, body.z.floor() as i32);
     let cy = (body.y - 0.05).floor() as i32;
-    let Some(here) = block(ix, cy, iz).filter(|b| is_liquid(*b)) else {
-        return (0.0, 0.0);
-    };
-    let depth = fluid::depth(here) as f32;
-    let mut push = (0.0f32, 0.0f32);
-    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-        let Some(there) = block(ix + dx, cy, iz + dz).filter(|b| is_liquid(*b)) else {
-            continue;
-        };
-        let fall = (depth - fluid::depth(there) as f32) / fluid::SOURCE_DEPTH as f32;
-        push.0 += dx as f32 * fall;
-        push.1 += dz as f32 * fall;
-    }
-    (push.0 * CURRENT_PUSH, push.1 * CURRENT_PUSH)
+    let (ex, ez) = fluid::running(ix, cy, iz, block);
+    let per_cell = 2.0 / fluid::SOURCE_DEPTH as f32 * CURRENT_PUSH;
+    (ex * per_cell, ez * per_cell)
 }
 
 /// **Where the open sea is carrying this raft**, in blocks a second.

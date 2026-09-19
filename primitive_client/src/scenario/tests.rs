@@ -1003,3 +1003,91 @@ fn a_cob_lift_is_refused_on_a_wet_one_and_the_wall_waits_as_it_was_left() {
     assert_eq!(s.inventory.count(t::BLOCK_COB), 1, "the refused lump was spent");
     no_corrections(&s);
 }
+
+// ---------------------------------------------------------------- water
+
+#[test]
+fn two_pools_joined_by_a_trench_come_to_one_level() {
+    // The neighbour rules alone left a wedge in the trench and the far
+    // pool three quarters of a block below the near one, for ever. Played
+    // through the real server's flow, levelling and broadcast, and read
+    // off what this client was told.
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let g = GROUND;
+    s.stand_at(feet_on(x0 - 3, z));
+    s.fill((x0, g - 2, z - 2), (x0 + 12, g, z + 2), t::BLOCK_STONE);
+    s.fill((x0 + 9, g, z - 1), (x0 + 11, g, z + 1), t::BLOCK_AIR);
+    s.fill((x0 + 4, g, z), (x0 + 8, g, z), t::BLOCK_AIR);
+    s.fill((x0 + 1, g, z - 1), (x0 + 3, g, z + 1), t::BLOCK_AIR);
+    // The water straight into the world rather than through `fill`, which
+    // waits to see the blocks it wrote -- and these start moving at once.
+    for x in x0 + 1..=x0 + 3 {
+        for dz in -1..=1 {
+            s.server().place_block(x, g, z + dz, t::BLOCK_WATER);
+        }
+    }
+    let depth = |s: &Scenario, x: i32| s.block((x, g, z)).map_or(0, primitive_shared::fluid::depth);
+    let profile = |s: &Scenario| (x0 + 1..=x0 + 11).map(|x| depth(s, x)).collect::<Vec<u8>>();
+    // Until two looks two seconds apart agree: it has stopped moving, and
+    // it has to stop -- a pair trading an eighth for ever would never pass.
+    let mut last = profile(&s);
+    let mut settled = false;
+    for _ in 0..30 {
+        s.seconds(2.0);
+        let now = profile(&s);
+        if now == last && now.iter().any(|&d| d > 0) {
+            settled = true;
+            break;
+        }
+        last = now;
+    }
+    s.shot("two_pools_level");
+    assert!(settled, "the pools were still moving after a minute: {last:?}");
+    let (near, far) = (depth(&s, x0 + 2), depth(&s, x0 + 10));
+    assert!(
+        far >= 2 && near.abs_diff(far) <= 1 && (x0 + 4..=x0 + 8).all(|x| depth(&s, x) >= 2),
+        "the two pools came to rest at different levels: {last:?}"
+    );
+    no_corrections(&s);
+}
+
+#[test]
+fn a_swimmer_beside_a_cut_in_a_pond_is_carried_toward_it() {
+    // A pond three deep, walled on the side of a deep pit; the player
+    // floats in it, pressing nothing, and the wall is cut. Rivers carried
+    // a swimmer already; water a player set running did not.
+    //
+    // **Beside the cut, not in the middle of the pond**, and that is what
+    // the rule is rather than a convenience: a pond drawn on as one body
+    // (`draw_on_the_body`) goes down evenly everywhere, so the only cells
+    // handing water on across a difference the rules would move are the
+    // ones at the lip -- which is where the water is visibly running, and
+    // where a swimmer who lets it will be taken over.
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let g = GROUND;
+    s.stand_at(feet_on(x0 - 3, z));
+    // Dug into the field's own ground, as a player would: a pond of 360
+    // eighths, and a pit beside it that holds 504.
+    s.fill((x0 + 7, g - 6, z - 1), (x0 + 9, g, z + 1), t::BLOCK_AIR);
+    s.fill((x0 + 1, g - 3, z - 1), (x0 + 5, g - 1, z + 1), t::BLOCK_WATER);
+    s.fill((x0 + 1, g, z - 1), (x0 + 5, g, z + 1), t::BLOCK_AIR);
+    s.stand_at((x0 as f64 + 5.4, (g - 1) as f64, z as f64 + 0.5));
+    s.seconds(1.0);
+    assert!(s.player.in_water, "the scenario did not put the player in the water");
+    let still = s.feet().x;
+    s.seconds(1.0);
+    let drift = s.feet().x - still;
+    assert!(drift.abs() < 0.15, "a still pond carried the swimmer {drift:.2} blocks");
+
+    let before = s.feet().x;
+    for y in g - 3..=g - 1 {
+        s.server().place_block(x0 + 6, y, z, t::BLOCK_AIR);
+    }
+    s.seconds(2.5);
+    let carried = s.feet().x - before;
+    s.shot("carried_to_the_cut");
+    assert!(carried > 0.5, "the pond poured out beside the swimmer and carried them {carried:.2} blocks");
+    no_corrections(&s);
+}
