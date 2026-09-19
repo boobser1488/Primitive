@@ -612,6 +612,40 @@ mod tests {
     }
 
     #[test]
+    fn snow_and_ash_lie_on_every_lowered_top_at_its_own_height_and_nothing_that_stands_does() {
+        // **"Every lip of every hillside stays a green stripe in a white
+        // field."** A coating lies on the lip's real top (`types::rest_drop`),
+        // on turf and on the earth left when the sod is lifted, and on a floor
+        // dug down; a torch, a stone and a chair still want a whole floor.
+        use crate::types::{
+            can_grow_on, coating_rests_at, faced, rest_drop, Facing, BLOCK_ASH, BLOCK_DIRT, BLOCK_GRASS, BLOCK_LEAF_LITTER,
+            BLOCK_PLANK_STAIRS, BLOCK_SNOW_COVER, BLOCK_STONE, BLOCK_TORCH,
+        };
+        for quarters in 1..SLICES {
+            let top = f32::from(quarters) / f32::from(SLICES);
+            let turf = lowered(BLOCK_GRASS, quarters);
+            let earth = next_bite(turf, Side::PosY).expect("the sod comes off a lip");
+            for ground in [turf, earth, lowered(BLOCK_STONE, quarters)] {
+                assert_eq!(coating_rests_at(ground), Some(top), "a coating on {ground:#x} does not rest on its top");
+                for coating in [BLOCK_SNOW_COVER, BLOCK_ASH] {
+                    assert!(can_grow_on(coating, ground), "{coating} will not lie on {quarters} quarters of {ground:#x}");
+                    assert_eq!(rest_drop(coating, ground), 1.0 - top, "{coating} is not drawn on the top of {ground:#x}");
+                }
+                assert!(!crate::types::has_full_top(ground), "{quarters} quarters became a floor to stand a torch on");
+            }
+            // Litter keeps its own ground rule: the wood's earth, not stone.
+            assert!(can_grow_on(BLOCK_LEAF_LITTER, earth) && !can_grow_on(BLOCK_LEAF_LITTER, lowered(BLOCK_STONE, quarters)));
+        }
+        // A whole top is where it always was; a step is two levels and takes
+        // no sheet; nothing standing is lowered.
+        assert_eq!(rest_drop(BLOCK_SNOW_COVER, BLOCK_GRASS), 0.0);
+        assert_eq!(rest_drop(BLOCK_TORCH, lowered(BLOCK_GRASS, 2)), 0.0, "a thing that stands was lowered");
+        let step = faced(BLOCK_PLANK_STAIRS, Facing::West);
+        assert!(coating_rests_at(step).is_none() && !can_grow_on(BLOCK_SNOW_COVER, step), "snow lay across a step");
+        assert!(!can_grow_on(BLOCK_SNOW_COVER, next_bite(BLOCK_DIRT, Side::PosX).unwrap()), "snow lay on a ledge bitten from the side");
+    }
+
+    #[test]
     fn the_first_swing_at_a_turf_lip_lifts_the_sod_and_leaves_earth_as_high_as_the_lip() {
         use crate::types::{collision_height, BLOCK_DIRT, BLOCK_GRASS};
         for quarters in 1..SLICES {

@@ -33,7 +33,7 @@ use bytemuck::{Pod, Zeroable};
 use primitive_shared::lighting::{BlockSource, LightMap};
 use primitive_shared::types::ChunkPos;
 use primitive_shared::types::{
-    block_height, is_cross, is_cutout, is_flat, is_foliage, is_liquid, is_opaque, is_partial,
+    block_height, is_cross, is_cutout, is_flat, is_foliage, is_liquid, is_opaque, is_partial, rest_drop,
     is_translucent, BlockId, BLOCK_AIR, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z,
 };
 /// Only the tests build chunks a cell at a time now. `fill` addresses
@@ -2980,7 +2980,7 @@ pub fn build_mesh(
                     } else if is_flat(id) {
                         flat_block(
                             [gx, y, gz],
-                            [x as f32, y as f32, z as f32],
+                            [x as f32, y as f32 - rest_drop(id, cache.block_near(cell, y, 0, -1, 0)), z as f32],
                             id,
                             textures.layer_for_face(id, 0),
                             if reliefs_here { textures.relief(id) } else { None },
@@ -3104,9 +3104,14 @@ pub fn build_mesh(
                 // by it -- they draw *and* fall through to the cube.
                 let plain = plain_cube::known(id);
                 if !plain && is_flat(id) {
+                    // **On the real top of what it lies on**: a lip on a
+                    // slope, a floor dug down (`types::rest_drop`). From the
+                    // floor of its own cell the snow on every lip of a
+                    // winter hillside hung a quarter of a block over the
+                    // grass, with the turf showing through the gap.
                     flat_block(
                         [gx, y, gz],
-                        [x as f32, y as f32, z as f32],
+                        [x as f32, y as f32 - rest_drop(id, cache.block_near(cell, y, 0, -1, 0)), z as f32],
                         id,
                         textures.layer_for_face(id, 0),
                         if reliefs_here { textures.relief(id) } else { None },
@@ -8963,6 +8968,46 @@ mod tests {
                 mesh.vertices.iter().filter(|v| (v.position[1] - top).abs() < 1e-4).all(|v| v.tint() != 0),
                 "the top of {quarters} quarters of turf is not the meadow's colour"
             );
+        }
+    }
+
+    #[test]
+    fn snow_on_a_lip_is_drawn_on_the_lips_top_and_the_grass_under_it_is_not() {
+        // The cover is in the cell over the lip (`types::rest_drop`) and has
+        // to be drawn where the lip's top is: from its own cell's floor it
+        // hung over the turf with the green showing under it, and a turf top
+        // left drawn under it would fight it for every pixel.
+        use primitive_shared::dig;
+        use primitive_shared::types::{BLOCK_ASH, BLOCK_GRASS, BLOCK_SNOW_COVER};
+        use super::transparency_tests::{cache_of, mesh_of};
+        const AT: (i32, i32, i32) = (8, 4, 8);
+        for coating in [BLOCK_SNOW_COVER, BLOCK_ASH] {
+            for quarters in 1..dig::SLICES {
+                let lip = dig::lowered(BLOCK_GRASS, quarters);
+                let over = (AT.0, AT.1 + 1, AT.2);
+                let meshed = |on: BlockId| {
+                    mesh_of(&cache_of(|x, y, z| match (x, y, z) {
+                        c if c == AT => lip,
+                        c if c == over => on,
+                        _ => BLOCK_AIR,
+                    }))
+                };
+                let (bare, mesh) = (meshed(BLOCK_AIR), meshed(coating));
+                let top = AT.1 as f32 + f32::from(quarters) / f32::from(dig::SLICES);
+                let at_top = |mesh: &MeshBuffers, tinted: bool| {
+                    mesh.vertices.iter().filter(|v| (v.position[1] - top).abs() < 1e-4 && (v.tint() != 0) == tinted).count()
+                };
+                let highest = mesh.vertices.iter().map(|v| v.position[1]).fold(f32::MIN, f32::max);
+                assert!((highest - top).abs() < 1e-4, "{coating} on {quarters} quarters drawn up to {highest}, not {top}");
+                assert!(at_top(&mesh, false) >= 4, "no {coating} was drawn on the top of {quarters} quarters of turf");
+                // The turf's sides reach the top too; what the coating takes
+                // away is the four corners of the grass top, and only those.
+                assert_eq!(
+                    at_top(&mesh, true) + 4,
+                    at_top(&bare, true),
+                    "the grass top was drawn under the {coating} on {quarters} quarters"
+                );
+            }
         }
     }
 

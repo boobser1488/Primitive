@@ -459,6 +459,17 @@ pub fn block_box_for_aim_near(
         let (x, y, z) = (bx as f32, by as f32, bz as f32);
         return Some(([x + min[0], y + min[1], z + min[2]], [x + max[0], y + max[1], z + max[2]]));
     }
+    // **Snow on a lip is aimed at on the lip**, where it is drawn
+    // (`types::rest_drop`): the box of its own cell's floor was a wafer of
+    // air a quarter of a block over the snow, and a sweep of the hand at the
+    // white went through to the turf under it.
+    if crate::types::is_flat(block) {
+        let drop = crate::types::rest_drop(block, near(0, -1, 0));
+        let (mut min, mut max) = block_box_for_aim(block, bx, by, bz, include_liquid)?;
+        min[1] -= drop;
+        max[1] -= drop;
+        return Some((min, max));
+    }
     block_box_for_aim(block, bx, by, bz, include_liquid)
 }
 
@@ -1636,6 +1647,22 @@ mod tests {
         let (min, max) = block_box(BLOCK_SNOW, 3, 4, 5).unwrap();
         assert_eq!(min, [3.0, 4.0, 5.0]);
         assert_eq!(max, [4.0, 5.0, 6.0], "snow is a whole block now");
+    }
+
+    #[test]
+    fn snow_on_a_lip_is_aimed_at_on_the_lip_where_it_is_drawn() {
+        use crate::types::{BLOCK_AIR, BLOCK_GRASS, BLOCK_SNOW_COVER};
+        for quarters in 1..crate::dig::SLICES {
+            let lip = crate::dig::lowered(BLOCK_GRASS, quarters);
+            let under = |_: i32, dy: i32, _: i32| if dy == -1 { lip } else { BLOCK_AIR };
+            let (min, max) = block_box_for_aim_near(BLOCK_SNOW_COVER, 0, 11, 0, false, under).expect("snow is aimed at");
+            let top = 10.0 + f32::from(quarters) / 4.0;
+            assert_eq!(min[1], top, "the snow on {quarters} quarters is aimed at above the lip");
+            assert!(max[1] > top && max[1] < 11.0, "the snow's box on {quarters} quarters is {min:?}..{max:?}");
+        }
+        let whole = |_: i32, _: i32, _: i32| BLOCK_GRASS;
+        let (min, _) = block_box_for_aim_near(BLOCK_SNOW_COVER, 0, 11, 0, false, whole).unwrap();
+        assert_eq!(min[1], 11.0, "snow on whole turf moved");
     }
 
     #[test]

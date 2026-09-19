@@ -144,41 +144,46 @@ fn meadow_top(s: &Scenario, x: i32, z: i32) -> Option<(i32, f64, BlockId)> {
     (t::block_kind(block) == t::BLOCK_GRASS && clear).then(|| (y, y as f64 + f64::from(t::collision_height(block)), block))
 }
 
-#[test]
-fn a_generated_hill_is_walked_up_without_a_jump() {
-    // **The lips on a landforms slope** (`worldgen::lips`): a new world's
-    // meadow, a straight line up a rise of at least two whole blocks, found
-    // in the ground round the spawn, and walked with forward held and the
-    // jump never pressed. Before the lips every block of that rise was a
-    // step a body does not take without jumping.
-    let mut s = Scenario::with(primitive_server::settings::ServerSettings {
+/// A new world of the scale that lays lips (`worldgen::lips`).
+fn landforms_world() -> Scenario {
+    Scenario::with(primitive_server::settings::ServerSettings {
         world_preset: primitive_shared::worldgen::Preset::Normal,
         world_scale: primitive_shared::worldgen::Scale::Landforms,
         ..scenario_settings()
-    });
+    })
+}
+
+/// How many columns a rise is walked over.
+const RISE_RUN: i32 = 10;
+
+/// A straight line of meadow along +x round the spawn, [`RISE_RUN`] columns
+/// long, climbing two whole blocks or more with no step taller than a body
+/// takes and at least two lips on it: its first column, its z, and the
+/// surface of each column.
+fn gentle_rise(s: &Scenario) -> (i32, i32, Vec<(i32, f64, BlockId)>) {
     let spawn = cell_of(s.feet());
-    const RUN: i32 = 10;
     let step = f64::from(primitive_shared::geometry::PLAYER_STEP_HEIGHT);
-    let mut found = None;
-    'search: for z in spawn.2 - 40..spawn.2 + 40 {
-        for x0 in spawn.0 - 40..spawn.0 + 40 - RUN {
-            let Some(line) = (0..RUN).map(|k| meadow_top(&s, x0 + k, z)).collect::<Option<Vec<_>>>() else {
+    for z in spawn.2 - 40..spawn.2 + 40 {
+        for x0 in spawn.0 - 40..spawn.0 + 40 - RISE_RUN {
+            let Some(line) = (0..RISE_RUN).map(|k| meadow_top(s, x0 + k, z)).collect::<Option<Vec<_>>>() else {
                 continue;
             };
             let walkable = line.windows(2).all(|w| (w[1].1 - w[0].1).abs() <= step);
             let lips = line.iter().filter(|c| primitive_shared::dig::is_turf_lip(c.2)).count();
-            if walkable && line[RUN as usize - 1].0 - line[0].0 >= 2 && lips >= 2 {
-                found = Some((x0, z, line));
-                break 'search;
+            if walkable && line[RISE_RUN as usize - 1].0 - line[0].0 >= 2 && lips >= 2 {
+                return (x0, z, line);
             }
         }
     }
-    let (x0, z, line) = found.expect("no gentle rise of two blocks round the spawn of a landforms world");
-    let start = (x0 as f64 + 0.5, line[0].1, z as f64 + 0.5);
-    s.stand_at(start);
-    s.face(0.0);
-    s.camera.pitch = -0.25;
-    s.shot("smooth_after");
+    panic!("no gentle rise of two blocks round the spawn of a landforms world");
+}
+
+/// Forward held up the rise from its foot, the jump never pressed: says the
+/// player reached the top, and that no one frame lifted them more than a
+/// step.
+fn walk_up_the_rise(s: &mut Scenario, x0: i32, line: &[(i32, f64, BlockId)]) {
+    let step = f64::from(primitive_shared::geometry::PLAYER_STEP_HEIGHT);
+    let last_column = x0 + RISE_RUN - 1;
     s.hold(Action::Forward);
     let mut rises = Vec::new();
     let mut last = s.feet().y;
@@ -189,21 +194,37 @@ fn a_generated_hill_is_walked_up_without_a_jump() {
             rises.push(y - last);
         }
         last = y;
-        if s.feet().x > (x0 + RUN - 1) as f64 + 0.5 {
+        if s.feet().x > last_column as f64 + 0.5 {
             break;
         }
     }
     s.release_all();
     s.seconds(0.5);
-    let top = line[RUN as usize - 1].1;
+    let top = line[RISE_RUN as usize - 1].1;
     assert!(
-        s.feet().x > (x0 + RUN - 1) as f64 && (s.feet().y - top).abs() < 0.05,
-        "the walk up the hill stopped at {:?}, the top is {top} at x {}",
+        s.feet().x > last_column as f64 && (s.feet().y - top).abs() < 0.05,
+        "the walk up the hill stopped at {:?}, the top is {top} at x {last_column}",
         s.feet(),
-        x0 + RUN - 1
     );
     let biggest = rises.iter().copied().fold(0.0, f64::max);
     assert!(biggest <= step + 0.02, "one frame lifted the player {biggest:.3} of a block: {rises:?}");
+}
+
+#[test]
+fn a_generated_hill_is_walked_up_without_a_jump() {
+    // **The lips on a landforms slope** (`worldgen::lips`): a new world's
+    // meadow, a straight line up a rise of at least two whole blocks, found
+    // in the ground round the spawn, and walked with forward held and the
+    // jump never pressed. Before the lips every block of that rise was a
+    // step a body does not take without jumping.
+    let mut s = landforms_world();
+    let (x0, z, line) = gentle_rise(&s);
+    let start = (x0 as f64 + 0.5, line[0].1, z as f64 + 0.5);
+    s.stand_at(start);
+    s.face(0.0);
+    s.camera.pitch = -0.25;
+    s.shot("smooth_after");
+    walk_up_the_rise(&mut s, x0, &line);
     no_corrections(&s);
 
     // The same hillside with every lip in sight made whole again: the stair
@@ -211,7 +232,7 @@ fn a_generated_hill_is_walked_up_without_a_jump() {
     if std::env::var("PRIMITIVE_SCENARIO_SHOTS").is_ok() {
         let mut whole = Vec::new();
         for dz in -8..=8 {
-            for dx in -2..RUN + 12 {
+            for dx in -2..RISE_RUN + 12 {
                 if let Some((y, _, block)) = meadow_top(&s, x0 + dx, z + dz) {
                     if primitive_shared::dig::is_dug(block) {
                         whole.push(((x0 + dx, y, z + dz), primitive_shared::dig::whole(block)));
@@ -225,6 +246,105 @@ fn a_generated_hill_is_walked_up_without_a_jump() {
         s.camera.pitch = -0.25;
         s.shot("smooth_before");
     }
+}
+
+#[test]
+fn a_winter_hillside_of_lips_is_white_all_over_is_walked_up_and_is_swept_back_to_its_turf() {
+    // **"Every lip of every hillside stays a green stripe in a white field."**
+    // Snow wanted a whole top (`types::has_full_top`) and a lip is not one,
+    // so a winter over the landforms' meadows left each rise green. It lies
+    // on the lip's real top now (`types::coating_rests_at`), drawn and aimed
+    // at there (`types::rest_drop`). The cover is laid here by the rule the
+    // snowfall asks (`logic::snowfall`, whose own test lets it fall on a
+    // field of lips); the rain keeps the thaw off it while the player works.
+    let mut s = landforms_world();
+    s.server().console_command("/weather rain");
+    let (x0, z, line) = gentle_rise(&s);
+    let start = (x0 as f64 + 0.5, line[0].1, z as f64 + 0.5);
+
+    // The ground in sight, and the air over it.
+    let (mut ground, mut mown) = (Vec::new(), Vec::new());
+    for dz in -8..=8 {
+        for dx in -2..RISE_RUN + 12 {
+            let (x, z) = (x0 + dx, z + dz);
+            let Some(y) = (1..t::CHUNK_SIZE_Y as i32 - 1)
+                .rev()
+                .find(|&y| s.block((x, y, z)).is_some_and(|b| t::is_collidable(b) || t::is_liquid(b)))
+            else {
+                continue;
+            };
+            let block = s.block((x, y, z)).expect("the column was just read");
+            match s.block((x, y + 1, z)) {
+                Some(t::BLOCK_AIR) => ground.push(((x, y, z), block)),
+                // The tufts mown, so the picture is of the ground: snow keeps
+                // off a plant on a lip as on whole turf, and a meadow in
+                // leaf is green under any rule.
+                Some(over) if t::is_cross(over) && !t::is_cross(s.block((x, y + 2, z)).unwrap_or(t::BLOCK_AIR)) => {
+                    mown.push(((x, y + 1, z), t::BLOCK_AIR));
+                    ground.push(((x, y, z), block));
+                }
+                _ => {}
+            }
+        }
+    }
+    let snow_where = |lies: &dyn Fn(BlockId) -> bool| -> Vec<((i32, i32, i32), BlockId)> {
+        ground.iter().filter(|(_, b)| lies(*b)).map(|&((x, y, z), _)| ((x, y + 1, z), t::BLOCK_SNOW_COVER)).collect()
+    };
+    let look_up_the_hill = |s: &mut Scenario| {
+        look_from(s, DVec3::new(start.0 - 3.0, start.1 + 5.0, start.2 - 5.0), DVec3::new(start.0 + 6.0, line[5].1, start.2));
+    };
+
+    // Before: where the old rule let snow lie, whole tops only.
+    s.stand_at(start);
+    s.build(&mown);
+    s.build(&snow_where(&|b| t::has_full_top(b)));
+    s.seconds(0.5);
+    look_up_the_hill(&mut s);
+    s.shot("winter_hill_before");
+
+    // Now: every level top, lips and all.
+    s.build(&snow_where(&|b| t::can_grow_on(t::BLOCK_SNOW_COVER, b)));
+    s.seconds(0.5);
+    look_up_the_hill(&mut s);
+    s.shot("winter_hill_after");
+    let lips: Vec<_> = ground.iter().filter(|(_, b)| primitive_shared::dig::is_turf_lip(*b)).collect();
+    assert!(lips.len() >= 2, "no lips in sight of the rise");
+    for &&((x, y, z), lip) in &lips {
+        assert_eq!(s.block((x, y + 1, z)), Some(t::BLOCK_SNOW_COVER), "the lip at {x},{y},{z} stayed green");
+        assert_eq!(s.block((x, y, z)), Some(lip), "the snow changed the lip under it at {x},{y},{z}");
+    }
+
+    // Up it with forward held, as up the green one: the snow is walked
+    // through and the lips are still quarter steps.
+    s.stand_at(start);
+    s.face(0.0);
+    walk_up_the_rise(&mut s, x0, &line);
+
+    // A lip in sight, swept by hand from the ground beside it: the snow
+    // comes off and the turf under it is the lip it was, at the height it
+    // was. Stood on the column two to the west, looking down across the
+    // edge of the lip, which is the ray that comes into the lip's own cell
+    // through its side (`physics::raycast_in`).
+    let floor_at = |x: i32, z: i32| {
+        ground.iter().find(|((gx, _, gz), _)| (*gx, *gz) == (x, z)).map(|&((_, y, _), b)| f64::from(y) + f64::from(t::collision_height(b)))
+    };
+    let (&((lx, ly, lz), lip), stand) = lips
+        .iter()
+        .find_map(|l| Some((*l, floor_at(l.0 .0 - 2, l.0 .2)?)))
+        .expect("a lip with ground beside it");
+    let snow = (lx, ly + 1, lz);
+    s.stand_at((f64::from(lx) - 1.5, stand, f64::from(lz) + 0.5));
+    s.look_at(DVec3::new(f64::from(lx) + 0.5, f64::from(ly) + f64::from(t::collision_height(lip)) + 0.01, f64::from(lz) + 0.5));
+    assert_eq!(s.aimed(), Some((snow, t::BLOCK_SNOW_COVER)), "the snow on the lip is not where the hand reaches for it");
+    s.input.breaking = true;
+    let swept = s.until(8.0, |s| s.block(snow) == Some(t::BLOCK_AIR));
+    s.input.breaking = false;
+    assert!(swept, "the snow on the lip was never swept off");
+    s.seconds(0.5);
+    assert_eq!(s.block((lx, ly, lz)), Some(lip), "sweeping the snow took the lip with it");
+    assert_eq!(s.server().block_at(lx, ly, lz), Some(lip), "the server's lip is not the one swept");
+    s.shot("winter_hill_swept");
+    no_corrections(&s);
 }
 
 /// Walks along +x at `z` from `x0` into whatever is in front, and says

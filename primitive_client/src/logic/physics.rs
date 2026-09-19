@@ -2250,9 +2250,27 @@ fn raycast_in(
     let mut travelled = 0.0f32;
     let mut previous = cell;
     loop {
-        if let Some(face) =
-            ray_enters_block(chunks, origin, dir, cell, travelled, max_distance, include_liquid)
-        {
+        let mut hit = ray_enters_block(chunks, origin, dir, cell, travelled, max_distance, include_liquid)
+            .map(|(distance, face)| (distance, face, cell));
+        // **Snow on a lip is in the lip's cell to the eye** and in the cell
+        // over it to the world (`types::rest_drop`), so a ray that comes into
+        // the lip's cell through the side, over the lip, meets the snow
+        // without ever passing through the cell the snow is in -- and took
+        // the lip, turf and all, from under a player sweeping at the white.
+        // The nearer of the two is what was hit.
+        if chunks.block_at(cell[0], cell[1], cell[2]).and_then(primitive_shared::types::coating_rests_at).is_some_and(|top| top < 1.0) {
+            let above = [cell[0], cell[1] + 1, cell[2]];
+            if chunks.block_at(above[0], above[1], above[2]).is_some_and(primitive_shared::types::is_flat) {
+                if let Some((distance, face)) =
+                    ray_enters_block(chunks, origin, dir, above, travelled, max_distance, include_liquid)
+                {
+                    if hit.is_none_or(|(nearest, _, _)| distance < nearest) {
+                        hit = Some((distance, face, above));
+                    }
+                }
+            }
+        }
+        if let Some((_, face, cell)) = hit {
             // Where a new block would go: across the face that was
             // actually hit, which for anything that fills its cell
             // *is* the cell the ray came from and for anything else
@@ -2308,10 +2326,12 @@ fn raycast_in(
 /// traversal visits cells in order, and a hit before the cell started is
 /// a hit in some earlier cell that has already been ruled out.
 ///
-/// Returns *which face* the ray came in through when it hits, since that
-/// -- and not the cell the ray came from -- is what decides where a
-/// block placed against it goes. `Some(None)` is a ray that began inside
-/// the block, which has no face to name.
+/// Returns how far along the ray it hits, for the one caller that has two
+/// cells to choose between (snow on a lip, in `raycast_in`), and *which
+/// face* the ray came in through, since that -- and not the cell the ray
+/// came from -- is what decides where a block placed against it goes. A
+/// face of `None` is a ray that began inside the block, which has no face
+/// to name.
 fn ray_enters_block(
     chunks: &impl Solids,
     origin: [f32; 3],
@@ -2320,7 +2340,7 @@ fn ray_enters_block(
     entered: f32,
     max_distance: f32,
     include_liquid: bool,
-) -> Option<Option<usize>> {
+) -> Option<(f32, Option<usize>)> {
     if entered > max_distance {
         return None;
     }
@@ -2349,7 +2369,7 @@ fn ray_enters_block(
                 }
             }
         });
-        return nearest.map(|(_, face)| face);
+        return nearest;
     }
     let (min, max) = primitive_shared::geometry::block_box_for_aim_near(
         block,
@@ -2360,7 +2380,7 @@ fn ray_enters_block(
         near,
     )?;
     match primitive_shared::geometry::ray_box_entry(origin, dir, min, max, max_distance) {
-        Some((distance, face)) if distance <= max_distance => Some(face),
+        Some((distance, face)) if distance <= max_distance => Some((distance, face)),
         _ => None,
     }
 }
