@@ -873,6 +873,22 @@ impl Server {
         self.named(name).map(|handle| handle.state.lock().unwrap_or_else(|e| e.into_inner()).vitals.wetness())
     }
 
+    /// Whether the player called `name` is asleep in a bed, as the server has
+    /// it -- which is a tick ahead of any client, and that tick is what a
+    /// scenario timing a night on the client's word raced (see
+    /// `a_lean_to_keeps_its_sleeper_out_of_the_rain_and_falls_in_at_dawn`).
+    pub fn asleep(&self, name: &str) -> bool {
+        self.named(name).is_some_and(|handle| handle.state.lock().unwrap_or_else(|e| e.into_inner()).sleeping_in.is_some())
+    }
+
+    /// The server's own tick count: what a scenario waits on when it needs
+    /// the server to have *done* something a number of times, rather than
+    /// the client to have waited a while -- the two part company on a
+    /// machine running a whole test suite at once.
+    pub fn ticks(&self) -> u64 {
+        self.ctx.clock.tick()
+    }
+
     /// Sets how long a player's wet pack has been drying (`wet::pack_weather`),
     /// `peat_progress`'s way: a scenario sets it a breath short and watches
     /// the ordinary sample finish the job by a fire, or a shower undo it,
@@ -5634,7 +5650,7 @@ pub(crate) fn use_block(
         // A wet wad does not take the flame (`wet`), and says so rather
         // than falling through to feeding the fire with the torch.
         if held.is_some_and(primitive_shared::wet::will_not_light) {
-            handle.send(ServerMessage::Error("the torch is wet: dry it by a fire or in the sun first".to_string()));
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::TorchWet });
             return;
         }
         let (slot, lit) = {
@@ -5906,16 +5922,12 @@ pub(crate) fn use_block(
                 ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
                 notify_mechanics(ctx, at.0, at.1, at.2);
                 broadcast_block(ctx, at, field);
-                handle.send(ServerMessage::Chat {
-                    from: None,
-                    username: "server".to_string(),
-                    text: "ash dug into the furrow: the next crop here grows a third faster".to_string(),
-                });
+                handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::AshDugIn });
             }
             return;
         }
         if primitive_shared::wildfire::is_dressed(block) {
-            handle.send(ServerMessage::Error("this furrow already has ash in it".to_string()));
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::FurrowHasAsh });
             return;
         }
     }
@@ -6066,7 +6078,7 @@ pub(crate) fn use_block(
         .contents(at)
         .block_in(primitive_shared::hearth::FUEL_SLOT);
     if fuel.is_some_and(primitive_shared::wet::will_not_light) {
-        handle.send(ServerMessage::Error("the fuel is wet: dry it by a fire or in the sun first".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::FuelWet });
         return;
     }
     if !ctx
@@ -6264,13 +6276,13 @@ fn fill_vessel(
             .is_some();
         if holding_goods {
             drop(state);
-            handle.send(ServerMessage::Error("the jug has something in it".to_string()));
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::JugNotEmpty });
             return;
         }
         let single = state.inventory.count_in(slot) == 1;
         if !single && !state.inventory.has_room_for(full, 1) {
             drop(state);
-            handle.send(ServerMessage::Error("your pack is full".to_string()));
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PackFull });
             return;
         }
         if state.inventory.take_from(slot, 1) == 0 {
@@ -6344,7 +6356,7 @@ fn pick_by_hand(
     if !picked {
         let restored = ctx.world.set_block(at.0, at.1, at.2, block);
         debug_assert!(restored, "apples written off a moment ago could not be put back");
-        handle.send(ServerMessage::Error("your pack is full".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PackFull });
         return;
     }
     ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
@@ -6480,14 +6492,14 @@ fn use_barrel(
         BLOCK_JUG_WATER => match barrel_after_pouring(barrel, held) {
             Some(next) => (next, BLOCK_JUG),
             None => {
-                handle.send(ServerMessage::Error("the barrel is full".to_string()));
+                handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::BarrelFull });
                 return;
             }
         },
         BLOCK_JUG => match barrel_after_dipping(barrel) {
             Some((next, full)) => (next, full),
             None => {
-                handle.send(ServerMessage::Error("the barrel is empty".to_string()));
+                handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::BarrelEmpty });
                 return;
             }
         },
@@ -6621,7 +6633,7 @@ fn drink_from_barrel(
     let Some((next, kind)) = primitive_shared::types::barrel_after_drinking(barrel) else {
         // The words dipping an empty jug gets, because it is the same
         // discovery.
-        handle.send(ServerMessage::Error("the barrel is empty".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::BarrelEmpty });
         return;
     };
     if !ctx.world.set_block(at.0, at.1, at.2, next) {
@@ -6701,7 +6713,7 @@ fn exchange_in_hand(
     }
     if primitive_shared::inventory::jug_contents(&stack).is_some() {
         drop(state);
-        handle.send(ServerMessage::Error("the jug has something in it".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::JugNotEmpty });
         return false;
     }
     // A slot holding one is always fine, because taking it frees the
@@ -6709,7 +6721,7 @@ fn exchange_in_hand(
     let single = state.inventory.count_in(slot) == 1;
     if !single && !state.inventory.has_room_for(got, 1) {
         drop(state);
-        handle.send(ServerMessage::Error("your pack is full".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PackFull });
         return false;
     }
     if state.inventory.take_from(slot, 1) == 0 {
@@ -6908,7 +6920,7 @@ pub(crate) fn eat_from_slot(
         if let Some(bowl) = bowl {
             if stack.count > 1 && !state.inventory.has_room_for(bowl, 1) {
                 drop(state);
-                handle.send(ServerMessage::Error("nowhere to put the bowl".to_string()));
+                handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NowhereForBowl });
                 return false;
             }
         }
@@ -7003,9 +7015,7 @@ pub(crate) fn equip_from_slot(
             let room = single || state.inventory.has_room_for(coming_off.block, 1);
             if !room {
                 drop(state);
-                handle.send(ServerMessage::Error(
-                    "no room to take that off".to_string(),
-                ));
+                handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NoRoomToTakeOff });
                 return;
             }
         }
@@ -7084,7 +7094,7 @@ pub(crate) fn unequip_slot(
             let mut trial = state.inventory.clone();
             if !trial.close_backpack() {
                 drop(state);
-                handle.send(ServerMessage::Error("empty the rucksack first".to_string()));
+                handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::EmptyRucksackFirst });
                 return;
             }
             // ...and the square it lands in has to be one of the body's
@@ -7096,7 +7106,7 @@ pub(crate) fn unequip_slot(
                 .all(|square| state.inventory.block_in(square).is_some())
             {
                 drop(state);
-                handle.send(ServerMessage::Error("your pack is full".to_string()));
+                handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PackFull });
                 return;
             }
         }
@@ -7104,7 +7114,7 @@ pub(crate) fn unequip_slot(
         // rather than a garment that stops existing.
         if !state.inventory.has_room_for(worn.block, 1) {
             drop(state);
-            handle.send(ServerMessage::Error("your pack is full".to_string()));
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PackFull });
             return;
         }
         let Some(taken) = state.equipment.take(body_slot) else {
@@ -7461,6 +7471,18 @@ pub(crate) fn tend_animal(
     target: primitive_shared::protocol::EntityId,
 ) {
     use primitive_shared::types::{block_kind, is_knife, BLOCK_BOWL, BLOCK_BOWL_MILK, BLOCK_WOOL};
+    // **A knife on a horse takes its tack off** (`Animals::unbuckle`). Its
+    // own way before the wool's room is checked below: the pack is asked a
+    // different question -- room for the bags and their load, not for a
+    // fleece -- and a pack full of wool is no reason a saddle cannot come off.
+    let knife = {
+        let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.inventory.block_in(state.selected_slot).is_some_and(is_knife)
+    };
+    if knife && ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).horse_at(target).is_some() {
+        horses::unbuckle(ctx, handle, target);
+        return;
+    }
     let (eye, held, slot) = {
         let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.vitals.is_dead() {
@@ -7484,7 +7506,7 @@ pub(crate) fn tend_animal(
         };
         if !room {
             drop(state);
-            handle.send(ServerMessage::Error("your pack is full".to_string()));
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PackFull });
             return;
         }
         (primitive_shared::geometry::narrow(eye), held, slot)
@@ -7497,17 +7519,13 @@ pub(crate) fn tend_animal(
     match tended {
         animals::Tended::Refused(why) => {
             drop(state);
-            handle.send(ServerMessage::Error(why.to_string()));
+            handle.send(ServerMessage::Notice { what: why });
             return;
         }
         animals::Tended::Fed { gentled, .. } => {
             state.inventory.take_from(slot, 1);
             if gentled {
-                handle.send(ServerMessage::Chat {
-                    from: None,
-                    username: "server".to_string(),
-                    text: "the horse takes it from your hand: it may let you on its back now".to_string(),
-                });
+                handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::HorseTakesFood });
             }
         }
         // The saddle or the bags in the hand went onto the horse.
@@ -7770,7 +7788,7 @@ pub(crate) fn attack_animal(
             primitive_shared::inventory::Wear::Worn => send_inventory(handle),
             primitive_shared::inventory::Wear::Broke => {
                 send_inventory(handle);
-                handle.send(ServerMessage::Error("your tool broke".to_string()));
+                handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::ToolBroke });
             }
         }
     }
@@ -7839,13 +7857,14 @@ pub(crate) fn carcass_cell(
 /// version of this lived in `attack_animal` alone and a mod that killed
 /// a deer got a heap while a player got a carcass.
 pub(crate) fn lay_carcass(ctx: &Arc<Context>, death: animals::Death) {
-    let animals::Death { species, at, growth } = death;
+    let animals::Death { species, at, growth, shorn } = death;
     // **A young one leaves a heap of what it had, not its species' carcass**
     // -- see `youth::leaves_carcass`, which is where the reason lives: the
     // carcass is the adult's, drawn and butchered at the adult's size.
     if !primitive_shared::youth::leaves_carcass(growth) {
         let mut items = ctx.items.lock().unwrap_or_else(|e| e.into_inner());
-        for (block, count) in primitive_shared::youth::drops(species, growth) {
+        let unshorn = |&(block, _): &(primitive_shared::types::BlockId, u32)| !(shorn && block == primitive_shared::types::BLOCK_WOOL);
+        for (block, count) in primitive_shared::youth::drops(species, growth).into_iter().filter(unshorn) {
             items.spawn(
                 block,
                 count,
@@ -7865,7 +7884,10 @@ pub(crate) fn lay_carcass(ctx: &Arc<Context>, death: animals::Death) {
         .carcass()
         .and_then(|_| carcass_cell(at, |x, y, z| ctx.world.cached_block(x, y, z)));
     if let Some(cell) = cell {
-        let carcass = primitive_shared::animals::carcass_at_stage(species, 0);
+        // A shorn sheep's carcass starts with its first cut made: the fleece
+        // is the sheep's first cut (`Species::butchering`) and it is already
+        // off. See `animals::Death::shorn`.
+        let carcass = primitive_shared::animals::carcass_at_stage(species, usize::from(shorn));
         if ctx.world.set_block(cell.0, cell.1, cell.2, carcass) {
             ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
             notify_mechanics(ctx, cell.0, cell.1, cell.2);
@@ -7877,7 +7899,7 @@ pub(crate) fn lay_carcass(ctx: &Arc<Context>, death: animals::Death) {
     // merges, expires and is picked up by walking over it like
     // everything else.
     let mut items = ctx.items.lock().unwrap_or_else(|e| e.into_inner());
-    for &(block, count) in species.drops() {
+    for &(block, count) in species.drops().iter().filter(|(block, _)| !(shorn && *block == primitive_shared::types::BLOCK_WOOL)) {
         items.spawn(
             block,
             count,
@@ -7914,7 +7936,7 @@ fn butcher_carcass(
 
     let (took, next) = match outcome {
         Butchered::NeedsATool => {
-            handle.send(ServerMessage::Error("it needs a knife".to_string()));
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NeedsAKnife });
             return;
         }
         Butchered::Cut { took, next } => (took, next),
@@ -7980,7 +8002,7 @@ fn butcher_carcass(
         primitive_shared::inventory::Wear::Worn => send_inventory(handle),
         primitive_shared::inventory::Wear::Broke => {
             send_inventory(handle);
-            handle.send(ServerMessage::Error("your tool broke".to_string()));
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::ToolBroke });
         }
     }
 }
@@ -8588,9 +8610,7 @@ pub(crate) fn drop_from_slot(
             state.inventory.add_worn(refused.block, refused.count, refused.damage);
         }
         drop(state);
-        handle.send(ServerMessage::Error(
-            "too much is already lying around to drop that".to_string(),
-        ));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::TooMuchLyingAround });
     }
     send_inventory(handle);
     thrown
@@ -8694,7 +8714,7 @@ pub(crate) fn open_chest(
     // let go above.
     let block = ctx.world.cached_block(at.0, at.1, at.2).unwrap_or(0);
     if !container_opened(ctx, handle.id, at, block) {
-        handle.send(ServerMessage::Error("it will not open".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::WillNotOpen });
         return;
     }
     let left = {
@@ -8958,19 +8978,19 @@ pub(crate) fn open_station(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandl
     // do nothing is a screen that reads as broken -- and the note says what to
     // go and get. The wheel asks for nothing: a potter works with their hands.
     if game == Game::Anvil && !held.is_some_and(minigame::is_hammer) {
-        handle.send(ServerMessage::Error("you need a hammer to work at an anvil".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NeedHammerAtAnvil });
         return;
     }
     // ...and a saw is what makes a sawhorse one, for the same reason.
     if game == Game::Saw && !held.is_some_and(minigame::is_saw) {
-        handle.send(ServerMessage::Error("you need a saw to work at a sawhorse".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NeedSawAtSawhorse });
         return;
     }
     // **The stone sharpens what is in the hand**, so the hand has to hold an
     // edge. Asked at the door rather than at the first stroke, for the
     // anvil's reason.
     if game == Game::Whet && !held.is_some_and(primitive_shared::tools::takes_an_edge) {
-        handle.send(ServerMessage::Error("hold the blade you want to sharpen".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::HoldBladeToSharpen });
         return;
     }
     let tolerance = minigame::tolerance(match game {
@@ -9032,7 +9052,7 @@ pub(crate) fn station_begin(
         || station_at(ctx, at) != Some(game)
         || !within_station_reach(ctx, primitive_shared::geometry::narrow(position), at)
     {
-        handle.send(ServerMessage::Error("you are not at that station".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NotAtStation });
         return;
     }
     let seed = (logic::rng::Rng::from_clock().next_u64() >> 32) as u32;
@@ -9136,7 +9156,7 @@ pub(crate) fn station_run(handle: &Arc<players::PlayerHandle>, presses: Vec<u32>
     // is a rule about this process. A million-element run would be a
     // million-element allocation a client chose.
     if presses.len() > 16 {
-        handle.send(ServerMessage::Error("that is not a run".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NotARun });
         return;
     }
     let taken = {
@@ -9147,12 +9167,12 @@ pub(crate) fn station_run(handle: &Arc<players::PlayerHandle>, presses: Vec<u32>
         seat.run.take().map(|run| (seat.game, seat.tolerance, run, seat.piece.take(), seat.honing.take()))
     };
     let Some((game, tolerance, (job, began, seed), piece, honing)) = taken else {
-        handle.send(ServerMessage::Error("there is nothing on the anvil".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NothingOnAnvil });
         return;
     };
     let elapsed = began.elapsed();
     if elapsed > STATION_RUN_EXPIRES {
-        handle.send(ServerMessage::Error("the piece went cold".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PieceWentCold });
         return;
     }
     let elapsed_ms = elapsed.as_millis().min(u128::from(u32::MAX)) as u32;
@@ -10759,7 +10779,24 @@ const WILDFIRE_NEWS_REACH: f32 = 24.0;
 /// takes both. Two locks held at once anywhere else in this file are held
 /// in that order or not at all.
 pub(crate) fn step_wildfire(ctx: &Arc<Context>, players: &[(PlayerId, (f32, f32, f32))], dt: f32) {
-    let hearths = ctx.fires.lock().unwrap_or_else(|e| e.into_inner()).burning_cells();
+    let (hearths, smouldering) = {
+        let fires = ctx.fires.lock().unwrap_or_else(|e| e.into_inner());
+        (fires.burning_cells(), fires.smouldering_cells())
+    };
+    // **The fuel, passed through to the smoke** (`wildfire::SMOULDER_SMOKE`),
+    // and onto the open hearths' blocks for the plume every client draws
+    // (`wildfire::SMOULDERING`): written only where the bit disagrees with the
+    // fire, so a fire burning one fuel all evening is two edits, not one a tick.
+    for &at in &hearths {
+        let Some(block) = ctx.world.cached_block(at.0, at.1, at.2) else {
+            continue;
+        };
+        let wanted = primitive_shared::wildfire::with_smoulder(block, smouldering.contains(&at));
+        if wanted != block && ctx.world.set_block(at.0, at.1, at.2, wanted) {
+            ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+            broadcast_block(ctx, at, wanted);
+        }
+    }
     let feet: Vec<(f32, f32, f32)> = players.iter().map(|&(_, at)| at).collect();
     let weather = ctx.sky.lock().unwrap_or_else(|e| e.into_inner()).weather();
     // The rafts' wind, off the same clock: see `raft::wind` on why it is a
@@ -10768,6 +10805,7 @@ pub(crate) fn step_wildfire(ctx: &Arc<Context>, players: &[(PlayerId, (f32, f32,
     let stepped = {
         let mut wildfire = ctx.wildfire.lock().unwrap_or_else(|e| e.into_inner());
         wildfire.set_weather(weather, wind);
+        wildfire.set_smouldering(smouldering);
         wildfire.step(&*ctx.world, &hearths, &feet, dt, simulation::DEFAULT_TICK_BUDGET)
     };
     for change in &stepped.changes {
@@ -11013,7 +11051,7 @@ fn empty_trap(
     use primitive_shared::types::{trap_catch, BLOCK_FISH_TRAP};
     let caught = trap_catch(block);
     if caught == 0 {
-        handle.send(ServerMessage::Error("nothing has gone into the trap yet".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::TrapEmpty });
         return;
     }
     if !ctx.world.set_block(at.0, at.1, at.2, BLOCK_FISH_TRAP) {
@@ -11276,7 +11314,7 @@ fn wear_rod(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, slot: usize
         primitive_shared::inventory::Wear::Worn => send_inventory(handle),
         primitive_shared::inventory::Wear::Broke => {
             send_inventory(handle);
-            handle.send(ServerMessage::Error("the line parted: the rod is done".to_string()));
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::LineParted });
         }
     }
     let _ = ctx;
@@ -11491,9 +11529,7 @@ pub(crate) fn set_down_item(ctx: &Arc<Context>, handle: &Arc<players::PlayerHand
     let empty = ctx.world.cached_block(at.0, at.1, at.2).is_some_and(is_air);
     let floor = ctx.world.cached_block(at.0, at.1 - 1, at.2).is_some_and(has_full_top);
     if !empty || !floor {
-        handle.send(ServerMessage::Error(
-            "that is set down on top of solid ground, in an empty place".to_string(),
-        ));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::SetDownOnSolidGround });
         return;
     }
     let block = faced(BLOCK_SET_DOWN, Facing::toward_viewer(yaw));
@@ -11653,7 +11689,7 @@ pub(crate) fn strike_firepit(ctx: &Arc<Context>, handle: &Arc<players::PlayerHan
         }
         if wet > 0 && (sticks < FIREPIT_STICKS || logs < FIREPIT_LOGS) {
             drop(items);
-            handle.send(ServerMessage::Error("the wood is wet: dry it by a fire or in the sun first".to_string()));
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::WoodWet });
             return;
         }
         if sticks < FIREPIT_STICKS || logs < FIREPIT_LOGS {
@@ -13434,14 +13470,14 @@ fn lie_down(
     let refusal = {
         let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.sleeping_in.is_some() {
-            Some("you are already asleep")
+            Some(primitive_shared::notice::Notice::AlreadyAsleep)
         } else if state.vitals.last_damage_elapsed() < HURT_RECENTLY_SECS {
             // Being hit is the one thing that must stop this, and the
             // check is "were you hit *recently*" rather than "is
             // something near you": the server would otherwise have to
             // scan for animals, and a scan that says "no" the instant
             // before a boar arrives is a scan that bought nothing.
-            Some("you cannot sleep while something is hurting you")
+            Some(primitive_shared::notice::Notice::HurtCannotSleep)
         } else if state.vitals.nourishment() <= 0.0 {
             // **An empty stomach or an empty waterskin keeps you up.**
             // The night's hunger and thirst are charged all at once when
@@ -13450,9 +13486,9 @@ fn lie_down(
             // player lies down and is dead by the time the screen goes
             // dark. Refusing with a reason turns it into the decision it
             // should be -- eat first, or stay up.
-            Some("you are too hungry to sleep")
+            Some(primitive_shared::notice::Notice::TooHungryToSleep)
         } else if state.vitals.hydration() <= 0.0 {
-            Some("you are too thirsty to sleep")
+            Some(primitive_shared::notice::Notice::TooThirstyToSleep)
         } else {
             None
         }
@@ -13465,9 +13501,9 @@ fn lie_down(
                 && other.state.lock().unwrap_or_else(|e| e.into_inner()).sleeping_in == Some(key)
         })
     };
-    let refusal = refusal.or_else(|| taken().then_some("somebody is already asleep there"));
-    if let Some(text) = refusal {
-        handle.send(ServerMessage::Error(text.to_string()));
+    let refusal = refusal.or_else(|| taken().then_some(primitive_shared::notice::Notice::BedTaken));
+    if let Some(what) = refusal {
+        handle.send(ServerMessage::Notice { what });
         return;
     }
 
@@ -13691,11 +13727,11 @@ fn sit_down(
             && other.state.lock().unwrap_or_else(|e| e.into_inner()).sitting_on == Some(at)
     });
     if taken {
-        handle.send(ServerMessage::Error("somebody is already sitting there".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::SeatTaken });
         return;
     }
     if !body_fits(ctx, seat) {
-        handle.send(ServerMessage::Error("there is no room to sit there".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NoRoomToSit });
         return;
     }
     let yaw = facing.unwrap_or(looking);
@@ -16313,6 +16349,33 @@ mod vessel_tests {
         state.inventory.slots()[state.selected_slot]
     }
 
+    /// **A jug dipped in a lake takes nothing out of the world**, so it can
+    /// leave no dimple: `fill_vessel` swaps the jug in the pack and never
+    /// writes the cell. A jug is two litres and the smallest water the world
+    /// holds is an eighth of a cube, a hundred and twenty-five (see
+    /// `water::SPILL_EIGHTHS_PER_JUG` for the other direction) -- a jug that
+    /// took an eighth would drain a pond sixty times faster than it should,
+    /// and one that took nothing is the true answer to the nearest eighth.
+    #[test]
+    fn a_jug_dipped_in_a_lake_leaves_the_lake_as_it_was() {
+        use primitive_shared::types::jug_of;
+        let (ctx, handle) = a_world_and_a_player();
+        floor_under_at(&ctx);
+        let full = primitive_shared::fluid::with_depth(primitive_shared::fluid::SOURCE_DEPTH);
+        for x in AT.0 - 4..=AT.0 + 4 {
+            for z in AT.2 - 4..=AT.2 + 4 {
+                assert!(ctx.world.set_block(x, AT.1, z, full));
+            }
+        }
+        let before = water_round_at(&ctx);
+        holding(&handle, Stack::new(BLOCK_JUG, 1));
+        use_block(&ctx, &handle, AT);
+        let jug = in_hand(&handle).map(|s| s.block);
+        assert!(jug.is_some_and(|b| b != BLOCK_JUG && [Water::Standing, Water::Fresh, Water::Salt].iter().any(|&w| b == jug_of(w))), "the jug did not fill: {jug:?}");
+        assert_eq!(water_round_at(&ctx), before, "dipping a jug took water out of the lake");
+        assert_eq!(ctx.world.cached_block(AT.0, AT.1, AT.2), Some(full), "the cell the jug was dipped in changed");
+    }
+
     #[test]
     fn a_full_jug_of_grain_empties_into_a_barrel_and_an_empty_jug_scoops_it_back() {
         use primitive_shared::types::barrel_goods;
@@ -17298,7 +17361,7 @@ mod picking_tests {
         assert!(on_the_ground(&ctx).is_empty(), "the apple was dropped instead of left on the tree");
         let said = errors(&mut rx);
         assert!(
-            said.iter().any(|text| text.contains("full")),
+            said.iter().any(|text| text == "PackFull"),
             "the player was not told why nothing came off: {said:?}"
         );
     }
@@ -17583,11 +17646,16 @@ mod butchering_tests {
         }
     }
 
+    /// Everything the player was told: an `Error`'s English, and a
+    /// `Notice` by its code's name (`notice`), which is what a test can
+    /// hold now that the words are the client's.
     pub(super) fn errors(rx: &mut tokio::sync::mpsc::Receiver<players::Outgoing>) -> Vec<String> {
         let mut out = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let players::Outgoing::Message(ServerMessage::Error(text)) = msg {
-                out.push(text);
+            match msg {
+                players::Outgoing::Message(ServerMessage::Error(text)) => out.push(text),
+                players::Outgoing::Message(ServerMessage::Notice { what }) => out.push(format!("{what:?}")),
+                _ => {}
             }
         }
         out
@@ -17994,7 +18062,7 @@ mod butchering_tests {
         use_block(&ctx, &handle, at);
         assert_eq!(handle.state.lock().unwrap().sitting_on, None, "sat with a stone through the head");
         assert!(
-            errors(&mut rx).iter().any(|e| e.contains("no room")),
+            errors(&mut rx).iter().any(|e| e == "NoRoomToSit"),
             "a refused seat said nothing"
         );
     }
@@ -18074,7 +18142,7 @@ mod butchering_tests {
 
     #[test]
     fn nobody_can_lie_down_on_an_empty_stomach_or_an_empty_waterskin() {
-        for (food, water, says) in [(0.0, 50.0, "hungry"), (50.0, 0.0, "thirsty")] {
+        for (food, water, says, code) in [(0.0, 50.0, "hungry", "TooHungryToSleep"), (50.0, 0.0, "thirsty", "TooThirstyToSleep")] {
             let (ctx, handle, mut rx) = a_hunter();
             let at = (0, FLOOR + 1, 0);
             assert!(ctx
@@ -18088,7 +18156,7 @@ mod butchering_tests {
             use_block(&ctx, &handle, at);
             assert_eq!(handle.state.lock().unwrap().sleeping_in, None, "slept while {says}");
             assert!(
-                errors(&mut rx).iter().any(|e| e.contains(says)),
+                errors(&mut rx).iter().any(|e| e == code),
                 "the refusal to sleep while {says} said nothing about it"
             );
         }
@@ -18353,7 +18421,7 @@ mod butchering_tests {
         assert!(on_the_ground(&ctx).is_empty());
         let said = errors(&mut rx);
         assert_eq!(said.len(), 1, "the player was told {said:?}");
-        assert!(said[0].contains("knife"), "the hint does not name the tool: {said:?}");
+        assert_eq!(said[0], "NeedsAKnife", "the hint does not name the tool: {said:?}");
 
         // A dead player cannot butcher either, whatever they hold.
         hold(&handle, Some(Stack::new(BLOCK_FLINT_KNIFE, 1)));

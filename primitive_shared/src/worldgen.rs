@@ -1303,6 +1303,10 @@ pub struct WorldGen {
     /// stratum boundary wanders the way a real bed does instead of
     /// lying at one depth across the whole world. See `stratum`.
     strata_noise: Perlin,
+    /// Each landform river order's course turned by the world's own turn,
+    /// as the sine and cosine `drained_field` lays its wave across: see
+    /// `WorldGen::drain_courses`.
+    drain: [(f64, (f64, f64)); 3],
 }
 
 /// What lives on top of a column, and what the soil under it is made of.
@@ -2726,7 +2730,9 @@ impl WorldGen {
             province_noise: Perlin::new(seed.wrapping_add(37)),
             mineral_noise: Perlin::new(seed.wrapping_add(41)),
             strata_noise: Perlin::new(seed.wrapping_add(43)),
+            drain: [(0.0, (0.0, 1.0)); 3],
         };
+        laid.drain = laid.drain_courses();
         // **The landforms change the ground, not where a world is cut from.**
         // The meridian is the first stride along the parallel whose ground is
         // low and dry by the sea, and the landforms flatten a plain into

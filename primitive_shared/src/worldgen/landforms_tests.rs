@@ -199,6 +199,33 @@ fn an_old_worlds_new_chunks_are_the_old_generators_to_the_block() {
     }
 }
 
+/// **The landforms draw the ground they drew before they were made cheaper**:
+/// four chunks round the origin and four in the hill country of
+/// `what_the_landforms_cost_a_chunk`, to the block.
+///
+/// The prints were taken from the generator as it was before `slow`
+/// remembered its last column and the courses were turned once
+/// (`drain_courses`) -- both changes are the same arithmetic done fewer
+/// times, and this is what says so. A change that means to move the ground
+/// changes these on purpose and says why.
+#[test]
+fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
+    let held: [((i32, i32), u64); 8] = [
+        ((0, 0), 0xabe3_3f77_a5a6_190a),
+        ((5, -3), 0xdd18_0957_c840_0838),
+        ((-40, 90), 0x0a60_1d08_b823_9ba7),
+        ((313, -77), 0x8c37_0dc9_cf40_88bf),
+        ((-1875, -1875), 0x52a5_fa06_c321_cdb8),
+        ((-1868, -1872), 0x3093_679c_3f7c_b3e6),
+        ((-1864, -1864), 0x1972_aadd_5875_6711),
+        ((-1873, -1866), 0x09e4_0e3c_0fd6_0394),
+    ];
+    let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
+    for ((x, z), print) in held {
+        assert_eq!(fingerprint(&gen, ChunkPos::new(x, z)), print, "landforms chunk {x},{z} is not the ground it was");
+    }
+}
+
 #[test]
 #[ignore = "prints the fingerprints the golden test holds"]
 fn print_fingerprints() {

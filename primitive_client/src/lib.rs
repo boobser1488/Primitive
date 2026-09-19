@@ -8673,6 +8673,17 @@ fn drain_network(
                 });
             }
 
+            // A refusal or a piece of news as a code (`notice`), said in the
+            // player's language where every refusal lands. A refusal also
+            // ends a station run, as the `Error` arm's does: the server ended
+            // it when it refused.
+            ServerMessage::Notice { what } => {
+                if !what.is_news() {
+                    station_screen.run_refused();
+                }
+                *notice = Some((language.text(ui::lang::Msg::Notice(what)).to_string(), Instant::now()));
+            }
+
             // A stall said no. In words, where every refusal lands.
             ServerMessage::StallRefused { why } => {
                 *notice = Some((language.text(stall_refusal(why)).to_string(), Instant::now()));

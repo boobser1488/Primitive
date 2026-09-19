@@ -161,11 +161,14 @@
 //! of interface rather than of animals.
 
 use primitive_shared::animals::{
-    blocks_sight, is_cover, Grouping, Species, DESPAWN_DISTANCE, MAX_ANIMALS, MAX_ANIMALS_PER_PLAYER,
+    blocks_sight, is_cover, Grouping, Species, DESPAWN_DISTANCE, MAX_ANIMALS, MAX_ANIMALS_PER_PLAYER, MAX_KEPT,
     MAX_FISH, MAX_FISH_PER_PLAYER, MAX_SEABIRDS_PER_PLAYER,
 };
 use primitive_shared::protocol::{
     entity_id, EntityId, EntityKind, EntitySource, EntityState, PlayerId,
+};
+use primitive_shared::notice::{
+    Notice,
 };
 /// How high an animal stands on this cell.
 ///
@@ -2332,6 +2335,14 @@ impl Animal {
             | if self.ride.is_some() { horse::TACK_RIDDEN } else { 0 }
             | if tame { horse::TACK_HALTER } else { 0 }
             | if self.stallion && !tame { horse::TACK_STALLION } else { 0 }
+            | if self.shorn() { horse::TACK_SHORN } else { 0 }
+    }
+
+    /// A sheep with its fleece off and not yet grown back: what the model
+    /// draws close-cropped (`horse::TACK_SHORN`) and what a carcass gives no
+    /// wool for (`Animals::kill`'s drops).
+    fn shorn(&self) -> bool {
+        self.species == Species::Sheep && self.keep.is_some_and(|k| !k.fleece_ready())
     }
 
     /// What its body is doing right now, as [`Animal::attitude`] says, with
@@ -2645,6 +2656,15 @@ pub struct Death {
     /// How grown it was: a young one leaves a small heap rather than its
     /// species' carcass (`youth::leaves_carcass`).
     pub growth: f32,
+    /// A sheep killed with its fleece off (`Animal::shorn`): its carcass is
+    /// laid with the fleece already taken, so it gives no wool.
+    ///
+    /// **The wool came off the knife twice before.** A ewe sheared this
+    /// morning and butchered this afternoon gave the two of the shearing and
+    /// then three more off the carcass -- which made shearing a sheep and
+    /// then eating it strictly better than either, and the regrowth that is
+    /// the whole reason to keep her (`husbandry`) worth nothing.
+    pub shorn: bool,
 }
 
 impl Animals {
@@ -2880,7 +2900,7 @@ impl Animals {
     fn fell(&mut self, index: usize) -> Death {
         let mut body = self.animals.remove(index);
         self.killed += 1;
-        let death = Death { species: body.species, at: body.at(), growth: body.growth };
+        let death = Death { species: body.species, at: body.at(), growth: body.growth, shorn: body.shorn() };
         // **A horse's saddle and load go down with it**, where it fell, for
         // the tick loop to throw on the ground: see `horse::Gear::left_behind`
         // for why all of it. The rider is put off by the tick loop, which
@@ -2922,7 +2942,7 @@ impl Animals {
         self.falling = going;
         for body in down {
             self.deaths.push(body.id);
-            self.fallen.push(Death { species: body.species, at: body.at(), growth: body.growth });
+            self.fallen.push(Death { species: body.species, at: body.at(), growth: body.growth, shorn: body.shorn() });
         }
     }
 
@@ -3071,7 +3091,8 @@ impl Animals {
         // apart on the next tick anyway.
         let side = yaw + std::f32::consts::FRAC_PI_2;
         let beside = (at.0 + side.cos() * species.width(), at.1, at.2 + side.sin() * species.width());
-        let id = self.spawn(species, beside)?;
+        let kept = parent_keep.is_some_and(|k| k.tame);
+        let id = self.spawn_as(species, beside, kept)?;
         let young = self.animals.last_mut().expect("just spawned");
         young.growth = 0.0;
         young.health = species.health() * youth::strength(0.0);
@@ -3268,15 +3289,25 @@ impl Animals {
     /// Puts one in the world at a stated place. What the spawner uses,
     /// and what a test or a plugin can call directly.
     pub fn spawn(&mut self, species: Species, at: (f32, f32, f32)) -> Option<EntityId> {
+        self.spawn_as(species, at, false)
+    }
+
+    /// `spawn`, for one that will be kept (`kept`: a tame mother's young) or
+    /// wild.
+    fn spawn_as(&mut self, species: Species, at: (f32, f32, f32), kept: bool) -> Option<EntityId> {
         // **Each class against its own ceiling.** The sea's animals and the
         // land's are capped separately (`MAX_FISH`, `MAX_ANIMALS`): one
         // list, one wire, two budgets -- a coast full of schools must not be
         // why a mod's deer refuses to appear, and a crowded meadow must not
-        // empty the river.
-        let (class, ceiling) = if species.swims() {
+        // empty the river. The kept are a third (`MAX_KEPT`), and the land's
+        // cap counts only the wild: see `MAX_KEPT` for the rule and the herd
+        // that used to empty the world.
+        let (class, ceiling) = if kept {
+            (self.animals.iter().filter(|a| is_kept(a)).count(), MAX_KEPT)
+        } else if species.swims() {
             (self.animals.iter().filter(|a| a.species.swims()).count(), MAX_FISH)
         } else {
-            (self.animals.iter().filter(|a| !a.species.swims()).count(), MAX_ANIMALS)
+            (self.animals.iter().filter(|a| !a.species.swims() && !is_kept(a)).count(), MAX_ANIMALS)
         };
         if class >= ceiling {
             return None;
@@ -4226,10 +4257,12 @@ impl Animals {
         // Neither the sea's nor the shore's: a flock of gulls over the beach
         // is counted against its own allowance (`populate_shore`), and must
         // not use up the three a player meets in the meadow behind it.
+        // ...and never the kept: a flock in a pen is not the meadow's three
+        // (`MAX_KEPT`).
         let on_land = self
             .animals
             .iter()
-            .filter(|a| !a.species.swims() && !a.species.soars())
+            .filter(|a| !a.species.swims() && !a.species.soars() && !is_kept(a))
             .count();
         if players.is_empty() || on_land >= MAX_ANIMALS {
             return;
@@ -4314,7 +4347,7 @@ impl Animals {
         // `Animal::stallion`. Marked when the loop is done, however it ends.
         let mut last = None;
         for _ in 1..wanted {
-            if self.animals.len() >= MAX_ANIMALS {
+            if self.animals.iter().filter(|a| !is_kept(a)).count() >= MAX_ANIMALS {
                 break;
             }
             let bearing = self.rng.range(0.0, std::f32::consts::TAU);
@@ -4477,7 +4510,8 @@ impl Animals {
         players: &[(PlayerId, (f32, f32, f32))],
         night: bool,
     ) {
-        if players.is_empty() || self.animals.len() >= MAX_ANIMALS {
+        let wild = |animals: &[Animal]| animals.iter().filter(|a| !is_kept(a)).count();
+        if players.is_empty() || wild(&self.animals) >= MAX_ANIMALS {
             return;
         }
         let Some(species) = Species::ALL.iter().copied().find(|s| s.soars()) else {
@@ -4530,7 +4564,7 @@ impl Animals {
         let (low, high) = primitive_shared::animals::group_size(species);
         let wanted = low + self.rng.below(high - low + 1);
         for i in 0..wanted {
-            if soaring(&self.animals) >= cap || self.animals.len() >= MAX_ANIMALS {
+            if soaring(&self.animals) >= cap || wild(&self.animals) >= MAX_ANIMALS {
                 return;
             }
             let (cx, cz) = if i == 0 {
@@ -4605,6 +4639,12 @@ const RAID_CHANCE: f32 = 0.05;
 /// cell and a sheep's back is a metre from its feet.
 const TEND_REACH: f32 = 3.5;
 
+/// Tame: a kept animal, counted against `MAX_KEPT` and never against the
+/// wild's caps.
+fn is_kept(animal: &Animal) -> bool {
+    animal.keep.is_some_and(|k| k.tame)
+}
+
 /// What a right click with something in hand did to a kept animal. See
 /// `Animals::tend`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4621,8 +4661,20 @@ pub enum Tended {
     Shorn(u32),
     /// A bowl of milk.
     Milked,
-    /// Nothing happened, and this is why, in the words the player is told.
-    Refused(&'static str),
+    /// Nothing happened, and this is why, as the code the player's client
+    /// says in their language (`notice`).
+    Refused(Notice),
+}
+
+/// What a knife on a horse's buckles came to. See `Animals::unbuckle`.
+#[derive(Debug, Clone)]
+pub enum Unbuckled {
+    /// Its saddlebags came off, with this in them.
+    Bags(primitive_shared::inventory::Inventory),
+    /// Its saddle came off.
+    Saddle,
+    /// Nothing came off, and why.
+    Refused(Notice),
 }
 
 /// A kept animal as the save file holds it: what it is, where, and what
@@ -4698,8 +4750,8 @@ pub enum Mounting {
     Riding { body: horse::Mount, fettle: horse::Fettle, broke: bool },
     /// A gentled horse had them off (`husbandry::thrown`): where it stood.
     Thrown { at: (f64, f64, f64) },
-    /// Not on, and why, in the words the player is told.
-    Refused(&'static str),
+    /// Not on, and why (`notice`).
+    Refused(Notice),
 }
 
 impl Animals {
@@ -4715,7 +4767,7 @@ impl Animals {
     ) -> Tended {
         use primitive_shared::types::{block_kind, is_knife, BLOCK_BOWL};
         let Some(held) = held else {
-            return Tended::Refused("you have nothing in your hand");
+            return Tended::Refused(Notice::NothingInHand);
         };
         if primitive_shared::types::is_tack(held) {
             return self.saddle_up(id, from, held);
@@ -4727,37 +4779,37 @@ impl Animals {
             .and_then(|young| self.find(young))
             .is_some_and(|young| youth::is_young(young.growth));
         let Some(animal) = self.animals.iter_mut().find(|a| a.id == id) else {
-            return Tended::Refused("it is gone");
+            return Tended::Refused(Notice::AnimalGone);
         };
         let at = animal.at();
         let (dx, dy, dz) = (at.0 - from.0, at.1 - from.1, at.2 - from.2);
         if (dx * dx + dy * dy + dz * dz).sqrt() > TEND_REACH + animal.species.width() * 0.5 {
-            return Tended::Refused("too far away");
+            return Tended::Refused(Notice::TooFarAway);
         }
         if !husbandry::tameable(animal.species) {
-            return Tended::Refused("that animal cannot be kept");
+            return Tended::Refused(Notice::CannotBeKept);
         }
         let tame = animal.keep.is_some_and(|k| k.tame);
         if is_knife(held) {
             if animal.species != Species::Sheep {
-                return Tended::Refused("there is nothing on it to shear");
+                return Tended::Refused(Notice::NothingToShear);
             }
             if !tame {
-                return Tended::Refused("it will not stand for the knife: tame it first");
+                return Tended::Refused(Notice::TameItFirst);
             }
             return match animal.keep.as_mut().and_then(|k| k.shear()) {
                 Some(wool) => Tended::Shorn(wool),
-                None => Tended::Refused("the fleece has not grown back yet"),
+                None => Tended::Refused(Notice::FleeceNotGrown),
             };
         }
         if block_kind(held) == BLOCK_BOWL {
             if animal.species != Species::Sheep || youth::is_young(animal.growth) || !tame || !has_lamb {
-                return Tended::Refused("only a tame ewe with a lamb gives milk");
+                return Tended::Refused(Notice::OnlyEweGivesMilk);
             }
             return if animal.keep.as_mut().is_some_and(|k| k.milk(has_lamb)) {
                 Tended::Milked
             } else {
-                Tended::Refused("she has no milk to give yet")
+                Tended::Refused(Notice::NoMilkYet)
             };
         }
         // **A wild horse will not eat from a hand it is running from.** The
@@ -4767,7 +4819,7 @@ impl Animals {
         // bolt by somebody who sprinted after it is still bolting.
         let wild = !animal.keep.is_some_and(|k| k.tame);
         if animal.species == Species::Horse && wild && animal.mind == Mind::Flee {
-            return Tended::Refused("it shies away from you: come at it slowly");
+            return Tended::Refused(Notice::ShiesAway);
         }
         let fresh = animal.keep.is_none();
         let was_gentled = animal.keep.is_some_and(|k| k.gentled());
@@ -4793,8 +4845,8 @@ impl Animals {
                     animal.keep = None;
                 }
                 Tended::Refused(match refused {
-                    husbandry::Refused::Sated => "it is not hungry yet",
-                    husbandry::Refused::NotItsFood => "it does not eat that",
+                    husbandry::Refused::Sated => Notice::NotHungry,
+                    husbandry::Refused::NotItsFood => Notice::DoesNotEatThat,
                 })
             }
         }
@@ -4825,36 +4877,92 @@ impl Animals {
     /// word of the game for; the breaking is bareback, as it is.
     fn saddle_up(&mut self, id: EntityId, from: (f32, f32, f32), held: primitive_shared::types::BlockId) -> Tended {
         let Some(animal) = self.animals.iter_mut().find(|a| a.id == id) else {
-            return Tended::Refused("it is gone");
+            return Tended::Refused(Notice::AnimalGone);
         };
         let at = animal.at();
         let (dx, dy, dz) = (at.0 - from.0, at.1 - from.1, at.2 - from.2);
         if (dx * dx + dy * dy + dz * dz).sqrt() > TEND_REACH + animal.species.width() * 0.5 {
-            return Tended::Refused("too far away");
+            return Tended::Refused(Notice::TooFarAway);
         }
         if animal.species != Species::Horse {
-            return Tended::Refused("that goes on a horse");
+            return Tended::Refused(Notice::GoesOnAHorse);
         }
         if !animal.keep.is_some_and(|k| k.tame) {
-            return Tended::Refused("it will not stand for that: break it first");
+            return Tended::Refused(Notice::BreakItFirst);
         }
         if youth::is_young(animal.growth) {
-            return Tended::Refused("it is too young to carry anything");
+            return Tended::Refused(Notice::TooYoungToCarry);
         }
         let gear = animal.gear.get_or_insert_with(Default::default);
         if primitive_shared::types::block_kind(held) == primitive_shared::types::BLOCK_SADDLE {
             if gear.saddle {
-                return Tended::Refused("it already wears a saddle");
+                return Tended::Refused(Notice::AlreadySaddled);
             }
             gear.saddle = true;
             Tended::Saddled
         } else {
             if gear.bags.is_some() {
-                return Tended::Refused("it already carries saddlebags");
+                return Tended::Refused(Notice::AlreadyBagged);
             }
             gear.bags = Some(primitive_shared::inventory::Inventory::new());
             Tended::Bagged
         }
+    }
+
+    /// **A knife on a horse's buckles**: its saddlebags off, or -- when it
+    /// wears none -- its saddle. What the item does to the pack is the
+    /// caller's; `takes` says whether the pack has room for the bags and
+    /// everything in them, and is asked only when there are bags to take.
+    ///
+    /// ## Why a knife, and why the bags first
+    ///
+    /// The knife is already the tool for taking something *off* an animal --
+    /// the fleece -- and a horse had nothing for it to do. A gesture of its
+    /// own (the rein key and a click is the bags' door, `OpenBags`) would be
+    /// one more thing to be told. The bags come first because they hang over
+    /// the saddle: two clicks strip a horse, and one takes off only the load.
+    ///
+    /// ## Where the load goes
+    ///
+    /// **Into the player's pack with the bags, or the bags stay on.** Three
+    /// ways were weighed. Bags that come off only when empty make unloading a
+    /// chore of dragging every stack out first, for a rule with no decision
+    /// in it. Bags that spill what will not fit on the ground would lose a
+    /// load in the grass to a mis-click. So the bags come off whole when the
+    /// pack can take them and all they hold, and otherwise they stay on and
+    /// the player is told: nothing is lost, and nothing is a chore when there
+    /// is room.
+    pub fn unbuckle(
+        &mut self,
+        id: EntityId,
+        from: (f32, f32, f32),
+        takes: impl FnOnce(&primitive_shared::inventory::Inventory) -> bool,
+    ) -> Unbuckled {
+        let Some(animal) = self.animals.iter_mut().find(|a| a.id == id) else {
+            return Unbuckled::Refused(Notice::AnimalGone);
+        };
+        let at = animal.at();
+        let (dx, dy, dz) = (at.0 - from.0, at.1 - from.1, at.2 - from.2);
+        if (dx * dx + dy * dy + dz * dz).sqrt() > TEND_REACH + animal.species.width() * 0.5 {
+            return Unbuckled::Refused(Notice::TooFarAway);
+        }
+        if animal.ride.is_some() {
+            return Unbuckled::Refused(Notice::SomebodyOnIt);
+        }
+        let Some(gear) = animal.gear.as_mut() else {
+            return Unbuckled::Refused(Notice::NothingToUnbuckle);
+        };
+        if let Some(bags) = &gear.bags {
+            if !takes(bags) {
+                return Unbuckled::Refused(Notice::PackCannotTakeBags);
+            }
+            return Unbuckled::Bags(gear.bags.take().expect("the bags were just there"));
+        }
+        if gear.saddle {
+            gear.saddle = false;
+            return Unbuckled::Saddle;
+        }
+        Unbuckled::Refused(Notice::NothingToUnbuckle)
     }
 
     /// A player at `from` getting on horse `id`.
@@ -4868,37 +4976,37 @@ impl Animals {
     /// it happened. Anything else refuses to be got near.
     pub fn mount(&mut self, id: EntityId, rider: PlayerId, from: (f32, f32, f32)) -> Mounting {
         if self.animals.iter().any(|a| a.ride.is_some_and(|r| r.rider == rider)) {
-            return Mounting::Refused("you are already riding");
+            return Mounting::Refused(Notice::AlreadyRiding);
         }
         let roll = self.rng.range(0.0, 1.0);
         let Some(animal) = self.animals.iter_mut().find(|a| a.id == id) else {
-            return Mounting::Refused("it is gone");
+            return Mounting::Refused(Notice::AnimalGone);
         };
         if animal.species != Species::Horse {
-            return Mounting::Refused("you cannot ride that");
+            return Mounting::Refused(Notice::CannotRideThat);
         }
         let at = animal.at();
         if (at.0 - from.0).hypot(at.2 - from.2) > horse::MOUNT_REACH + animal.species.width() * 0.5
             || (at.1 - from.1).abs() > 2.5
         {
-            return Mounting::Refused("too far away");
+            return Mounting::Refused(Notice::TooFarAway);
         }
         if animal.ride.is_some() {
-            return Mounting::Refused("somebody is already on it");
+            return Mounting::Refused(Notice::SomebodyOnIt);
         }
         if youth::is_young(animal.growth) {
-            return Mounting::Refused("it is too young to carry anybody");
+            return Mounting::Refused(Notice::TooYoungToRide);
         }
         let Some(keep) = animal.keep.as_mut() else {
-            return Mounting::Refused("it will not let you near its back: gentle it with food first");
+            return Mounting::Refused(Notice::GentleItFirst);
         };
         let mut broke = false;
         if !keep.tame {
             if !keep.gentled() {
-                return Mounting::Refused("it will not let you near its back: gentle it with food first");
+                return Mounting::Refused(Notice::GentleItFirst);
             }
             if animal.settle_for > 0.0 {
-                return Mounting::Refused("it is still wild-eyed from the last time: let it settle");
+                return Mounting::Refused(Notice::LetItSettle);
             }
             let gear = animal.gear.get_or_insert_with(Default::default);
             let attempt = gear.rides;
@@ -15825,6 +15933,95 @@ mod husbandry_tests {
         }
     }
 
+    fn tack_of(animals: &Animals, id: EntityId) -> u8 {
+        match animals.states().into_iter().find(|s| s.id == id).map(|s| s.kind) {
+            Some(EntityKind::Animal { tack, .. }) => tack,
+            other => panic!("not an animal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_shorn_sheep_is_sent_shorn_until_its_fleece_is_ready_again() {
+        let world = meadow(20);
+        let mut animals = Animals::seeded(4);
+        let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+        animals.keep_for_test(sheep, tame_at_home());
+        assert_eq!(tack_of(&animals, sheep) & horse::TACK_SHORN, 0, "a sheep in full fleece was drawn shorn");
+        assert_eq!(animals.tend(sheep, (2.0, 22.6, 0.5), Some(BLOCK_FLINT_KNIFE)), Tended::Shorn(husbandry::FLEECE_WOOL));
+        assert_ne!(tack_of(&animals, sheep) & horse::TACK_SHORN, 0, "a sheep sheared a moment ago looks unshorn");
+        // Grain-fed, the fleece is back in three days (`FLEECE_DAYS_WELL_FED`).
+        animals.calendar(0.0);
+        for day in 1..=3 {
+            animals.calendar(day as f32);
+            animals.step(&world, &at(2.0, 0.5), 0.05, NOON);
+            let eye = animals.position(sheep).map(|p| (p.0 + 1.5, 22.6, p.2)).expect("alive");
+            let _ = animals.tend(sheep, eye, Some(BLOCK_GRAIN));
+        }
+        assert!(animals.keeping(sheep).is_some_and(|k| k.fleece_ready()), "the fleece never grew back");
+        assert_eq!(tack_of(&animals, sheep) & horse::TACK_SHORN, 0, "a sheep with its fleece back is still drawn shorn");
+    }
+
+    #[test]
+    fn a_sheep_butchered_the_day_it_was_shorn_leaves_a_carcass_with_no_fleece_on_it() {
+        for shear in [false, true] {
+            let world = meadow(20);
+            let mut animals = Animals::seeded(4);
+            let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
+            animals.keep_for_test(sheep, tame_at_home());
+            if shear {
+                assert!(matches!(animals.tend(sheep, (2.0, 22.6, 0.5), Some(BLOCK_FLINT_KNIFE)), Tended::Shorn(_)));
+            }
+            let mut deaths = Vec::new();
+            for _ in 0..400 {
+                let _ = animals.strike(sheep, (1.5, 22.0, 0.5), 3.0, 100.0);
+                animals.step(&world, &at(1.5, 0.5), 0.05, NOON);
+                deaths.extend(animals.take_fallen());
+                if !deaths.is_empty() {
+                    break;
+                }
+            }
+            let death = deaths.first().copied().expect("the sheep never came down");
+            assert_eq!(death.shorn, shear, "shorn {shear}: the death says {death:?}");
+        }
+    }
+
+    #[test]
+    fn a_kept_flock_does_not_use_up_the_wilds_allowance() {
+        let mut animals = Animals::seeded(3);
+        for i in 0..MAX_ANIMALS {
+            let id = animals.spawn(Species::Sheep, (i as f32, 21.0, 0.5)).expect("the land's cap came early");
+            animals.keep_for_test(id, tame_at_home());
+        }
+        assert!(
+            animals.spawn(Species::Deer, (0.5, 21.0, 9.5)).is_some(),
+            "sixty tame sheep in a pen kept every wild deer out of the world"
+        );
+        // ...and the flock has its own ceiling: a tame ewe past it bears
+        // nothing, however the wild stand.
+        let mut kept = Animals::seeded(5);
+        let ewes: Vec<EntityId> = (0..MAX_KEPT)
+            .map(|i| {
+                let id = kept.spawn(Species::Sheep, (i as f32 * 2.0, 21.0, 0.5)).expect("sheep");
+                kept.keep_for_test(id, tame_at_home());
+                id
+            })
+            .collect();
+        assert_eq!(kept.bear_young(ewes[0]), None, "a flock bred past its ceiling");
+    }
+
+    #[test]
+    fn a_player_keeping_a_small_flock_still_meets_wild_animals() {
+        let world = meadow(100);
+        let mut animals = Animals::seeded(9);
+        for i in 0..MAX_ANIMALS_PER_PLAYER + 1 {
+            let id = animals.spawn(Species::Sheep, (0.5 + i as f32, 21.0, 0.5)).expect("sheep");
+            animals.keep_for_test(id, tame_at_home());
+        }
+        let flock = animals.len();
+        run(&mut animals, &world, &at(0.5, 0.5), 600.0, NOON);
+        assert!(animals.len() > flock, "a player with {flock} tame sheep never met anything wild in ten minutes");
+    }
+
     #[test]
     fn a_wild_sheep_comes_to_a_still_hand_holding_grain_and_not_to_one_holding_planks() {
         for (held, comes) in [(BLOCK_GRAIN, true), (BLOCK_PLANKS, false)] {
@@ -15849,7 +16046,7 @@ mod husbandry_tests {
         let eye = (2.0, 22.6, 0.5);
         animals.calendar(0.0);
         assert_eq!(animals.tend(sheep, eye, Some(BLOCK_GRAIN)), Tended::Fed { tamed: false, gentled: false });
-        assert_eq!(animals.tend(sheep, eye, Some(BLOCK_GRAIN)), Tended::Refused("it is not hungry yet"));
+        assert_eq!(animals.tend(sheep, eye, Some(BLOCK_GRAIN)), Tended::Refused(Notice::NotHungry));
         let mut tamed = false;
         for n in 1..=2 {
             animals.calendar(n as f32 * 0.6);
@@ -15865,7 +16062,7 @@ mod husbandry_tests {
     fn planks_held_out_to_a_wild_sheep_leave_it_nobody_s() {
         let mut animals = Animals::seeded(3);
         let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
-        assert_eq!(animals.tend(sheep, (2.0, 22.6, 0.5), Some(BLOCK_PLANKS)), Tended::Refused("it does not eat that"));
+        assert_eq!(animals.tend(sheep, (2.0, 22.6, 0.5), Some(BLOCK_PLANKS)), Tended::Refused(Notice::DoesNotEatThat));
         assert_eq!(animals.keeping(sheep), None, "shown a plank, it is kept and saved for ever");
     }
 
@@ -16231,7 +16428,7 @@ mod horse_tests {
                         animals.step(&world, &watcher(), 0.05, NOON);
                     }
                 }
-                Mounting::Refused(why) => panic!("a gentled horse refused a try: {why}"),
+                Mounting::Refused(why) => panic!("a gentled horse refused a try: {why:?}"),
             }
         };
         assert!(broke, "the ride that stayed on did not say it broke the horse");
@@ -16293,6 +16490,41 @@ mod horse_tests {
         let all: Vec<(primitive_shared::types::BlockId, u32)> = spilled.into_iter().flat_map(|(_, left)| left).collect();
         assert!(all.contains(&(BLOCK_SADDLE, 1)) && all.contains(&(BLOCK_SADDLEBAGS, 1)), "the tack vanished: {all:?}");
         assert_eq!(all.iter().filter(|(b, _)| *b == BLOCK_COPPER_ORE).map(|(_, n)| n).sum::<u32>(), 30);
+    }
+
+    #[test]
+    fn a_knife_takes_the_bags_off_a_living_horse_with_their_load_and_then_the_saddle() {
+        let mut animals = Animals::seeded(15);
+        let horse = saddled_horse(&mut animals);
+        let mut bags = primitive_shared::inventory::Inventory::new();
+        bags.add(BLOCK_COPPER_ORE, 30);
+        animals.gear_for_test(horse).expect("gear").bags = Some(bags);
+        let eye = (2.0, 22.6, 0.5);
+        // A pack with no room: the bags stay on, load and all.
+        let refused = animals.unbuckle(horse, eye, |_| false);
+        assert!(matches!(refused, Unbuckled::Refused(Notice::PackCannotTakeBags)), "{refused:?}");
+        assert!(animals.gear(horse).is_some_and(|g| g.load_kg() > 0.0), "the load went nowhere");
+        // Room: the bags come off first, with every stack in them...
+        let Unbuckled::Bags(load) = animals.unbuckle(horse, eye, |_| true) else {
+            panic!("the bags did not come off");
+        };
+        assert_eq!(load.count(BLOCK_COPPER_ORE), 30, "the load was not in the bags that came off");
+        assert!(animals.gear(horse).is_some_and(|g| g.saddle && g.bags.is_none()));
+        // ...then the saddle, and then there is nothing left.
+        assert!(matches!(animals.unbuckle(horse, eye, |_| true), Unbuckled::Saddle));
+        assert_eq!(animals.gear(horse).map(|g| g.tack()), Some(0), "the horse still wears something");
+        assert!(matches!(animals.unbuckle(horse, eye, |_| true), Unbuckled::Refused(Notice::NothingToUnbuckle)));
+        // The saddle goes back on, as it came off.
+        assert_eq!(animals.tend(horse, eye, Some(BLOCK_SADDLE)), Tended::Saddled);
+    }
+
+    #[test]
+    fn nothing_comes_off_a_horse_somebody_is_riding() {
+        let mut animals = Animals::seeded(15);
+        let horse = saddled_horse(&mut animals);
+        assert!(matches!(animals.mount(horse, RIDER, (1.5, 21.0, 0.5)), Mounting::Riding { .. }));
+        assert!(matches!(animals.unbuckle(horse, (2.0, 22.6, 0.5), |_| true), Unbuckled::Refused(Notice::SomebodyOnIt)));
+        assert!(animals.gear(horse).is_some_and(|g| g.saddle), "the saddle came off under its rider");
     }
 
     #[test]

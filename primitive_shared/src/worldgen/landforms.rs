@@ -262,7 +262,10 @@ impl WorldGen {
             ),
             None => (x, z),
         };
-        let (sin, cos) = (course + self.drain_turn()).sin_cos();
+        let (sin, cos) = match self.drain.iter().find(|(known, _)| *known == course) {
+            Some(&(_, turned)) => turned,
+            None => (course + self.drain_turn()).sin_cos(),
+        };
         let spacing = 1.0 / frequency;
         let (bx, bz) = turned(x / (spacing * BEND_WAVELENGTHS), z / (spacing * BEND_WAVELENGTHS), 2);
         let bend = self.warp_noise.get([bx + shift * 2.0, bz - shift * 2.0]) * spacing * BEND_DEPTH;
@@ -292,6 +295,20 @@ impl WorldGen {
         };
         let field = self.river_field(&self.river_orders()[parent], x, z).abs();
         smoothstep(TRIBUTARY_FIELD.1, TRIBUTARY_FIELD.0, field)
+    }
+
+    /// Every landform order's course with the world's turn on it, as a sine
+    /// and a cosine: worked out once when the generator is made.
+    ///
+    /// **It was worked out at every sample of every river field** -- a hash
+    /// of the seed and a sine and cosine, five to seven times a column for
+    /// each of three orders, for three numbers fixed when the world was
+    /// made. The same numbers from the same sum, so not a block moves.
+    pub(super) fn drain_courses(&self) -> [(f64, (f64, f64)); 3] {
+        LANDFORM_RIVERS.map(|order| {
+            let course = order.course.map_or(0.0, |(course, _)| course);
+            (course, (course + self.drain_turn()).sin_cos())
+        })
     }
 
     /// The world's own turn of every course, in radians, off its seed: one

@@ -313,8 +313,13 @@ struct SlowTile {
     points: Box<[[f64; SLOW_FIELDS]]>,
 }
 
+/// A column -- its world and where -- and every slow field at it. See `slow`.
+type LastSlow = ((super::WorldKey, i32, i32), [f64; SLOW_FIELDS]);
+
 thread_local! {
     static SLOW_TILES: RefCell<TileStore<SlowTile>> = RefCell::new(TileStore::<SlowTile>::new(SLOW_TILES_KEPT));
+    /// The last column `slow` answered, and its fields. See `slow`.
+    static LAST_SLOW: std::cell::Cell<Option<LastSlow>> = const { std::cell::Cell::new(None) };
 }
 
 impl WorldGen {
@@ -349,6 +354,30 @@ impl WorldGen {
     /// it. Only ever asked by an Earth-scale world: a regional one answers
     /// its constants before it gets here.
     fn slow(&self, gx: i32, gz: i32) -> [f64; SLOW_FIELDS] {
+        // **The last column's answer, remembered.** One column asks for its
+        // slow fields four to six times in a row -- the basin, the highland,
+        // the rolling land, the landform, the weather and the rain, each
+        // through its own accessor -- and every ask was a hashed look-up in
+        // the tile store and a blend of all six fields: about a tenth of a
+        // microsecond, measured, for a column that costs two or three. The
+        // landforms added three more asks a column (`landform` in the height
+        // and again, with `highland`, in the biome), which was most of what
+        // they cost a chunk (`what_the_landforms_cost_a_chunk`). The same
+        // numbers either way: a remembered answer is the answer.
+        //
+        // Rejected: one `slow` per column handed down to every accessor. It
+        // would thread a six-field array through a dozen signatures, and the
+        // next accessor written would ask for itself again.
+        let key = (self.key(), gx, gz);
+        if let Some(fields) = LAST_SLOW.with(|last| last.get().filter(|(at, _)| *at == key).map(|(_, fields)| fields)) {
+            return fields;
+        }
+        let fields = self.slow_uncached(gx, gz);
+        LAST_SLOW.with(|last| last.set(Some((key, fields))));
+        fields
+    }
+
+    fn slow_uncached(&self, gx: i32, gz: i32) -> [f64; SLOW_FIELDS] {
         let side = SLOW_STEP * SLOW_CELLS;
         let (tx, tz) = (gx.div_euclid(side), gz.div_euclid(side));
         let (lx, lz) = (gx.rem_euclid(side), gz.rem_euclid(side));

@@ -40,7 +40,7 @@ use primitive_shared::wildfire::{
     licked, licks_as_a_hearth, smoke_room, smoke_target, soot, with_soot, Fuel, Room, BLAZE_HEAT,
     COOLING_PER_SECOND, FLASH_SECONDS, HEARTH_HEAT, MAX_BURNING, MAX_CATCHES_PER_STEP, MAX_WARM_CELLS,
     NEAR_PLAYER, SMOKE_CLEAR_PER_SECOND, SMOKE_RISE_PER_SECOND, SMOKE_STEP_SECONDS, SOOT_STAGES,
-    SOOT_STAGE_SECONDS, STEP_SECONDS, TORCH_SECONDS,
+    SMOULDER_SMOKE, SOOT_STAGE_SECONDS, STEP_SECONDS, TORCH_SECONDS,
 };
 
 use crate::logic::falling::BlockWorld;
@@ -109,6 +109,8 @@ pub struct Wildfire {
     spread_clock: f32,
     smoke_clock: f32,
     dirty: bool,
+    /// Hearths burning green or wet fuel. See `set_smouldering`.
+    smouldering: HashSet<Cell>,
 }
 
 /// Is `at` within reach of anybody? See `wildfire::NEAR_PLAYER`.
@@ -155,6 +157,14 @@ impl Wildfire {
     pub fn set_weather(&mut self, weather: Weather, wind: (f32, f32)) {
         self.weather = weather;
         self.wind = wind;
+    }
+
+    /// The hearths burning green or wet fuel, once a tick, from the fire map
+    /// (`Fires::smouldering_cells`): they smoke and soot `SMOULDER_SMOKE`
+    /// times as hard. Told, because this file sees a hearth only as a lit
+    /// block and the fuel is the fire map's.
+    pub fn set_smouldering(&mut self, cells: Vec<Cell>) {
+        self.smouldering = cells.into_iter().collect();
     }
 
     /// A cell changed. Queue it; the world is not ours to read here.
@@ -471,6 +481,9 @@ impl Wildfire {
             .collect();
 
         for &at in &lit {
+            // Green or wet fuel: thicker and faster, and sooner black. See
+            // `SMOULDER_SMOKE`.
+            let thick = if self.smouldering.contains(&at) { SMOULDER_SMOKE } else { 1.0 };
             let smoke = self.smoke.entry(at).or_default();
             match smoke_room(look, at) {
                 Room::Vented => {
@@ -485,9 +498,9 @@ impl Wildfire {
                         Room::Closed(cells) => (cells, 1.0),
                         Room::Vented => unreachable!(),
                     };
-                    let target = smoke_target(cells.len()) * kept;
+                    let target = (smoke_target(cells.len()) * kept * thick).min(1.0);
                     smoke.thickness = if smoke.thickness < target {
-                        (smoke.thickness + SMOKE_RISE_PER_SECOND * seconds).min(target)
+                        (smoke.thickness + SMOKE_RISE_PER_SECOND * thick * seconds).min(target)
                     } else {
                         (smoke.thickness - SMOKE_CLEAR_PER_SECOND * seconds).max(target)
                     };
@@ -504,7 +517,7 @@ impl Wildfire {
                             .soot
                             .entry(ceiling)
                             .or_insert(f32::from(had) * SOOT_STAGE_SECONDS);
-                        *gathered += seconds;
+                        *gathered += seconds * thick;
                         let stage = ((*gathered / SOOT_STAGE_SECONDS) as u8).min(SOOT_STAGES);
                         // ...and not onto a board the weather has greyed,
                         // which `with_soot` hands back unchanged (see
@@ -777,6 +790,29 @@ mod tests {
         run(&mut wildfire, &world, &[FIRE], &PLAYER, 60.0);
         let holed = wildfire.smoke_at(head);
         assert!(holed < doorway, "a smoke hole did nothing a doorway had not: {holed} against {doorway}");
+    }
+
+    /// **Green or wet fuel smokes harder** (`SMOULDER_SMOKE`), which the room
+    /// and the soot learn from the fire map (`set_smouldering`): the same hut
+    /// fills twice as fast, and its ceiling blackens in half the time.
+    #[test]
+    fn green_wood_fills_a_hut_with_smoke_faster_and_soots_its_ceiling_sooner() {
+        let burn = |smouldering: bool, seconds: f32| {
+            let world = camp();
+            hut(&world, true);
+            let mut wildfire = Wildfire::new();
+            if smouldering {
+                wildfire.set_smouldering(vec![FIRE]);
+            }
+            run(&mut wildfire, &world, &[FIRE], &PLAYER, seconds);
+            (wildfire.smoke_at((1, 11, 1)), soot(world.get(0, 13, 0)))
+        };
+        let (dry, _) = burn(false, 30.0);
+        let (green, _) = burn(true, 30.0);
+        assert!(green > dry * 1.5, "green wood smoked no harder than dry: {green} against {dry}");
+        let early = SOOT_STAGE_SECONDS * 0.5 + 10.0;
+        assert_eq!(burn(false, early).1, 0, "dry wood sooted the ceiling early");
+        assert_eq!(burn(true, early).1, 1, "green wood sooted the ceiling no sooner than dry");
     }
 
     #[test]

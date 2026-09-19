@@ -185,10 +185,18 @@ impl Material {
             return Material::Stone;
         }
         // Anything smelted, forged, or worn as plate.
+        //
+        // ...and the anvil, which is bronze cast on a stump. It fell through
+        // to `Stone` by its `Work` (it wants a pick), so a hammer or a pick
+        // on it was the recorded pick on rock -- and setting it down was a
+        // slab of stone put on the floor. Bronze is what the tool meets, and
+        // the metal's recordings are a blow on metal, which is the strike an
+        // anvil is for; the workbench beside it stays wood.
         if name.starts_with("copper")
             || name.starts_with("tin")
             || name.starts_with("bronze")
             || name.starts_with("iron")
+            || name == "anvil"
         {
             return Material::Metal;
         }
@@ -1348,6 +1356,16 @@ mod tests {
             assert_eq!(Material::of(carcass), Material::Cloth, "{} rings like a pick on rock", block_name(carcass));
         }
         assert_eq!(Material::of(BLOCK_BONES), Material::Gravel);
+    }
+
+    /// **A tool on the anvil is metal on metal**, and not the pick on rock it
+    /// fell through to by its `Work` -- nor the workbench's timber beside it.
+    #[test]
+    fn striking_the_anvil_rings_as_metal_and_the_workbench_knocks_as_wood() {
+        use primitive_shared::types::{BLOCK_ANVIL, BLOCK_WORKBENCH};
+        assert_eq!(Material::of(BLOCK_ANVIL), Material::Metal);
+        assert_eq!(Material::of(BLOCK_WORKBENCH), Material::Wood);
+        assert_ne!(Sfx::Material(Impact::Dig, Material::of(BLOCK_ANVIL)), Sfx::Material(Impact::Dig, Material::of(BLOCK_WORKBENCH)));
     }
 
     #[test]

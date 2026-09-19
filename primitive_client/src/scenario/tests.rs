@@ -11,6 +11,7 @@
 use super::*;
 use primitive_shared::types as t;
 use primitive_shared::types::Facing;
+use primitive_shared::notice::Notice;
 
 fn no_corrections(s: &Scenario) {
     assert!(s.corrections.is_empty(), "the server corrected the player: {:#?}", s.corrections);
@@ -1037,7 +1038,7 @@ fn horse_story(s: &Scenario) -> String {
         s.corrections,
         s.heard
             .iter()
-            .filter(|m| matches!(m, ServerMessage::Chat { .. } | ServerMessage::Error(_) | ServerMessage::Mounted { horse: None, .. }))
+            .filter(|m| matches!(m, ServerMessage::Chat { .. } | ServerMessage::Error(_) | ServerMessage::Notice { .. } | ServerMessage::Mounted { horse: None, .. }))
             .collect::<Vec<_>>()
     )
 }
@@ -1189,6 +1190,37 @@ fn saddlebags_on_a_horse_take_a_load_from_beside_it_and_the_load_slows_it() {
     no_corrections(&s);
 }
 
+/// **A knife on a living horse takes its tack off**: the bags first, with
+/// their load, into the pack; then the saddle. Before this nothing came off a
+/// horse but by killing it.
+#[test]
+fn a_knife_unbuckles_a_horses_bags_with_their_load_and_then_its_saddle() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    let horse = saddled_horse(&mut s, x0, z, true);
+    s.give(t::BLOCK_COPPER_ORE, 20);
+    s.send(ClientMessage::OpenBags { horse });
+    assert!(s.until(3.0, |s| s.chest_screen.is_open()), "the saddlebags never opened");
+    s.send(ClientMessage::ChestBulkMove { to_chest: true });
+    let loaded = s.until(3.0, |s| s.server().horse_gear(horse).and_then(|g| g.bags).is_some_and(|b| b.count(t::BLOCK_COPPER_ORE) == 20));
+    assert!(loaded, "the ore did not go into the bags");
+    s.send(ClientMessage::CloseChest);
+    s.close_screens();
+    s.give(t::BLOCK_FLINT_KNIFE, 1);
+    s.select(t::BLOCK_FLINT_KNIFE);
+    s.send(ClientMessage::TendAnimal { animal: horse });
+    let bags_off = s.until(3.0, |s| s.server().horse_gear(horse).is_some_and(|g| g.bags.is_none()));
+    assert!(bags_off, "the knife took nothing off: {}", horse_story(&s));
+    let packed = s.until(3.0, |s| s.inventory.count(t::BLOCK_SADDLEBAGS) == 1 && s.inventory.count(t::BLOCK_COPPER_ORE) == 20);
+    assert!(packed, "the bags and their load did not come into the pack");
+    s.send(ClientMessage::TendAnimal { animal: horse });
+    let saddle_off = s.until(3.0, |s| s.inventory.count(t::BLOCK_SADDLE) == 1);
+    assert!(saddle_off, "the saddle stayed on: {}", horse_story(&s));
+    assert_eq!(s.server().horse_gear(horse).map(|g| g.tack()), Some(0), "the horse still wears something");
+    no_corrections(&s);
+}
+
 #[test]
 fn a_gentled_horse_throws_its_rider_until_it_is_broken_and_then_it_is_theirs() {
     use primitive_shared::husbandry::Keeping;
@@ -1210,7 +1242,7 @@ fn a_gentled_horse_throws_its_rider_until_it_is_broken_and_then_it_is_theirs() {
         }
         s.send(ClientMessage::Mount { horse });
         let answered = s.until(3.0, |s| {
-            s.horseback.is_some() || s.heard.iter().any(|m| matches!(m, ServerMessage::Chat { text, .. } if text.contains("throws you")))
+            s.horseback.is_some() || s.heard.iter().any(|m| matches!(m, ServerMessage::Notice { what: Notice::HorseThrowsYou }))
         });
         assert!(answered, "a try on its back came to nothing");
         if s.horseback.is_none() {
@@ -1221,7 +1253,7 @@ fn a_gentled_horse_throws_its_rider_until_it_is_broken_and_then_it_is_theirs() {
     }
     assert_eq!(s.server().player_riding(), Some(horse));
     assert!(
-        s.heard.iter().any(|m| matches!(m, ServerMessage::Chat { text, .. } if text.contains("yours"))),
+        s.heard.iter().any(|m| matches!(m, ServerMessage::Notice { what: Notice::HorseIsYours })),
         "breaking it was never said"
     );
 }
@@ -1252,7 +1284,10 @@ fn a_lean_to_keeps_its_sleeper_out_of_the_rain_and_falls_in_at_dawn() {
     s.shot("lean_to");
     // Caught out in it first: the rain is on the player.
     let name = s.name.clone();
-    assert!(s.until(6.0, |s| s.server().wetness_of(&name).unwrap_or(0.0) > 0.1), "standing in the rain wet nobody");
+    // A long ceiling, which costs nothing when the rain does its work: the
+    // wetting is sampled on the server's ticks, and a server starved by a
+    // full test run takes fewer of them in six seconds of frames.
+    assert!(s.until(20.0, |s| s.server().wetness_of(&name).unwrap_or(0.0) > 0.1), "standing in the rain wet nobody");
 
     // In, and down.
     // At the leaves, which are the pallet's two eighths high.
@@ -1269,14 +1304,31 @@ fn a_lean_to_keeps_its_sleeper_out_of_the_rain_and_falls_in_at_dawn() {
     // down may have been read where they stood, so it is let go.) The night
     // passes on the server's clock, so this watches until the roof is gone
     // rather than for a fixed while.
-    s.seconds(0.6);
+    //
+    // **Everything here is timed on the server's word, and it was not.** The
+    // wait for the stale sample to pass was 0.6 s of client frames, and the
+    // roof was the client's copy of the lean-to -- which hears of the
+    // collapse a snapshot after the server has woken the sleeper into the
+    // morning's rain. On a machine running the whole suite the server fell
+    // behind the frames, a sample taken in that gap counted dawn's rain
+    // against the roof, and one full run went red. Now: a sample interval of
+    // the server's own ticks after lying down (the climate samples every ten
+    // at the default rate), and each reading kept only if the server still
+    // had the sleeper under a standing roof *after* it was read.
+    let roofed = |s: &Scenario| {
+        s.server().asleep(&name)
+            && cells.iter().all(|&(x, y, z)| s.server().block_at(x, y, z).is_some_and(|b| t::block_kind(b) == t::BLOCK_LEAN_TO))
+    };
+    let lay_down_at = s.server().ticks();
+    assert!(s.until(10.0, |s| s.server().ticks() >= lay_down_at + 12 || !roofed(s)), "the server stopped ticking");
     let mut under = vec![s.server().wetness_of(&name).unwrap_or(0.0)];
     for _ in 0..40 {
         s.seconds(0.1);
-        if !lean_to_at(&s, cells) {
+        let wetness = s.server().wetness_of(&name).unwrap_or(1.0);
+        if !roofed(&s) {
             break;
         }
-        under.push(s.server().wetness_of(&name).unwrap_or(1.0));
+        under.push(wetness);
     }
     assert!(
         under.windows(2).all(|w| w[1] <= w[0] + 1e-3),
@@ -1285,7 +1337,7 @@ fn a_lean_to_keeps_its_sleeper_out_of_the_rain_and_falls_in_at_dawn() {
 
     // The night passes -- everybody is asleep -- and the roof comes down
     // with the morning, and the sleeper is on their feet beside the heap.
-    let gone = s.until(10.0, |s| cells.iter().all(|&c| s.block(c) == Some(t::BLOCK_AIR)));
+    let gone = s.until(30.0, |s| cells.iter().all(|&c| s.block(c) == Some(t::BLOCK_AIR)));
     assert!(gone, "the lean-to stood through the morning: {:?}", cells.map(|c| s.block(c).map(t::block_name)));
     s.seconds(0.5);
     s.shot("lean_to_fallen");

@@ -307,6 +307,12 @@ impl Smelting {
         if !fed {
             return;
         }
+        // **What it was fed is the smoke's business** (`Fires::smoulder`):
+        // the fire map keeps heats, and a green log's heat is a lesser
+        // seasoned fuel's, so the fuel is told to it here, where it is known.
+        if hearth::burns_green(fuel) {
+            fires.smoulder(at, seconds);
+        }
         self.stepped.changed.push(at);
 
         let owed = self.ash_owed.entry(at).or_insert(0.0);

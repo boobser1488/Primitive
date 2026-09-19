@@ -27,7 +27,9 @@ use std::time::{Duration, Instant};
 use primitive_shared::horse::{self, Fettle, Gait, Mount, Reins};
 use primitive_shared::protocol::{EntityId, Posture, ServerMessage};
 
-use crate::logic::animals::Mounting;
+use primitive_shared::notice::Notice;
+
+use crate::logic::animals::{Mounting, Unbuckled};
 
 fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
@@ -61,7 +63,7 @@ pub(crate) fn mount(
     let mounting = lock(&ctx.animals).mount(id, handle.id, feet);
     match mounting {
         Mounting::Refused(why) => {
-            handle.send(ServerMessage::Error(why.to_string()));
+            handle.send(ServerMessage::Notice { what: why });
         }
         Mounting::Thrown { at } => {
             // **On the ground beside it, and hurt a little**: the fall is a
@@ -89,12 +91,12 @@ pub(crate) fn mount(
                 primitive_shared::injury::Blow::Blunt,
             );
             crate::report_vitals(ctx, handle, outcome);
-            tell(handle, "the horse throws you: let it settle, and try again");
+            tell(handle, Notice::HorseThrowsYou);
         }
         Mounting::Riding { body, fettle, broke } => {
             seat(handle, id, body, fettle);
             if broke {
-                tell(handle, "the horse stands for you: it is yours now, and home is here");
+                tell(handle, Notice::HorseIsYours);
             }
         }
     }
@@ -121,8 +123,11 @@ fn seat(handle: &std::sync::Arc<crate::players::PlayerHandle>, id: EntityId, bod
     handle.send(ServerMessage::Mounted { horse: Some(id), at: (body.x, body.y, body.z), yaw: body.yaw, wind: body.wind, fettle });
 }
 
-fn tell(handle: &std::sync::Arc<crate::players::PlayerHandle>, text: &str) {
-    handle.send(ServerMessage::Chat { from: None, username: "server".to_string(), text: text.to_string() });
+/// News about a horse, in the player's words (`notice`). It was a chat line
+/// in English from "server", which a Russian player read as English and every
+/// player read as somebody talking.
+fn tell(handle: &std::sync::Arc<crate::players::PlayerHandle>, what: Notice) {
+    handle.send(ServerMessage::Notice { what });
 }
 
 /// `ClientMessage::Dismount`, and every other way off a horse: `why` is said
@@ -148,7 +153,7 @@ pub(crate) fn dismount(
     handle.send(ServerMessage::Mounted { horse: None, at: down, yaw: 0.0, wind: 0.0, fettle: Fettle::FRESH });
     handle.send(ServerMessage::Posture { posture: Posture::Standing, at: Some(down), yaw: 0.0 });
     if let Some(text) = why {
-        tell(handle, text);
+        handle.send(ServerMessage::Chat { from: None, username: "server".to_string(), text: text.to_string() });
     }
 }
 
@@ -212,6 +217,68 @@ pub(crate) fn rein(
     lock(&ctx.animals).rein(id, handle.id, reins);
 }
 
+/// A knife on horse `id` (`ClientMessage::TendAnimal`): its saddlebags off
+/// into the pack with their load, or its saddle. See `Animals::unbuckle` for
+/// why the bags go first and why a load that will not fit keeps them on.
+///
+/// **The pack is tried on a copy**, and the copy kept only if every stack
+/// went in: `Inventory::add` answers what did not fit, and a load that half
+/// fitted would be half a load left in bags that are no longer anywhere.
+pub(crate) fn unbuckle(
+    ctx: &std::sync::Arc<crate::Context>,
+    handle: &std::sync::Arc<crate::players::PlayerHandle>,
+    id: EntityId,
+) {
+    use primitive_shared::types::{BLOCK_SADDLE, BLOCK_SADDLEBAGS};
+    let eye = {
+        let state = lock(&handle.state);
+        if state.vitals.is_dead() || state.riding.is_some() {
+            return;
+        }
+        let feet = primitive_shared::geometry::narrow(state.position);
+        (feet.0, feet.1 + primitive_shared::geometry::EYE_HEIGHT, feet.2)
+    };
+    // The pack as it would be with the bags in it: worked out under the
+    // animals' lock, which is the order `with_open_bags` takes the two in.
+    let mut packed = None;
+    let unbuckled = lock(&ctx.animals).unbuckle(id, eye, |bags| {
+        let mut pack = lock(&handle.state).inventory.clone();
+        let fits = pack.add(BLOCK_SADDLEBAGS, 1) == 0
+            && bags.slots().iter().flatten().all(|stack| pack.add_worn(stack.block, stack.count, stack.damage) == 0);
+        if fits {
+            packed = Some(pack);
+        }
+        fits
+    });
+    match unbuckled {
+        Unbuckled::Refused(what) => {
+            handle.send(ServerMessage::Notice { what });
+            return;
+        }
+        Unbuckled::Bags(_) => {
+            let mut state = lock(&handle.state);
+            if let Some(pack) = packed {
+                state.inventory = pack;
+            }
+            state.inventory_dirty = true;
+        }
+        Unbuckled::Saddle => {
+            let mut state = lock(&handle.state);
+            let left = state.inventory.add(BLOCK_SADDLE, 1);
+            state.inventory_dirty = true;
+            drop(state);
+            // A full pack: the saddle goes down at the player's feet rather
+            // than nowhere. It was never refused for want of room -- a
+            // saddle is one thing, and the ground takes it.
+            if left > 0 {
+                let at = lock(&handle.state).position;
+                lock(&ctx.items).spawn(BLOCK_SADDLE, left, (at.0, at.1 + 0.5, at.2), (0.0, 0.0, 0.0), None, Instant::now());
+            }
+        }
+    }
+    crate::send_inventory(handle);
+}
+
 /// `ClientMessage::OpenBags`: the horse's saddlebags, as a container.
 pub(crate) fn open_bags(
     ctx: &std::sync::Arc<crate::Context>,
@@ -227,7 +294,7 @@ pub(crate) fn open_bags(
     };
     let contents = lock(&ctx.animals).bags_within(id, eye, BAGS_REACH).map(|bags| bags.clone());
     let Some(inventory) = contents else {
-        handle.send(ServerMessage::Error("there are no saddlebags within reach".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NoBagsInReach });
         return;
     };
     let cell = bags_cell(id);
@@ -337,8 +404,10 @@ pub(crate) fn tick(
         let dead = lock(&handle.state).vitals.is_dead();
         let Some(body) = on.filter(|_| !dead) else {
             // The horse died under them, or was forgotten, or they did.
-            let why = (!dead).then_some("your horse is gone");
-            dismount(ctx, handle, why);
+            dismount(ctx, handle, None);
+            if !dead {
+                tell(handle, Notice::HorseGone);
+            }
             continue;
         };
         let saddle = body.saddle();

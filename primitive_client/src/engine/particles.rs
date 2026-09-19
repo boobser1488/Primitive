@@ -1104,7 +1104,12 @@ impl Particles {
                 continue;
             }
             let nearness = 1.0 - (distance / SMOKE_RANGE).clamp(0.0, 1.0);
-            let rate = SMOKE_PER_SECOND * (SMOKE_FAR_SHARE + (1.0 - SMOKE_FAR_SHARE) * nearness);
+            // **Green or wet fuel smokes harder** (`wildfire::SMOULDERING`,
+            // set on the block by the server, which knows the fuel): the
+            // plume a player sees is the room the server is filling.
+            let smouldering = chunks.block_at(x, y, z).is_some_and(primitive_shared::wildfire::smoulders);
+            let thick = if smouldering { primitive_shared::wildfire::SMOULDER_SMOKE } else { 1.0 };
+            let rate = SMOKE_PER_SECOND * thick * (SMOKE_FAR_SHARE + (1.0 - SMOKE_FAR_SHARE) * nearness);
             let wait = self.wait_for(rate);
             self.hearths[index].smoke_in = wait;
             if distance <= SMOKE_RANGE && smoking < SMOKE_MAX {

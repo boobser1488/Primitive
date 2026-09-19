@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use primitive_shared::packed::PackedChunk;
 use primitive_shared::types::{
-    is_collidable, BlockId, Chunk, ChunkPos, BLOCK_AIR, CHUNK_SIZE_Y, CHUNK_VOLUME,
+    is_collidable, BlockId, Chunk, ChunkPos, BLOCK_AIR, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z, CHUNK_VOLUME,
 };
 use primitive_shared::worldgen::WorldGen;
 
@@ -611,6 +611,30 @@ impl World {
             existing.last_access.store(self.stamp(), Ordering::Relaxed);
             return Arc::clone(&existing.chunk);
         }
+        // **The overlay again, under the shard's lock.** `generate` read it
+        // before this chunk existed anywhere, and an edit that landed in
+        // between -- overlay written, then no cached chunk for `set_block`
+        // to update -- was lost from the cache: the chunk went in as the
+        // generator drew it, and every read said grass where water had been
+        // placed. A scenario that filled a river on a field hit it in one full
+        // run of two. Read here, a `set_block` is either already in the
+        // overlay or takes this lock after us and finds the chunk cached.
+        let mut packed = packed;
+        {
+            let edits = self.edits.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(chunk_edits) = edits.get(&pos) {
+                for (&index, &block) in chunk_edits {
+                    let index = index as usize;
+                    if index < CHUNK_VOLUME {
+                        // `Chunk::index` undone: x fastest, then z, then y.
+                        let (x, z, y) = (index % CHUNK_SIZE_X, index / CHUNK_SIZE_X % CHUNK_SIZE_Z, index / (CHUNK_SIZE_X * CHUNK_SIZE_Z));
+                        if packed.get(x, y, z) != block {
+                            packed.set(x, y, z, block);
+                        }
+                    }
+                }
+            }
+        }
         let arc = Arc::new(packed);
         guard.chunks.insert(
             pos,
@@ -848,7 +872,7 @@ impl World {
     /// of chunks in the rare save that has one -- and kept for the pass.
     fn frame_lone_racks(&self) -> usize {
         use primitive_shared::types::{
-            block_kind, rack_whole, BLOCK_DRYING_RACK, BLOCK_HIDE_FRAME, CHUNK_SIZE_X, CHUNK_SIZE_Z, KIND_MASK,
+            block_kind, rack_whole, BLOCK_DRYING_RACK, BLOCK_HIDE_FRAME, KIND_MASK,
         };
         // A cell: `rack_whole` asks through an `Fn`, and the terrain it fills
         // on the way is a cache, not a result.
@@ -925,6 +949,22 @@ impl crate::logic::falling::BlockWorld for World {
 mod tests {
     use super::*;
     use primitive_shared::types::{BLOCK_AIR, BLOCK_GLOWSTONE};
+
+    /// **An edit made while its chunk was being generated is not lost.** The
+    /// generator read the overlay before the edit, the edit found no cached
+    /// chunk to update, and the chunk went in as drawn -- which is what put
+    /// grass back where a scenario had placed water. `insert` reads the
+    /// overlay again.
+    #[test]
+    fn an_edit_made_while_its_chunk_was_generating_is_in_the_chunk_that_goes_in() {
+        let world = World::new(99, 64);
+        let pos = ChunkPos::new(2, 3);
+        let (x, y, z) = (2 * 16 + 5, 40, 3 * 16 + 7);
+        let stale = world.generate(pos);
+        assert!(world.set_block(x, y, z, BLOCK_GLOWSTONE));
+        world.insert(stale);
+        assert_eq!(world.cached_block(x, y, z), Some(BLOCK_GLOWSTONE), "the edit was lost to the chunk generated under it");
+    }
 
     #[test]
     fn edits_survive_eviction_and_regeneration() {

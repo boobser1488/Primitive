@@ -667,7 +667,7 @@ pub(crate) fn use_raft(
     // oars of a raft they are not standing on would be rowing it away from
     // whoever is.
     if aboard != Some(id) {
-        handle.send(ServerMessage::Error("step aboard to take the oars".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::StepAboardForOars });
         return;
     }
     let taken = {
@@ -770,9 +770,7 @@ pub(crate) fn launch(
     }
     let aim = [f64::from(at.0) + 0.5, f64::from(at.1) + 0.5, f64::from(at.2) + 0.5];
     let Some(body) = raft::launch(aim, yaw, &|x, y, z| ctx.world.cached_block(x, y, z)) else {
-        handle.send(ServerMessage::Error(
-            "a raft needs open water: three blocks long, two wide, and deep enough to float".to_string(),
-        ));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::RaftNeedsOpenWater });
         return;
     };
     // Out of the pack before it is on the water, so that no failure between
@@ -790,7 +788,7 @@ pub(crate) fn launch(
         let mut state = lock(&handle.state);
         let _ = state.inventory.add(BLOCK_RAFT, 1);
         drop(state);
-        handle.send(ServerMessage::Error("there is already a raft there".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::RaftAlreadyThere });
     }
     crate::send_inventory(handle);
 }

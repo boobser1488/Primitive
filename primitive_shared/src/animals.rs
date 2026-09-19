@@ -2529,6 +2529,30 @@ pub fn per_player_cap(species: Species) -> usize {
 /// out with it, bounded when twenty people are online in one valley.
 pub const MAX_ANIMALS: usize = 60;
 
+/// The ceiling on **kept** animals in a world -- tame ones, and the young
+/// born to them -- counted apart from the wild.
+///
+/// ## The rule
+///
+/// The wild's caps (`MAX_ANIMALS`, `MAX_ANIMALS_PER_PLAYER`) count the wild
+/// and nothing else, and the kept have this ceiling of their own. A tame
+/// animal is a thing a player made, like a wall; it is not the world's
+/// share of deer.
+///
+/// **They were one count, and a herd emptied the world.** A shepherd with
+/// three ewes in a pen had used the whole of their three-animal allowance,
+/// and nothing wild ever arrived near them again -- no deer to hunt, no wolf
+/// at the fold, no horse herd to go and catch -- and on a server sixty kept
+/// animals would have done the same to everybody. What keeping a flock
+/// should cost is the grass and the grain, not the hunting.
+///
+/// Still a ceiling, because the kept are entities like the wild ones: every
+/// one is in the snapshot every player is sent, and a flock that bred
+/// without end would be a snapshot that grew without end. Sixty is the
+/// wild's own hard cap, so the list can at most double; past it the ewes
+/// are simply barren until somebody eats a sheep.
+pub const MAX_KEPT: usize = 60;
+
 /// Beyond this many blocks from every player, an animal is forgotten.
 ///
 /// Comfortably past the interest radius, so nothing is despawned while
