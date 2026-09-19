@@ -981,7 +981,7 @@ pub(super) fn place_branch_baobab(
 /// nine survives in a forest, most of them on a plain -- and what is left
 /// is a couple of saplings a chunk in either.
 fn sapling_spacing(biome: Biome) -> Option<u32> {
-    if !matches!(biome, Biome::Forest | Biome::Plains | Biome::Swamp | Biome::BirchForest) {
+    if !matches!(biome, Biome::Forest | Biome::Plains | Biome::Hills | Biome::Swamp | Biome::BirchForest) {
         return None;
     }
     biome.tree_spacing().map(|trees| (trees / 2).max(8))

@@ -578,6 +578,8 @@ impl WorldGen {
             | Biome::Swamp
             | Biome::Bog
             | Biome::Plains
+            | Biome::Steppe
+            | Biome::Hills
             | Biome::Savanna => Some((BLOCK_LOG, BLOCK_PLANKS)),
             _ => None,
         };

@@ -1326,7 +1326,13 @@ impl Species {
             ),
             Species::Pike => matches!(
                 biome,
-                Biome::Swamp | Biome::Plains | Biome::Forest | Biome::DeadForest | Biome::Savanna
+                Biome::Swamp
+                    | Biome::Plains
+                    | Biome::Steppe
+                    | Biome::Hills
+                    | Biome::Forest
+                    | Biome::DeadForest
+                    | Biome::Savanna
             ),
             Species::Herring => matches!(biome, Biome::Ocean | Biome::Beach),
             // **The coast, and the sea off it.** Not a river: a gull on a
@@ -3729,7 +3735,7 @@ mod tests {
         );
         assert_eq!(
             lives(Species::Pike),
-            ["savanna", "plains", "forest", "dead forest", "swamp"],
+            ["savanna", "plains", "forest", "dead forest", "swamp", "steppe", "hills"],
             "the pike has left the warm still water"
         );
         assert_eq!(lives(Species::Herring), ["ocean", "beach"], "the herring has left the coast");

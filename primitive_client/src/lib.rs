@@ -1307,8 +1307,9 @@ fn run(
 
                     Action::CreateWorld => {
                         let name = menu.name_input.text().trim().to_string();
+                        // A blank box rolls a seed: see `ui::menu::random_seed`.
                         let seed = if menu.seed_input.is_empty() {
-                            settings.singleplayer_seed
+                            ui::menu::random_seed()
                         } else {
                             menu.seed_input.text().parse::<u32>().unwrap_or(settings.singleplayer_seed)
                         };

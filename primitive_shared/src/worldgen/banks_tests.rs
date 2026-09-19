@@ -201,8 +201,11 @@ fn rivers_have_cut_banks_and_banks_that_shelve_into_the_water() {
 fn the_outside_of_a_bend_is_steeper_than_the_inside() {
     let gen = WorldGen::new(SEED);
     let (mut outside, mut inside) = ((0.0, 0usize), (0.0, 0usize));
-    for gz in (-30_000..30_000).step_by(97) {
-        for gx in (-30_000..30_000).step_by(89) {
+    // Closer than the ninety-odd blocks it was: the landforms' brooks run
+    // only near their rivers (`landforms::tributary_reach`), and the sweep
+    // found twenty-odd bends of each hand where it wants thirty.
+    for gz in (-30_000..30_000).step_by(61) {
+        for gx in (-30_000..30_000).step_by(59) {
             let (land, island) = gen.land_before_rivers(gx, gz);
             if island {
                 continue;

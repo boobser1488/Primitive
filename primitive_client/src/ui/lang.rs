@@ -231,6 +231,11 @@ pub enum Msg {
     MinutesLeft,
     DeleteThisWorld,
     SeedHelp,
+    /// What an empty seed box says it will do: roll one.
+    SeedRandom,
+    /// The button beside the seed box that rolls one into it now, so the
+    /// player sees the number before the world is made from it.
+    RollSeed,
     WorldFormHelp,
     /// The same hint for a screen with no keyboard on it.
     WorldFormHelpTouch,
@@ -941,7 +946,9 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::RackEmpty,    en: "nothing on the frame", simple: "nothing on it", ru: "на раме пусто", pl: "rama pusta" },
     Line { msg: Msg::RackFull,     en: "the tray is full", simple: "no room for more leather", ru: "лоток полон", pl: "taca pełna" },
     Line { msg: Msg::MinutesLeft,  en: "min left",     simple: "min to go",  ru: "мин осталось", pl: "min zostało" },
-    Line { msg: Msg::SeedHelp,     en: "the seed decides the terrain -- leave it for the default", simple: "this number shapes the land -- leave it if unsure", ru: "зерно определяет рельеф -- можно оставить как есть", pl: "ziarno decyduje o terenie -- zostaw dla domyślnego" },
+    Line { msg: Msg::SeedHelp,     en: "the seed decides the terrain -- leave it empty for a new one", simple: "this number shapes the land -- leave it empty for a surprise", ru: "зерно определяет рельеф -- пустое даст новый мир", pl: "ziarno decyduje o terenie -- puste da nowy świat" },
+    Line { msg: Msg::SeedRandom,   en: "random",       simple: "any",          ru: "случайное",    pl: "losowe" },
+    Line { msg: Msg::RollSeed,     en: "ROLL",         simple: "PICK",         ru: "БРОСИТЬ",      pl: "LOSUJ" },
     Line { msg: Msg::WorldFormHelp, en: "tab switches field   enter creates   esc cancels", simple: "tab moves   enter makes it   esc goes back", ru: "tab переключает поле   ввод создаёт   esc отменяет", pl: "tab zmienia pole   enter tworzy   esc anuluje" },
     Line { msg: Msg::NeverPlayed,  en: "never played",  simple: "never played", ru: "не играли", pl: "nigdy nie grano" },
     Line { msg: Msg::JustNow,      en: "just now",      simple: "just now",  ru: "только что", pl: "przed chwilą" },

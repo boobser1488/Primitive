@@ -207,7 +207,7 @@ impl World {
         zone: primitive_shared::worldgen::Zone,
         max_cached_chunks: usize,
     ) -> Self {
-        Self::with_scale(seed, preset, zone, primitive_shared::worldgen::Scale::Earth, max_cached_chunks)
+        Self::with_scale(seed, preset, zone, primitive_shared::worldgen::Scale::Landforms, max_cached_chunks)
     }
 
     /// The same, drawn at a scale: the Earth's for a new world, the

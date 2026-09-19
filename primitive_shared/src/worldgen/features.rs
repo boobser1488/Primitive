@@ -371,7 +371,7 @@ impl WorldGen {
         // counts took that test's fallen logs under a hundred. Out on the
         // grass nothing lies there to take, and a shelter is a thing seen
         // from across the country rather than found behind a tree.
-        if !matches!(site.biome, Biome::Plains | Biome::Tundra | Biome::Savanna | Biome::Desert) {
+        if !matches!(site.biome, Biome::Plains | Biome::Steppe | Biome::Hills | Biome::Tundra | Biome::Savanna | Biome::Desert) {
             return None;
         }
         if middle.height >= middle.granite_from {
@@ -485,7 +485,7 @@ impl WorldGen {
 
     /// A thicket wants a meadow wood's edge: most of a small disc of turf.
     fn judge_thicket(&self, site: Feature) -> Option<Feature> {
-        if !matches!(site.biome, Biome::Forest | Biome::BirchForest | Biome::Plains) {
+        if !matches!(site.biome, Biome::Forest | Biome::BirchForest | Biome::Plains | Biome::Hills) {
             return None;
         }
         let good = disc(3, 10)
