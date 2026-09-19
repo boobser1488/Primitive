@@ -1,4 +1,5 @@
-//! The anvil's and the potter's wheel's screen: pick a job, then keep time.
+//! The anvil's, the potter's wheel's, the sawhorse's and the honing stone's
+//! screen: pick a job, then keep time.
 //!
 //! **One module for both games**, and it is not laziness. What is on the
 //! screen is the same object in both: a list of jobs, a bar with a marker
@@ -350,10 +351,12 @@ impl StationScreen {
         // they actually started, because the screen they picked it on is
         // gone.
         let title = match open.run.as_ref() {
-            Some(run) => crate::ui::names::identified(run.job.name(), language),
+            Some(run) => job_label(run.job, language),
             None => std::borrow::Cow::Borrowed(language.text(match open.game {
                 Game::Anvil => Msg::AnvilTitle,
                 Game::Wheel => Msg::WheelTitle,
+                Game::Saw => Msg::SawhorseTitle,
+                Game::Whet => Msg::HoningTitle,
             })),
         };
         p.text_centred(&title, panel.frame.centre_x(), panel.title_top, TITLE_SCALE, widgets::INK);
@@ -370,7 +373,14 @@ impl StationScreen {
         for (index, &job) in jobs_of(open.game).iter().enumerate() {
             let row = panel.row(index);
             let hovered = self.cursor.is_some_and(|at| row.contains(at.0, at.1));
-            p.button(row, &crate::ui::names::identified(job.name(), language), hovered, true);
+            // **The words in the part of the button right of the picture**,
+            // not centred on the whole of it: in the sawhorse's half-width
+            // rows a centred "Storage box" ran into the chest drawn at its
+            // left end. The slab is still the whole row, so the click is.
+            let label = job_label(job, language);
+            p.button(row, "", hovered, true);
+            let words = panel.words(index);
+            p.label_in(words, &label, widgets::button_label_scale(words, &label, 1.0), widgets::INK);
             // **The picture of what comes off it, beside the words.** Three
             // rows at the wheel say "unfired" three times, and a player
             // scanning for the jug reads a shape faster than a word -- the
@@ -468,8 +478,26 @@ fn elapsed_ms(began: Instant) -> u32 {
 /// The good run and not the fair one because they are the same thing and a
 /// ruined run makes nothing -- and a row with no picture would be a row that
 /// looks like it makes nothing.
+///
+/// **The whetstone for the hone**, which makes nothing: its row is the
+/// gesture, and the stone is the picture a player already knows for it.
 pub fn job_product(job: Job) -> Option<BlockId> {
+    if job == Job::Hone {
+        return Some(primitive_shared::types::BLOCK_WHETSTONE);
+    }
     minigame::outcome(job, Verdict::Fine).made.map(|(block, _)| block)
+}
+
+/// What a job's row and a running bar's heading say.
+///
+/// The thing it makes, by its block name -- except the hone, which makes
+/// nothing and is named as the gesture the crafting menu already calls it
+/// ("hone"), so the stone and the menu say the same word for the same work.
+pub fn job_label(job: Job, language: Language) -> std::borrow::Cow<'static, str> {
+    if job == Job::Hone {
+        return crate::ui::names::recipe("hone", language);
+    }
+    crate::ui::names::identified(job.name(), language)
 }
 
 /// The jobs a station offers, in the order it lists them.
@@ -477,8 +505,15 @@ pub fn jobs_of(game: Game) -> &'static [Job] {
     match game {
         Game::Anvil => &[Job::Nails, Job::Helm],
         Game::Wheel => &[Job::Vessel, Job::Jug, Job::Mould, Job::Bowl],
+        Game::Whet => &[Job::Hone],
+        // The camp's pieces first, then the house's.
+        Game::Saw => &[Job::Stool, Job::Chest, Job::Barrel, Job::Chair, Job::Table, Job::Door, Job::Bed],
     }
 }
+
+/// How many rows fit between the heading and the line under the list. A
+/// station with more jobs than this lays them in two columns.
+const ROWS_IN_A_COLUMN: usize = 4;
 
 /// Every rectangle on the screen, worked out once.
 ///
@@ -493,10 +528,17 @@ pub struct Panel {
     title_top: f32,
     note_top: f32,
     rows_top: f32,
+    /// One, or two for the sawhorse's seven pieces.
+    ///
+    /// **Two columns rather than a taller panel or a scrolling list.** A
+    /// taller panel is the size jump `for_game` refuses; a list that scrolls
+    /// hides the bed below a stool, and the one thing a list of seven must
+    /// not do is make a player hunt for the piece they came to cut.
+    columns: usize,
 }
 
 impl Panel {
-    pub fn for_game(_game: Game) -> Panel {
+    pub fn for_game(game: Game) -> Panel {
         // One shape for both, because they hold the same things: a heading,
         // a short list, a bar and a line of words. A wheel panel sized to its
         // own three rows would jump when a player walked from one station to
@@ -518,13 +560,18 @@ impl Panel {
         // as the English -- ran straight through it. Measured off the button's
         // own top edge, so the two cannot drift apart.
         let note_top = close.y1 + 0.03 + widgets::cell_height(NOTE_SCALE);
-        Panel { frame, close, bar, title_top, note_top, rows_top }
+        let columns = if jobs_of(game).len() > ROWS_IN_A_COLUMN { 2 } else { 1 };
+        Panel { frame, close, bar, title_top, note_top, rows_top, columns }
     }
 
-    /// Job row `index`, counted down from under the heading.
+    /// Job row `index`, counted down from under the heading -- across first,
+    /// then down, when there are two columns.
     pub fn row(&self, index: usize) -> Rect {
-        let top = self.rows_top - index as f32 * (ROW_HEIGHT + ROW_GAP);
-        Rect::new(self.frame.x0 + PAD, top - ROW_HEIGHT, self.frame.x1 - PAD, top)
+        let (line, column) = (index / self.columns, index % self.columns);
+        let top = self.rows_top - line as f32 * (ROW_HEIGHT + ROW_GAP);
+        let span = (self.frame.width() - 2.0 * PAD - (self.columns - 1) as f32 * ROW_GAP) / self.columns as f32;
+        let x0 = self.frame.x0 + PAD + column as f32 * (span + ROW_GAP);
+        Rect::new(x0, top - ROW_HEIGHT, x0 + span, top)
     }
 
     /// Where job row `index` draws its picture: a square at the row's left
@@ -535,6 +582,14 @@ impl Panel {
         let inset = ROW_HEIGHT * 0.12;
         let side = row.height() - 2.0 * inset;
         Rect::new(row.x0 + inset * 1.5, row.y0 + inset, row.x0 + inset * 1.5 + side, row.y1 - inset)
+    }
+
+    /// Where job row `index` letters its name: the row right of its picture,
+    /// with the same air on the far side. See `draw_jobs`.
+    pub fn words(&self, index: usize) -> Rect {
+        let (row, icon) = (self.row(index), self.icon(index));
+        let air = icon.x0 - row.x0;
+        Rect::new(icon.x1 + air, row.y0, row.x1 - air, row.y1)
     }
 
     /// A slice of the bar between two fractions of its width.
@@ -577,7 +632,7 @@ mod tests {
 
     #[test]
     fn a_station_row_is_clicked_where_it_is_drawn() {
-        for game in [Game::Anvil, Game::Wheel] {
+        for game in [Game::Anvil, Game::Wheel, Game::Whet, Game::Saw] {
             let mut screen = opened(game);
             let panel = Panel::for_game(game);
             for (index, &job) in jobs_of(game).iter().enumerate() {
@@ -610,7 +665,7 @@ mod tests {
 
     #[test]
     fn a_job_is_clicked_on_its_picture_as_on_its_words() {
-        for game in [Game::Anvil, Game::Wheel] {
+        for game in [Game::Anvil, Game::Wheel, Game::Whet, Game::Saw] {
             let mut screen = opened(game);
             let panel = Panel::for_game(game);
             for (index, &job) in jobs_of(game).iter().enumerate() {
@@ -628,12 +683,12 @@ mod tests {
                 let words = Language::ALL
                     .iter()
                     .map(|&language| {
-                        let text = crate::ui::names::identified(job.name(), language);
-                        widgets::measure(&text, widgets::button_label_scale(row, &text, 1.0))
+                        let text = job_label(job, language);
+                        widgets::measure(&text, widgets::button_label_scale(panel.words(index), &text, 1.0))
                     })
                     .fold(0.0f32, f32::max);
                 assert!(
-                    icon.x1 < row.centre_x() - words / 2.0,
+                    icon.x1 < panel.words(index).centre_x() - words / 2.0,
                     "{game:?} row {index}: the picture runs into the words"
                 );
                 // ...and a click on it is a click on the job.
@@ -651,7 +706,7 @@ mod tests {
         // brought back by `Layout::hit` -- the pair `place_cursor` uses.
         let check = |aspect: f32, requested: f32| {
             let layout = widgets::Layout::for_screen(aspect, requested);
-            for game in [Game::Anvil, Game::Wheel] {
+            for game in [Game::Anvil, Game::Wheel, Game::Whet, Game::Saw] {
                 let mut screen = opened(game);
                 let grown = screen.grow_by(layout);
                 let panel = Panel::for_game(game);
@@ -706,6 +761,25 @@ mod tests {
         for pair in keys.windows(2) {
             assert_ne!(pair[0], pair[1], "a step of the run left the interface key as it was, so it was never drawn");
         }
+    }
+
+    #[test]
+    fn the_sawhorse_lays_its_seven_pieces_in_two_columns_that_neither_overlap_nor_run_into_the_note() {
+        let panel = Panel::for_game(Game::Saw);
+        let jobs = jobs_of(Game::Saw);
+        assert_eq!(jobs.len(), 7, "the sawhorse lost or gained a piece");
+        for a in 0..jobs.len() {
+            let row = panel.row(a);
+            assert!(row.y0 > panel.note_top, "{:?} runs down into the line under the list", jobs[a]);
+            assert!(row.x0 >= panel.frame.x0 && row.x1 <= panel.frame.x1, "{:?} is off the panel", jobs[a]);
+            for b in a + 1..jobs.len() {
+                let other = panel.row(b);
+                let apart = row.x1 <= other.x0 || other.x1 <= row.x0 || row.y1 <= other.y0 || other.y1 <= row.y0;
+                assert!(apart, "{:?} and {:?} are drawn on top of each other", jobs[a], jobs[b]);
+            }
+        }
+        // ...and the honing stone has one row, a whole panel wide.
+        assert_eq!(Panel::for_game(Game::Whet).row(0).width(), Panel::for_game(Game::Anvil).row(0).width());
     }
 
     #[test]
@@ -802,7 +876,7 @@ mod tests {
         // -- has to pass `judge`. A client that built a run its own server
         // refuses would cost the player the material for nothing, and the
         // rule and the collector are in different crates.
-        for game in [Game::Anvil, Game::Wheel] {
+        for game in [Game::Anvil, Game::Wheel, Game::Whet, Game::Saw] {
             for skip in 0..game.presses() {
                 let mut screen = StationScreen::mid_run(game, minigame::tolerance(None), jobs_of(game)[0], 31, 0);
                 let mut handed = None;

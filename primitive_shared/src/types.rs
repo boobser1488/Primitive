@@ -2625,6 +2625,37 @@ pub const BLOCK_BRONZE_CHISEL: BlockId = 652;
 /// of an anvil and the horn points the other way.
 pub const BLOCK_ANVIL: BlockId = 653;
 
+/// **A saw**: a toothed blade in a wooden back. What it is for is *wood
+/// saved*: a log split with wedges and an axe is four boards and a heap of
+/// splinters, a log sawn along its length is six (`crafting`, "sawn planks").
+/// So the saw is a costly tool bought to spend less of something cheap, and
+/// whether it is worth two ingots depends on how far away the trees are.
+///
+/// Held, not spent: the sawn rows name it in `inputs` and `returns` at once,
+/// and it takes a point of wear and dulls a step at a time like any edge
+/// (`tools::edge_swings`). The sawhorse asks for one in the hand, the way the
+/// anvil asks for a hammer (`minigame::Game::Saw`).
+///
+/// Ids 380–384 in the long empty run under the handfuls: well clear of the
+/// ids other changes in flight take from the bottom of the free list.
+pub const BLOCK_COPPER_SAW: BlockId = 380;
+/// A bronze saw. See `BLOCK_COPPER_SAW`.
+pub const BLOCK_BRONZE_SAW: BlockId = 381;
+/// An iron saw. See `BLOCK_COPPER_SAW`.
+pub const BLOCK_IRON_SAW: BlockId = 382;
+/// **A sawhorse**: two splayed trestles and a beam, where a joiner cuts to a
+/// line. A station with a timing game behind it (`minigame::Game::Saw`):
+/// furniture cut true wastes less wood and comes out better made. It stands
+/// in for the joiner's bench for the pieces it makes, so it is a second way
+/// to a chair and not a toll on the first.
+pub const BLOCK_SAWHORSE: BlockId = 383;
+/// **A honing stone**: a slab of sandstone set on a stump with a trough of
+/// water beside it -- the whetstone (`BLOCK_WHETSTONE`) grown too big to
+/// carry. A station with a timing game (`minigame::Game::Whet`): a careful
+/// hand takes an edge back with almost no metal, where the whetstone in the
+/// pack grinds away the rest of the old edge every time (`tools::hone`).
+pub const BLOCK_HONING_STONE: BlockId = 384;
+
 /// The skeletons past the sixteenth species -- which, so far, is one rat.
 ///
 /// **Not an argument for a species, an argument the note on
@@ -2693,6 +2724,9 @@ pub fn is_workshop_tool(id: BlockId) -> bool {
             | BLOCK_IRON_HAMMER
             | BLOCK_FLINT_CHISEL
             | BLOCK_BRONZE_CHISEL
+            | BLOCK_COPPER_SAW
+            | BLOCK_BRONZE_SAW
+            | BLOCK_IRON_SAW
     )
 }
 
@@ -4817,6 +4851,13 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     (BLOCK_FLINT_CHISEL, "flint_chisel"),
     (BLOCK_BRONZE_CHISEL, "bronze_chisel"),
     (BLOCK_ANVIL, "anvil"),
+    // The saws, and the two stations that ask for an edge. See
+    // `BLOCK_COPPER_SAW`, `BLOCK_SAWHORSE` and `BLOCK_HONING_STONE`.
+    (BLOCK_COPPER_SAW, "copper_saw"),
+    (BLOCK_BRONZE_SAW, "bronze_saw"),
+    (BLOCK_IRON_SAW, "iron_saw"),
+    (BLOCK_SAWHORSE, "sawhorse"),
+    (BLOCK_HONING_STONE, "honing_stone"),
     // What a death leaves, in its two states. The backpack above is
     // still in this list and still loads; nothing makes a new one. See
     // `BLOCK_CORPSE`.
@@ -5020,6 +5061,10 @@ pub const PLACEABLE_BLOCKS: &[BlockId] = &[
     BLOCK_POTTERS_WHEEL,
     BLOCK_LEATHER_BENCH,
     BLOCK_ANVIL,
+    // ...and the two stations of the edge, which come back whole as the
+    // anvil does. See `BLOCK_SAWHORSE` and `BLOCK_HONING_STONE`.
+    BLOCK_SAWHORSE,
+    BLOCK_HONING_STONE,
     // ...and a stall, which comes back whole with its goods in the owner's
     // pack or spilled for anybody else (`stall`).
     BLOCK_STALL,
@@ -10110,6 +10155,8 @@ mod depth_tests {
                 // ...and the anvil, which stands at the height a smith's
                 // hand falls to rather than a cell's.
                 "anvil",
+                "sawhorse",
+                "honing_stone",
                 // ...and a dead player: the body half a cell, like the
                 // bag it replaced, and what is left of it two eighths,
                 // like any other skeleton.

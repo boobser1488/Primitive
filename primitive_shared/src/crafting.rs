@@ -371,9 +371,16 @@ pub const RECIPES: &[Recipe] = &[
         returns: &[],
         failure: 0.0,
     },
+    // **Six boards a beam, not four**, and the saw is why. A log split with
+    // an axe is four boards ("planks"); a log sawn is six ("sawn planks", at
+    // the end of the table). While a beam took four back, a saw was a mill:
+    // six boards out, four back in, two boards out of nothing every turn --
+    // the loop `a_recipe_loop_cannot_multiply_blocks` exists to catch. Six is
+    // what a log's worth of boards is once there is a way to get all of them,
+    // and boards split by hand simply do not go back into a whole log.
     Recipe {
         name: "beam",
-        inputs: &[(BLOCK_PLANKS, 4)],
+        inputs: &[(BLOCK_PLANKS, 6)],
         output: (BLOCK_LOG, 1),
         station: Station::Hands,
         returns: &[],
@@ -538,7 +545,7 @@ pub const RECIPES: &[Recipe] = &[
     },
     Recipe {
         name: "birch beam",
-        inputs: &[(BLOCK_BIRCH_PLANKS, 4)],
+        inputs: &[(BLOCK_BIRCH_PLANKS, 6)],
         output: (BLOCK_BIRCH_LOG, 1),
         station: Station::Hands,
         returns: &[],
@@ -2806,7 +2813,7 @@ pub const RECIPES: &[Recipe] = &[
     },
     Recipe {
         name: "fir beam",
-        inputs: &[(crate::types::BLOCK_FIR_PLANKS, 4)],
+        inputs: &[(crate::types::BLOCK_FIR_PLANKS, 6)],
         output: (crate::types::BLOCK_FIR_LOG, 1),
         station: Station::Hands,
         returns: &[],
@@ -2822,7 +2829,7 @@ pub const RECIPES: &[Recipe] = &[
     },
     Recipe {
         name: "saxaul beam",
-        inputs: &[(crate::types::BLOCK_SAXAUL_PLANKS, 4)],
+        inputs: &[(crate::types::BLOCK_SAXAUL_PLANKS, 6)],
         output: (crate::types::BLOCK_SAXAUL_LOG, 1),
         station: Station::Hands,
         returns: &[],
@@ -3022,7 +3029,7 @@ pub const RECIPES: &[Recipe] = &[
     },
     Recipe {
         name: "pine beam",
-        inputs: &[(crate::types::BLOCK_PINE_PLANKS, 4)],
+        inputs: &[(crate::types::BLOCK_PINE_PLANKS, 6)],
         output: (crate::types::BLOCK_PINE_LOG, 1),
         station: Station::Hands,
         returns: &[],
@@ -3046,7 +3053,7 @@ pub const RECIPES: &[Recipe] = &[
     },
     Recipe {
         name: "willow beam",
-        inputs: &[(crate::types::BLOCK_WILLOW_PLANKS, 4)],
+        inputs: &[(crate::types::BLOCK_WILLOW_PLANKS, 6)],
         output: (crate::types::BLOCK_WILLOW_LOG, 1),
         station: Station::Hands,
         returns: &[],
@@ -3092,7 +3099,9 @@ pub const RECIPES: &[Recipe] = &[
     // asked a bench to open. Rejected: *a workshop row that yields more
     // boards from a log*. It was the obvious first bonus and it is a mill:
     // six boards a log against "beam" taking four back is two boards out of
-    // nothing every turn of the loop.
+    // nothing every turn of the loop. (The saw now does yield six, and the
+    // beam costs six for it -- see "beam". What a saw is, a bench is not: a
+    // tool bought with two ingots, not a place.)
     Recipe {
         name: "workbench",
         inputs: &[(BLOCK_LOG, 1), (BLOCK_STICK, 4), (BLOCK_PEG, 4)],
@@ -3826,6 +3835,151 @@ pub const RECIPES: &[Recipe] = &[
         station: Station::Hands,
         returns: &[],
         failure: 0.0,
+    },    // ---- the saw and the edge ----
+    //
+    // **A saw is two ingots of blade in a bow of two sticks**, drawn thin at
+    // the kiln like the hammers. Two plain sticks and not a worked haft,
+    // because a hearth knows its recipe by the tray (`hearth::next_recipe`):
+    // two bars and a worked stick is already the hammer, and a saw loaded the
+    // same way would have come out of the fire as one. What it buys is wood: six boards a log where the
+    // axe splits four (see "beam" for why the beam went up with it). Its
+    // rows name the copper saw and take any saw above it (`TOOL_LADDERS`),
+    // and it comes back a point more worn from each log (`used_tool`).
+    Recipe {
+        name: "copper saw",
+        inputs: &[(BLOCK_COPPER_INGOT, 2), (BLOCK_STICK, 2)],
+        output: (crate::types::BLOCK_COPPER_SAW, 1),
+        station: Station::Forge,
+        returns: &[],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "bronze saw",
+        inputs: &[(BLOCK_BRONZE_INGOT, 2), (BLOCK_STICK, 2)],
+        output: (crate::types::BLOCK_BRONZE_SAW, 1),
+        station: Station::Forge,
+        returns: &[],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "iron saw",
+        inputs: &[(BLOCK_IRON_INGOT, 2), (BLOCK_STICK, 2)],
+        output: (crate::types::BLOCK_IRON_SAW, 1),
+        station: Station::Forge,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **Sawn, a log is six boards.** One row a wood, because boards are the
+    // boards of the log they came from (`own_rows`). By hand and anywhere: a
+    // log and a saw are all it takes, and the sawhorse is for joinery, not a
+    // toll on boards. Rejected: *seven or eight*, which would make the saw
+    // the only way anyone ever made a board -- a tool that answers every
+    // question the same way is a tax, and at six a player far from the kiln
+    // with an axe in hand still splits the log where it fell.
+    Recipe {
+        name: "sawn planks",
+        inputs: &[(BLOCK_LOG, 1), (crate::types::BLOCK_COPPER_SAW, 1)],
+        output: (BLOCK_PLANKS, 6),
+        station: Station::Hands,
+        returns: &[(crate::types::BLOCK_COPPER_SAW, 1)],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "sawn birch",
+        inputs: &[(BLOCK_BIRCH_LOG, 1), (crate::types::BLOCK_COPPER_SAW, 1)],
+        output: (BLOCK_BIRCH_PLANKS, 6),
+        station: Station::Hands,
+        returns: &[(crate::types::BLOCK_COPPER_SAW, 1)],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "sawn fir",
+        inputs: &[(crate::types::BLOCK_FIR_LOG, 1), (crate::types::BLOCK_COPPER_SAW, 1)],
+        output: (crate::types::BLOCK_FIR_PLANKS, 6),
+        station: Station::Hands,
+        returns: &[(crate::types::BLOCK_COPPER_SAW, 1)],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "sawn saxaul",
+        inputs: &[(crate::types::BLOCK_SAXAUL_LOG, 1), (crate::types::BLOCK_COPPER_SAW, 1)],
+        output: (crate::types::BLOCK_SAXAUL_PLANKS, 6),
+        station: Station::Hands,
+        returns: &[(crate::types::BLOCK_COPPER_SAW, 1)],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "sawn pine",
+        inputs: &[(crate::types::BLOCK_PINE_LOG, 1), (crate::types::BLOCK_COPPER_SAW, 1)],
+        output: (crate::types::BLOCK_PINE_PLANKS, 6),
+        station: Station::Hands,
+        returns: &[(crate::types::BLOCK_COPPER_SAW, 1)],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "sawn willow",
+        inputs: &[(crate::types::BLOCK_WILLOW_LOG, 1), (crate::types::BLOCK_COPPER_SAW, 1)],
+        output: (crate::types::BLOCK_WILLOW_PLANKS, 6),
+        station: Station::Hands,
+        returns: &[(crate::types::BLOCK_COPPER_SAW, 1)],
+        failure: 0.0,
+    },
+    // **The sawhorse** is two trestles and a beam: boards and pegs, hands and
+    // anywhere, stone-age work that waits for a saw. See `minigame::Game::Saw`.
+    Recipe {
+        name: "sawhorse",
+        inputs: &[(BLOCK_PLANKS, 3), (BLOCK_STICK, 4), (BLOCK_PEG, 4)],
+        output: (crate::types::BLOCK_SAWHORSE, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **The honing stone** is a block of sandstone dressed flat on a stump:
+    // the whetstone's rock, two blocks of it, rubbed flat on each other by
+    // hand. Not the mason's: a workshop row has to be a cheaper way to
+    // something the hands make, and nothing else makes one of these. See `minigame::Game::Whet` for why a player builds one
+    // when a whetstone in the pack already sharpens.
+    Recipe {
+        name: "honing stone",
+        inputs: &[(crate::types::BLOCK_SANDSTONE, 2), (BLOCK_LOG, 1)],
+        output: (crate::types::BLOCK_HONING_STONE, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    // ...and the whetstone's own hone for the four new edges, one row a kind
+    // as the others are ("hone").
+    Recipe {
+        name: "hone",
+        inputs: &[(crate::types::BLOCK_COPPER_SAW, 1), (crate::types::BLOCK_WHETSTONE, 1)],
+        output: (crate::types::BLOCK_COPPER_SAW, 1),
+        station: Station::Hands,
+        returns: &[(crate::types::BLOCK_WHETSTONE, 1)],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "hone",
+        inputs: &[(crate::types::BLOCK_BRONZE_SAW, 1), (crate::types::BLOCK_WHETSTONE, 1)],
+        output: (crate::types::BLOCK_BRONZE_SAW, 1),
+        station: Station::Hands,
+        returns: &[(crate::types::BLOCK_WHETSTONE, 1)],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "hone",
+        inputs: &[(crate::types::BLOCK_IRON_SAW, 1), (crate::types::BLOCK_WHETSTONE, 1)],
+        output: (crate::types::BLOCK_IRON_SAW, 1),
+        station: Station::Hands,
+        returns: &[(crate::types::BLOCK_WHETSTONE, 1)],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "hone",
+        inputs: &[(crate::types::BLOCK_BRONZE_CHISEL, 1), (crate::types::BLOCK_WHETSTONE, 1)],
+        output: (crate::types::BLOCK_BRONZE_CHISEL, 1),
+        station: Station::Hands,
+        returns: &[(crate::types::BLOCK_WHETSTONE, 1)],
+        failure: 0.0,
     },
     // ---- the horse's tack ----
     //
@@ -4308,13 +4462,14 @@ fn worked_slot(inventory: &Inventory, recipe: &Recipe) -> Option<usize> {
 /// better one is allowed but never *required*. A row per metal was the
 /// alternative -- six furniture rows instead of three -- and it is the copy
 /// the woods were collapsed out of for exactly this reason (`other_woods`).
-const TOOL_LADDERS: [&[BlockId]; 2] = [
+const TOOL_LADDERS: [&[BlockId]; 3] = [
     &[
         crate::types::BLOCK_STONE_HAMMER,
         crate::types::BLOCK_BRONZE_HAMMER,
         crate::types::BLOCK_IRON_HAMMER,
     ],
     &[crate::types::BLOCK_FLINT_CHISEL, crate::types::BLOCK_BRONZE_CHISEL],
+    &[crate::types::BLOCK_COPPER_SAW, crate::types::BLOCK_BRONZE_SAW, crate::types::BLOCK_IRON_SAW],
 ];
 
 /// The better tools that stand in for `block`, from the rung above it up.
@@ -4361,8 +4516,11 @@ pub fn tool_goodness(inventory: &Inventory, recipe: &Recipe) -> f32 {
     };
     // Three quarters condition, a quarter how it was made: a fine chisel
     // worn to nothing is still worn to nothing, and a poor sharp one still
-    // cuts.
-    (0.75 * stack.condition() + 0.25 * stack.quality().fraction()).clamp(0.0, 1.0)
+    // cuts. **Times the edge**: this is the doc's "how blunt it is", which
+    // for years read only the wear -- a blunt bronze chisel made work as
+    // good as a sharp one, and the whetstone had nothing to say at a bench.
+    let edge = crate::tools::edge_factor(stack.block);
+    ((0.75 * stack.condition() + 0.25 * stack.quality().fraction()) * edge).clamp(0.0, 1.0)
 }
 
 /// Which stack the tool would come out of: the lowest rung of the ladder the
@@ -4473,6 +4631,56 @@ fn in_wood_of(output: BlockId, before: &[u32], after: &Inventory) -> BlockId {
         .filter(|&(_, used)| used > 0)
         .map_or(0, |(index, _)| index);
     crate::types::in_wood(output, wood)
+}
+
+/// **A row run up to the moment of making, and the piece taken back off the
+/// bench**: what the sawhorse spends when a run begins (`minigame::Job::recipe`).
+///
+/// The inputs go exactly as the menu row would take them -- any wood's boards,
+/// the chisel's wear, the room checked -- because it *is* the menu row, run by
+/// `craft_made`. What comes back is the piece it made (in the wood of its
+/// boards, `in_wood_of`), lifted out again for the run to hand back or not,
+/// and the boards of that wood, which is what a true cut returns and a
+/// spoiled one gives half of. `None` changes nothing.
+///
+/// Rejected: *spending `Job::inputs` with `take_exact`*, the anvil's way. It
+/// takes oak and only oak, so a pine joiner would have been told they were
+/// short of boards with a pack full of them -- and the bench row beside the
+/// sawhorse would have taken the same pine without a word.
+pub fn begin_piece(
+    inventory: &mut Inventory,
+    recipe: &Recipe,
+    heat: Heat,
+) -> Option<(crate::types::BlockId, u32, crate::types::BlockId)> {
+    let kind = crate::types::block_kind(recipe.output.0);
+    let before = inventory.clone();
+    let boards_before = planks_by_wood(inventory);
+    if craft_made(inventory, recipe, heat, Attempt::Succeeds, crate::quality::Quality::PLAIN) != Crafted::Made {
+        *inventory = before;
+        return None;
+    }
+    let made = inventory
+        .slots()
+        .iter()
+        .flatten()
+        .map(|stack| stack.block)
+        .find(|&block| crate::types::block_kind(block) == kind && inventory.count(block) > before.count(block));
+    let Some(made) = made else {
+        *inventory = before;
+        return None;
+    };
+    let count = inventory.count(made) - before.count(made);
+    inventory.take_exact(made, count);
+    let boards = planks_by_wood(inventory);
+    let wood = boards_before
+        .iter()
+        .zip(&boards)
+        .map(|(was, is)| was.saturating_sub(*is))
+        .enumerate()
+        .max_by_key(|&(index, used)| (used, std::cmp::Reverse(index)))
+        .filter(|&(_, used)| used > 0)
+        .map_or(0, |(index, _)| index);
+    Some((made, count, crate::wood::WOODS[wood].planks))
 }
 
 /// Runs a recipe against an inventory, with the die already rolled.
@@ -5353,13 +5561,13 @@ mod tests {
     #[test]
     fn a_recipe_without_its_ingredients_changes_nothing() {
         let mut inventory = Inventory::new();
-        inventory.add(BLOCK_PLANKS, 3); // one short of the beam recipe
+        inventory.add(BLOCK_PLANKS, 5); // one short of the beam recipe
         assert_eq!(
             feasibility(&inventory, &RECIPES[1], KILN),
             Feasibility::MissingIngredients
         );
         assert!(!made(&mut inventory, &RECIPES[1], KILN));
-        assert_eq!(inventory.count(BLOCK_PLANKS), 3, "a failed craft consumed something");
+        assert_eq!(inventory.count(BLOCK_PLANKS), 5, "a failed craft consumed something");
     }
 
     #[test]
@@ -5473,8 +5681,8 @@ mod tests {
     #[test]
     fn the_menu_can_say_what_is_missing() {
         let mut inventory = Inventory::new();
-        assert_eq!(missing_ingredient(&inventory, &RECIPES[1]), Some((BLOCK_PLANKS, 4)));
-        inventory.add(BLOCK_PLANKS, 3);
+        assert_eq!(missing_ingredient(&inventory, &RECIPES[1]), Some((BLOCK_PLANKS, 6)));
+        inventory.add(BLOCK_PLANKS, 5);
         assert_eq!(missing_ingredient(&inventory, &RECIPES[1]), Some((BLOCK_PLANKS, 1)));
         inventory.add(BLOCK_PLANKS, 1);
         assert_eq!(missing_ingredient(&inventory, &RECIPES[1]), None);
@@ -7102,5 +7310,97 @@ mod tests {
         assert!(smelt(&mut pack, named("birch charcoal"), crate::hearth::Kind::Campfire));
         assert_eq!(pack.count(BLOCK_COAL), 1);
         assert_eq!(pack.count(BLOCK_BIRCH_LOG), 0);
+    }
+
+    #[test]
+    fn a_sawn_log_is_six_boards_and_the_saw_comes_back_a_point_more_worn() {
+        use crate::types::{BLOCK_COPPER_SAW, BLOCK_IRON_SAW, BLOCK_PINE_LOG, BLOCK_PINE_PLANKS};
+        let mut pack = Inventory::new();
+        pack.add(BLOCK_LOG, 1);
+        pack.add(BLOCK_COPPER_SAW, 1);
+        assert!(made(&mut pack, named("sawn planks"), Heat::NONE), "a log and a saw made nothing");
+        assert_eq!(pack.count(BLOCK_PLANKS), 6, "a sawn log is not six boards");
+        let saw = pack.slots().iter().flatten().find(|s| s.block == BLOCK_COPPER_SAW).expect("the saw was spent");
+        assert_eq!(saw.wear(), 1, "sawing a log did not wear the saw");
+        // Split by hand it is four: the saw is the difference, and the
+        // decision.
+        let mut pack = Inventory::new();
+        pack.add(BLOCK_LOG, 1);
+        assert!(made(&mut pack, named("planks"), Heat::NONE));
+        assert_eq!(pack.count(BLOCK_PLANKS), 4);
+        // An iron saw does the copper saw's row, and a pine log is pine boards.
+        let mut pack = Inventory::new();
+        pack.add(BLOCK_PINE_LOG, 1);
+        pack.add(BLOCK_IRON_SAW, 1);
+        assert!(made(&mut pack, named("sawn pine"), Heat::NONE), "an iron saw would not saw");
+        assert_eq!(pack.count(BLOCK_PINE_PLANKS), 6);
+        assert_eq!(pack.count(BLOCK_PLANKS), 0, "a pine log was sawn into oak");
+    }
+
+    #[test]
+    fn sawing_and_beaming_cannot_make_wood_out_of_nothing() {
+        // The mill `Station::Bench` refused, asked of every wood: a log
+        // sawn into boards and the boards glued back into beams must never
+        // come out with more logs than it went in with.
+        for wood in crate::wood::WOODS.iter() {
+            let saw_row = RECIPES
+                .iter()
+                .find(|r| r.output.0 == wood.planks && used_tool(r).is_some())
+                .unwrap_or_else(|| panic!("no sawn row for {}", crate::types::block_name(wood.log)));
+            let beam_row = RECIPES
+                .iter()
+                .find(|r| r.output.0 == wood.log && r.inputs.iter().any(|&(b, _)| b == wood.planks))
+                .expect("no beam row");
+            let mut pack = Inventory::new();
+            pack.add(wood.log, 12);
+            pack.add(crate::types::BLOCK_IRON_SAW, 1);
+            while made(&mut pack, saw_row, Heat::NONE) {}
+            while made(&mut pack, beam_row, Heat::NONE) {}
+            assert!(
+                pack.count(wood.log) <= 12,
+                "sawing and beaming {} made {} logs out of 12",
+                crate::types::block_name(wood.log),
+                pack.count(wood.log)
+            );
+        }
+    }
+
+    #[test]
+    fn a_piece_begun_at_the_sawhorse_is_of_the_wood_its_boards_were() {
+        use crate::types::{furniture_wood, BLOCK_PINE_PLANKS};
+        let pine = crate::wood::WOODS.iter().position(|wood| wood.planks == BLOCK_PINE_PLANKS).unwrap();
+        let mut pack = Inventory::new();
+        pack.add(BLOCK_PINE_PLANKS, 2);
+        pack.add(crate::types::BLOCK_FRAME, 1);
+        pack.add(BLOCK_STICK, 2);
+        let bench = Heat::NONE.with_workshop(Station::Bench);
+        let (piece, count, boards) = begin_piece(&mut pack, named("chair"), bench).expect("pine boards made no chair");
+        assert_eq!((crate::types::block_kind(piece), count), (BLOCK_CHAIR, 1));
+        assert_eq!(furniture_wood(piece), pine, "a chair of pine boards is not pine");
+        assert_eq!(boards, BLOCK_PINE_PLANKS, "the offcut of a pine chair is not pine");
+        assert_eq!(pack.count(piece), 0, "the piece stayed in the pack before the cut was judged");
+        assert_eq!(pack.count(BLOCK_PINE_PLANKS), 0, "the boards were not spent");
+        // ...and a pack that cannot pay is left as it was.
+        let mut short = Inventory::new();
+        short.add(BLOCK_PLANKS, 1);
+        let was = short.clone();
+        assert!(begin_piece(&mut short, named("chair"), bench).is_none());
+        assert_eq!(short.count(BLOCK_PLANKS), was.count(BLOCK_PLANKS));
+    }
+
+    #[test]
+    fn a_blunt_chisel_makes_worse_work_than_a_sharp_one() {
+        use crate::tools::{with_edge, BLUNTEST};
+        use crate::types::BLOCK_BRONZE_CHISEL;
+        let row = RECIPES.iter().find(|r| used_tool(r).is_some_and(|t| crate::types::block_kind(t) == crate::types::BLOCK_FLINT_CHISEL)).expect("no chisel row");
+        let with = |chisel| {
+            let mut pack = Inventory::new();
+            pack.add(chisel, 1);
+            tool_goodness(&pack, row)
+        };
+        assert!(
+            with(with_edge(BLOCK_BRONZE_CHISEL, BLUNTEST)) < with(BLOCK_BRONZE_CHISEL),
+            "the edge of a chisel does not reach the bench"
+        );
     }
 }

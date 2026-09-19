@@ -741,6 +741,28 @@
 //!
 //! - **plane**: A plane on the top, its iron standing out of the sole.
 //!
+//! ## workstations/sawhorse.bbmodel
+//!
+//! The sawhorse (`types::BLOCK_SAWHORSE`): a beam on two trestles, a board
+//! lying across it and a saw standing in the cut. Worked from -z, the end of
+//! the board a joiner stands at.
+//!
+//! - **crossbar left**: Its top a quarter of a sixteenth under the legs' tops, so the
+//!   two never share an upward face (`model_overlap`); the beam sits on it.
+//!
+//! - **saw blade**: Standing in the kerf at the near end of the board: what makes
+//!   a trestle read as a sawhorse and not a low table.
+//!
+//! ## workstations/honing_stone.bbmodel
+//!
+//! The honing stone (`types::BLOCK_HONING_STONE`): a slab of dressed stone on
+//! a stump, a blade lying on it and a trough of water at its back corner.
+//!
+//! - **stump**: Bark, because it is a log stood on end: `pole`, as the mason's is.
+//!
+//! - **trough**: Clear of the stump and the slab's edge, in the corner the
+//!   grinder does not stand in.
+//!
 //! ## workstations/mason_block.bbmodel
 //!
 //! A slab of dressed stone on a stump: a saddle quern and its rubber on the

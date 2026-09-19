@@ -515,7 +515,9 @@ pub fn needs_degrees(recipe: &Recipe) -> Option<f32> {
         | crate::types::BLOCK_ANVIL => BRONZE_MELTS_C,
         // Forged: an ingot worked hot onto a haft or a strap.
         // ...and a hook, which is a wire of the same bar bent hot.
-        BLOCK_COPPER_KNIFE | BLOCK_COPPER_SPEAR | BLOCK_COPPER_HOOK => COPPER_MELTS_C * FORGING_SHARE,
+        BLOCK_COPPER_KNIFE | BLOCK_COPPER_SPEAR | BLOCK_COPPER_HOOK | crate::types::BLOCK_COPPER_SAW => {
+            COPPER_MELTS_C * FORGING_SHARE
+        }
         BLOCK_BRONZE_KNIFE
         | BLOCK_BRONZE_AXE
         | BLOCK_BRONZE_PICKAXE
@@ -527,7 +529,9 @@ pub fn needs_degrees(recipe: &Recipe) -> Option<f32> {
         // ...and the smith's own two, which are forged like every other
         // bronze head. See `types::BLOCK_STONE_HAMMER`.
         | crate::types::BLOCK_BRONZE_HAMMER
-        | crate::types::BLOCK_BRONZE_CHISEL => BRONZE_MELTS_C * FORGING_SHARE,
+        | crate::types::BLOCK_BRONZE_CHISEL
+        // ...and a saw, a strip of the same bar drawn thin and toothed.
+        | crate::types::BLOCK_BRONZE_SAW => BRONZE_MELTS_C * FORGING_SHARE,
         BLOCK_IRON_KNIFE
         | BLOCK_IRON_AXE
         | BLOCK_IRON_PICKAXE
@@ -538,7 +542,8 @@ pub fn needs_degrees(recipe: &Recipe) -> Option<f32> {
         | BLOCK_IRON_BOOTS
         // Nails are a bar drawn out and cut hot: the knife's heat.
         | BLOCK_NAILS
-        | crate::types::BLOCK_IRON_HAMMER => IRON_MELTS_C * FORGING_SHARE,
+        | crate::types::BLOCK_IRON_HAMMER
+        | crate::types::BLOCK_IRON_SAW => IRON_MELTS_C * FORGING_SHARE,
         BLOCK_IRON_BLOOM => BLOOM_C,
         BLOCK_IRON_INGOT => IRON_MELTS_C * WELDING_SHARE,
         BLOCK_STEEL_INGOT => CEMENTATION_C,

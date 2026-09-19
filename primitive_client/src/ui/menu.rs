@@ -1006,6 +1006,8 @@ pub enum Action {
     /// Step the zone on the new-world form, the same way. See
     /// `worldgen::Zone`.
     StepZone(i32),
+    /// Roll a seed into the new-world form's seed box. See `random_seed`.
+    RollSeed,
 
     // ---- settings ----
     Tweak(Setting, i32),
@@ -1214,6 +1216,27 @@ const MAX_NAME: usize = 32;
 const MAX_ADDRESS: usize = 64;
 /// A `u32` is ten digits at most; anything longer cannot be a seed.
 const MAX_SEED_DIGITS: usize = 10;
+
+/// A seed nobody chose: what a blank seed box makes a world from, and what
+/// the roll button writes into it.
+///
+/// **The standard library's own random keys, stirred with the clock.** Every
+/// `RandomState` is seeded from the operating system's randomness once per
+/// process and stepped on for every one made after, so two rolls in one
+/// second are two numbers and two machines rolling at once are two numbers.
+///
+/// Rejected: the clock alone, which is two identical worlds for two players
+/// who press CREATE in the same second, and on some phones a clock that
+/// steps in whole milliseconds; and a random-number crate, which is a
+/// dependency for one number a world.
+pub fn random_seed() -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos());
+    hasher.write_u128(now);
+    let mixed = hasher.finish();
+    (mixed ^ (mixed >> 32)) as u32
+}
 
 /// What to say, in the language the player has chosen.
 ///
@@ -2247,6 +2270,15 @@ impl Menu {
                 self.world_zone = self.world_zone.step(*delta);
                 self.explaining_zone = true;
             }
+            Action::RollSeed => {
+                // Into the box, not straight into a world: the number is
+                // the one thing about a world a player can write down and
+                // give to a friend, so they see it before it is used.
+                // On a phone the input method's copy follows on the next
+                // frame (`ime::Mirror::sync`), as it does for any edit the
+                // game makes to a field.
+                self.seed_input.set_text(random_seed().to_string());
+            }
             Action::Save => return self.save_form(),
             Action::Cancel => {
                 self.notice = None;
@@ -2951,25 +2983,33 @@ impl Menu {
                     self.field_boxes.push((rect, Field::Name));
                 }
                 1 => {
-                    // **The seed a blank field will actually use, as a
-                    // placeholder rather than as a value.** It used to
-                    // be written into the field itself, which reads as
-                    // a number somebody typed -- so a player who wanted
-                    // a different world deleted it character by
-                    // character before typing their own, and a player
-                    // who did not notice believed they had chosen it.
-                    // As a placeholder it says the same thing and
-                    // vanishes the moment anything is typed.
-                    let fallback = ctx.settings.singleplayer_seed.to_string();
+                    // **What a blank field will actually do, as a
+                    // placeholder rather than as a value**: roll a seed.
+                    // It used to be the settings' one fixed number, so
+                    // every world nobody typed a seed for was the same
+                    // world ("возможность выбрать случайный сид"). A
+                    // placeholder rather than a number written in, for the
+                    // reason it always was one: a number in the box reads
+                    // as one somebody chose.
+                    //
+                    // **And a button to roll one now**, at the end of the
+                    // box and a finger wide, for the player who wants to
+                    // see the number before the world is made from it --
+                    // or to roll again. The box is what is left, and it is
+                    // the box that hit-tests as the box.
+                    let roll = layout.at(0.16).max(layout.finger()).min(rect.width() / 3.0);
+                    let field = Rect::new(rect.x0, rect.y0, rect.x1 - roll - layout.at(0.01), rect.y1);
+                    let button = Rect::new(rect.x1 - roll, rect.y0, rect.x1, rect.y1);
                     p.text_field(
-                        rect,
+                        field,
                         &self.seed_input,
-                        &fallback,
+                        say(ctx, Msg::SeedRandom),
                         self.focus == Field::Seed,
                         self.caret_visible(),
                     );
-                    self.hot.push((rect, Action::Focus(Field::Seed)));
-                    self.field_boxes.push((rect, Field::Seed));
+                    self.hot.push((field, Action::Focus(Field::Seed)));
+                    self.field_boxes.push((field, Field::Seed));
+                    self.add_button(p, cursor, button, say(ctx, Msg::RollSeed), Action::RollSeed, true);
                 }
                 3 => {
                     // The zone: stepped, on the world type's terms, and
@@ -5743,6 +5783,40 @@ mod tests {
         }
     }
 
+    /// **The roll button rolls, where it is drawn, and the seed box beside it
+    /// still takes the finger.** On a desktop and on a phone: the button is a
+    /// target of its own at the right of the seed row, clicking its middle
+    /// answers the roll and puts a number in the box, a second roll is
+    /// another number, and the middle of the box still focuses the box.
+    #[test]
+    fn the_seed_row_rolls_a_seed_where_its_button_is_drawn() {
+        for layout in [widgets::Layout::desktop(), widgets::Layout::for_screen(PHONE, 1.5)] {
+            let fixture = Fixture::new();
+            let mut menu = Menu::new(ServerList::default());
+            menu.apply(Action::NewWorld);
+            let ctx = MenuContext { layout, ..fixture.ctx() };
+            let _ = menu.build(&ctx);
+            let roll = hot_rect(&menu, &Action::RollSeed).expect("a roll button on the seed row");
+            let field = hot_rect(&menu, &Action::Focus(Field::Seed)).expect("the seed box");
+            assert!(field.x1 <= roll.x0, "the seed box {field:?} runs under the roll button {roll:?}");
+            for (rect, wanted) in [(roll, Action::RollSeed), (field, Action::Focus(Field::Seed))] {
+                menu.set_cursor(Some((rect.centre_x(), rect.centre_y())));
+                assert_eq!(menu.hovered().cloned(), Some(wanted.clone()), "the middle of {rect:?} is not {wanted:?}");
+            }
+            menu.apply(Action::RollSeed);
+            let first = menu.seed_input.text().to_string();
+            assert!(first.parse::<u32>().is_ok() && first.len() <= MAX_SEED_DIGITS, "rolled {first:?}");
+            menu.apply(Action::RollSeed);
+            assert_ne!(menu.seed_input.text(), first, "two rolls gave one seed");
+        }
+    }
+
+    #[test]
+    fn a_blank_seed_is_a_new_seed_each_time() {
+        let rolls: std::collections::HashSet<u32> = (0..16).map(|_| random_seed()).collect();
+        assert!(rolls.len() >= 15, "sixteen rolls gave {} seeds", rolls.len());
+    }
+
     #[test]
     fn not_one_vertex_of_the_desktop_menu_moved() {
         // **The guarantee, for every screen at once.** Ten of these
@@ -5796,7 +5870,10 @@ mod tests {
         // renamed: one seed is one planet now, and the row picks where on
         // it you wake rather than what the world is made of, so it says
         // "ГДЕ ПРОСНЁТЕСЬ" and the longer word is thirty more vertices.
-        ("world_form", 1374, 6553772074736765712, 18281574022791976339),
+        // 1440 since the seed row rolls: a ROLL button at the end of the
+        // box, which is the box a button's width shorter, and the
+        // placeholder saying "random" where it said the settings' number.
+        ("world_form", 1440, 17828191189071698182, 12624195846552934867),
         // Shape only, as the world list.
         ("servers", 726, 10814275185546909310, 5468121121085479251),
         // Shape only: SAVE and CANCEL on the panel's two halves.

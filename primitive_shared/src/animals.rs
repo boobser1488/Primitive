@@ -1407,7 +1407,13 @@ impl Species {
             ),
             Species::Pike => matches!(
                 biome,
-                Biome::Swamp | Biome::Plains | Biome::Forest | Biome::DeadForest | Biome::Savanna
+                Biome::Swamp
+                    | Biome::Plains
+                    | Biome::Steppe
+                    | Biome::Hills
+                    | Biome::Forest
+                    | Biome::DeadForest
+                    | Biome::Savanna
             ),
             Species::Herring => matches!(biome, Biome::Ocean | Biome::Beach),
             // **The coast, and the sea off it.** Not a river: a gull on a
@@ -2730,7 +2736,26 @@ pub fn butcher(block: BlockId, held: Option<BlockId>) -> Option<Butchered> {
     } else {
         carcass_at_stage(species, stage + 1)
     };
-    let took = cuts.get(stage).copied().filter(|&(what, _)| {
+    // **A blunt knife is a knife that tears.** At the last step of its edge
+    // (`tools::BLUNTEST`) it saws at a hide instead of parting it from the
+    // flesh, and the skin comes off in rags -- the axe's answer. At *dull*,
+    // the step before, the skin still comes whole and the meat comes off
+    // ragged: a cut of flesh a piece short. So a hunter who has worked their
+    // knife blunt far from the stone has the same choice the axe gives:
+    // dinner now, or the hide later. Rejected: *slower cuts*, which is what
+    // the edge does to digging -- a carcass is one click a cut, and a click
+    // that took longer would be a wait and not a decision.
+    let step = crate::tools::blunt_step(tool);
+    let knife = knife && step < crate::tools::BLUNTEST;
+    let took = cuts.get(stage).copied().map(|(what, count)| {
+        let skin = matches!(what, BLOCK_HIDE | BLOCK_WOOL | BLOCK_PELT | BLOCK_BEAR_HIDE | BLOCK_FEATHER);
+        if step >= 2 && !skin && count > 1 {
+            (what, count - 1)
+        } else {
+            (what, count)
+        }
+    });
+    let took = took.filter(|&(what, _)| {
         // The skin is the first cut -- the fleece too, on a sheep, and
         // the skin under it -- and it is what a blade that is not a
         // knife tears rather than takes. Decided by *what the cut is*
@@ -2817,6 +2842,22 @@ mod tests {
             }
         }
         panic!("{} never came apart", species.name());
+    }
+
+    #[test]
+    fn a_blunt_knife_tears_the_skin_and_a_dull_one_takes_less_meat() {
+        use crate::tools::{with_edge, BLUNTEST};
+        use crate::types::BLOCK_COPPER_KNIFE;
+        let count = |taken: &[(BlockId, u32)], what: BlockId| taken.iter().filter(|t| t.0 == what).map(|t| t.1).sum::<u32>();
+        let sharp = butcher_all(Species::Deer, Some(BLOCK_COPPER_KNIFE));
+        let dull = butcher_all(Species::Deer, Some(with_edge(BLOCK_COPPER_KNIFE, 2)));
+        let blunt = butcher_all(Species::Deer, Some(with_edge(BLOCK_COPPER_KNIFE, BLUNTEST)));
+        assert!(count(&sharp, BLOCK_HIDE) > 0, "a sharp knife lost the hide");
+        assert_eq!(count(&dull, BLOCK_HIDE), count(&sharp, BLOCK_HIDE), "a dull knife tore the hide");
+        assert_eq!(count(&blunt, BLOCK_HIDE), 0, "a blunt knife skinned a deer as well as a sharp one");
+        let meat = |taken: &[(BlockId, u32)]| taken.iter().filter(|t| t.0 != BLOCK_HIDE).map(|t| t.1).sum::<u32>();
+        assert!(meat(&dull) < meat(&sharp), "a dull knife took as much off the deer as a sharp one");
+        assert!(meat(&dull) > 0, "a dull knife took nothing at all");
     }
 
     #[test]
@@ -3858,7 +3899,7 @@ mod tests {
         );
         assert_eq!(
             lives(Species::Pike),
-            ["savanna", "plains", "forest", "dead forest", "swamp"],
+            ["savanna", "plains", "forest", "dead forest", "swamp", "steppe", "hills"],
             "the pike has left the warm still water"
         );
         assert_eq!(lives(Species::Herring), ["ocean", "beach"], "the herring has left the coast");

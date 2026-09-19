@@ -231,6 +231,11 @@ pub enum Msg {
     MinutesLeft,
     DeleteThisWorld,
     SeedHelp,
+    /// What an empty seed box says it will do: roll one.
+    SeedRandom,
+    /// The button beside the seed box that rolls one into it now, so the
+    /// player sees the number before the world is made from it.
+    RollSeed,
     WorldFormHelp,
     /// The same hint for a screen with no keyboard on it.
     WorldFormHelpTouch,
@@ -814,6 +819,11 @@ pub enum Msg {
     StallNoRoom,
     StallTillFull,
     StallBadOffer,
+    // ---- the sawhorse and the honing stone ----
+    //
+    // The two new stations' headings. Their jobs are names, like the anvil's.
+    SawhorseTitle,
+    HoningTitle,
 }
 
 /// One line of interface text, in every language at once.
@@ -943,7 +953,9 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::RackEmpty,    en: "nothing on the frame", simple: "nothing on it", ru: "на раме пусто", pl: "rama pusta" },
     Line { msg: Msg::RackFull,     en: "the tray is full", simple: "no room for more leather", ru: "лоток полон", pl: "taca pełna" },
     Line { msg: Msg::MinutesLeft,  en: "min left",     simple: "min to go",  ru: "мин осталось", pl: "min zostało" },
-    Line { msg: Msg::SeedHelp,     en: "the seed decides the terrain -- leave it for the default", simple: "this number shapes the land -- leave it if unsure", ru: "зерно определяет рельеф -- можно оставить как есть", pl: "ziarno decyduje o terenie -- zostaw dla domyślnego" },
+    Line { msg: Msg::SeedHelp,     en: "the seed decides the terrain -- leave it empty for a new one", simple: "this number shapes the land -- leave it empty for a surprise", ru: "зерно определяет рельеф -- пустое даст новый мир", pl: "ziarno decyduje o terenie -- puste da nowy świat" },
+    Line { msg: Msg::SeedRandom,   en: "random",       simple: "any",          ru: "случайное",    pl: "losowe" },
+    Line { msg: Msg::RollSeed,     en: "ROLL",         simple: "PICK",         ru: "БРОСИТЬ",      pl: "LOSUJ" },
     Line { msg: Msg::WorldFormHelp, en: "tab switches field   enter creates   esc cancels", simple: "tab moves   enter makes it   esc goes back", ru: "tab переключает поле   ввод создаёт   esc отменяет", pl: "tab zmienia pole   enter tworzy   esc anuluje" },
     Line { msg: Msg::NeverPlayed,  en: "never played",  simple: "never played", ru: "не играли", pl: "nigdy nie grano" },
     Line { msg: Msg::JustNow,      en: "just now",      simple: "just now",  ru: "только что", pl: "przed chwilą" },
@@ -1327,6 +1339,8 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::StallNoRoom,  en: "no room in your pack", simple: "your bag is full", ru: "нет места в рюкзаке", pl: "brak miejsca w plecaku" },
     Line { msg: Msg::StallTillFull, en: "the takings are full - the owner must empty them", simple: "the table is full of payments - the owner must take them", ru: "выручке нет места - хозяину пора её забрать", pl: "utarg pełny - właściciel musi go zabrać" },
     Line { msg: Msg::StallBadOffer, en: "that is not a price", simple: "that swap cannot be", ru: "такой цены быть не может", pl: "to nie jest cena" },
+    Line { msg: Msg::SawhorseTitle, en: "SAWHORSE", simple: "SAWING TRESTLE", ru: "КОЗЛЫ", pl: "KOZIOŁ STOLARSKI" },
+    Line { msg: Msg::HoningTitle, en: "HONING STONE", simple: "SHARPENING STONE", ru: "ТОЧИЛЬНАЯ КОЛОДА", pl: "KAMIEŃ SZLIFIERSKI" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as

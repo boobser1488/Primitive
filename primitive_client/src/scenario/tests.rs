@@ -351,6 +351,107 @@ fn an_anvil_is_opened_a_run_is_played_and_the_nails_come_out_of_it() {
     no_corrections(&s);
 }
 
+/// Opens the station at `cell` with what is selected, begins `job` and plays
+/// every stroke on its sweet spot, then waits for the verdict. The anvil
+/// scenario's run, for the stations that came after it.
+fn a_run_on_the_marker(s: &mut Scenario, cell: (i32, i32, i32), job: primitive_shared::minigame::Job) -> Option<(primitive_shared::minigame::Verdict, Option<(t::BlockId, u32)>)> {
+    use primitive_shared::minigame;
+    s.look_at_face(cell, (-1, 0, 0));
+    s.use_aimed();
+    assert!(s.until(3.0, |s| s.station_screen.is_open()), "{job:?}: the station never opened: {:?}", s.heard.last());
+    s.station_begin(job);
+    assert!(s.until(3.0, |s| s.station_screen.is_running()), "{job:?}: the run never began: {:?}", s.heard.iter().rev().take(4).collect::<Vec<_>>());
+    let began = Instant::now();
+    let seed = s
+        .heard
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            ServerMessage::StationBegun { seed } => Some(*seed),
+            _ => None,
+        })
+        .expect("no seed");
+    let game = job.game();
+    let step = game.step_ms();
+    for k in 0..game.presses() {
+        let at = k as u32 * step + (minigame::target(seed, k) * step as f32 / 2.0) as u32;
+        while (began.elapsed().as_millis() as u32) < at {
+            s.frame();
+        }
+        s.station_press();
+    }
+    assert!(s.until(4.0, |s| s.heard_any(|m| matches!(m, ServerMessage::StationResult { .. }))), "{job:?} was never judged");
+    s.frames(10);
+    s.heard.iter().rev().find_map(|m| match m {
+        ServerMessage::StationResult { verdict, made } => Some((*verdict, *made)),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_chair_is_cut_at_the_sawhorse_from_pine_boards_and_the_saw_pays_for_it() {
+    use primitive_shared::minigame::Job;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let horse = (x0 + 2, GROUND + 1, z);
+    s.stand_at(feet_on(x0, z));
+    s.build(&[(horse, t::BLOCK_SAWHORSE)]);
+    // With nothing sharp in the hand the sawhorse is refused at the door.
+    s.look_at_face(horse, (-1, 0, 0));
+    s.use_aimed();
+    s.seconds(1.0);
+    assert!(!s.station_screen.is_open(), "a sawhorse opened for an empty hand");
+    s.give(t::BLOCK_COPPER_SAW, 1);
+    s.give(t::BLOCK_PINE_PLANKS, 2);
+    s.give(t::BLOCK_FRAME, 1);
+    s.give(t::BLOCK_STICK, 2);
+    s.select(t::BLOCK_COPPER_SAW);
+    let result = a_run_on_the_marker(&mut s, horse, Job::Chair);
+    let chair = s
+        .inventory
+        .slots()
+        .iter()
+        .flatten()
+        .find(|stack| t::block_kind(stack.block) == t::BLOCK_CHAIR)
+        .map(|stack| stack.block);
+    assert!(chair.is_some(), "the sawhorse made no chair: {result:?}");
+    let pine = primitive_shared::wood::WOODS.iter().position(|w| w.planks == t::BLOCK_PINE_PLANKS).unwrap();
+    assert_eq!(t::furniture_wood(chair.unwrap()), pine, "a chair of pine boards came off the sawhorse as another wood");
+    assert_eq!(s.inventory.count(t::BLOCK_FRAME), 0, "the frame was not spent");
+    let saw = s.inventory.slots().iter().flatten().find(|stack| t::block_kind(stack.block) == t::BLOCK_COPPER_SAW).copied();
+    assert!(saw.is_some_and(|saw| saw.wear() >= 1), "the saw cut a chair for nothing: {saw:?}");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_dull_axe_is_honed_sharp_at_the_honing_stone_for_less_than_the_whetstone_takes() {
+    use primitive_shared::minigame::{Job, Verdict};
+    use primitive_shared::tools::{blunt_step, edge_swings, with_edge};
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let stone = (x0 + 2, GROUND + 1, z);
+    s.stand_at(feet_on(x0, z));
+    s.build(&[(stone, t::BLOCK_HONING_STONE)]);
+    let dull = with_edge(t::BLOCK_BRONZE_AXE, 2);
+    s.give(dull, 1);
+    s.select(dull);
+    let result = a_run_on_the_marker(&mut s, stone, Job::Hone);
+    let axe = s
+        .inventory
+        .slots()
+        .iter()
+        .flatten()
+        .find(|stack| t::block_kind(stack.block) == t::BLOCK_BRONZE_AXE)
+        .copied()
+        .expect("the axe went missing on the stone");
+    assert_eq!(blunt_step(axe.block), 0, "the axe came off the stone still dull: {result:?}");
+    // A run on the marker is a fine one, and a fine hone grinds less than
+    // the whetstone's (which would carry the wear to a whole edge).
+    assert_eq!(result.map(|r| r.0), Some(Verdict::Fine), "a run on the marker was not fine");
+    assert!(axe.wear() < edge_swings(t::BLOCK_BRONZE_AXE).unwrap(), "the stone took a whole edge: {}", axe.wear());
+    no_corrections(&s);
+}
+
 #[test]
 fn turf_peels_to_earth_and_the_earth_comes_away_in_quarters() {
     let mut s = Scenario::new();

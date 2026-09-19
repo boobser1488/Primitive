@@ -8852,6 +8852,15 @@ pub struct StationSeat {
     /// The job under way: which, when the server agreed to it, and the seed
     /// the sweet spots come out of.
     pub run: Option<(primitive_shared::minigame::Job, Instant, u32)>,
+    /// The piece a sawhorse run is cutting, already paid for: what it is (in
+    /// its wood), how many, and the boards of that wood a true cut hands
+    /// back. See `crafting::begin_piece`.
+    pub piece: Option<(primitive_shared::types::BlockId, u32, primitive_shared::types::BlockId)>,
+    /// The tool on the honing stone: the slot it was in when the run began
+    /// and its kind. **Checked again at the end**, so a player who swapped
+    /// the axe for a pick half way through does not get the pick sharpened
+    /// for the axe's run.
+    pub honing: Option<(usize, primitive_shared::types::BlockId)>,
 }
 
 /// How long a run may sit unfinished before it is thrown away.
@@ -8888,13 +8897,25 @@ pub(crate) fn open_station(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandl
         handle.send(ServerMessage::Error("you need a hammer to work at an anvil".to_string()));
         return;
     }
+    // ...and a saw is what makes a sawhorse one, for the same reason.
+    if game == Game::Saw && !held.is_some_and(minigame::is_saw) {
+        handle.send(ServerMessage::Error("you need a saw to work at a sawhorse".to_string()));
+        return;
+    }
+    // **The stone sharpens what is in the hand**, so the hand has to hold an
+    // edge. Asked at the door rather than at the first stroke, for the
+    // anvil's reason.
+    if game == Game::Whet && !held.is_some_and(primitive_shared::tools::takes_an_edge) {
+        handle.send(ServerMessage::Error("hold the blade you want to sharpen".to_string()));
+        return;
+    }
     let tolerance = minigame::tolerance(match game {
-        Game::Anvil => held,
-        Game::Wheel => None,
+        Game::Anvil | Game::Saw => held,
+        Game::Wheel | Game::Whet => None,
     });
     {
         let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.station = Some(StationSeat { at, game, tolerance, run: None });
+        state.station = Some(StationSeat { at, game, tolerance, run: None, piece: None, honing: None });
     }
     handle.send(ServerMessage::StationOpen { game, tolerance });
 }
@@ -8902,10 +8923,12 @@ pub(crate) fn open_station(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandl
 /// Which game, if any, the cell at `at` is.
 fn station_at(ctx: &Arc<Context>, at: (i32, i32, i32)) -> Option<primitive_shared::minigame::Game> {
     use primitive_shared::minigame::Game;
-    use primitive_shared::types::{block_kind, BLOCK_ANVIL, BLOCK_POTTERS_WHEEL};
+    use primitive_shared::types::{block_kind, BLOCK_ANVIL, BLOCK_HONING_STONE, BLOCK_POTTERS_WHEEL, BLOCK_SAWHORSE};
     match block_kind(ctx.world.cached_block(at.0, at.1, at.2)?) {
         BLOCK_ANVIL => Some(Game::Anvil),
         BLOCK_POTTERS_WHEEL => Some(Game::Wheel),
+        BLOCK_SAWHORSE => Some(Game::Saw),
+        BLOCK_HONING_STONE => Some(Game::Whet),
         _ => None,
     }
 }
@@ -8955,6 +8978,47 @@ pub(crate) fn station_begin(
     // of its own would deadlock against this one, on a busy server, once.
     let refused = {
         let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = &mut *state;
+        if job == primitive_shared::minigame::Job::Hone {
+            // **Nothing is spent at the stone**: the run works the blade in
+            // the hand. A sharp one is refused rather than honed for nothing
+            // -- the stone would take its metal and give back what it had.
+            let slot = state.selected_slot;
+            let held = state.inventory.block_in(slot);
+            match held {
+                Some(block) if primitive_shared::tools::takes_an_edge(block) => {
+                    if primitive_shared::tools::blunt_step(block) == 0 {
+                        Some("that edge is already sharp")
+                    } else {
+                        if let Some(seat) = state.station.as_mut() {
+                            seat.honing = Some((slot, primitive_shared::types::block_kind(block)));
+                            seat.run = Some((job, Instant::now(), seed));
+                        }
+                        None
+                    }
+                }
+                _ => Some("hold the blade you want to sharpen"),
+            }
+        } else if let Some(recipe) = job.recipe() {
+            // **The row itself, run up to the moment of making** -- any
+            // wood's boards, the room checked, all or nothing -- and the
+            // piece lifted back off the bench until the cut is judged. The
+            // sawhorse stands in for the joiner's bench for the pieces it
+            // cuts: it is a second way to a chair, and one that asked for a
+            // bench as well would be a toll on the first.
+            use primitive_shared::crafting::{begin_piece, Heat, Station};
+            match begin_piece(&mut state.inventory, recipe, Heat::NONE.with_workshop(Station::Bench)) {
+                Some(piece) => {
+                    state.inventory_dirty = true;
+                    if let Some(seat) = state.station.as_mut() {
+                        seat.piece = Some(piece);
+                        seat.run = Some((job, Instant::now(), seed));
+                    }
+                    None
+                }
+                None => Some("you are short of what that takes"),
+            }
+        } else {
         let mut short = false;
         for &(block, amount) in job.inputs() {
             if state.inventory.count(block) < amount {
@@ -8989,6 +9053,7 @@ pub(crate) fn station_begin(
             None
         }
         }
+        }
     };
     if let Some(note) = refused {
         handle.send(ServerMessage::Error(note.to_string()));
@@ -9015,9 +9080,9 @@ pub(crate) fn station_run(handle: &Arc<players::PlayerHandle>, presses: Vec<u32>
         let Some(seat) = state.station.as_mut() else {
             return;
         };
-        seat.run.take().map(|run| (seat.game, seat.tolerance, run))
+        seat.run.take().map(|run| (seat.game, seat.tolerance, run, seat.piece.take(), seat.honing.take()))
     };
-    let Some((game, tolerance, (job, began, seed))) = taken else {
+    let Some((game, tolerance, (job, began, seed), piece, honing)) = taken else {
         handle.send(ServerMessage::Error("there is nothing on the anvil".to_string()));
         return;
     };
@@ -9038,10 +9103,35 @@ pub(crate) fn station_run(handle: &Arc<players::PlayerHandle>, presses: Vec<u32>
         }
     };
     let verdict = minigame::verdict(accuracy);
-    let result = minigame::outcome(job, verdict);
+    let mut result = minigame::outcome(job, verdict);
+    // **A sawhorse's piece is the one paid for at the start**, in the wood its
+    // boards were, and the boards a cut hands back are that wood's too: the
+    // table names oak (`minigame::joinery_outcome`), the pack does not.
+    if let Some((made, count, boards)) = piece {
+        use primitive_shared::types::{block_kind, BLOCK_PLANKS};
+        result.made = result.made.map(|_| (made, count));
+        for back in &mut result.back {
+            if block_kind(back.0) == BLOCK_PLANKS {
+                back.0 = boards;
+            }
+        }
+    }
     {
         let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((block, count)) = result.made {
+        // **The stone works the blade that was on it**, in the slot it was
+        // in, and only if it is still the same kind of tool. What the run
+        // decided is how much metal the edge cost (`tools::hone_by`); the
+        // result names the honed tool so the screen can say what it came to.
+        if let Some((slot, kind)) = honing {
+            let held = state.inventory.slots().get(slot).copied().flatten();
+            if let Some(stack) = held.filter(|stack| primitive_shared::types::block_kind(stack.block) == kind) {
+                let honed = primitive_shared::tools::hone_by(stack, verdict);
+                state.inventory.take_from(slot, stack.count);
+                let _ = state.inventory.put_in_slot(slot, honed);
+                result.made = Some((honed.block, 1));
+            }
+        }
+        if let Some((block, count)) = result.made.filter(|_| honing.is_none()) {
             // **The run is half of the piece and the smith is the other
             // half** (`quality::Maker::aim`). What the mini-game already
             // decided is *how much* comes out (`minigame::outcome`); what
@@ -9053,19 +9143,20 @@ pub(crate) fn station_run(handle: &Arc<players::PlayerHandle>, presses: Vec<u32>
             // The hammer is the tool for an anvil job; a potter's hands
             // are the right hands, which is `1.0` and not zero -- see
             // `Maker::craft`.
-            let tool = if game == Game::Anvil {
-                state
-                    .inventory
-                    .slots()
-                    .get(state.selected_slot)
-                    .copied()
-                    .flatten()
-                    .filter(|stack| minigame::is_hammer(stack.block))
-                    .map_or(0.0, |stack| {
-                        0.75 * stack.condition() + 0.25 * stack.quality().fraction()
-                    })
-            } else {
-                1.0
+            //
+            // At the sawhorse the saw is the tool, and its edge counts as a
+            // chisel's does at the bench (`crafting::tool_goodness`): a blunt
+            // saw tears the fibres at the end of the cut.
+            let held = state.inventory.slots().get(state.selected_slot).copied().flatten();
+            let tool = match game {
+                Game::Anvil => held.filter(|stack| minigame::is_hammer(stack.block)).map_or(0.0, |stack| {
+                    0.75 * stack.condition() + 0.25 * stack.quality().fraction()
+                }),
+                Game::Saw => held.filter(|stack| minigame::is_saw(stack.block)).map_or(0.0, |stack| {
+                    (0.75 * stack.condition() + 0.25 * stack.quality().fraction())
+                        * primitive_shared::tools::edge_factor(stack.block)
+                }),
+                Game::Wheel | Game::Whet => 1.0,
             };
             let maker = maker_of(&state, true, tool, Some(accuracy));
             let quality = maker.judge(logic::rng::Rng::from_clock().range(0.0, 1.0));
@@ -9089,9 +9180,17 @@ pub(crate) fn station_run(handle: &Arc<players::PlayerHandle>, presses: Vec<u32>
         // the honest answer -- the run was still scored by the head they
         // started with (`StationSeat::tolerance`), which is the half that could
         // have been cheated.
-        if game == Game::Anvil {
+        //
+        // A saw at the sawhorse the same way: a point of wear a piece, and
+        // the edge dulls on that wear like any other (`wear_tool`).
+        let worn_here = match game {
+            Game::Anvil => Some(minigame::is_hammer as fn(primitive_shared::types::BlockId) -> bool),
+            Game::Saw => Some(minigame::is_saw as fn(primitive_shared::types::BlockId) -> bool),
+            Game::Wheel | Game::Whet => None,
+        };
+        if let Some(is_the_tool) = worn_here {
             let slot = state.selected_slot;
-            if state.inventory.block_in(slot).is_some_and(minigame::is_hammer) {
+            if state.inventory.block_in(slot).is_some_and(is_the_tool) {
                 for _ in 0..=result.extra_wear {
                     state.inventory.wear_tool(slot);
                 }

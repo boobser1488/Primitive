@@ -7656,6 +7656,9 @@ pub(crate) fn is_furniture(id: BlockId) -> bool {
         || block_kind(id) == primitive_shared::types::BLOCK_ANVIL
         // ...and the barter stall, a counter on legs under an awning.
         || block_kind(id) == primitive_shared::types::BLOCK_STALL
+        // ...and the two stations of the edge, models on legs and a stump.
+        || block_kind(id) == primitive_shared::types::BLOCK_SAWHORSE
+        || block_kind(id) == primitive_shared::types::BLOCK_HONING_STONE
 }
 
 /// How many of `push_box`'s quarter turns lay a bed written head-toward
@@ -7775,6 +7778,10 @@ pub(crate) fn furniture_block_hinged(
         // north, so turned the way the chest is: it faces whoever put it down,
         // and the owner stands behind it.
         primitive_shared::types::BLOCK_STALL => (Prop::Stall, turned_from_north(block_facing(block))),
+        // Worked from north, as the bench is: the joiner at the end of the
+        // board, the grinder in front of the slab.
+        primitive_shared::types::BLOCK_SAWHORSE => (Prop::Sawhorse, turned_from_north(block_facing(block))),
+        primitive_shared::types::BLOCK_HONING_STONE => (Prop::HoningStone, turned_from_north(block_facing(block))),
         _ => return,
     };
     // Face 4 is +z and 5 is -z, as the piece is written. Measured on the

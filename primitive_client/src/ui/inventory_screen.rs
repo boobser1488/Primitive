@@ -1564,6 +1564,30 @@ pub(crate) fn quality_corner(band: Option<primitive_shared::quality::Band>) -> O
     }
 }
 
+/// The corner a dulled tool carries in the grid: slate for *dull*, the
+/// wear bar's red for *blunt*, nothing for sharp or merely dulled.
+///
+/// **The last two steps of four, and not the first.** A tool is *dulled* a
+/// few dozen swings after every hone (`tools::edge_swings`), so a mark at
+/// the first step would sit on nearly every tool in the pack and say
+/// nothing -- the wear bar's lesson again (see `QUALITY_FINE`). What a player
+/// scanning the hotbar wants is "this one needs the stone": a pick at two
+/// thirds of its speed, and a knife that is tearing hides.
+///
+/// **Top-left, the jug's corner**, and they never meet: a jug takes no edge
+/// and a tool holds no contents. Read off the id alone, because that is where
+/// the edge is kept (`tools`, "why the edge is in the id"), so every caller
+/// that draws a slot draws it without a new argument.
+const EDGE_DULL: [f32; 4] = [0.55, 0.62, 0.70, 1.0];
+
+pub(crate) fn edge_corner(block: primitive_shared::types::BlockId) -> Option<[f32; 4]> {
+    match primitive_shared::tools::blunt_step(block) {
+        2 => Some(EDGE_DULL),
+        3 => Some(WEAR_LOW),
+        _ => None,
+    }
+}
+
 pub(crate) fn draw_slot(
     p: &mut Painter,
     cell: Rect,
@@ -1670,6 +1694,14 @@ fn draw_slot_full(
         let (x1, y1) = (cell.x1 - widgets::BEVEL, cell.y1 - widgets::BEVEL);
         p.quad(Rect::new(x1 - size - CELL * 0.03, y1 - size - CELL * 0.03, x1, y1), WEAR_BACK);
         p.quad(Rect::new(x1 - size, y1 - size, x1, y1), colour);
+    }
+
+    // The edge mark, in the top-left corner, for a tool gone dull or blunt.
+    if let Some(colour) = edge_corner(block) {
+        let size = CELL * 0.16;
+        let (x0, y1) = (cell.x0 + widgets::BEVEL, cell.y1 - widgets::BEVEL);
+        p.quad(Rect::new(x0, y1 - size - CELL * 0.03, x0 + size + CELL * 0.03, y1), WEAR_BACK);
+        p.quad(Rect::new(x0, y1 - size, x0 + size, y1), colour);
     }
 
     // The wear bar, under the icon of anything that wears out.
@@ -2926,6 +2958,18 @@ mod tests {
         assert!(drawn(meat(0.1)).len() > unmarked, "a poor piece carries no corner");
         assert!(drawn(meat(0.95)).len() > unmarked, "a fine piece carries no corner");
         assert_ne!(quality_corner(meat(0.1).quality().band()), quality_corner(meat(0.95).quality().band()), "poor and fine look the same");
+    }
+
+    #[test]
+    fn a_dull_and_a_blunt_tool_are_marked_and_a_sharp_or_dulled_one_is_not() {
+        use primitive_shared::tools::with_edge;
+        use primitive_shared::types::{BLOCK_BRONZE_AXE, BLOCK_COPPER_SAW, BLOCK_JUG};
+        assert_eq!(edge_corner(BLOCK_BRONZE_AXE), None, "a sharp axe carries a mark");
+        assert_eq!(edge_corner(with_edge(BLOCK_BRONZE_AXE, 1)), None, "every tool fresh off the stone is marked");
+        let dull = edge_corner(with_edge(BLOCK_COPPER_SAW, 2));
+        let blunt = edge_corner(with_edge(BLOCK_COPPER_SAW, 3));
+        assert!(dull.is_some() && blunt.is_some() && dull != blunt, "dull and blunt do not read apart: {dull:?} {blunt:?}");
+        assert_eq!(edge_corner(BLOCK_JUG), None, "a jug's corner was taken by an edge");
     }
 
     #[test]
