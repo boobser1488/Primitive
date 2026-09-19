@@ -375,6 +375,43 @@ impl Reading {
     }
 }
 
+// ---- the lean-to ----
+//
+// **A shelter that is not a room.** Everything above reads a room off the
+// air a player can reach, and a debris hut has no air in it to reach: it is
+// a hollow in a heap of leaves the size of a body, and the survey walks
+// straight out of its open end into the night. So it is asked about by name
+// -- the cell the body is in -- and it answers the two questions a room
+// answers: is the sky kept off, and how much of the night.
+
+/// Is the body at `feet` lying (or crouching) in a lean-to?
+///
+/// The feet's own cell, because that is where a sleeper is: the pallet's
+/// two eighths of collider put a body lying on it inside its cell
+/// (`types::BLOCK_LEAN_TO`). A player standing on a lean-to is in it too,
+/// which is honest -- there is nowhere to stand on a heap of leaves but in it.
+pub fn is_lean_to(look: impl Fn(i32, i32, i32) -> Option<crate::types::BlockId>, feet: (i32, i32, i32)) -> bool {
+    look(feet.0, feet.1, feet.2).is_some_and(|b| crate::types::block_kind(b) == crate::types::BLOCK_LEAN_TO)
+}
+
+/// How much of the night's swing a lean-to keeps out: two thirds.
+///
+/// **More than a roof on posts (a half), less than walls (four fifths).** A
+/// debris hut is small enough that a body warms the air in it, and a foot of
+/// leaves is as good a blanket as a thatched roof -- which is why the thing
+/// has been built for as long as there have been nights away from home. It
+/// is not a house: its mouth is open and there is no fire in it, and a hut
+/// with a hearth is warmer on the night that matters. Rejected: *walls'
+/// four fifths*, which would make a heap of leaves as warm as the log cabin
+/// and the cabin a longer way to the same night.
+pub const LEAN_TO_EVENS_OUT: f32 = 0.65;
+
+/// What a lean-to counts as for comfort's enclosure (`comfort::Surroundings`):
+/// a little over half a shut room. Out of the rain and the wind is most of
+/// what makes a place feel like shelter; a door, walls and a fire are the
+/// rest, and a house still has them.
+pub const LEAN_TO_ENCLOSURE: f32 = 0.6;
+
 #[cfg(test)]
 mod tests {
     use super::*;

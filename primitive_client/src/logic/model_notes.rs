@@ -615,6 +615,30 @@
 //!
 //! - **frayed end**: The foot end, where the straw thins out.
 //!
+//! ## furniture/lean_to_head.bbmodel
+//!
+//! The shut end of a lean-to (`types::BLOCK_LEAN_TO`), written as the straw
+//! pallet's head is: toward -z, the seam at z sixteen. Two sides of leaves
+//! leant in to a ridge pole, turned thirty degrees about z each way -- the
+//! one turn a box of a block has (`mesh::Swing`).
+//!
+//! - **leaf bed**: The hollow a body lies in, two sixteenths high: the
+//!   pallet's collider, so a sleeper lies on what is drawn.
+//!
+//! - **back low**: The first of three courses of leaves heaped against the
+//!   back, each narrower and set a quarter further in so no two share a face
+//!   (`model_overlap`): the gable end a box cannot draw as a triangle.
+//!
+//! - **fork**: The forked stick the ridge rests on, standing in the heap.
+//!
+//! ## furniture/lean_to_foot.bbmodel
+//!
+//! ...and the open end, from the seam at z nought to the mouth at sixteen,
+//! where a sleeper crawls in. No wall: the dark under the ridge is the door.
+//!
+//! - **ridge pole**: Bark on, running the whole length -- what the leaves
+//!   are thrown over.
+//!
 //! ## furniture/stool.bbmodel
 //!
 //! A three-legged stool: a board seat on three poles and one rung. Three

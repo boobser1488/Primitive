@@ -1225,3 +1225,101 @@ fn a_gentled_horse_throws_its_rider_until_it_is_broken_and_then_it_is_theirs() {
         "breaking it was never said"
     );
 }
+
+// ---------------------------------------------------------------- a night out, and the wet
+
+/// The lean-to's two cells, and whether both are standing.
+fn lean_to_at(s: &Scenario, cells: [(i32, i32, i32); 2]) -> bool {
+    cells.iter().all(|&c| s.block(c).is_some_and(|b| t::block_kind(b) == t::BLOCK_LEAN_TO))
+}
+
+#[test]
+fn a_lean_to_keeps_its_sleeper_out_of_the_rain_and_falls_in_at_dawn() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.server().console_command("/weather rain");
+    s.server().console_command("/time night");
+    s.give(t::BLOCK_LEAN_TO, 1);
+    s.select(t::BLOCK_LEAN_TO);
+    s.face(0.0);
+    s.look_at_face((x0 + 2, GROUND, z), (0, 1, 0));
+    s.use_aimed();
+    // Put down lying away from the placer, like a pallet: the foot where
+    // it was aimed, the head a cell further on.
+    let cells = [(x0 + 2, GROUND + 1, z), (x0 + 3, GROUND + 1, z)];
+    assert!(s.until(3.0, |s| lean_to_at(s, cells)), "the lean-to was not put down: {:?}", cells.map(|c| s.block(c).map(t::block_name)));
+    s.shot("lean_to");
+    // Caught out in it first: the rain is on the player.
+    let name = s.name.clone();
+    assert!(s.until(6.0, |s| s.server().wetness_of(&name).unwrap_or(0.0) > 0.1), "standing in the rain wet nobody");
+
+    // In, and down.
+    // At the leaves, which are the pallet's two eighths high.
+    s.look_at(DVec3::new(cells[0].0 as f64 + 0.5, cells[0].1 as f64 + 0.06, cells[0].2 as f64 + 0.5));
+    s.use_aimed();
+    let down = s.until(3.0, |s| s.heard.iter().any(|m| matches!(m, ServerMessage::Asleep { asleep: true })));
+    let said: Vec<&String> = s.heard.iter().filter_map(|m| match m {
+        ServerMessage::Error(text) => Some(text),
+        _ => None,
+    }).collect();
+    assert!(down, "the lean-to could not be slept in: aimed at {:?}, told {said:?}", s.aimed().map(|(c, b)| (c, t::block_name(b))));
+    // Every sample while the leaves are still over the sleeper: none of
+    // them wetter than the one before. (The sample taken as the player lay
+    // down may have been read where they stood, so it is let go.) The night
+    // passes on the server's clock, so this watches until the roof is gone
+    // rather than for a fixed while.
+    s.seconds(0.6);
+    let mut under = vec![s.server().wetness_of(&name).unwrap_or(0.0)];
+    for _ in 0..40 {
+        s.seconds(0.1);
+        if !lean_to_at(&s, cells) {
+            break;
+        }
+        under.push(s.server().wetness_of(&name).unwrap_or(1.0));
+    }
+    assert!(
+        under.windows(2).all(|w| w[1] <= w[0] + 1e-3),
+        "it rained into the lean-to: {under:?}"
+    );
+
+    // The night passes -- everybody is asleep -- and the roof comes down
+    // with the morning, and the sleeper is on their feet beside the heap.
+    let gone = s.until(10.0, |s| cells.iter().all(|&c| s.block(c) == Some(t::BLOCK_AIR)));
+    assert!(gone, "the lean-to stood through the morning: {:?}", cells.map(|c| s.block(c).map(t::block_name)));
+    s.seconds(0.5);
+    s.shot("lean_to_fallen");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_swim_soaks_the_kindling_and_a_fire_dries_it_again() {
+    use primitive_shared::wet::{is_wet, wetted};
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let g = GROUND;
+    s.server().console_command("/weather clear");
+    s.stand_at(feet_on(x0 - 3, z));
+    s.give(t::BLOCK_STICK, 4);
+    s.give(t::BLOCK_STONE_AXE, 1);
+    // A pool four deep, its water up to the field.
+    s.fill((x0, g - 4, z - 2), (x0 + 5, g, z + 2), t::BLOCK_WATER);
+    s.stand_at((x0 as f64 + 2.5, (g - 3) as f64, z as f64 + 0.5));
+    let soaked = s.until(4.0, |s| s.inventory.slots().iter().flatten().any(|st| st.block == wetted(t::BLOCK_STICK)));
+    assert!(soaked, "a swim left the sticks dry");
+    assert!(
+        s.inventory.slots().iter().flatten().all(|st| !is_wet(st.block) || t::block_kind(st.block) == t::BLOCK_STICK),
+        "something that does not get wet came out of the river wet"
+    );
+
+    // Out, and sat by a fire: a breath short of a minute's drying, and the
+    // ordinary sample does the rest.
+    let fire = (x0 - 5, g + 1, z);
+    s.server().place_block(fire.0, fire.1, fire.2, t::BLOCK_CAMPFIRE_LIT);
+    s.stand_at(feet_on(x0 - 4, z));
+    let name = s.name.clone();
+    s.server().set_pack_drying(&name, primitive_shared::wet::PACK_DRIES_SECONDS - 0.5);
+    let dry = s.until(4.0, |s| s.inventory.count(t::BLOCK_STICK) == 4 && s.inventory.slots().iter().flatten().all(|st| !is_wet(st.block)));
+    assert!(dry, "the sticks never dried by the fire");
+    no_corrections(&s);
+}

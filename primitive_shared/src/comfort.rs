@@ -138,7 +138,7 @@ pub struct Condition {
 pub fn furniture_worth(block: BlockId) -> f32 {
     match block_kind(block) {
         BLOCK_BED => 0.12,
-        BLOCK_STRAW_BED => 0.08,
+        BLOCK_STRAW_BED | crate::types::BLOCK_LEAN_TO => 0.08,
         BLOCK_CHAIR | BLOCK_TABLE => 0.06,
         BLOCK_STOOL | BLOCK_CHEST => 0.04,
         BLOCK_TORCH_LIT | BLOCK_STANDING_TORCH_LIT => 0.04,
@@ -224,12 +224,26 @@ pub fn survey(look: impl Fn(i32, i32, i32) -> Option<BlockId>, feet: (i32, i32, 
     found.filth = found.filth.min(FILTH_CAP);
     found.on_mud = look(fx, fy - 1, fz).is_some_and(|b| block_kind(b) == BLOCK_MUD);
 
+    // **A lean-to is shelter with no room in it** (`shelter::is_lean_to`):
+    // the walk below goes out of its open end and finds the sky, so it is
+    // asked by name first. What it gives is its own share of enclosure and
+    // its worth as a bed -- and it is only ever a lean-to, however many
+    // stools a player carries into the leaves. A lean-to put up inside a
+    // house is the house's, which the room below finds for itself.
+    if crate::shelter::is_lean_to(&look, feet) {
+        found.enclosure = crate::shelter::LEAN_TO_ENCLOSURE;
+        found.furniture = furniture_worth(crate::types::BLOCK_LEAN_TO);
+    }
+
     // `smoke_room` starts one over what it is given.
     let (cells, enclosure) = match smoke_room(&look, (fx, fy - 1, fz)) {
         Room::Vented => return found,
         Room::Closed(cells) => (cells, 1.0),
         Room::Leaky(cells, kept) => (cells, kept),
     };
+    if enclosure < found.enclosure {
+        return found;
+    }
     found.enclosure = enclosure.clamp(0.0, 1.0);
     let room: std::collections::HashSet<(i32, i32, i32)> = cells.iter().copied().collect();
     let solid = |at: (i32, i32, i32)| look(at.0, at.1, at.2).is_some_and(blocks_the_sky);
@@ -543,5 +557,30 @@ mod tests {
         assert!(goes_now(DUNG_PER_BAR, 0.0));
         assert!(!goes_now(DUNG_PER_BAR, 0.8), "went on the floor the moment it was due");
         assert!(goes_now(DUNG_PER_BAR + DUNG_HELD_INDOORS, 0.8));
+    }
+
+    #[test]
+    fn a_lean_to_in_a_field_is_shelter_and_a_bed_and_the_field_beside_it_is_neither() {
+        use crate::types::{bed_half_of, Facing, BLOCK_LEAN_TO};
+        let lean_to = bed_half_of(BLOCK_LEAN_TO, Facing::South, false);
+        let field = |x, y, z| {
+            Some(if (x, y, z) == (0, 10, 0) {
+                lean_to
+            } else if y < 10 {
+                BLOCK_STONE
+            } else {
+                BLOCK_AIR
+            })
+        };
+        let inside = survey(field, (0, 10, 0));
+        assert_eq!(inside.enclosure, crate::shelter::LEAN_TO_ENCLOSURE, "{inside:?}");
+        assert!(inside.furniture > 0.0, "the leaves were not a bed: {inside:?}");
+        let beside = survey(field, (1, 10, 1));
+        assert_eq!(beside.enclosure, 0.0, "standing beside a lean-to was shelter: {beside:?}");
+        let body = Condition { asleep: true, ..calm() };
+        assert!(target(body, inside) > target(body, beside) + 0.2, "a night in the leaves was no better than the grass");
+        // ...and a house is still better than a heap of leaves.
+        let home = survey(hut(true, &[((1, 10, 1), crate::types::BLOCK_BED)]), (0, 10, 0));
+        assert!(target(body, home) > target(body, inside));
     }
 }

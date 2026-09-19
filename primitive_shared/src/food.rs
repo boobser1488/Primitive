@@ -490,8 +490,16 @@ pub const STALE_WORTH: f32 = 0.7;
 ///
 /// The toadstool and the rotten lump themselves never age: one is a
 /// trap and the other is the end state, and neither has a next stage.
+///
+/// **Wet flour goes off; dry flour keeps for ever** (`wet`). Flour is grain
+/// that has been opened, and what keeps it is being dry: soaked, it is a
+/// paste that moulds as fast as a roast goes. So a sack of flour carried
+/// through a river is a sack to bake or dry today.
 #[inline]
 pub fn rot_per_step(block: BlockId) -> u8 {
+    if block_kind(block) == crate::types::BLOCK_FLOUR && crate::wet::is_wet(block) {
+        return 1;
+    }
     match block_kind(block) {
         // Every raw meat goes off at the meat rate, which is twice
         // everything else: a haunch is a haunch whatever it was cut
@@ -567,8 +575,14 @@ pub fn rot_per_step(block: BlockId) -> u8 {
 /// id for a remainder, and a counter per stack is the per-slot state the
 /// note at the top of this section already turned down. A step number is
 /// the world's clock, which every pack, chest and drop already share.
+///
+/// **A wet loaf goes at a stage a step**, twice a dry one's pace (`wet`): a
+/// crust that has been rained through is a sponge, and mould likes it.
 #[inline]
 pub fn rot_every(block: BlockId) -> u32 {
+    if crate::wet::is_wet(block) {
+        return 1;
+    }
     match block_kind(block) {
         // **The ladder of the larder**, in steps of a cooked haunch: salt buys
         // days, drying buys a season, and salting before drying buys the
@@ -615,11 +629,14 @@ pub fn rot_stage(block: BlockId) -> u8 {
 /// that does not perish comes back as its plain kind.
 #[inline]
 pub fn with_rot_stage(block: BlockId, stage: u8) -> BlockId {
+    // The water with it, which is asked of the whole id: a wet flour's age
+    // is only an age while it is wet (`wet`, "flour comes back fresh").
+    let wet = if crate::wet::is_wet(block) { crate::wet::WET } else { 0 };
     let kind = block_kind(block);
-    if !is_perishable(kind) {
+    if !is_perishable(kind | wet) {
         return kind;
     }
-    kind | ((stage.min(LAST_ROT_STAGE) as BlockId) << VARIANT_SHIFT)
+    kind | wet | ((stage.min(LAST_ROT_STAGE) as BlockId) << VARIANT_SHIFT)
 }
 
 /// The same stack one step of the clock later: a stage or two older,
@@ -1246,5 +1263,21 @@ mod tests {
                 crate::types::block_name(food)
             );
         }
+    }
+
+    #[test]
+    fn wet_flour_moulds_where_dry_flour_keeps_and_a_wet_loaf_goes_twice_as_fast() {
+        use crate::types::BLOCK_FLOUR;
+        use crate::wet::{dried, is_wet, wetted};
+        assert!(!is_perishable(BLOCK_FLOUR), "dry flour went off");
+        let wet = wetted(BLOCK_FLOUR);
+        assert_eq!(steps_until_rot(wet), u32::from(ROT_STAGES), "wet flour is not two days");
+        // Aged, it is still wet flour, and a known one.
+        let older = aged_on(wet, 0);
+        assert!(is_wet(older) && rot_stage(older) == 1 && crate::types::is_known_block(older));
+        // ...and dried before it went, it is flour again with no age at all.
+        assert_eq!(dried(older), BLOCK_FLOUR);
+        assert_eq!(steps_until_rot(wetted(BLOCK_BREAD)) * 2, steps_until_rot(BLOCK_BREAD));
+        assert!(is_wet(aged_on(wetted(BLOCK_BREAD), 1)), "a wet loaf dried by going stale");
     }
 }

@@ -1587,6 +1587,10 @@ impl Inventory {
         if crate::types::block_kind(stack.block) != crate::types::BLOCK_TORCH {
             return false;
         }
+        // A wet wad does not take a flame (`wet`).
+        if crate::wet::will_not_light(stack.block) {
+            return false;
+        }
         if stack.count == 1 {
             let stack = self.slots[slot].as_mut().expect("checked above");
             stack.block = lit;

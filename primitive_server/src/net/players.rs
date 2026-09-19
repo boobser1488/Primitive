@@ -167,6 +167,10 @@ pub struct PlayerRuntime {
     /// Seconds since that sample. When it passes
     /// `climate::SAMPLE_INTERVAL_SECS` the world is looked at again.
     pub since_ambient: f32,
+    /// Seconds of drying weather a wet pack has had so far
+    /// (`wet::pack_weather`). Not saved: a pack half dried when the server
+    /// stopped is a pack that dries from the start again, a minute by a fire.
+    pub pack_drying: f32,
     /// Whether this player has been granted flight, and how fast.
     ///
     /// Server-owned like everything else about a body. The client is
@@ -381,6 +385,7 @@ impl PlayerHandle {
                 // and is exactly the sort of thing that makes a test of
                 // "does standing in a fire warm you" flaky.
                 since_ambient: crate::logic::climate::SAMPLE_INTERVAL_SECS,
+                pack_drying: 0.0,
                 flying: false,
                 fly_speed: DEFAULT_FLY_SPEED,
                 body_reported: (

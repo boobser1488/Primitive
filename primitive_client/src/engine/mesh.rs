@@ -7300,12 +7300,18 @@ pub(crate) enum Material {
     /// simplified chest wears it -- and a layer is the one thing the atlas
     /// runs out of.
     Chest,
+    /// A heap of fallen leaves: the leaf litter's own picture
+    /// (`plants/leaf_litter.png`), which is what a lean-to is thatched and
+    /// bedded with. The litter rather than the green handful, because what a
+    /// traveller rakes up for a roof is last year's leaves off the floor of a
+    /// wood, and the litter's row is already in the atlas.
+    Leaves,
 }
 
 impl Material {
     /// Every material, in the order a model file's reader lists them when
     /// a texture names none of them.
-    pub(crate) const ALL: [Material; 16] = [
+    pub(crate) const ALL: [Material; 17] = [
         Material::Boards,
         Material::Pole,
         Material::Straw,
@@ -7322,6 +7328,7 @@ impl Material {
         Material::Clay,
         Material::Chest,
         Material::Bronze,
+        Material::Leaves,
     ];
 
     /// The picture in a wood (`types::furniture_wood`): boards, poles and
@@ -7369,6 +7376,7 @@ impl Material {
             // Face 2, a side: the row's north is the front picture with the
             // hasp painted on, for the far chest that has no hasp box.
             Material::Chest => textures.layer_for_face(primitive_shared::types::BLOCK_CHEST, 2),
+            Material::Leaves => textures.layer_for_face(primitive_shared::types::BLOCK_LEAF_LITTER, 0),
         }
     }
 
@@ -7411,6 +7419,7 @@ impl Material {
             Material::Clay => "clay",
             Material::Chest => "chest",
             Material::Bronze => "bronze",
+            Material::Leaves => "leaves",
         }
     }
 }
@@ -7659,6 +7668,8 @@ pub(crate) fn is_furniture(id: BlockId) -> bool {
         // ...and the two stations of the edge, models on legs and a stump.
         || block_kind(id) == primitive_shared::types::BLOCK_SAWHORSE
         || block_kind(id) == primitive_shared::types::BLOCK_HONING_STONE
+        // ...and the lean-to, a pallet of leaves under a roof of them.
+        || block_kind(id) == primitive_shared::types::BLOCK_LEAN_TO
 }
 
 /// How many of `push_box`'s quarter turns lay a bed written head-toward
@@ -7782,6 +7793,10 @@ pub(crate) fn furniture_block_hinged(
         // board, the grinder in front of the slab.
         primitive_shared::types::BLOCK_SAWHORSE => (Prop::Sawhorse, turned_from_north(block_facing(block))),
         primitive_shared::types::BLOCK_HONING_STONE => (Prop::HoningStone, turned_from_north(block_facing(block))),
+        // Written as the pallet is, so turned as the pallet is: the shut end
+        // at the head, the mouth at the foot where the sleeper crawled in.
+        primitive_shared::types::BLOCK_LEAN_TO if head => (Prop::LeanToHead, bed_quarters(block_facing(block))),
+        primitive_shared::types::BLOCK_LEAN_TO => (Prop::LeanToFoot, bed_quarters(block_facing(block))),
         _ => return,
     };
     // Face 4 is +z and 5 is -z, as the piece is written. Measured on the

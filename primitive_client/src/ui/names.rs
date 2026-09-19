@@ -200,10 +200,14 @@ pub fn condition(block: BlockId, language: Language) -> Option<Cow<'static, str>
 
 /// Every rule that has a word for the state of a stack, asked in turn:
 /// which water, how blunt, how dry the clay (`clay::label`), how green the
-/// wood (`wood::seasoning_label`). At most one of them answers for any
-/// block, since no block is two of those things.
+/// wood (`wood::seasoning_label`), and wet (`wet::label`). At most one of
+/// them answers for any block: no block is two of the first four, and wet
+/// is asked first because it is the one that matters tonight.
 fn rules_label(block: BlockId) -> Option<&'static str> {
-    primitive_shared::types::water_label(block)
+    // Wet first: of everything a stack can be, it is the one that stops a
+    // fire tonight, and a log that is wet is wet before it is green.
+    primitive_shared::wet::label(block)
+        .or_else(|| primitive_shared::types::water_label(block))
         .or_else(|| primitive_shared::tools::label(block))
         .or_else(|| primitive_shared::clay::label(block))
         .or_else(|| primitive_shared::wood::seasoning_label(block))
@@ -337,6 +341,7 @@ const CONDITIONS: &[Name] = &[
     Name { id: "bone-dry", en: "bone-dry", simple: "dry, ready to fire", ru: "сухая", pl: "sucha" },
     Name { id: "green", en: "green", simple: "fresh cut, wet", ru: "сырое", pl: "surowe" },
     Name { id: "seasoning", en: "seasoning", simple: "drying out", ru: "подсыхает", pl: "schnie" },
+    Name { id: "wet", en: "wet", simple: "wet, dry it first", ru: "мокрое", pl: "mokre" },
 ];
 
 /// Every block and item, in `ALL_BLOCK_IDS`'s order so a new row has an
@@ -599,6 +604,7 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "bronze_saw", en: "Bronze saw", simple: "Bronze saw", ru: "Бронзовая пила", pl: "Brązowa piła" },
     Name { id: "iron_saw", en: "Iron saw", simple: "Iron saw", ru: "Железная пила", pl: "Żelazna piła" },
     Name { id: "sawhorse", en: "Sawhorse", simple: "Sawing trestle", ru: "Козлы", pl: "Kozioł stolarski" },
+    Name { id: "lean_to", en: "Lean-to", simple: "Leaf hut for one night", ru: "Шалаш", pl: "Szałas" },
     Name { id: "honing_stone", en: "Honing stone", simple: "Big sharpening stone", ru: "Точильная колода", pl: "Kamień szlifierski" },
     Name { id: "plank_stairs", en: "Plank stairs", simple: "Wooden steps", ru: "Деревянные ступени", pl: "Drewniane schody" },
     Name { id: "cobblestone_stairs", en: "Cobblestone stairs", simple: "Stone steps", ru: "Каменные ступени", pl: "Kamienne schody" },
@@ -1020,6 +1026,7 @@ pub const RECIPES: &[Name] = &[
     Name { id: "sawn pine", en: "Sawn pine", simple: "Pine boards cut with a saw", ru: "Пилёная сосна", pl: "Piłowana sosna" },
     Name { id: "sawn willow", en: "Sawn willow", simple: "Willow boards cut with a saw", ru: "Пилёная ива", pl: "Piłowana wierzba" },
     Name { id: "sawhorse", en: "Sawhorse", simple: "Sawing trestle", ru: "Козлы", pl: "Kozioł stolarski" },
+    Name { id: "lean-to", en: "Lean-to", simple: "Leaf hut for one night", ru: "Шалаш", pl: "Szałas" },
     Name { id: "honing stone", en: "Honing stone", simple: "Big sharpening stone", ru: "Точильная колода", pl: "Kamień szlifierski" },
     Name { id: "fir planks", en: "Fir planks", simple: "Fir boards", ru: "Еловые доски", pl: "Jodłowe deski" },
     Name { id: "fir beam", en: "Fir beam", simple: "Fir log from boards", ru: "Еловый брус", pl: "Jodłowa belka" },

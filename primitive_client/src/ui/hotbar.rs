@@ -300,6 +300,14 @@ pub fn icon_tint(block: primitive_shared::types::BlockId, slot: [f32; 4]) -> [f3
     if primitive_shared::tools::is_hardened(block) {
         return [slot[0] * 0.80, slot[1] * 0.87, slot[2] * 1.0, slot[3]];
     }
+    // **A wet thing is darker and a little blue** (`wet`), the way a soaked
+    // stick is darker than a dry one: the hotbar has no room for a mark, and
+    // the question a player asks it at a cold fire is "is my kindling wet".
+    // Darker rather than bluer, mostly -- a blue stick reads as a different
+    // stick, a dark one as the same stick soaked.
+    if primitive_shared::wet::is_wet(block) {
+        return [slot[0] * 0.62, slot[1] * 0.68, slot[2] * 0.82, slot[3]];
+    }
     // **Raw clay is darker the wetter it is** (`clay::shade`): wet off the
     // hands, leather-hard, then the pale picture itself when it is dry
     // enough to fire -- the one way to see across a pack which pots are

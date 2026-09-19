@@ -867,6 +867,22 @@ impl Server {
         self.ctx.peat.lock().unwrap_or_else(|e| e.into_inner()).set_progress(at, progress);
     }
 
+    /// How wet the player called `name` is, 0..1, as the server has it --
+    /// the number the health page is sent on a gate, read without the gate.
+    pub fn wetness_of(&self, name: &str) -> Option<f32> {
+        self.named(name).map(|handle| handle.state.lock().unwrap_or_else(|e| e.into_inner()).vitals.wetness())
+    }
+
+    /// Sets how long a player's wet pack has been drying (`wet::pack_weather`),
+    /// `peat_progress`'s way: a scenario sets it a breath short and watches
+    /// the ordinary sample finish the job by a fire, or a shower undo it,
+    /// rather than sitting through the minute.
+    pub fn set_pack_drying(&self, name: &str, seconds: f32) {
+        if let Some(handle) = self.named(name) {
+            handle.state.lock().unwrap_or_else(|e| e.into_inner()).pack_drying = seconds;
+        }
+    }
+
     /// Fills a hearth's room with smoke at once, `peat_progress`'s way: a
     /// scenario sets the room a breath from full and watches the ordinary
     /// step keep it there or clear it, rather than waiting the minute and a
@@ -2867,8 +2883,36 @@ async fn tick_loop(ctx: Arc<Context>) {
                             state.shelter_reported = Some(reading);
                             handle.send(ServerMessage::Shelter { reading });
                         }
-                        let wetness = sampled
-                            .step_wetness(state.vitals.wetness(), climate::SAMPLE_INTERVAL_SECS);
+                        let wetness = sampled.step_wetness_dressed(
+                            state.vitals.wetness(),
+                            climate::SAMPLE_INTERVAL_SECS,
+                            worn.shed_rain,
+                        );
+                        // **The pack gets wet with the body** (`wet`): at
+                        // once in a swim, once the coat is through in the
+                        // rain, and dry again after a while by a fire or in
+                        // the sun. Decided on the sample, where the rain and
+                        // the water are already known, and sent only when a
+                        // slot changed -- which is almost never.
+                        let (weather, drying) = primitive_shared::wet::pack_weather(
+                            sampled.swimming,
+                            sampled.rained_on,
+                            wetness,
+                            sampled.near_fire,
+                            sampled.sun_c > 0.0,
+                            state.pack_drying,
+                            climate::SAMPLE_INTERVAL_SECS,
+                        );
+                        state.pack_drying = drying;
+                        if primitive_shared::wet::weather_inventory(&mut state.inventory, weather) {
+                            state.inventory_dirty = true;
+                            let slot = state.selected_slot;
+                            let held = state.inventory.block_in(slot);
+                            drop(state);
+                            held_slot_changed(&ctx, handle.id, slot, held);
+                            send_inventory(handle);
+                            state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+                        }
                         (sampled, worn, wetness)
                     } else {
                         (state.ambient, worn, state.vitals.wetness())
@@ -5587,6 +5631,12 @@ pub(crate) fn use_block(
     if held.is_some_and(|held| primitive_shared::types::block_kind(held) == primitive_shared::types::BLOCK_TORCH)
         && primitive_shared::types::lights_a_torch(block)
     {
+        // A wet wad does not take the flame (`wet`), and says so rather
+        // than falling through to feeding the fire with the torch.
+        if held.is_some_and(primitive_shared::wet::will_not_light) {
+            handle.send(ServerMessage::Error("the torch is wet: dry it by a fire or in the sun first".to_string()));
+            return;
+        }
         let (slot, lit) = {
             let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
             let slot = state.selected_slot;
@@ -6003,6 +6053,20 @@ pub(crate) fn use_block(
     // see `fire::STRIKER` for why it is the nodule rather than a flake
     // or a finished knife.
     if primitive_shared::types::block_kind(held) != fire::STRIKER {
+        return;
+    }
+    // **Wet fuel in the slot does not catch** (`wet`). The strike is refused
+    // before the flint is spent, and the player is told why: a hearth that
+    // took the spark and burned nothing would be a nodule gone for a fire
+    // that never was. An empty slot is still the laid fire it always was.
+    let fuel = ctx
+        .chests
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contents(at)
+        .block_in(primitive_shared::hearth::FUEL_SLOT);
+    if fuel.is_some_and(primitive_shared::wet::will_not_light) {
+        handle.send(ServerMessage::Error("the fuel is wet: dry it by a fire or in the sun first".to_string()));
         return;
     }
     if !ctx
@@ -11570,12 +11634,26 @@ pub(crate) fn strike_firepit(ctx: &Arc<Context>, handle: &Arc<players::PlayerHan
     if !floor || !empty {
         return;
     }
-    let is_stick = |block| block_kind(block) == BLOCK_STICK;
+    // **Only dry wood catches** (`wet`): a firepit laid with sticks carried
+    // through a river is laid, and it will not light until they have dried.
+    // Counted apart so the refusal can say which it is -- "not enough" and
+    // "wet" are two different things to go and fix.
+    let dry = |block| !primitive_shared::wet::will_not_light(block);
+    let is_stick = |block| block_kind(block) == BLOCK_STICK && dry(block);
+    let is_dry_log = |block| is_log(block) && dry(block);
     {
         let mut items = ctx.items.lock().unwrap_or_else(|e| e.into_inner());
         let sticks = items.count_lying_in(cell, is_stick);
-        let logs = items.count_lying_in(cell, is_log);
-        if sticks == 0 && logs == 0 {
+        let logs = items.count_lying_in(cell, is_dry_log);
+        let wet = items.count_lying_in(cell, |block| {
+            (block_kind(block) == BLOCK_STICK || is_log(block)) && !dry(block)
+        });
+        if sticks == 0 && logs == 0 && wet == 0 {
+            return;
+        }
+        if wet > 0 && (sticks < FIREPIT_STICKS || logs < FIREPIT_LOGS) {
+            drop(items);
+            handle.send(ServerMessage::Error("the wood is wet: dry it by a fire or in the sun first".to_string()));
             return;
         }
         if sticks < FIREPIT_STICKS || logs < FIREPIT_LOGS {
@@ -11586,7 +11664,7 @@ pub(crate) fn strike_firepit(ctx: &Arc<Context>, handle: &Arc<players::PlayerHan
             return;
         }
         items.take_lying_in(cell, is_stick, FIREPIT_STICKS);
-        items.take_lying_in(cell, is_log, FIREPIT_LOGS);
+        items.take_lying_in(cell, is_dry_log, FIREPIT_LOGS);
     }
     if !ctx.fires.lock().unwrap_or_else(|e| e.into_inner()).light(cell) {
         return;
@@ -13236,9 +13314,49 @@ fn sleep_through_to_dawn(ctx: &Arc<Context>, handles: &[Arc<players::PlayerHandl
             // on every screen. The client says it, in the player's
             // language, once the dark has lifted.
             send_asleep(handle);
+            // ...and a lean-to slept in falls in with the morning.
+            collapse_lean_to(ctx, handle);
         }
         send_body(handle);
         report_vitals(ctx, handle, outcome);
+    }
+}
+
+/// **A lean-to slept in falls in at dawn** (`types::BLOCK_LEAN_TO`), and the
+/// sleeper wakes beside a heap of what is left of it (`LEAN_TO_REMAINS`).
+///
+/// **At the morning the night passed, not when the sleeper gets up.** Waiting
+/// for the gesture would make a lean-to that lasts as long as its sleeper
+/// stays lying in it -- a player who never stands up would keep the roof for
+/// the day -- and the price is the night, which has been paid by now. The
+/// sleeper is stood up first, out of cells that are about to be nothing.
+///
+/// Rejected: *a lean-to that wears out over nights*, a count of three or
+/// five. It is a number nobody could see in a heap of leaves, and "one
+/// night" is a rule a player plans a trip around.
+fn collapse_lean_to(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>) {
+    use primitive_shared::types::{block_kind, BLOCK_AIR, BLOCK_LEAN_TO, LEAN_TO_REMAINS};
+    let Some(key) = handle.state.lock().unwrap_or_else(|e| e.into_inner()).sleeping_in else {
+        return;
+    };
+    if ctx.world.cached_block(key.0, key.1, key.2).map(block_kind) != Some(BLOCK_LEAN_TO) {
+        return;
+    }
+    let cells = bed_cells(ctx, key);
+    stand_up(ctx, handle, None);
+    for &cell in &cells {
+        if !ctx.world.set_block(cell.0, cell.1, cell.2, BLOCK_AIR) {
+            continue;
+        }
+        ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+        broadcast_block(ctx, cell, BLOCK_AIR);
+        ctx.falling.lock().unwrap_or_else(|e| e.into_inner()).on_block_changed(cell.0, cell.1, cell.2);
+        notify_mechanics(ctx, cell.0, cell.1, cell.2);
+    }
+    let centre = (key.0 as f32 + 0.5, key.1 as f32 + 0.5, key.2 as f32 + 0.5);
+    let mut items = ctx.items.lock().unwrap_or_else(|e| e.into_inner());
+    for (block, count) in LEAN_TO_REMAINS {
+        items.spawn(block, count, primitive_shared::geometry::wide(centre), (0.0, 0.0, 0.0), None, Instant::now());
     }
 }
 

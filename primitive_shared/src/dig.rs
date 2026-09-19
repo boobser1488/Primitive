@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(swings, SLICES as usize - 1, "the earth under the turf did not come away a quarter at a time");
     }
     use crate::types::{
-        is_known_block, BLOCK_COBBLESTONE, BLOCK_GRANITE, BLOCK_LOG, BLOCK_SAND, BLOCK_STONE,
+        is_known_block, BLOCK_COBBLESTONE, BLOCK_GRANITE, BLOCK_LOG, BLOCK_PLANKS, BLOCK_SAND, BLOCK_STONE,
         BLOCK_TABLE,
     };
 
@@ -696,7 +696,9 @@ mod tests {
         // flag on something nobody quarries.
         assert!(!is_known_block(BLOCK_STONE | DUG | (6 << VARIANT_SHIFT)));
         assert!(!is_known_block(BLOCK_STONE | DUG | (7 << VARIANT_SHIFT)));
-        assert!(!is_known_block(BLOCK_LOG | DUG));
+        // Not a log: a carried log spends the same bit on being wet
+        // (`wet`), which is a thing a log can be.
+        assert!(!is_known_block(BLOCK_PLANKS | DUG));
     }
 
     #[test]
