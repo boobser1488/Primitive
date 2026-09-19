@@ -35,8 +35,9 @@ fn tops(gen: &WorldGen) -> (i32, i32, i32, Vec<Option<Top>>) {
                     let Some(y) = top else { continue };
                     let block = chunk.get(x, y, z);
                     let above = chunk.get(x, y + 1, z);
-                    // Bare ground: nothing over it but air or a plant. A
-                    // bush or a stone keeps the whole block it stands on.
+                    // Bare ground: nothing over it but air or a plant, which
+                    // is what a walker crosses. What stands on the slopes is
+                    // looked at by `features_on_the_downs`.
                     if !takes_a_lip(dig::whole(block)) || !(above == crate::types::BLOCK_AIR || crate::types::is_cross(above)) {
                         continue;
                     }
@@ -146,5 +147,128 @@ fn the_lips_of_a_meadow_slope_are_grass_on_top() {
     // ...and the meadow's tufts go on growing on them.
     let tufted = lips.iter().filter(|t| crate::types::is_cross(t.above)).count();
     assert!(tufted * 10 > turf, "only {tufted} of {turf} turf lips grew anything");
+}
+
+/// What stands on the ground of a column, sorted the way the lips meet it
+/// (`lips`, "What stands on a lip").
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Standing {
+    Tree,
+    Stone,
+    Pebble,
+    Other,
+}
+
+fn standing(above: BlockId, over_that: BlockId) -> Standing {
+    use crate::ground::{rock_of, Form};
+    if (crate::wood::is_log(above) && crate::types::block_axis(above) == crate::types::Axis::Y)
+        || (crate::types::is_bough(above) && crate::types::is_branch(over_that))
+    {
+        Standing::Tree
+    } else if matches!(rock_of(above), Some((_, None | Some(Form::Cobble)))) && over_that == crate::types::BLOCK_AIR {
+        Standing::Stone
+    } else if crate::types::is_flat(above) {
+        Standing::Pebble
+    } else {
+        Standing::Other
+    }
+}
+
+/// Every column of the downs whose ground something stands on, as (what
+/// stands there, whether the slope made a lip of that column -- the thing
+/// on a lip or its foot in the lip's cell -- and the column's cells from
+/// under its ground up: under the ground, the ground, and the two over it).
+fn features_on_the_downs(gen: &WorldGen) -> Vec<(Standing, bool, [BlockId; 4])> {
+    let keep = super::lips::FEATURES_KEEP_THEIR_STEP.with(std::cell::Cell::get);
+    let mut found = Vec::new();
+    for cz in 0..SPAN {
+        for cx in 0..SPAN {
+            let pos = ChunkPos::new(HILLS.0 + cx, HILLS.1 + cz);
+            let chunk = gen.generate_chunk(pos);
+            // The same chunk with every feature on the whole block it was
+            // laid on: where the two differ under a feature, the lip met it.
+            super::lips::FEATURES_KEEP_THEIR_STEP.with(|k| k.set(true));
+            let stepped = gen.generate_chunk(pos);
+            super::lips::FEATURES_KEEP_THEIR_STEP.with(|k| k.set(keep));
+            for z in 0..CHUNK_SIZE_Z {
+                for x in 0..CHUNK_SIZE_X {
+                    let (gx, gz) = (pos.x * CHUNK_SIZE_X as i32 + x as i32, pos.z * CHUNK_SIZE_Z as i32 + z as i32);
+                    let h = gen.height_at(gx, gz);
+                    if h < 1 || h + 3 >= CHUNK_SIZE_Y as i32 {
+                        continue;
+                    }
+                    let at = |c: &Chunk, y: i32| c.get(x, y as usize, z);
+                    let whole = at(&stepped, h);
+                    if !takes_a_lip(whole) || at(&stepped, h + 1) == crate::types::BLOCK_AIR {
+                        continue;
+                    }
+                    let what = standing(at(&stepped, h + 1), at(&stepped, h + 2));
+                    let met = at(&chunk, h) != whole;
+                    found.push((what, met, [at(&chunk, h - 1), at(&chunk, h), at(&chunk, h + 1), at(&chunk, h + 2)]));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// **On a generated hillside trees and stones stand on the lips as well as
+/// on whole tops.** "Деревья растут только на полных блоках, камни также
+/// только так появляются": every trunk, boulder and pebble on the downs kept
+/// the whole block it was laid on, a step left standing round each. Now a
+/// trunk on a lip roots into it, a boulder is bedded in it and a pebble lies
+/// on it -- and on the terraces, where the slope makes no lip, they stand on
+/// the whole block as they always did.
+#[test]
+fn on_a_generated_hillside_trees_and_stones_stand_on_lips_as_well_as_on_whole_tops() {
+    let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
+    let found = features_on_the_downs(&gen);
+    let count = |what: Standing, met: bool| found.iter().filter(|f| f.0 == what && f.1 == met).count();
+    let [trees, stones, pebbles] = [Standing::Tree, Standing::Stone, Standing::Pebble].map(|w| (count(w, true), count(w, false)));
+    println!("on lips and on whole tops: trees {trees:?}, boulders {stones:?}, pebbles {pebbles:?}");
+    assert!(trees.0 >= 10 && trees.1 >= 10, "trees on lips and on whole tops: {trees:?}");
+    assert!(stones.0 + pebbles.0 >= 10 && stones.1 + pebbles.1 >= 10, "stones {stones:?}, pebbles {pebbles:?}");
+    // ...and before, not one of them met a lip.
+    super::lips::FEATURES_KEEP_THEIR_STEP.with(|k| k.set(true));
+    let before = features_on_the_downs(&gen);
+    super::lips::FEATURES_KEEP_THEIR_STEP.with(|k| k.set(false));
+    assert!(
+        before.iter().all(|f| !f.1 || f.0 == Standing::Other),
+        "a tree or a stone met a lip before the lips were let under them"
+    );
+}
+
+/// **Nothing on a generated hillside floats or sinks**: whatever stands on a
+/// column's ground has its bottom at the real top of what is under it. A
+/// plant or a thing lying on a lip is drawn on the lip (`types::stand_drop`);
+/// a trunk, a boulder or a bush that met a lip has its foot in the lip's
+/// cell, on the whole block under it; and nothing solid is left over a lip,
+/// which would be a trunk on a gap a quarter to three quarters deep.
+#[test]
+fn nothing_on_a_generated_hillside_floats_over_a_lip_or_sinks_into_one() {
+    use crate::types::{coating_rests_at, has_full_top, is_cross, is_flat, stand_drop, BLOCK_AIR};
+    let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
+    let found = features_on_the_downs(&gen);
+    let mut checked = 0;
+    for &(what, met, [below, ground, above, over]) in &found {
+        if is_cross(above) || is_flat(above) {
+            // Drawn from `1 - drop` over the ground's cell floor: that is
+            // where the ground's own top is.
+            let top = coating_rests_at(ground).or_else(|| has_full_top(ground).then_some(1.0));
+            let drawn = 1.0 - stand_drop(above, ground, BLOCK_AIR);
+            assert_eq!(Some(drawn), top, "{} on {ground:#x} is drawn at {drawn}", crate::types::block_name(above));
+            checked += 1;
+        } else if met {
+            // The foot of the thing, where the lip would have been, on a
+            // whole floor -- and the thing going on up from it.
+            assert!(has_full_top(below), "the foot of a {what:?} at the lip stands on {below:#x}");
+            assert!(!dig::is_dug(ground), "a {what:?} was left over a lip");
+            assert_ne!(above, BLOCK_AIR, "the foot of a {what:?} has nothing on it");
+            checked += 1;
+        } else {
+            assert!(!dig::is_dug(ground), "a {} stands over a lip, {over:#x} on it", crate::types::block_name(above));
+        }
+    }
+    assert!(checked > 100, "only {checked} things on the downs were looked at");
 }
 

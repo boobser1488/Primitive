@@ -220,6 +220,12 @@ fn an_old_worlds_new_chunks_are_the_old_generators_to_the_block() {
 /// says they are the *only* change -- a lip lowers a block of the ground
 /// that was there and touches nothing else. What the lips themselves are is
 /// held by `the_landforms_lay_the_same_lips_every_time`.
+///
+/// **...and with every feature on a slope on the whole block it was laid on**
+/// (`lips::FEATURES_KEEP_THEIR_STEP`): where a lip meets a trunk, a boulder
+/// or a bush it is that thing's foot and not a lowered block, which
+/// `dig::whole` cannot read back -- and with that turned off, the rest of
+/// the chunk is still to the block what it was.
 #[test]
 fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
     let held: [((i32, i32), u64); 8] = [
@@ -233,6 +239,7 @@ fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
         ((-1873, -1866), 0x09e4_0e3c_0fd6_0394),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
+    super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(true));
     for ((x, z), print) in held {
         assert_eq!(
             fingerprint_as(&gen, ChunkPos::new(x, z), crate::dig::whole),
@@ -247,13 +254,19 @@ fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
 /// heights round a column and of nothing a thread remembers, so a chunk
 /// evicted and made again, or made by another thread, or made after its
 /// neighbours rather than before, has the same slopes.
+///
+/// Three of the prints were taken again when the lips were let under the
+/// trees, the boulders, the bushes and the stones lying on the slopes
+/// (`lips`, "What stands on a lip"): that is the change they hold, and
+/// `the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper`
+/// says it is the only one. Round the origin nothing stood on a lip.
 #[test]
 fn the_landforms_lay_the_same_lips_every_time() {
     let held: [((i32, i32), u64); 4] = [
         ((0, 0), 0xb134_89aa_a937_2cd6),
-        ((5, -3), 0xdc1f_e362_9e04_136c),
-        ((-1875, -1875), 0x63ee_9a9d_cf1e_4298),
-        ((-1868, -1872), 0xf20a_e5ea_fbf2_35f2),
+        ((5, -3), 0x99cc_53d3_c8a2_ed7c),
+        ((-1875, -1875), 0x2154_9ae7_825f_abea),
+        ((-1868, -1872), 0xfa3f_2bc6_901f_df17),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     for ((x, z), print) in held {
@@ -540,15 +553,25 @@ fn what_the_landforms_cost_a_chunk() {
         .expect("hill country near the origin");
     let squares = [(0, 0), (country.0.div_euclid(16), country.1.div_euclid(16))];
     // ...and the landforms once more with their lips off (`lips::LIPS_OFF`),
-    // which is what the lips cost, measured in the same binary.
-    let mut spent = [[0f64; 2]; 3];
+    // which is what the lips cost, measured in the same binary -- and once
+    // with every feature on a slope keeping its whole block
+    // (`lips::FEATURES_KEEP_THEIR_STEP`), which is what letting the lips
+    // under them costs.
+    let mut spent = [[0f64; 2]; 4];
     for _round in 0..5 {
-        for (index, (scale, lips)) in
-            [(Scale::Earth, true), (Scale::Landforms, true), (Scale::Landforms, false)].into_iter().enumerate()
+        for (index, (scale, lips, stepped)) in [
+            (Scale::Earth, true, false),
+            (Scale::Landforms, true, false),
+            (Scale::Landforms, false, false),
+            (Scale::Landforms, true, true),
+        ]
+        .into_iter()
+        .enumerate()
         {
             for (which, &(cx, cz)) in squares.iter().enumerate() {
                 let elapsed = std::thread::spawn(move || {
                     super::lips::LIPS_OFF.with(|off| off.set(!lips));
+                    super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(stepped));
                     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, scale);
                     let clock = Instant::now();
                     for dz in 0..12 {
@@ -564,7 +587,7 @@ fn what_the_landforms_cost_a_chunk() {
             }
         }
     }
-    for (index, name) in ["earth", "landforms", "no lips"].iter().enumerate() {
+    for (index, name) in ["earth", "landforms", "no lips", "stepped"].iter().enumerate() {
         println!(
             "{name:>9}: {:.2} ms a chunk round the origin, {:.2} ms in hill country",
             spent[index][0] * 1000.0 / (5.0 * 144.0),

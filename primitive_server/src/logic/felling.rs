@@ -1351,18 +1351,35 @@ mod tests {
                     let chunk = &near[((z / side) * 3 + x / side) as usize];
                     Some(chunk.get((x % side) as usize, y as usize, (z % side) as usize))
                 };
+                let soil = |x: i32, y: i32, z: i32| {
+                    at(x, y, z).is_some_and(|b| {
+                        matches!(
+                            block_kind(b),
+                            BLOCK_GRASS | BLOCK_DIRT | primitive_shared::types::BLOCK_SANDY_SOIL | primitive_shared::types::BLOCK_DRY_TURF
+                        )
+                    })
+                };
+                // **A trunk of pieces stands on soil, or on its own flare in
+                // it.** Where the generator's slope wanted a lip under a
+                // trunk it put the trunk's log in that cell instead
+                // (`worldgen::lips`), so the lowest piece stands on a log and
+                // the log on the ground. Asked for soil directly under the
+                // wood, this missed every tree rooted in a lip -- and the
+                // crowding check below then called a grove a lone acacia and
+                // blamed felling for the neighbour's leaves. A log-cube trunk
+                // needs no arm of its own: its flare is one more log of it,
+                // and that log stands on the ground.
+                let ground_under = |x: i32, y: i32, z: i32| {
+                    at(x, y, z).is_some_and(|b| {
+                        !is_standing_trunk(b) && !primitive_shared::types::is_branch(b) && primitive_shared::types::is_collidable(b)
+                    })
+                };
                 let rooted = |x: i32, y: i32, z: i32| {
                     at(x, y, z).is_some_and(|b| is_standing_trunk(b) || primitive_shared::types::is_branch(b))
-                        && at(x, y - 1, z)
-                            .is_some_and(|b| {
-                                matches!(
-                                    block_kind(b),
-                                    BLOCK_GRASS
-                                        | BLOCK_DIRT
-                                        | primitive_shared::types::BLOCK_SANDY_SOIL
-                                        | primitive_shared::types::BLOCK_DRY_TURF
-                                )
-                            })
+                        && (soil(x, y - 1, z)
+                            || (at(x, y, z).is_some_and(primitive_shared::types::is_branch)
+                                && at(x, y - 1, z).is_some_and(is_standing_trunk)
+                                && ground_under(x, y - 2, z)))
                 };
                 // Roots anywhere their whole neighbourhood is inside the
                 // three chunks, not only in the middle one: at the
@@ -1587,6 +1604,31 @@ mod tests {
             assert_ne!(block_axis(*block), Axis::Y, "a felled log landed standing");
         }
         assert_eq!(plan.twigs, 4, "the six-wide top and the limb are four twigs");
+    }
+
+    /// **A tree rooted in a hillside's lip falls from its flare and from its
+    /// foot alike.** Where the generator's slope wanted a lip under a trunk
+    /// of pieces, the cell is the trunk's own log instead
+    /// (`worldgen::lips`, "What stands on a lip"). Cut at that flare, the
+    /// tree over it comes down whole; cut at the piece over the flare, it
+    /// comes down and the flare stays in the ground as the stump.
+    #[test]
+    fn a_tree_rooted_in_a_lip_comes_down_whether_its_flare_or_its_foot_is_cut() {
+        let g = 20;
+        let pieces = [(0, g + 2, 0), (0, g + 3, 0), (0, g + 4, 0), (1, g + 3, 0), (2, g + 3, 0), (2, g + 4, 0)];
+        // The ground cell under the tree is the flare, and it is cut.
+        let flared = branch_tree(Wood::new(g)).put((0, g, 0), BLOCK_AIR);
+        let plan = fell((0, g, 0), flared.look(), None);
+        for piece in [(0, g + 1, 0)].iter().chain(&pieces) {
+            assert!(plan.cleared.contains(piece), "cut at the flare, the piece at {piece:?} was left in the air");
+        }
+        // ...and the piece over it is cut, the flare standing.
+        let flared = branch_tree(Wood::new(g)).put((0, g, 0), BLOCK_LOG).put((0, g + 1, 0), BLOCK_AIR);
+        let plan = cut(&flared, 0, 0);
+        for piece in &pieces {
+            assert!(plan.cleared.contains(piece), "cut over the flare, the piece at {piece:?} was left in the air");
+        }
+        assert!(!plan.cleared.contains(&(0, g, 0)), "the flare went with the tree");
     }
 
     /// **The bug the player reported, against every tree the world grows

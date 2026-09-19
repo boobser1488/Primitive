@@ -56,17 +56,76 @@
 //!   is, keeps its bank whole: a bite is a hole to the water (`logic::water`
 //!   washes cut earth away), and a shore of lips would be a shore that
 //!   dissolves the first time water moves.
-//! * **Not under anything.** This runs last of everything that stands or
-//!   lies on the ground, and the cell over the column must be air or a plant
-//!   that roots in the lip as it rooted in the block -- a tuft or a flower on
-//!   turf (`types::can_grow_on`). A trunk, a bush, a boulder, a wall, a drift
-//!   of ash or a stick keeps the whole block it was put on: each of those
-//!   needs a full floor, and the first attempt, which ran before the ground
-//!   cover, left the ash of a burnt wood missing from every rise in it.
+//! * **Under what stands on the ground, as what stands there allows** --
+//!   see the next part.
 //!
-//! **So a lip is the one thing this changes**, and a test says so: a
-//! landforms chunk with every lip made whole again is, to the block, the
-//! chunk from before lips existed.
+//! **So a lip is the one thing this changes about the ground**, and a test
+//! says so: a landforms chunk with every lip made whole again, and every
+//! feature it had to meet put back on the whole block it was laid on, is to
+//! the block the chunk from before lips existed.
+//!
+//! ## What stands on a lip
+//!
+//! This runs after everything that stands or lies on the ground, and it used
+//! to lower only a column with air over it or a plant that roots in the lip.
+//! Everything else -- a trunk, a bush, a boulder, a pebble, a stick -- kept
+//! the whole block it was put on, and a hillside showed it: "деревья растут
+//! только на полных блоках, камни также только так появляются". Every tree
+//! and every stone on a slope stood on a step of its own with the ramp going
+//! past it, and the smooth parts were bare. What the slope says now comes
+//! first, and each kind of thing meets the lip the way it can:
+//!
+//! * **What is drawn at the real top stays on the lip** -- a tuft, a flower,
+//!   a berry bush, a pebble, a flint, a stick, ash, fallen leaves: anything
+//!   that grows or lies (`types::is_cross`, `types::is_flat`) and that
+//!   `types::can_grow_on` lets have the lip for ground. The mesher, the aim
+//!   and the cracks put it on the lip's real top (`types::stand_drop`), and
+//!   none of them is collided with.
+//! * **A standing trunk goes down into the lip's cell: a root flare.** The
+//!   cell the lip would have been is the trunk's own log, upright, standing
+//!   on the whole block under it; the lips round it form as the slope says,
+//!   so the bark shows a quarter to three quarters further down on the low
+//!   side, which is how a trunk meets a hillside. A trunk of pieces
+//!   (`branches`) gets the log of its bark (`types::piece_log`), which is a
+//!   foot wider than the piece over it: what it costs is two sixteenths of
+//!   bark round the foot, and it reads as the flare. Felling is unchanged in
+//!   kind -- the flare is the stump, standing on the ground, and cutting it
+//!   drops what stands on it as cutting the foot of any trunk does
+//!   (`logic::felling`). Weighed and rejected:
+//!   - *the whole block kept under the trunk*, which is what there was: a
+//!     turf plinth with its grass sides showing under every tree on a slope,
+//!     the pattern the player saw;
+//!   - *the trunk's lowest piece cut short to meet the lip*: a log or a piece
+//!     shorter than its cell is a new shape for the collider, the mesher, the
+//!     light, the felling, the support rules and the save -- all of it for the
+//!     bottom quarter of a tree that nobody walks under;
+//!   - *the piece itself carried down* instead of the log: twelve sixteenths
+//!     of trunk in a cell that was ground leaves a slot two sixteenths wide
+//!     and a block deep round every tree.
+//! * **A boulder is bedded**: the lip's cell is the boulder's own stone, and
+//!   the stone over it stays -- a rock half sunk in a hillside, standing a
+//!   block and a bit out of the low side. A stone with more stone on it is
+//!   not a boulder but a course of a wall, and it keeps its whole block.
+//!   Rejected: *the stone moved down a
+//!   cell*, which leaves its top flush with the terrace above -- a paving
+//!   stone, not a boulder -- and *a stone drawn lowered*, which would be a
+//!   cube that is not in its cell for the collider, the light and every face
+//!   that is culled against it.
+//! * **A bush is rooted in the slope the same way**: its bottom leaf fills
+//!   the lip's cell. Leaves are pushed through, not walked on
+//!   (`types::is_collidable`), so what this costs is a hollow under the bush
+//!   a quarter to three quarters deep, and a body inside a bush on a slope
+//!   is a body in a bush. Rejected: *the lip under the leaf*, which is a
+//!   bush floating over its own gap, and *the whole block kept*, the plinth.
+//! * **Anything else keeps the whole block it was put on**: a wall's
+//!   footing, a mound, a sapling's stem (a twig, too thin to flare), a bough
+//!   or a log lying on the ground, a canopy low enough to touch it. Each of
+//!   those either needs a full floor or is something somebody built, and a
+//!   plinth under a rarity is not the pattern of a whole hillside.
+//!
+//! A column whose ground something else already replaced -- a ruin's floor,
+//! the dirt under a fallen giant -- is left alone whatever stands on it (see
+//! `lay_lips`).
 //!
 //! ## "Учти голую землю"
 //!
@@ -83,15 +142,16 @@
 //! has made a world with. A world of an older scale regenerates its new
 //! chunks to the block (`an_old_worlds_new_chunks_are_the_old_generators_
 //! to_the_block`), and the landforms' own golden prints hold with every lip
-//! made whole (`the_landforms_draw_the_ground_they_drew_before_they_were_
-//! made_cheaper`).
+//! made whole and every feature kept on its step (`the_landforms_draw_the_
+//! ground_they_drew_before_they_were_made_cheaper`).
 
 use super::{Column, ColumnCache, Scale, WorldGen, FEATURE_MARGIN};
 use crate::dig::{self, SLICES};
 use crate::ground::{self, Form};
 use crate::types::{
-    block_kind, can_grow_on, is_cross, BlockId, Chunk, BLOCK_AIR, BLOCK_DIRT, BLOCK_DRY_TURF, BLOCK_GRASS, BLOCK_PERMAFROST,
-    BLOCK_SANDY_SOIL, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z,
+    block_axis, block_kind, can_grow_on, is_bough, is_branch, is_cross, is_flat, piece_log, Axis, BlockId, Chunk, BLOCK_AIR,
+    BLOCK_BUSH_LEAVES, BLOCK_DIRT, BLOCK_DRY_TURF, BLOCK_GRASS, BLOCK_PERMAFROST, BLOCK_SANDY_SOIL, CHUNK_SIZE_X,
+    CHUNK_SIZE_Y, CHUNK_SIZE_Z,
 };
 
 /// How far along each way a column looks for the edge of its terrace.
@@ -113,6 +173,45 @@ thread_local! {
     /// Lips off on this thread, for `what_the_landforms_cost_a_chunk` to
     /// time the generator with and without them in one binary.
     pub(super) static LIPS_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Everything that stands on a column keeping the whole block under it,
+    /// as before the lips met the features (the module note, "What stands on
+    /// a lip"): the before of a before-and-after in one binary, for the
+    /// timing and for the prints that hold the rest of the ground still.
+    pub(super) static FEATURES_KEEP_THEIR_STEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// What the top cell of a column becomes where the slope wants `lip` in it,
+/// with `above` standing on it and `over_that` on that -- or `None` for the
+/// whole block it was. See the module note, "What stands on a lip", for each
+/// answer and what was weighed against it.
+pub(super) fn under(lip: BlockId, above: BlockId, over_that: BlockId) -> Option<BlockId> {
+    if above == BLOCK_AIR {
+        return Some(lip);
+    }
+    #[cfg(test)]
+    if FEATURES_KEEP_THEIR_STEP.with(std::cell::Cell::get) {
+        return (is_cross(above) && can_grow_on(above, lip)).then_some(lip);
+    }
+    if (is_cross(above) || is_flat(above)) && can_grow_on(above, lip) {
+        return Some(lip);
+    }
+    // A standing trunk of logs: its own log, upright, a cell further down.
+    if crate::wood::is_log(above) && block_axis(above) == Axis::Y {
+        return Some(above);
+    }
+    // A trunk of pieces: a bough with wood standing on it, which a limb
+    // lying on the forest floor has not.
+    if is_bough(above) && is_branch(over_that) {
+        return piece_log(above);
+    }
+    // A boulder, bedded: a whole stone or its cobble, moss and all, with
+    // nothing standing on it -- a boulder is one stone of a cluster, and a
+    // course under more of itself is a wall's footing
+    // (`a_ruin_is_whole_across_a_chunk_seam`).
+    if matches!(ground::rock_of(above), Some((_, None | Some(Form::Cobble)))) && over_that == BLOCK_AIR {
+        return Some(above);
+    }
+    (block_kind(above) == BLOCK_BUSH_LEAVES).then_some(above)
 }
 
 /// Is this what a lip is cut into? Soil, turf, sand and gravel, whole. See
@@ -197,7 +296,7 @@ fn lip_quarters(columns: &ColumnCache, lx: i32, lz: i32, here: Column) -> Option
 impl WorldGen {
     /// Lowers the top block at the edge of every gentle rise in the chunk.
     /// See the module note.
-    pub(super) fn lay_lips(&self, blocks: &mut [BlockId], columns: &ColumnCache) {
+    pub(super) fn lay_lips(&self, blocks: &mut [BlockId], columns: &ColumnCache, origin_x: i32, origin_z: i32) {
         if self.scale != Scale::Landforms {
             return;
         }
@@ -260,15 +359,28 @@ impl WorldGen {
                 if ground != here.surface.top || !takes_a_lip(ground) {
                     continue;
                 }
+                // What stands on it decides what the cell becomes: the lip,
+                // or the foot of the thing itself. See the module note.
+                let over_that = if height + 2 < CHUNK_SIZE_Y as i32 {
+                    blocks[Chunk::index(lx as usize, height as usize + 2, lz as usize)]
+                } else {
+                    BLOCK_AIR
+                };
                 let lip = dig::lowered(ground, quarters);
-                // Air over it, or a plant that roots in the lip as it did in
-                // the whole block -- a tuft on a turf lip. Anything else
-                // keeps the floor it was put on. See the module note.
-                let above = blocks[above_index];
-                if above != BLOCK_AIR && !(is_cross(above) && can_grow_on(above, lip)) {
+                let Some(cell) = under(lip, blocks[above_index], over_that) else {
+                    continue;
+                };
+                // **A ruin's ground is the ruin's.** A stone fallen off a
+                // wall lies on the ground exactly as a boulder does, and
+                // bedded into the lip it ate the turf the site laid -- the
+                // generator disagreeing with its own plan, which
+                // `a_ruin_is_whole_across_a_chunk_seam` reads cell by cell.
+                // A lip is still cut there: the ruin's own test reads its
+                // ground through `dig::whole`.
+                if cell != lip && self.ruin_claims(origin_x + lx, origin_z + lz) {
                     continue;
                 }
-                blocks[ground_index] = lip;
+                blocks[ground_index] = cell;
             }
         }
     }

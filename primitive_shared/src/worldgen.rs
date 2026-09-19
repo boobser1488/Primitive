@@ -5320,7 +5320,7 @@ impl WorldGen {
         self.place_ground_cover(&mut blocks, origin_x, origin_z, &columns);
         // **The lips on the slopes** (`lips`): after everything that stands
         // or lies on the ground, which keeps the whole block it was put on.
-        self.lay_lips(&mut blocks, &columns);
+        self.lay_lips(&mut blocks, &columns, origin_x, origin_z);
         // The water standing in caves: after every pass that writes near the
         // surface, so a cell it fills is one nothing else wanted, and before
         // the scatter and the dripstone, which then find water where a floor
@@ -12281,8 +12281,16 @@ mod tests {
                     .then(|| chunk.get(x as usize, y as usize, z as usize))
             };
             let wood = |b: BlockId| crate::wood::is_log(b) || (is_branch(b) && block_kind(b) != BLOCK_PALM_TRUNK);
+            // **A trunk stands on the ground, or on its own flare in it**:
+            // where the slope wanted a lip under a trunk, that cell is the
+            // trunk's own log (`worldgen::lips`), and a foot asked for
+            // anything-but-wood underneath found no tree at all on a slope.
+            let ground_under = |x: i32, y: i32, z: i32| {
+                at(x, y, z).is_some_and(|b| !wood(b) && crate::types::is_collidable(b))
+            };
             let footed = |x: i32, y: i32, z: i32| {
-                at(x, y, z).is_some_and(wood) && at(x, y - 1, z).is_some_and(|b| !wood(b) && crate::types::is_collidable(b))
+                at(x, y, z).is_some_and(wood)
+                    && (ground_under(x, y - 1, z) || (at(x, y - 1, z).is_some_and(wood) && ground_under(x, y - 2, z)))
             };
             for lz in 4..CHUNK_SIZE_Z as i32 - 4 {
                 for lx in 4..CHUNK_SIZE_X as i32 - 4 {
