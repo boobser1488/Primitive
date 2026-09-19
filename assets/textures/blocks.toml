@@ -612,6 +612,9 @@ workbench = { all = "terrain/planks.png", item = "furniture/workbench_item.png" 
 mason_block = { all = "terrain/stone.png", item = "furniture/mason_block_item.png" }
 potters_wheel = { all = "terrain/planks.png", item = "furniture/potters_wheel_item.png" }
 leather_bench = { all = "terrain/planks.png", item = "furniture/leather_bench_item.png" }
+# The barter stall: a model (`furniture/stall.bbmodel`), so its faces are the
+# crumbs' planks and its one picture of its own is the icon.
+stall = { all = "terrain/planks.png", item = "furniture/stall_item.png" }
 
 # ---- the smith and the joiner ----
 #
@@ -704,6 +707,27 @@ bowl_milk = "food/bowl_milk.png"
 cairn = { all = "terrain/cobblestone.png", item = "terrain/cairn_item.png" }
 lodestone = "metal/lodestone.png"
 water_compass = "tools/water_compass.png"
+
+# Building in stages (`build`). Every picture a recolour: the handfuls are
+# flour's heap filled with the ground they came out of; quicklime is chalk
+# whitened, mortar lime beaten into sand, daub and cob clay and earth with
+# the straw's own flecks in them. The walls are what they are made of --
+# the cobble with its joints opened into shadow, the bricks with the mortar
+# gone dark, the planks' browns woven over and under.
+handful_earth = "terrain/handful_earth.png"
+handful_sand = "terrain/handful_sand.png"
+handful_gravel = "terrain/handful_gravel.png"
+handful_clay = "pottery/handful_clay.png"
+stone_chips = "terrain/stone_chips.png"
+quicklime = "pottery/quicklime.png"
+mortar = "pottery/mortar.png"
+daub = { all = "pottery/daub.png", item = "pottery/daub_item.png" }
+cob = "terrain/cob.png"
+brick_courses = "pottery/bricks.png"
+dry_bricks = "pottery/bricks_dry.png"
+dry_stone_wall = "terrain/dry_stone_wall.png"
+wattle = "terrain/wattle.png"
+cob_wall = "terrain/cob_wall.png"
 
 # **Twelve garments, four pictures.**
 #

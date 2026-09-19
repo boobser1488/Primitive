@@ -676,6 +676,233 @@ fn a_cairn_piled_on_the_meadow_asks_its_name_and_is_on_the_map_over_the_grass() 
 }
 
 
+// ---------------------------------------------------------------- the stall
+
+/// The pack square holding `block`, as the screen's hit test finds it.
+fn pack_square(s: &Scenario, block: t::BlockId) -> (f32, f32) {
+    let slot = (0..crate::logic::inventory::SLOTS)
+        .find(|&slot| s.inventory.block_in(slot).is_some_and(|b| t::block_kind(b) == t::block_kind(block)))
+        .unwrap_or_else(|| panic!("no {} in the pack", t::block_name(block)));
+    let rect = crate::ui::chest_screen::slot_rect(primitive_shared::protocol::Side::Pack, slot);
+    (rect.centre_x(), rect.centre_y())
+}
+
+fn centre(rect: crate::ui::widgets::Rect) -> (f32, f32) {
+    (rect.centre_x(), rect.centre_y())
+}
+
+/// What the last `ChestState` a client was sent says is in the container.
+fn last_contents(s: &Scenario) -> primitive_shared::inventory::Inventory {
+    s.heard
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            ServerMessage::ChestState { inventory, .. } => Some(inventory.clone()),
+            _ => None,
+        })
+        .expect("never told what is in the container")
+}
+
+#[test]
+fn a_stall_put_down_by_one_player_is_traded_at_by_another_through_both_screens() {
+    use crate::ui::chest_screen::{stall_control_rect, stall_slot_rect, StallControl};
+    use primitive_shared::stall::{Offer, Refusal, STOCK, TAKINGS};
+    let mut owner = Scenario::new();
+    let mut buyer = owner.join("buyer");
+    let (x0, z) = FIELD;
+    let stall = (x0 + 2, GROUND + 1, z);
+
+    // The owner builds it, with their own hands, so the server knows whose.
+    owner.stand_at(feet_on(x0, z));
+    owner.give(t::BLOCK_STALL, 1);
+    owner.select(t::BLOCK_STALL);
+    owner.look_at_face((stall.0, GROUND, stall.2), (0, 1, 0));
+    owner.use_aimed();
+    assert!(
+        owner.until_both(&mut buyer, 3.0, |o, _| o.block(stall).is_some_and(|b| t::block_kind(b) == t::BLOCK_STALL)),
+        "the stall never went down"
+    );
+
+    // Stocks it, and prices it: four flint for a hide, named by holding a
+    // flint off the counter and a hide out of the pack up to the squares.
+    owner.give(t::BLOCK_FLINT, 8);
+    owner.give(t::BLOCK_HIDE, 1);
+    owner.look_at_face(stall, (-1, 0, 0));
+    owner.use_aimed();
+    assert!(
+        owner.until_both(&mut buyer, 3.0, |o, _| o.chest_screen.stall().is_some_and(|v| v.yours)),
+        "the owner's stall did not open as theirs"
+    );
+    let flint = pack_square(&owner, t::BLOCK_FLINT);
+    owner.chest_shift_click(flint);
+    assert!(
+        owner.until_both(&mut buyer, 3.0, |o, _| last_contents(o).count_within(STOCK, t::BLOCK_FLINT) == 8),
+        "the flint never went onto the counter"
+    );
+    owner.chest_click(centre(stall_slot_rect(STOCK.start).unwrap()));
+    owner.chest_click(centre(stall_control_rect(StallControl::Give(0))));
+    for _ in 0..3 {
+        owner.chest_click(centre(stall_control_rect(StallControl::Step { row: 0, take: false, up: true })));
+    }
+    let hide = pack_square(&owner, t::BLOCK_HIDE);
+    owner.chest_click(hide);
+    owner.chest_click(centre(stall_control_rect(StallControl::Take(0))));
+    let price = Offer { give: t::BLOCK_FLINT, give_count: 4, take: t::BLOCK_HIDE, take_count: 1 };
+    assert!(
+        owner.until_both(&mut buyer, 3.0, |o, _| o.chest_screen.stall().is_some_and(|v| v.offers[0] == Some(price))),
+        "the price never reached the server: {:?}",
+        owner.chest_screen.stall()
+    );
+    assert_eq!(owner.inventory.count(t::BLOCK_HIDE), 1, "naming the price spent the sample");
+    owner.shot("stall_owner");
+
+    // The buyer walks up with two hides, opens it, and sees it is not theirs.
+    buyer.stand_at(feet_on(stall.0, stall.2 + 2));
+    buyer.give(t::BLOCK_HIDE, 2);
+    buyer.look_at_face(stall, (0, 0, 1));
+    assert_eq!(buyer.aimed().map(|(cell, _)| cell), Some(stall), "the buyer is not looking at the stall");
+    buyer.use_aimed();
+    assert!(
+        buyer.until_both(&mut owner, 3.0, |b, _| b.chest_screen.stall().is_some_and(|v| !v.yours && v.offers[0] == Some(price))),
+        "the buyer never saw the price: {:?}",
+        buyer.chest_screen.stall()
+    );
+
+    // TRADE, where the screen draws it.
+    buyer.chest_click(centre(stall_control_rect(StallControl::Action(0))));
+    assert!(
+        buyer.until_both(&mut owner, 3.0, |b, _| b.inventory.count(t::BLOCK_FLINT) == 4),
+        "the trade never came back"
+    );
+    assert_eq!(buyer.inventory.count(t::BLOCK_HIDE), 1, "the buyer did not pay exactly the price");
+    // ...and the owner, still at the counter, saw it happen.
+    assert!(
+        owner.until_both(&mut buyer, 3.0, |o, _| {
+            let store = last_contents(o);
+            store.count_within(TAKINGS, t::BLOCK_HIDE) == 1 && store.count_within(STOCK, t::BLOCK_FLINT) == 4
+        }),
+        "the owner's screen never showed the sale"
+    );
+
+    // The buyer cannot help themselves to the rest.
+    buyer.send(ClientMessage::ChestMove { from: (primitive_shared::protocol::Side::Chest, 0), to: (primitive_shared::protocol::Side::Pack, 25), half: false });
+    assert!(
+        buyer.until_both(&mut owner, 3.0, |b, _| b.heard_any(|m| matches!(m, ServerMessage::StallRefused { why: Refusal::NotYours }))),
+        "a stranger reaching into the counter was not refused"
+    );
+    assert_eq!(buyer.inventory.count(t::BLOCK_FLINT), 4, "a stranger took goods off the counter");
+
+    // The owner empties the till.
+    owner.chest_shift_click(centre(stall_slot_rect(TAKINGS.start).unwrap()));
+    assert!(
+        owner.until_both(&mut buyer, 3.0, |o, _| o.inventory.count(t::BLOCK_HIDE) == 2),
+        "the owner never collected the hide"
+    );
+    let store = owner.server().container_at(stall.0, stall.1, stall.2);
+    assert_eq!(store.count_within(TAKINGS, t::BLOCK_HIDE), 0);
+    assert_eq!(store.count_within(STOCK, t::BLOCK_FLINT), 4);
+    no_corrections(&owner);
+    no_corrections(&buyer);
+}
+
+// ---------------------------------------------------------------- building
+
+/// Right-clicks `times` times to lay on `built`, waiting after each click
+/// until the cell has changed -- one stage a click, the way a player lays a
+/// wall. Aimed at the top of what stands there if anything does, and at the
+/// top of `under` if nothing does: the gesture a player makes either way.
+fn lay_on(s: &mut Scenario, under: (i32, i32, i32), built: (i32, i32, i32), times: usize) -> Vec<t::BlockId> {
+    let mut seen = Vec::new();
+    for _ in 0..times {
+        let before = s.block(built);
+        let top = s.drawn_bounds(built, built).map_or(0.0, |(_, hi)| f64::from(hi[1]) - built.1 as f64);
+        if top > 0.0 {
+            s.look_at(glam::DVec3::new(built.0 as f64 + 0.5, built.1 as f64 + top - 0.05, built.2 as f64 + 0.5));
+        } else {
+            s.look_at_face(under, (0, 1, 0));
+        }
+        s.use_aimed();
+        let changed = s.until(3.0, |s| s.block(built) != before);
+        assert!(changed, "a click did not lay anything on {:?}", before.map(t::block_name));
+        seen.push(s.block(built).unwrap_or(t::BLOCK_AIR));
+    }
+    seen
+}
+
+#[test]
+fn earth_dug_out_comes_as_four_handfuls_and_four_handfuls_heap_back_into_the_hole() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let cell = (x0 + 1, GROUND, z);
+    s.stand_at(feet_on(x0, z));
+    s.look_at_face(cell, (0, 1, 0));
+    s.input.breaking = true;
+    let dug = s.until(40.0, |s| s.block(cell) == Some(t::BLOCK_AIR));
+    s.input.breaking = false;
+    assert!(dug, "the dig never finished: {:?}", s.block(cell).map(t::block_name));
+    let got = s.until(5.0, |s| s.inventory.count(t::BLOCK_HANDFUL_EARTH) >= 4);
+    assert!(got, "a cell of earth gave {} handfuls", s.inventory.count(t::BLOCK_HANDFUL_EARTH));
+    assert_eq!(s.inventory.count(t::BLOCK_DIRT), 0, "the whole block came out as well as its handfuls");
+
+    // ...and back, a quarter a click, on the floor of the hole.
+    s.select(t::BLOCK_HANDFUL_EARTH);
+    let under = (cell.0, cell.1 - 1, cell.2);
+    let stages = lay_on(&mut s, under, cell, 4);
+    assert_eq!(stages.last().copied(), Some(t::BLOCK_DIRT), "four handfuls heaped into {stages:?}");
+    assert!(primitive_shared::dig::is_dug(stages[0]), "the first handful was not a quarter of a cell");
+    assert_eq!(s.inventory.count(t::BLOCK_HANDFUL_EARTH), 0);
+    no_corrections(&s);
+}
+
+#[test]
+fn a_brick_wall_is_laid_course_by_course_in_mortar_and_stands_as_high_as_it_is_drawn() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.give(t::BLOCK_BRICK, 4);
+    s.give(t::BLOCK_MORTAR, 4);
+    s.select(t::BLOCK_BRICK);
+    let ground = (x0 + 2, GROUND, z);
+    let wall = (x0 + 2, GROUND + 1, z);
+    let stages = lay_on(&mut s, ground, wall, 2);
+    let names: Vec<&str> = stages.iter().map(|&b| t::block_name(b)).collect();
+    assert_eq!(t::block_kind(stages[1]), t::BLOCK_BRICK_COURSES, "{names:?}");
+    // The top of what is drawn: a box as wide as its cell has its sides on
+    // the cell's walls, which `drawn_bounds` leaves out, so its top is what
+    // says how high it stands.
+    let (_, hi) = s.drawn_bounds(wall, wall).expect("two courses are not drawn");
+    assert!((hi[1] - wall.1 as f32 - 0.5).abs() < 0.05, "two courses are drawn {} high", hi[1] - wall.1 as f32);
+    assert!(s.physics_solid(wall), "the courses are drawn and walked through");
+    s.shot("brick courses");
+    lay_on(&mut s, ground, wall, 2);
+    assert_eq!(s.block(wall), Some(t::BLOCK_BRICKS), "four mortared courses are not brickwork");
+    assert_eq!(s.inventory.count(t::BLOCK_MORTAR), 0, "a course went on without its trowel");
+    assert_eq!(s.inventory.count(t::BLOCK_BRICK), 0);
+    no_corrections(&s);
+}
+
+#[test]
+fn a_cob_lift_is_refused_on_a_wet_one_and_the_wall_waits_as_it_was_left() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.give(t::BLOCK_COB, 2);
+    s.select(t::BLOCK_COB);
+    let ground = (x0 + 2, GROUND, z - 1);
+    let wall = (x0 + 2, GROUND + 1, z - 1);
+    let first = lay_on(&mut s, ground, wall, 1)[0];
+    assert!(primitive_shared::build::is_wet(first), "a fresh lift of cob is not wet");
+    let (_, hi) = s.drawn_bounds(wall, wall).expect("the lift is not drawn");
+    assert!((hi[1] - wall.1 as f32 - 0.25).abs() < 0.05, "one lift is drawn {} high", hi[1] - wall.1 as f32);
+    s.look_at(glam::DVec3::new(wall.0 as f64 + 0.5, wall.1 as f64 + 0.2, wall.2 as f64 + 0.5));
+    s.use_aimed();
+    let told = s.until(3.0, |s| s.heard_any(|m| matches!(m, ServerMessage::Error(e) if e.contains("still wet"))));
+    assert!(told, "a lift went onto a wet one without a word");
+    assert_eq!(s.block(wall), Some(first), "the wet lift changed under a refused one");
+    assert_eq!(s.inventory.count(t::BLOCK_COB), 1, "the refused lump was spent");
+    no_corrections(&s);
+}
+
 // ---------------------------------------------------------------- horses
 
 /// A broken horse with a saddle on, standing on the field two blocks along

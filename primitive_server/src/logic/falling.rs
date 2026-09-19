@@ -732,7 +732,12 @@ impl FallingBlocks {
             // Taken here rather than where it lands, so that everything
             // downstream -- the entity, the block it writes back, the drop
             // if it cannot land -- sees one whole block.
-            let block = primitive_shared::dig::whole(block);
+            // ...and **what lands is what there was** (`dig::settled`): a
+            // bite that loses its footing comes to rest as a heap of the
+            // quarters it still had. It used to fall whole, and once a
+            // handful could be heaped a handful over a hole fell as a block
+            // and dug out as four.
+            let block = primitive_shared::dig::settled(block);
             if !is_affected_by_gravity(block) {
                 continue;
             }
@@ -1805,12 +1810,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_bite_does_not_survive_the_fall() {
-        // A shovelful of half-cut earth that loses its footing collapses
-        // into a shovelful of earth. The bite names a face of the cell it
-        // was cut in, and three cells down that face is somewhere else --
-        // so what falls is `dig::whole` of it, and what lands is a whole
-        // block a player can dig again from whichever side they like.
+    fn a_bite_that_falls_lands_as_a_heap_of_what_was_left_of_it() {
+        // The bite names a face of the cell it was cut in, and three cells
+        // down that face is somewhere else -- so what lands lies on the
+        // floor of its new cell (`dig::settled`), and it is **as much as
+        // there was**: three quarters of a drift is three quarters of a
+        // drift. It used to land whole, which was a quarter of sand made
+        // out of nothing, and once a handful could be heaped over a hole
+        // (`build`) it was four.
         use primitive_shared::dig;
         let world = TestWorld::default();
         world.put(0, 0, 0, BLOCK_STONE);
@@ -1822,7 +1829,10 @@ pub(crate) mod tests {
         settle(&mut sim, &world, 400);
 
         assert_eq!(world.get(0, 6, 0), BLOCK_AIR, "the bitten drift never left its cell");
-        assert_eq!(world.get(0, 1, 0), BLOCK_SAND, "what landed is {:#x}", world.get(0, 1, 0));
+        let landed = world.get(0, 1, 0);
+        assert_eq!(landed, dig::settled(bitten), "what landed is {landed:#x}");
+        assert_eq!(dig::left(landed), dig::left(bitten), "the fall changed how much sand there was");
+        assert!(matches!(dig::bite(landed), Some((dig::Side::PosY, _))), "it did not land lying on its floor");
     }
 
     #[test]

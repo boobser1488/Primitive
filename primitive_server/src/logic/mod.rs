@@ -10,6 +10,7 @@
 //! | `survival`  | health, falls, drowning, suffocation, respawn         |
 //! | `items`     | dropped stacks, their motion, and who picks them up   |
 //! | `containers`| what is inside the chests, and how it is saved        |
+//! | `stalls`    | who owns each barter stall, and what it asks          |
 //! | `falling`   | sand that has lost its support, and rock somebody dug out from under |
 //! | `collapse`  | what a falling block does to whoever is under it      |
 //! | `felling`   | cutting the base of a tree brings the tree down       |
@@ -44,6 +45,7 @@ pub mod collapse;
 pub mod commands;
 pub mod drying;
 pub mod peat;
+pub mod walls;
 pub mod containers;
 pub mod falling;
 pub mod felling;
@@ -61,6 +63,7 @@ pub mod rafts;
 pub mod horses;
 pub mod rng;
 pub mod shelters;
+pub mod stalls;
 pub mod rot;
 pub mod simulation;
 pub mod smelting;

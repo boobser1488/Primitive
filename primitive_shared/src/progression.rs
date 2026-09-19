@@ -382,7 +382,12 @@ fn the_ladder_from_bare_hands_to_steel_takes_hours_and_not_days() {
     w.mine(BLOCK_IRON_ORE, BLOCK_IRON_ORE, 3 * 4, copper_pick, 1.0);
     w.hands("raw bricks", 4);
     w.fire("fire bricks", Kind::Kiln, 4);
-    w.hands("brickwork", 4);
+    // Mortar for the four courses the shaft is lined with: clay and sand by
+    // the handful, each a quarter of a block's dig.
+    let quarter = |block| break_seconds_with(block, None).unwrap() / 4.0;
+    w.take(crate::types::BLOCK_HANDFUL_CLAY, 8, quarter(BLOCK_CLAY) + 0.5);
+    w.take(crate::types::BLOCK_HANDFUL_SAND, 4, quarter(crate::types::BLOCK_SAND) + 0.5);
+    w.hands("clay mortar", 4);
     w.hands("bloomery", 1);
     // Charcoal for four blooms, four bars and three steelings.
     w.char_in_pits(4 * 4 + 4 + 3 * 2, axe);

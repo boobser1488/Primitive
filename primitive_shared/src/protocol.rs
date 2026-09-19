@@ -543,6 +543,10 @@ pub type PlayerId = u64;
 /// both are carried by 57 for the reason the rest of 57 is.
 /// ...and keeping animals: `TendAnimal` out, appended, and a bowl of milk at
 /// id 694 (`types::BLOCK_BOWL_MILK`). 57 still, which no release speaks.
+/// ...and the barter stall: `StallOffer` and `StallBuy` out, `StallOffers`
+/// and `StallRefused` back, `ContainerKind::Stall`, all appended, a block at
+/// id 665 (`types::BLOCK_STALL`) and a recipe at the end of `RECIPES`. 57
+/// still, for the same reason.
 /// ...and the horse: `Mount`, `Dismount`, `Rein` and `OpenBags` out,
 /// `Mounted` back, `ContainerKind::Saddlebags`, `Posture::Mounted`, a `tack`
 /// byte on `EntityKind::Animal`, and a species appended to `Species` (its
@@ -564,6 +568,10 @@ pub enum ContainerKind {
     /// A jug set down on something: one slot of loose goods, up to
     /// `inventory::JUG_UNITS`. See `types::opens_as_vessel`.
     Vessel,
+    /// A barter stall: a counter and a till (`stall::STOCK`,
+    /// `stall::TAKINGS`) under the offers `ServerMessage::StallOffers`
+    /// carries. Appended, so every earlier kind keeps its tag.
+    Stall,
     /// A horse's saddlebags: `horse::BAGS_SLOTS` squares, opened from beside
     /// the horse (`ClientMessage::OpenBags`). The position a `ChestState`
     /// carries for it is the horse's cell when it was opened, and means
@@ -1921,6 +1929,44 @@ pub enum ClientMessage {
     TendAnimal {
         animal: EntityId,
     },
+    /// **The owner of the open stall setting row `row`'s price**, or taking
+    /// it down with `None`. Against the stall the player has open, like every
+    /// container gesture, so it carries no position; refused for anybody but
+    /// the owner (`stall::Refusal::NotYours`).
+    StallOffer {
+        row: u8,
+        offer: Option<crate::stall::Offer>,
+    },
+    /// **One lot of row `row` of the open stall, at the price `offer`.**
+    ///
+    /// The offer the buyer *saw* rides along, and one that differs from the
+    /// stall's is refused (`stall::Refusal::OfferChanged`): a row number
+    /// alone would be taken at whatever the row says when the message
+    /// arrives, and the owner may have changed it under the buyer's hand.
+    StallBuy {
+        row: u8,
+        offer: crate::stall::Offer,
+    },
+    /// **A stage of a wall, or a handful of a heap, laid in the cell**: with
+    /// whatever is in the selected slot, onto whatever is there
+    /// (`build::lay`). The client names the cell and nothing else it could
+    /// lie about -- what the cell becomes, what it costs and whether mortar
+    /// went under it are the server's, worked out from its own copy of the
+    /// cell and the pack, the way `Dig` leaves the next shape to the server.
+    ///
+    /// Rejected: **`SetBlock` with the next stage in it.** The client would
+    /// then say what the wall becomes, and the server would have to work it
+    /// out anyway to know whether that was true -- and then again to know
+    /// what to charge, which a placement's one-item-of-its-kind rule cannot
+    /// say for two stones and a trowel.
+    Build {
+        global_x: i32,
+        global_y: i32,
+        global_z: i32,
+        /// Which way a new wattle panel runs: along x, so its face is to a
+        /// builder looking along z. Read for nothing else.
+        along_x: bool,
+    },
     /// **Get on that horse.** A right click on a horse with nothing in hand
     /// that tends it. The server decides everything that follows: whether it
     /// will have you at all (tame, or gentled and willing to be tried --
@@ -2600,6 +2646,27 @@ pub enum ServerMessage {
     /// fifty-seven's bump.
     Shelter {
         reading: crate::shelter::Reading,
+    },
+    /// **Whose stall this is and what it asks**, sent just before every
+    /// `ChestState` of a stall, to each player at it.
+    ///
+    /// Its own message rather than more fields on `ChestState`, which every
+    /// container sends and all but one would carry as nothing. `yours` is
+    /// said per player, because it is the answer to "may I change this" and
+    /// the client cannot work it out from a name: two players may share
+    /// one. Appended, so it rides fifty-seven's bump.
+    StallOffers {
+        global_x: i32,
+        global_y: i32,
+        global_z: i32,
+        owner: String,
+        yours: bool,
+        offers: Vec<Option<crate::stall::Offer>>,
+    },
+    /// A stall said no, and why (`stall::Refusal`). The reason rather than
+    /// a sentence, for `RackRefused`'s reason. Appended.
+    StallRefused {
+        why: crate::stall::Refusal,
     },
     /// **You are riding this horse, or you are not** (`None`), and what it
     /// has in it for the ride.

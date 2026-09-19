@@ -363,6 +363,63 @@ pub fn bite_box(id: BlockId) -> Option<([f32; 3], [f32; 3])> {
     Some((min, max))
 }
 
+/// **The box of a cell holding part of a block**: a bite taken out of it,
+/// or a wall built part of the way up (`build::stage_box`).
+///
+/// One question for both, because every consumer asks the same thing of
+/// them -- where is the material, so the collider can stop at it, the
+/// mesher can draw it and the aim can outline it -- and a wall three courses
+/// up is a rock with a quarter bitten off the top as far as any of those is
+/// concerned. Two questions asked in five places would be the one place
+/// that forgot the second.
+#[inline]
+pub fn part_box(id: BlockId) -> Option<([f32; 3], [f32; 3])> {
+    bite_box(id).or_else(|| crate::build::stage_box(id))
+}
+
+/// Does this cell hold part of a block? See [`part_box`].
+#[inline]
+pub fn is_part(id: BlockId) -> bool {
+    is_dug(id) || crate::build::stage_box(id).is_some()
+}
+
+/// **A quarter of `block` lying on the floor of its cell**: a handful set
+/// down (`build`). It is the same id a floor dug down three quarters is,
+/// and on purpose -- a heap of earth one handful high and the last quarter
+/// of a dug-out floor are the same thing, and one id for them is one shape
+/// for the collider, the mesher, the water and the save.
+#[inline]
+pub fn heaped(block: BlockId) -> BlockId {
+    block_kind(block) | DUG | (BlockId::from(SLICES - 2) << GONE_SHIFT) | (Side::PosY.code() << VARIANT_SHIFT)
+}
+
+/// One slice put back on a bite, from the face it was eaten from: the whole
+/// block when only one slice was gone, `None` for a block with no bite.
+#[inline]
+pub fn one_back(id: BlockId) -> Option<BlockId> {
+    let (side, gone) = bite(id)?;
+    if gone <= 1 {
+        return Some(block_kind(id));
+    }
+    Some(block_kind(id) | DUG | (BlockId::from(gone - 2) << GONE_SHIFT) | (side.code() << VARIANT_SHIFT))
+}
+
+/// **What a bite comes to rest as when it falls**: as much of the block as
+/// was left, lying on the floor of wherever it lands.
+///
+/// It used to fall whole (`whole`), which was a shovelful of half-cut earth
+/// collapsing into a shovelful of earth -- right while nothing could be
+/// *built* a quarter at a time, and a copying machine once it could: a
+/// handful of sand set down over a hole fell as a block of sand, which dug
+/// out into four handfuls. What falls now is what there was.
+#[inline]
+pub fn settled(id: BlockId) -> BlockId {
+    match bite(id) {
+        Some((_, gone)) => block_kind(id) | DUG | (BlockId::from(gone - 1) << GONE_SHIFT) | (Side::PosY.code() << VARIANT_SHIFT),
+        None => id,
+    }
+}
+
 /// How long one swing at this block takes with this tool: the whole
 /// block's time divided between its slices.
 ///

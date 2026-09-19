@@ -596,6 +596,35 @@ impl AntiCheat {
             return self.flag(W_BAD_BLOCK, "a bed is placed by its foot".to_string());
         }
 
+        self.check_reach(gx, gy, gz)
+    }
+
+    /// **A stage of a wall laid in place** (`build::lay`): the rate, the
+    /// height and the reach every edit is asked, and not the id.
+    ///
+    /// The id is the server's own answer to "what does this cell become when
+    /// this is laid on it", worked out from the cell and the pack, so there is
+    /// nothing a client claimed to check -- and the one question
+    /// `check_block_edit` would ask of it is the wrong one: the fourth course
+    /// of a mortared wall is `BLOCK_BRICKS`, which nobody may *place*, and
+    /// asked as a placement it would flag every bricklayer at every fourth
+    /// brick.
+    pub fn check_build(&mut self, gx: i32, gy: i32, gz: i32) -> Verdict {
+        if !self.cfg.enabled {
+            return Verdict::Allow;
+        }
+        let now = Instant::now();
+        self.decay(now);
+        if !self.edit_bucket.take(1.0, now) {
+            return self.flag(W_RATE_LIMIT, "block edit rate limit exceeded");
+        }
+        if gy < 0 || gy as usize >= CHUNK_SIZE_Y {
+            return self.flag(W_BAD_BLOCK, format!("block edit outside world height (y={gy})"));
+        }
+        self.check_reach(gx, gy, gz)
+    }
+
+    fn check_reach(&mut self, gx: i32, gy: i32, gz: i32) -> Verdict {
         if let Some((px, py, pz)) = self.last_pos {
             let ex = px;
             let ey = py + f64::from(EYE_HEIGHT);

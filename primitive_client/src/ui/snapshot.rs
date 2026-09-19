@@ -1932,3 +1932,54 @@ fn fill_triangle(
 fn edge(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
     (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
 }
+
+/// The barter stall, as its owner and as a buyer see it, in English and
+/// Russian: the owner halfway through a second price, the buyer's pointer on
+/// TRADE.
+///
+/// ```text
+/// UI_SNAPSHOT_DIR=shots/stall cargo test -p primitive_client --lib \
+///     stall_snapshot -- --ignored --nocapture
+/// UI_SNAPSHOT_SIZE=2712x1220 UI_SNAPSHOT_SCALE=1.65 PRIMITIVE_TOUCH_UI=1 \
+///     UI_SNAPSHOT_DIR=shots/stall/phone cargo test -p primitive_client --lib \
+///     stall_snapshot -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "a tool: writes PNGs of the stall for a person to look at"]
+fn stall_snapshot() {
+    use crate::ui::chest_screen::{stall_control_rect, StallControl, StallView};
+    use primitive_shared::stall::{Offer, STOCK, TAKINGS};
+    use primitive_shared::types::{BLOCK_HIDE, BLOCK_STALL};
+
+    let out = std::env::var("UI_SNAPSHOT_DIR").unwrap_or_else(|_| ".".to_string());
+    std::fs::create_dir_all(&out).expect("output directory");
+    let font = FontAtlas::for_size(32, 1_000);
+    let layers = FaceLayers::empty_for_test();
+    let mut pack = a_playing_pack();
+    pack.add(BLOCK_HIDE, 3);
+    let at = (0, 0, 0);
+    let offers = vec![
+        Some(Offer { give: BLOCK_FLINT, give_count: 4, take: BLOCK_HIDE, take_count: 1 }),
+        Some(Offer { give: BLOCK_STONE_AXE, give_count: 1, take: BLOCK_RAW_MEAT, take_count: 6 }),
+        None,
+    ];
+    let mut store = Inventory::chest();
+    store.add_within(STOCK, BLOCK_FLINT, 22);
+    store.add_within(STOCK, BLOCK_STONE_AXE, 1);
+    store.add_within(TAKINGS, BLOCK_HIDE, 2);
+    for (yours, name) in [(true, "owner"), (false, "buyer")] {
+        for (language, tag) in [(Language::English, "en"), (Language::Russian, "ru")] {
+            let mut screen = ChestScreen::new();
+            screen.show_stall(StallView { at, owner: "Ada".to_string(), yours, offers: offers.clone() });
+            screen.show(at, store.clone(), Some(BLOCK_STALL), ContainerKind::Stall, None, None);
+            let point = stall_control_rect(StallControl::Action(0));
+            screen.set_cursor(Some((point.centre_x(), point.centre_y())));
+            write_grown(
+                &format!("{out}/stall_{name}_{tag}.png"),
+                &screen.build(font, &layers, &pack, language),
+                font,
+                screen.grow_by(snapshot_layout()),
+            );
+        }
+    }
+}

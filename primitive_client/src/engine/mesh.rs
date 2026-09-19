@@ -3604,7 +3604,13 @@ pub fn build_mesh(
                 // per block: the face loop below is the hottest code in the
                 // client and this is a bit test for all but a handful of
                 // cells in a world.
-                let bite = primitive_shared::dig::bite_box(id);
+                // ...or of a wall built part of the way up (`build`), which
+                // is the same box the other way up and is drawn the same way.
+                let bite = primitive_shared::dig::part_box(id);
+                // **A stage wears the picture of what it looks like**: three
+                // courses in mortar are brickwork, a wet lift of cob is mud
+                // (`build::drawn_as`). The id itself for everything else.
+                let pictured = primitive_shared::build::drawn_as(id);
                 let above = cache.block_near(cell, y, 0, 1, 0);
                 // A trap standing in the water is water to the water round
                 // it (`seen_by_water`), so a column through one is still one
@@ -3872,7 +3878,7 @@ pub fn build_mesh(
                         continue;
                     }
 
-                    let layer = moss_layer.unwrap_or_else(|| textures.layer_for_face(id, face_index));
+                    let layer = moss_layer.unwrap_or_else(|| textures.layer_for_face(pictured, face_index));
 
                     // Light comes from the *air* cell in front of the
                     // face, never from the block itself (which is solid
@@ -7648,6 +7654,8 @@ pub(crate) fn is_furniture(id: BlockId) -> bool {
         // it. It is furniture here all the same -- a model on a stump that
         // leaves the floor of its cell showing round the base.
         || block_kind(id) == primitive_shared::types::BLOCK_ANVIL
+        // ...and the barter stall, a counter on legs under an awning.
+        || block_kind(id) == primitive_shared::types::BLOCK_STALL
 }
 
 /// How many of `push_box`'s quarter turns lay a bed written head-toward
@@ -7763,6 +7771,10 @@ pub(crate) fn furniture_block_hinged(
         primitive_shared::types::BLOCK_ANVIL => {
             (Prop::Anvil, turned_from_north(block_facing(block)))
         }
+        // Written with its front -- the drape, where a buyer stands -- toward
+        // north, so turned the way the chest is: it faces whoever put it down,
+        // and the owner stands behind it.
+        primitive_shared::types::BLOCK_STALL => (Prop::Stall, turned_from_north(block_facing(block))),
         _ => return,
     };
     // Face 4 is +z and 5 is -z, as the piece is written. Measured on the

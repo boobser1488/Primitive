@@ -765,6 +765,21 @@
 //! - **hide flap**: The hide hangs over the front edge a half in front of it, and its top
 //!   meets the hide on the table without running over it.
 //!
+//! ## furniture/stall.bbmodel
+//!
+//! A barter stall: a counter on four legs with a cloth over it and hanging down
+//! the front, a shelf under it, and an awning on two posts at the back. Front
+//! toward north, the drape's side, where a buyer stands.
+//!
+//! - **cloth drape**: A sixth of a sixteenth in front of the cloth on the counter, and its
+//!   top a twentieth below that cloth's -- the two share no plane facing one way,
+//!   which is what `model_overlap` would call a flicker.
+//!
+//! - **awning**: Held on the back posts alone and reaching over the counter: a
+//!   buyer's head is under it, and two posts at the front would stand where
+//!   they stand. It stays in its cell (under a roof, a taller one would put its
+//!   corners through the thatch).
+//!
 //! ## misc/drying_rack.bbmodel
 //!
 //! Draws a drying rack: the frame always, the skin if it has one (see `mesh::rack_block`).

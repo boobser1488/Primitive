@@ -94,7 +94,14 @@ const RENDER_DISTANCE: i32 = 3;
 
 pub struct Scenario {
     runtime: tokio::runtime::Runtime,
-    server: Option<primitive_server::Server>,
+    /// The server, shared with any client that joined this one's
+    /// ([`Scenario::join`]). Shut down by whichever of them is dropped last
+    /// -- which in a test is the one declared first.
+    server: Option<std::sync::Arc<primitive_server::Server>>,
+    /// Who this client is on the server, for the doors that act on a named
+    /// player (`Server::give_to`): with two clients connected, "the one
+    /// connected player" is nobody in particular.
+    pub name: String,
     net: NetworkHandle,
     pub welcome: WelcomeInfo,
 
@@ -204,6 +211,45 @@ impl Scenario {
                 .expect("the server refused the scenario");
             (server, connection)
         });
+        Self::connected(runtime, std::sync::Arc::new(server), connection, "scenario")
+    }
+
+    /// **A second player on the same server**, called `name`: its own
+    /// connection, its own chunks, body, pack and screens, played frame by
+    /// frame exactly as this one is.
+    ///
+    /// Why it exists: a trade at a stall is between two people, and every
+    /// rule that matters about one -- who may touch the counter, what the
+    /// buyer sees when the owner changes a price -- is about what one client
+    /// is told because of what the *other* did. One client could only test
+    /// the server's half of that. Rejected: a second connection driven by
+    /// raw messages, with no screens. It would pass while the buyer's screen
+    /// drew a TRADE button in a place its click did not land, which is the
+    /// half of the stall a player touches.
+    ///
+    /// Frames are the caller's to interleave (`until_both`): a client that
+    /// is not stepped still has its socket read in the background, it just
+    /// does not look at what arrived.
+    pub fn join(&self, name: &str) -> Scenario {
+        let server = std::sync::Arc::clone(self.server.as_ref().expect("a scenario without a server has nobody to join"));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let address = server.address().to_string();
+        let connection = runtime
+            .block_on(network::connect(&address, name))
+            .expect("the server refused the second player");
+        Self::connected(runtime, server, connection, name)
+    }
+
+    fn connected(
+        runtime: tokio::runtime::Runtime,
+        server: std::sync::Arc<primitive_server::Server>,
+        connection: network::Connection,
+        name: &str,
+    ) -> Self {
         let welcome = connection.welcome;
         let spawn = DVec3::new(welcome.spawn.0, welcome.spawn.1, welcome.spawn.2);
         let settings = crate::settings::ClientSettings::default();
@@ -214,6 +260,7 @@ impl Scenario {
         let mut scenario = Scenario {
             runtime,
             server: Some(server),
+            name: name.to_string(),
             net: connection.handle,
             welcome,
             chunks: ChunkManager::new(RENDER_DISTANCE),
@@ -294,7 +341,7 @@ impl Scenario {
     pub fn stand_at(&mut self, feet: (f64, f64, f64)) {
         let at = DVec3::new(feet.0, feet.1, feet.2);
         self.expected_move = Some(at);
-        self.server().teleport_player(feet.0 as f32, feet.1 as f32, feet.2 as f32);
+        self.server().teleport_named(&self.name, feet.0 as f32, feet.1 as f32, feet.2 as f32);
         let arrived = self.until(10.0, |s| s.expected_move.is_none() && s.world_ready);
         assert!(arrived, "the teleport to {feet:?} never came back");
         self.seconds(0.3);
@@ -303,7 +350,7 @@ impl Scenario {
     /// Gives the player something, and waits until the pack says so.
     pub fn give(&mut self, block: BlockId, count: u32) {
         let before = self.inventory.count(block);
-        assert_eq!(self.server().give(block, count), 0, "{count} of it did not fit");
+        assert_eq!(self.server().give_to(&self.name, block, count), 0, "{count} of it did not fit");
         let got = self.until(5.0, |s| s.inventory.count(block) >= before + count);
         assert!(got, "the pack never showed what was given");
     }
@@ -435,6 +482,27 @@ impl Scenario {
     pub fn close_screens(&mut self) {
         crate::close_chest(&mut self.chest_screen, Some(&self.net), &mut self.debug);
         crate::close_station(&mut self.station_screen, Some(&self.net), &mut self.debug);
+    }
+
+    /// A click at `cursor` on the open container screen, through the
+    /// screen's own hit test and `click`, and whatever it asks sent the way
+    /// the frame sends it (`crate::chest_intent_message`). `cursor` is in
+    /// the screen's own space -- a rect's centre from `chest_screen`.
+    pub fn chest_click(&mut self, cursor: (f32, f32)) {
+        self.chest_screen.set_cursor(Some(cursor));
+        let intent = self.chest_screen.click(&self.inventory, crate::ui::inventory_screen::Button::Left, false, false);
+        if let Some(message) = intent.and_then(crate::chest_intent_message) {
+            self.net.send(message);
+        }
+    }
+
+    /// The same, shift held: a stack straight across.
+    pub fn chest_shift_click(&mut self, cursor: (f32, f32)) {
+        self.chest_screen.set_cursor(Some(cursor));
+        let intent = self.chest_screen.click(&self.inventory, crate::ui::inventory_screen::Button::Left, true, false);
+        if let Some(message) = intent.and_then(crate::chest_intent_message) {
+            self.net.send(message);
+        }
     }
 
     /// Sends a message the way a screen's click would have. For the
@@ -703,6 +771,14 @@ impl Scenario {
                     }
                 }
                 ServerMessage::ChestClosed => self.chest_screen.close(),
+                ServerMessage::StallOffers { global_x, global_y, global_z, owner, yours, offers } => {
+                    self.chest_screen.show_stall(crate::ui::chest_screen::StallView {
+                        at: (*global_x, *global_y, *global_z),
+                        owner: owner.clone(),
+                        yours: *yours,
+                        offers: offers.clone(),
+                    });
+                }
                 ServerMessage::ChestLid { x, y, z, open } => {
                     if self.chunks.note_chest_lid((*x, *y, *z), *open) {
                         let pos = ChunkPos::from_world(*x, *z);
@@ -777,6 +853,20 @@ impl Scenario {
 
     /// Runs frames until `done` says so or `seconds` of them have passed,
     /// and says which.
+    /// `until`, stepping this client and `other` a frame each in turn, so
+    /// neither stops reading its socket while the other waits.
+    pub fn until_both(&mut self, other: &mut Scenario, seconds: f32, mut done: impl FnMut(&Self, &Scenario) -> bool) -> bool {
+        let start = Instant::now();
+        while start.elapsed().as_secs_f32() < seconds {
+            if done(self, other) {
+                return true;
+            }
+            self.frame();
+            other.frame();
+        }
+        done(self, other)
+    }
+
     pub fn until(&mut self, seconds: f32, mut done: impl FnMut(&Self) -> bool) -> bool {
         let frames = (seconds / FRAME).ceil() as u32;
         for _ in 0..frames {
@@ -903,7 +993,9 @@ impl Scenario {
 impl Drop for Scenario {
     fn drop(&mut self) {
         let _ = self.net.send(ClientMessage::Disconnect);
-        if let Some(server) = self.server.take() {
+        // Only the last client holding the server stops it: a guest that
+        // leaves first leaves the host's world running.
+        if let Some(server) = self.server.take().and_then(|server| std::sync::Arc::try_unwrap(server).ok()) {
             self.runtime.block_on(server.stop());
         }
     }
