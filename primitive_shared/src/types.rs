@@ -8007,7 +8007,14 @@ pub fn can_grow_on(plant: BlockId, ground: BlockId) -> bool {
     if block_kind(ground) == BLOCK_PLANTER {
         return grows_in_a_pot(plant);
     }
-    let full_floor = has_full_top(ground);
+    // **A turf lip is a floor for what grows in turf** (`dig::is_turf_lip`):
+    // the meadow's own tufts and flowers do not stop a block short of every
+    // rise. Not for a layer (above: a drift over a lip would hang over the
+    // quarter it does not fill) and not for a torch or a chest, which ask
+    // `has_full_top` themselves -- a lip is ground for roots, not for
+    // things set down. A plant stands on the lip's real top
+    // (`types::collision_height`), which is where it is drawn.
+    let full_floor = has_full_top(ground) || crate::dig::is_turf_lip(ground);
     // The whole id, for the one rule that asks what exactly is underneath:
     // the upper half of a tall plant stands on its own grown lower half.
     let whole = ground;
@@ -8534,7 +8541,8 @@ pub fn is_known_block(id: BlockId) -> bool {
     // because the server writes a new id into the world on every swing and
     // a client is free to invent one: two of the eight faces name nothing,
     // and the flag on a block nobody quarries is a claim.
-    if id & crate::dig::DUG != 0 && crate::dig::digs_in_slices(kind) {
+    // ...and the turf's lip, which the generator lays (`dig::is_turf_lip`).
+    if id & crate::dig::DUG != 0 && crate::dig::may_be_bitten(kind) {
         return crate::dig::bite(id).is_some() && is_known_block(kind);
     }
     // **A handful carries its material and a wall its courses** in the same

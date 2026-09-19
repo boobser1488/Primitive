@@ -775,7 +775,10 @@ impl Water {
             // nothing else: the cell below becomes air here and the water
             // falls into it on the next pass, which is one flow interval
             // away. Free to ask -- the block is already read.
-            Some(under) if primitive_shared::dig::is_dug(under) => {
+            // ...but not a turf lip (`dig::is_turf_lip`): the roots hold
+            // it, and a stream let down a meadow runs over the slope rather
+            // than cutting a gully through the lip of every rise.
+            Some(under) if primitive_shared::dig::is_dug(under) && !primitive_shared::dig::is_turf_lip(under) => {
                 self.wash_out(world, below, changes);
                 return;
             }
@@ -834,7 +837,9 @@ impl Water {
                 // The side is left out of this pass's arithmetic -- it is
                 // rock until the wash lands -- so nothing is promised to a
                 // cell that is not yet somewhere water can be.
-                Some(there_block) if primitive_shared::dig::is_dug(there_block) => {
+                Some(there_block)
+                    if primitive_shared::dig::is_dug(there_block) && !primitive_shared::dig::is_turf_lip(there_block) =>
+                {
                     self.wash_out(world, side, changes);
                 }
                 Some(there_block) if Self::holds_water(there_block) => {
@@ -2381,6 +2386,30 @@ mod tests {
             fluid::depth(world.get(1, 1, 0)) > 0,
             "the water never reached the cell the bite opened"
         );
+    }
+
+    #[test]
+    fn water_runs_over_a_turf_lip_and_leaves_it_where_it_was() {
+        // The generator's lip on a slope (`dig::is_turf_lip`) is a bite by
+        // shape and turf by kind, and the roots are what decide it: a pool
+        // beside one and a spill falling onto one leave it standing, where a
+        // cut bite in the same places is washed out (above).
+        use primitive_shared::dig;
+        use primitive_shared::types::BLOCK_GRASS;
+        let world = floored();
+        let lip = dig::lowered(BLOCK_GRASS, 2);
+        world.put(1, 1, 0, lip);
+        world.put(0, 1, 1, lip);
+        world.put(0, 0, 0, lip);
+        world.put(0, 1, 0, BLOCK_WATER);
+
+        let mut sim = Water::new();
+        sim.on_block_changed(0, 1, 0);
+        settle(&mut sim, &world, 4_000);
+
+        for cell in [(1, 1, 0), (0, 1, 1), (0, 0, 0)] {
+            assert_eq!(world.get(cell.0, cell.1, cell.2), lip, "the water washed out the lip at {cell:?}");
+        }
     }
 
     #[test]

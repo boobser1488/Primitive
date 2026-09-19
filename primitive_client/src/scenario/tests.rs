@@ -132,6 +132,101 @@ fn a_staircase_is_walked_up_half_a_block_at_a_time() {
     no_corrections(&s);
 }
 
+/// The surface a walker stands on at the top of a generated column: the
+/// top block's y and the height of its floor, if it is bare meadow turf
+/// (whole or a lip) with room for a body over it.
+fn meadow_top(s: &Scenario, x: i32, z: i32) -> Option<(i32, f64, BlockId)> {
+    let y = (0..t::CHUNK_SIZE_Y as i32).rev().find(|&y| {
+        s.block((x, y, z)).is_some_and(|b| t::is_collidable(b) || t::is_liquid(b))
+    })?;
+    let block = s.block((x, y, z))?;
+    let clear = (1..=2).all(|dy| s.block((x, y + dy, z)).is_some_and(|b| !t::is_collidable(b) && !t::is_liquid(b)));
+    (t::block_kind(block) == t::BLOCK_GRASS && clear).then(|| (y, y as f64 + f64::from(t::collision_height(block)), block))
+}
+
+#[test]
+fn a_generated_hill_is_walked_up_without_a_jump() {
+    // **The lips on a landforms slope** (`worldgen::lips`): a new world's
+    // meadow, a straight line up a rise of at least two whole blocks, found
+    // in the ground round the spawn, and walked with forward held and the
+    // jump never pressed. Before the lips every block of that rise was a
+    // step a body does not take without jumping.
+    let mut s = Scenario::with(primitive_server::settings::ServerSettings {
+        world_preset: primitive_shared::worldgen::Preset::Normal,
+        world_scale: primitive_shared::worldgen::Scale::Landforms,
+        ..scenario_settings()
+    });
+    let spawn = cell_of(s.feet());
+    const RUN: i32 = 10;
+    let step = f64::from(primitive_shared::geometry::PLAYER_STEP_HEIGHT);
+    let mut found = None;
+    'search: for z in spawn.2 - 40..spawn.2 + 40 {
+        for x0 in spawn.0 - 40..spawn.0 + 40 - RUN {
+            let Some(line) = (0..RUN).map(|k| meadow_top(&s, x0 + k, z)).collect::<Option<Vec<_>>>() else {
+                continue;
+            };
+            let walkable = line.windows(2).all(|w| (w[1].1 - w[0].1).abs() <= step);
+            let lips = line.iter().filter(|c| primitive_shared::dig::is_turf_lip(c.2)).count();
+            if walkable && line[RUN as usize - 1].0 - line[0].0 >= 2 && lips >= 2 {
+                found = Some((x0, z, line));
+                break 'search;
+            }
+        }
+    }
+    let (x0, z, line) = found.expect("no gentle rise of two blocks round the spawn of a landforms world");
+    let start = (x0 as f64 + 0.5, line[0].1, z as f64 + 0.5);
+    s.stand_at(start);
+    s.face(0.0);
+    s.camera.pitch = -0.25;
+    s.shot("smooth_after");
+    s.hold(Action::Forward);
+    let mut rises = Vec::new();
+    let mut last = s.feet().y;
+    for _ in 0..(8.0 / FRAME) as usize {
+        s.frame();
+        let y = s.feet().y;
+        if y > last + 1e-4 {
+            rises.push(y - last);
+        }
+        last = y;
+        if s.feet().x > (x0 + RUN - 1) as f64 + 0.5 {
+            break;
+        }
+    }
+    s.release_all();
+    s.seconds(0.5);
+    let top = line[RUN as usize - 1].1;
+    assert!(
+        s.feet().x > (x0 + RUN - 1) as f64 && (s.feet().y - top).abs() < 0.05,
+        "the walk up the hill stopped at {:?}, the top is {top} at x {}",
+        s.feet(),
+        x0 + RUN - 1
+    );
+    let biggest = rises.iter().copied().fold(0.0, f64::max);
+    assert!(biggest <= step + 0.02, "one frame lifted the player {biggest:.3} of a block: {rises:?}");
+    no_corrections(&s);
+
+    // The same hillside with every lip in sight made whole again: the stair
+    // the generator drew before, from the same place, for the eye.
+    if std::env::var("PRIMITIVE_SCENARIO_SHOTS").is_ok() {
+        let mut whole = Vec::new();
+        for dz in -8..=8 {
+            for dx in -2..RUN + 12 {
+                if let Some((y, _, block)) = meadow_top(&s, x0 + dx, z + dz) {
+                    if primitive_shared::dig::is_dug(block) {
+                        whole.push(((x0 + dx, y, z + dz), primitive_shared::dig::whole(block)));
+                    }
+                }
+            }
+        }
+        s.build(&whole);
+        s.stand_at((start.0, line[0].0 as f64 + 1.0, start.2));
+        s.face(0.0);
+        s.camera.pitch = -0.25;
+        s.shot("smooth_before");
+    }
+}
+
 /// Walks along +x at `z` from `x0` into whatever is in front, and says
 /// where the front of the body stopped.
 fn walk_into(s: &mut Scenario, x0: i32, z: i32) -> f64 {

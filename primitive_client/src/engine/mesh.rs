@@ -4379,8 +4379,15 @@ pub fn build_mesh(
                         // marks as well (`CHIPPED_BIT`): the others round a
                         // bite were rock a moment ago too, but this is the
                         // one the digger is looking into.
+                        // Not on a turf lip (`dig::is_turf_lip`): its top is
+                        // the meadow the generator laid on a slope, not a
+                        // face anybody opened, and chip marks on it would
+                        // draw every rise of every meadow as a quarry. Its
+                        // sides take the crop above like any bite, which
+                        // keeps the turf side's fringe and the soil under it.
                         let cut = bite_crop.is_some()
-                            && primitive_shared::dig::cut_face(id) == Some(FACE_OUTWARD[face_index]);
+                            && primitive_shared::dig::cut_face(id) == Some(FACE_OUTWARD[face_index])
+                            && !primitive_shared::dig::is_turf_lip(id);
                         // **The side of shallow water is cut, not squeezed.**
                         // Water was left out of `side_crop`, so a side two
                         // eighths deep wore the whole picture pressed into
@@ -8934,6 +8941,29 @@ mod tests {
             }
         }
         assert!(alone(BLOCK_STONE).vertices.iter().all(|v| v.uv & CHIPPED_BIT == 0), "a whole block wears chip marks");
+    }
+
+    #[test]
+    fn a_turf_lip_is_drawn_as_turf_at_its_own_height_and_never_as_a_cut() {
+        // The generator's lip on a slope (`dig::is_turf_lip`): the meadow,
+        // lowered, and not a face anybody opened.
+        use primitive_shared::dig;
+        const AT: (i32, i32, i32) = (8, 4, 8);
+        use super::transparency_tests::{cache_of, mesh_of};
+        for quarters in 1..dig::SLICES {
+            let lip = dig::lowered(primitive_shared::types::BLOCK_GRASS, quarters);
+            let mesh = mesh_of(&cache_of(|x, y, z| if (x, y, z) == AT { lip } else { BLOCK_AIR }));
+            assert!(mesh.vertices.iter().all(|v| v.uv & CHIPPED_BIT == 0), "{quarters} quarters of turf wear chip marks");
+            let top = AT.1 as f32 + f32::from(quarters) / f32::from(dig::SLICES);
+            let highest = mesh.vertices.iter().map(|v| v.position[1]).fold(f32::MIN, f32::max);
+            assert!((highest - top).abs() < 1e-4, "{quarters} quarters of turf drawn up to {highest}, not {top}");
+            // The grass is coloured by the climate it grew in, as the whole
+            // turf's is: tinted, and so drawn as grass.
+            assert!(
+                mesh.vertices.iter().filter(|v| (v.position[1] - top).abs() < 1e-4).all(|v| v.tint() != 0),
+                "the top of {quarters} quarters of turf is not the meadow's colour"
+            );
+        }
     }
 
     #[test]
@@ -15053,6 +15083,13 @@ mod merging_tests {
                 let hi = |axis: usize| positions.iter().map(|p| p[axis]).fold(f32::MIN, f32::max);
                 // The cell a face belongs to sits behind it along its
                 // normal: a +face at plane p is the top of cell p-1.
+                // A face off the block grid is a partial block's -- a lip on
+                // a generated slope (`worldgen::lips`) -- and this counts the
+                // faces of whole cubes. Floored onto the grid it was counted
+                // as a face of a cell it does not belong to.
+                if lo(n).fract() != 0.0 {
+                    continue;
+                }
                 let plane = lo(n) as i32 - face_defs[face].corners[0][n] as i32;
                 if !(0..CHUNK_SIZE_Y.max(CHUNK_SIZE_X) as i32).contains(&plane) {
                     continue;

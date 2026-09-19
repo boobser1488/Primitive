@@ -160,12 +160,17 @@ fn probe_river_ends() {
 /// library does not promise across releases: a toolchain update would turn
 /// this red with not one block of any world changed.
 fn fingerprint(gen: &WorldGen, pos: ChunkPos) -> u64 {
+    fingerprint_as(gen, pos, |id| id)
+}
+
+/// The same, of every block as `seen` reads it.
+fn fingerprint_as(gen: &WorldGen, pos: ChunkPos, seen: impl Fn(BlockId) -> BlockId) -> u64 {
     let chunk = gen.generate_chunk(pos);
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for y in 0..CHUNK_SIZE_Y {
         for z in 0..CHUNK_SIZE_Z {
             for x in 0..CHUNK_SIZE_X {
-                for byte in u32::from(chunk.get(x, y, z)).to_le_bytes() {
+                for byte in u32::from(seen(chunk.get(x, y, z))).to_le_bytes() {
                     hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
                 }
             }
@@ -208,6 +213,13 @@ fn an_old_worlds_new_chunks_are_the_old_generators_to_the_block() {
 /// (`drain_courses`) -- both changes are the same arithmetic done fewer
 /// times, and this is what says so. A change that means to move the ground
 /// changes these on purpose and says why.
+///
+/// **Read with every lip made whole again** (`dig::whole`): the lips on the
+/// slopes (`lips`) are the one change made to the landforms' ground on
+/// purpose since, and holding the rest of the chunk to these prints is what
+/// says they are the *only* change -- a lip lowers a block of the ground
+/// that was there and touches nothing else. What the lips themselves are is
+/// held by `the_landforms_lay_the_same_lips_every_time`.
 #[test]
 fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
     let held: [((i32, i32), u64); 8] = [
@@ -222,7 +234,30 @@ fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     for ((x, z), print) in held {
-        assert_eq!(fingerprint(&gen, ChunkPos::new(x, z)), print, "landforms chunk {x},{z} is not the ground it was");
+        assert_eq!(
+            fingerprint_as(&gen, ChunkPos::new(x, z), crate::dig::whole),
+            print,
+            "landforms chunk {x},{z} is not the ground it was"
+        );
+    }
+}
+
+/// **The lips are laid the same every time**: the chunks above, as they are
+/// with their lips, to the block. A lip is a function of the seed and the
+/// heights round a column and of nothing a thread remembers, so a chunk
+/// evicted and made again, or made by another thread, or made after its
+/// neighbours rather than before, has the same slopes.
+#[test]
+fn the_landforms_lay_the_same_lips_every_time() {
+    let held: [((i32, i32), u64); 4] = [
+        ((0, 0), 0xb134_89aa_a937_2cd6),
+        ((5, -3), 0xdc1f_e362_9e04_136c),
+        ((-1875, -1875), 0x63ee_9a9d_cf1e_4298),
+        ((-1868, -1872), 0xf20a_e5ea_fbf2_35f2),
+    ];
+    let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
+    for ((x, z), print) in held {
+        assert_eq!(fingerprint(&gen, ChunkPos::new(x, z)), print, "landforms chunk {x},{z} laid other lips");
     }
 }
 
@@ -504,11 +539,16 @@ fn what_the_landforms_cost_a_chunk() {
         .find(|&(gx, gz)| matches!(probe.biome_at(gx, gz), Biome::Hills) && matches!(probe.biome_at(gx + 400, gz + 400), Biome::Hills | Biome::Steppe))
         .expect("hill country near the origin");
     let squares = [(0, 0), (country.0.div_euclid(16), country.1.div_euclid(16))];
-    let mut spent = [[0f64; 2]; 2];
+    // ...and the landforms once more with their lips off (`lips::LIPS_OFF`),
+    // which is what the lips cost, measured in the same binary.
+    let mut spent = [[0f64; 2]; 3];
     for _round in 0..5 {
-        for (index, scale) in [Scale::Earth, Scale::Landforms].into_iter().enumerate() {
+        for (index, (scale, lips)) in
+            [(Scale::Earth, true), (Scale::Landforms, true), (Scale::Landforms, false)].into_iter().enumerate()
+        {
             for (which, &(cx, cz)) in squares.iter().enumerate() {
                 let elapsed = std::thread::spawn(move || {
+                    super::lips::LIPS_OFF.with(|off| off.set(!lips));
                     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, scale);
                     let clock = Instant::now();
                     for dz in 0..12 {
@@ -524,7 +564,7 @@ fn what_the_landforms_cost_a_chunk() {
             }
         }
     }
-    for (index, name) in ["earth", "landforms"].iter().enumerate() {
+    for (index, name) in ["earth", "landforms", "no lips"].iter().enumerate() {
         println!(
             "{name:>9}: {:.2} ms a chunk round the origin, {:.2} ms in hill country",
             spent[index][0] * 1000.0 / (5.0 * 144.0),

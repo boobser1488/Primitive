@@ -1523,7 +1523,9 @@ fn green_up(world: &dyn BlockWorld, soil: &dyn Soil, at: Cell) -> Option<BlockCh
     }
     let beside_turf = [(1, 0), (-1, 0), (0, 1), (0, -1)]
         .iter()
-        .any(|&(dx, dz)| world.block(at.0 + dx, at.1, at.2 + dz) == Some(BLOCK_GRASS));
+        // By kind: the turf's lip on a slope (`dig::is_turf_lip`) is turf
+        // to creep from like any other.
+        .any(|&(dx, dz)| world.block(at.0 + dx, at.1, at.2 + dz).is_some_and(|b| block_kind(b) == BLOCK_GRASS));
     if !beside_turf || built_near(world, at) || sky_over(world, at) != Sky::Open || !warm_enough(soil, at) {
         return None;
     }
