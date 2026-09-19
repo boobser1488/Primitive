@@ -34,9 +34,74 @@ use crate::types::{block_kind, BlockId};
 /// feature of its own; not the fowl, whose whole worth is eggs and eggs
 /// are another mechanic, not an extra line here. Not the goat, which does
 /// not exist: the ewe gives the milk (`MILK_EVERY_DAYS`).
+///
+/// **And the horse**, which is kept for what it does rather than for what it
+/// gives, and is the one animal here that has to be *broken* as well as
+/// tamed: see [`needs_breaking`].
 pub fn tameable(species: Species) -> bool {
-    matches!(species, Species::Sheep | Species::Boar)
+    matches!(species, Species::Sheep | Species::Boar | Species::Horse)
 }
+
+/// Feeds from the first to trust: three for everything but the horse.
+///
+/// **Five for a horse**, a quarter of a day apart like the rest
+/// (`SATED_DAYS`), so gentling one is the best part of two days of coming
+/// back to a herd that bolts if you walk at it -- and then it still has to be
+/// sat on. A horse that came as cheaply as a ewe would be a vehicle found in
+/// a field; one that costs this is a thing a player decided to have.
+pub fn feeds_to_tame(species: Species) -> f32 {
+    match species {
+        Species::Horse => HORSE_FEEDS_TO_TAME,
+        _ => FEEDS_TO_TAME,
+    }
+}
+
+/// Feeds that gentle a wild horse. See [`feeds_to_tame`].
+pub const HORSE_FEEDS_TO_TAME: f32 = 5.0;
+
+/// Does trust stop short of tame, until somebody has sat on it?
+///
+/// **The horse's, and only the horse's.** A ewe fed three times follows the
+/// grain home; a horse fed five times will take food from your hand and still
+/// throw you the first time you get on it. What finishes it is the mounting
+/// ([`thrown`]), so the last step of taming a horse is a few falls, and the
+/// feeding is what makes it stand still long enough for them.
+pub fn needs_breaking(species: Species) -> bool {
+    matches!(species, Species::Horse)
+}
+
+/// The chance a gentled horse throws its rider, by how many times it has
+/// been got on already.
+///
+/// **Nearly always on the first try, never on the fourth.** Nine in ten, then
+/// six, then three, then none: a few falls, which is what breaking a horse
+/// is, and a promise that it ends -- a horse that threw you at a fixed one in
+/// two for ever would be a slot machine with a mane. See [`thrown`].
+pub const THROW_CHANCES: [f32; 4] = [0.9, 0.6, 0.3, 0.0];
+
+/// What a throw costs the rider, in health: a hard landing, not a wound.
+pub const THROW_DAMAGE: f32 = 2.0;
+
+/// Seconds after a throw before it will let anybody near its back again: long
+/// enough that the next try is a decision, short enough that it is today.
+pub const SETTLE_SECONDS: f32 = 8.0;
+
+/// Whether the `attempt`th time on a gentled horse ends on the ground, for a
+/// roll in `0..1`. Nought is the first attempt.
+pub fn thrown(attempt: u8, roll: f32) -> bool {
+    let chance = THROW_CHANCES[(attempt as usize).min(THROW_CHANCES.len() - 1)];
+    roll < chance
+}
+
+/// Condition lost a day by a kept horse standing out in the rain with no
+/// roof over it.
+///
+/// **What "shelter it" means, as a number.** Half a day's feeding's worth
+/// every day of rain: a horse left out through a wet week is skin and bone
+/// (`THRIVING`), and a horse out of condition has less wind to gallop with
+/// (`Keeping::most_wind`). A roof -- a lean-to, a stable -- is the answer, and
+/// it is a building a player makes because they have a horse.
+pub const EXPOSED_CONDITION_PER_DAY: f32 = 0.5;
 
 /// How much a mouthful is worth to the animal that takes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +121,10 @@ pub enum Ration {
 pub fn ration(species: Species, food: BlockId) -> Option<Ration> {
     use crate::types::{BLOCK_APPLE, BLOCK_BERRIES, BLOCK_FIBER, BLOCK_GRAIN, BLOCK_MILLET, BLOCK_MUSHROOM, BLOCK_ROOT};
     match (species, block_kind(food)) {
+        // Grass and grain, and the apple every horse will come across a
+        // field for -- the lure, as much as a meal.
+        (Species::Horse, BLOCK_FIBER) => Some(Ration::Fodder),
+        (Species::Horse, BLOCK_GRAIN | BLOCK_MILLET | BLOCK_APPLE) => Some(Ration::Rich),
         (Species::Sheep, BLOCK_FIBER) => Some(Ration::Fodder),
         (Species::Sheep, BLOCK_GRAIN | BLOCK_MILLET) => Some(Ration::Rich),
         (Species::Boar, BLOCK_BERRIES | BLOCK_MUSHROOM) => Some(Ration::Fodder),
@@ -67,7 +136,7 @@ pub fn ration(species: Species, food: BlockId) -> Option<Ration> {
 /// Would anything that can be kept eat this? What a lure is: the animals
 /// take notice of a player holding one (see the server's `lure`).
 pub fn is_feed(held: BlockId) -> bool {
-    [Species::Sheep, Species::Boar].into_iter().any(|s| ration(s, held).is_some())
+    [Species::Sheep, Species::Boar, Species::Horse].into_iter().any(|s| ration(s, held).is_some())
 }
 
 /// **Is this a thing a right click on an animal means something with?**
@@ -77,7 +146,11 @@ pub fn is_feed(held: BlockId) -> bool {
 /// `ClientMessage::TendAnimal`, so a player carrying a stack of planks past
 /// a sheep still builds rather than being told the sheep is not hungry.
 pub fn is_tending_tool(held: BlockId) -> bool {
-    is_feed(held) || crate::types::is_knife(held) || block_kind(held) == crate::types::BLOCK_BOWL
+    is_feed(held)
+        || crate::types::is_knife(held)
+        || block_kind(held) == crate::types::BLOCK_BOWL
+        // ...and a saddle or saddlebags, put on a horse with the same click.
+        || crate::types::is_tack(held)
 }
 
 /// Feeds that make a wild animal tame: three, a quarter of a day apart at
@@ -247,12 +320,15 @@ impl Keeping {
             return Err(Refused::Sated);
         }
         let was_tame = self.tame;
-        self.trust = (self.trust + 1.0 / FEEDS_TO_TAME).min(1.0);
+        self.trust = (self.trust + 1.0 / feeds_to_tame(species)).min(1.0);
         // A hair under one third times three is 0.999..., and a sheep that
         // wanted a fourth feed for a rounding error would be a bug report.
         if self.trust >= 1.0 - 1e-4 {
             self.trust = 1.0;
-            self.tame = true;
+            // A horse is only gentled by food: see `needs_breaking`.
+            if !needs_breaking(species) {
+                self.tame = true;
+            }
         }
         if self.tame {
             self.home = Some(at);
@@ -263,6 +339,45 @@ impl Keeping {
             self.well_fed = WELL_FED_DAYS;
         }
         Ok(self.tame && !was_tame)
+    }
+
+    /// Trusts you all the way and is not yet tame: a horse that has been fed
+    /// enough and has not been sat on (`needs_breaking`).
+    pub fn gentled(&self) -> bool {
+        !self.tame && self.trust >= 1.0 - 1e-4
+    }
+
+    /// A gentled horse stood for its rider: it is tame, and home is where it
+    /// was broken.
+    pub fn break_in(&mut self, at: (f32, f32, f32)) {
+        self.trust = 1.0;
+        self.tame = true;
+        self.home = Some(at);
+    }
+
+    /// `days` out in the rain with nothing over it. See
+    /// [`EXPOSED_CONDITION_PER_DAY`].
+    pub fn exposed(&mut self, days: f32) {
+        if days.is_finite() && days > 0.0 {
+            self.condition = (self.condition - EXPOSED_CONDITION_PER_DAY * days).max(0.0);
+        }
+    }
+
+    /// How long a kept horse can gallop, in seconds: all of
+    /// `horse::GALLOP_SECONDS` in condition and under half of it as skin and
+    /// bone. **Condition, not hunger**, because hunger is already the other
+    /// rule (a hungry horse will not gallop at all, `will_gallop`), and what a
+    /// wet week or a lean month costs should be a horse that tires, not one
+    /// that refuses.
+    pub fn most_wind(&self) -> f32 {
+        crate::horse::GALLOP_SECONDS * (0.4 + 0.6 * self.condition.clamp(0.0, 1.0))
+    }
+
+    /// Whether it will be asked for a gallop: fed within the last day and a
+    /// half. A hungry horse walks and trots, and that is what makes feeding it
+    /// a thing the rider does before the ride rather than after.
+    pub fn will_gallop(&self) -> bool {
+        !self.is_hungry()
     }
 
     /// Hungry: past `HUNGRY_AFTER_DAYS` since it was last fed.
@@ -480,6 +595,43 @@ mod tests {
         assert!(k.thriving(), "fed on grain an hour ago and not thriving");
         k.pass_days(WELL_FED_DAYS + 0.1, false);
         assert!(!k.thriving(), "still thriving a day after the grain ran out");
+    }
+
+    #[test]
+    fn five_feeds_gentle_a_horse_and_only_a_ride_tames_it() {
+        let mut k = Keeping::wild();
+        for n in 0..5 {
+            assert!(!k.gentled(), "gentled after {n} feeds");
+            k.feed(Species::Horse, BLOCK_GRAIN, PEN).expect("a hungry horse refused grain");
+            k.pass_days(SATED_DAYS, false);
+        }
+        assert!(k.gentled() && !k.tame, "five feeds did not gentle it, or tamed it outright");
+        k.break_in(PEN);
+        assert!(k.tame && k.home == Some(PEN) && !k.gentled());
+        assert!(tamed().tame, "a ewe needs breaking now");
+    }
+
+    #[test]
+    fn a_gentled_horse_throws_its_rider_a_few_times_and_then_never() {
+        // Every roll a player could get: the first try is nearly always a
+        // fall and the fourth never is.
+        assert!(thrown(0, 0.5) && thrown(0, 0.85));
+        assert!(!thrown(3, 0.0) && !thrown(200, 0.0), "the fourth try threw");
+        let falls = |roll: f32| (0u8..).take_while(|&n| thrown(n, roll)).count();
+        assert!((0..100).all(|r| falls(r as f32 / 100.0) <= 3));
+    }
+
+    #[test]
+    fn a_horse_left_out_in_the_rain_gallops_less_and_a_hungry_one_not_at_all() {
+        let mut k = Keeping::wild();
+        k.break_in(PEN);
+        let fresh = k.most_wind();
+        k.exposed(1.0);
+        assert!(k.most_wind() < fresh * 0.85, "a wet day cost nothing: {} of {}", k.most_wind(), fresh);
+        k.hunger = 0.0;
+        assert!(k.will_gallop());
+        k.pass_days(HUNGRY_AFTER_DAYS, false);
+        assert!(!k.will_gallop(), "a hungry horse still galloped");
     }
 
     #[test]

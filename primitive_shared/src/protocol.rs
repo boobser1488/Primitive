@@ -547,6 +547,10 @@ pub type PlayerId = u64;
 /// and `StallRefused` back, `ContainerKind::Stall`, all appended, a block at
 /// id 665 (`types::BLOCK_STALL`) and a recipe at the end of `RECIPES`. 57
 /// still, for the same reason.
+/// ...and the horse: `Mount`, `Dismount`, `Rein` and `OpenBags` out,
+/// `Mounted` back, `ContainerKind::Saddlebags`, `Posture::Mounted`, a `tack`
+/// byte on `EntityKind::Animal`, and a species appended to `Species` (its
+/// index is on the wire). All appended, and 57 for the reason the rest is.
 pub const PROTOCOL_VERSION: u32 = 57;
 
 /// What kind of container a screen is showing.
@@ -568,6 +572,12 @@ pub enum ContainerKind {
     /// `stall::TAKINGS`) under the offers `ServerMessage::StallOffers`
     /// carries. Appended, so every earlier kind keeps its tag.
     Stall,
+    /// A horse's saddlebags: `horse::BAGS_SLOTS` squares, opened from beside
+    /// the horse (`ClientMessage::OpenBags`). The position a `ChestState`
+    /// carries for it is the horse's cell when it was opened, and means
+    /// nothing: the bags go where the horse goes. Appended, so it rides
+    /// fifty-seven's bump.
+    Saddlebags,
 }
 
 /// What a hearth is doing, for the screen that is watching it.
@@ -928,6 +938,16 @@ pub enum Posture {
     /// furniture. The byte after `Fallen`, so a v56 client that is sent one
     /// draws a swimmer standing, which is what it drew already.
     Swimming,
+    /// Astride a horse: legs either side of its back, hands at the reins.
+    ///
+    /// **Not `Sitting`**, which is a chair's pose -- knees bent in front,
+    /// feet on the floor -- and a rider drawn that way sits *inside* the
+    /// horse with their shins through its shoulders. In `PlayerState` for
+    /// everybody who can see the rider (the server's `players::snapshot`),
+    /// and in the rider's own `ServerMessage::Posture` so their own arms and
+    /// shadow agree. The byte after `Swimming`, so an older client draws a
+    /// rider standing on the saddle, which is wrong and harmless.
+    Mounted,
 }
 
 impl From<u8> for Posture {
@@ -937,6 +957,7 @@ impl From<u8> for Posture {
             2 => Posture::Lying,
             3 => Posture::Fallen,
             4 => Posture::Swimming,
+            5 => Posture::Mounted,
             _ => Posture::Standing,
         }
     }
@@ -1252,6 +1273,17 @@ pub enum EntityKind {
         hurt: f32,
         attitude: Attitude,
         growth: u8,
+        /// What it is wearing and who is on it, as `horse::TACK_*` bits:
+        /// a saddle, saddlebags, a rider, a halter, the herd's stallion.
+        ///
+        /// **A byte on every animal for the one species that wears
+        /// anything**, and that is the cheap way round. A second entity
+        /// kind for a horse would be a second arm in every match over
+        /// animals -- the aim, the hit box, the model, the sounds -- for the
+        /// sake of a saddle drawn on its back; a byte that is nought on a
+        /// deer costs one byte. Zero reads as a wild animal with nothing on,
+        /// which is the one reading that cannot put a rider on a boar.
+        tack: u8,
     },
     /// A raft on the water. The entity's `y` is its waterline -- see
     /// `raft::Body`.
@@ -1935,6 +1967,37 @@ pub enum ClientMessage {
         /// builder looking along z. Read for nothing else.
         along_x: bool,
     },
+    /// **Get on that horse.** A right click on a horse with nothing in hand
+    /// that tends it. The server decides everything that follows: whether it
+    /// will have you at all (tame, or gentled and willing to be tried --
+    /// `husbandry::needs_breaking`), whether you stay on (`husbandry::thrown`),
+    /// and where you sit. Named like `UseRaft`: the horse and nothing else.
+    Mount {
+        horse: EntityId,
+    },
+    /// Get off, beside it.
+    Dismount,
+    /// **The reins**, while riding: what the rider's keys ask for this
+    /// moment (`horse::Reins`). Sent on change and every quarter second while
+    /// the horse is asked to move, as `Row` is for the oars -- and it names the
+    /// horse, so a stale message about the last horse moves nothing.
+    Rein {
+        horse: EntityId,
+        forward: f32,
+        turn: f32,
+        /// `horse::Gait::to_wire`.
+        gait: u8,
+        jump: bool,
+    },
+    /// **Open that horse's saddlebags**, from beside it (sneak and right
+    /// click). Answered with a `ChestState` of `ContainerKind::Saddlebags`,
+    /// and every chest gesture after it is against the bags until
+    /// `CloseChest` -- the chest's screen and messages, because a pack on a
+    /// horse is a container like any other and a second set of gestures
+    /// for it would be a second set of rules to keep straight.
+    OpenBags {
+        horse: EntityId,
+    },
 }
 
 /// Messages the server sends to the client.
@@ -2604,6 +2667,28 @@ pub enum ServerMessage {
     /// a sentence, for `RackRefused`'s reason. Appended.
     StallRefused {
         why: crate::stall::Refusal,
+    },
+    /// **You are riding this horse, or you are not** (`None`), and what it
+    /// has in it for the ride.
+    ///
+    /// **What turns the movement keys into reins**, as `Oars` turns them into
+    /// strokes: until it arrives the keys walk the body; after it they ride,
+    /// and the client starts predicting the horse from the snapshot's
+    /// (`horseback`). Sent on mounting and again twice a second while riding,
+    /// because `wind` is the one thing the client cannot keep exactly -- it
+    /// spends it on its own frames and the server on its ticks -- and a gauge
+    /// that drifted from the horse under it would be a rider told they can
+    /// gallop by a horse that will not. Appended, so it rides fifty-seven's
+    /// bump.
+    Mounted {
+        horse: Option<EntityId>,
+        /// Where the horse's feet are and which way it faces, as the server
+        /// has it: what the client starts its prediction from on mounting.
+        at: (f64, f64, f64),
+        yaw: f32,
+        /// Seconds of gallop left (`horse::Mount::wind`).
+        wind: f32,
+        fettle: crate::horse::Fettle,
     },
 }
 

@@ -203,6 +203,7 @@ use primitive_shared::types::{
 };
 
 use crate::logic::falling::BlockWorld;
+use primitive_shared::horse;
 use primitive_shared::husbandry;
 use primitive_shared::youth;
 use crate::logic::rng::Rng;
@@ -1810,6 +1811,9 @@ struct Neighbours {
     /// whose every member drifted toward the middle of all the others, which
     /// is a herd that moves only by accident and never *somewhere*.
     leader: Option<Leader>,
+    /// For a wild herd's stallion only: the mare furthest out past `STRAY`,
+    /// on the ground. See `Animal::stallion`.
+    straggler: Option<(f32, f32)>,
 }
 
 /// What a follower reads off its leader. See `Neighbours::leader`.
@@ -2123,6 +2127,87 @@ pub struct Animal {
     /// fed. See `husbandry::Keeping` -- and `forget_the_distant`, which parks
     /// an animal with one of these instead of forgetting it.
     keep: Option<husbandry::Keeping>,
+    /// **The herd's stallion**: one of each wild herd of horses, the last of
+    /// the group to be spawned. It fetches back a mare that has strayed
+    /// (`Neighbours::straggler`), which is what "a stallion keeps the herd"
+    /// means on the ground -- a herd that drifts apart over a quarter of an
+    /// hour is a herd with no stallion. Meaningless once it is tamed.
+    stallion: bool,
+    /// A kept horse's saddle, bags and breaking (`horse::Gear`). Boxed because
+    /// one animal in a hundred has any, and the bags are an inventory.
+    gear: Option<Box<horse::Gear>>,
+    /// Somebody on its back, and the body their reins move. See `carry`.
+    ride: Option<Ride>,
+    /// Seconds before a gentled horse that has just thrown somebody lets
+    /// anybody try its back again (`husbandry::SETTLE_SECONDS`).
+    settle_for: f32,
+}
+
+/// A horse with a rider: the body `horse::step` moves, and what the reins
+/// last said.
+///
+/// **The body is its own and not the animal's `position`**, for the raft's
+/// reason: it is the thing the rider's client predicts with the same
+/// numbers, and `walk`'s collider -- the animals' own, with its step and its
+/// swim -- is not. So a ridden horse is moved by `carry` alone, and its
+/// position is copied out of this every tick.
+#[derive(Debug, Clone, Copy)]
+struct Ride {
+    rider: PlayerId,
+    body: horse::Mount,
+    reins: horse::Reins,
+    /// Seconds since the reins were last sent. See `REINS_TIMEOUT`.
+    reins_age: f32,
+    /// Seconds a jump asked for is still waiting to be taken.
+    ///
+    /// **Latched, and not read off the latest reins**, because a jump is a
+    /// press and the reins are a state: the client sends "jump" on the frame
+    /// the key goes down and "no jump" on the next, and both arrive inside one
+    /// tick -- so a server that read the reins as they stood at its tick never
+    /// jumped at all, while the rider's own horse cleared the ditch and the
+    /// server's fell into it. Held for `JUMP_LATCH` and spent by the jump.
+    jump_for: f32,
+}
+
+/// How long a jump asked for waits for the horse's feet to be under it.
+///
+/// A little over two ticks: long enough that a press between two ticks is
+/// taken, short enough that a jump asked in mid-air is not a second jump on
+/// landing that nobody asked for then.
+const JUMP_LATCH: f32 = 0.12;
+
+/// What a dead horse left, and where: see `Animals::take_spilled`.
+pub type Spilled = ((f64, f64, f64), Vec<(primitive_shared::types::BlockId, u32)>);
+
+/// How long a rider's last reins keep asking without another.
+///
+/// The client sends them every quarter second while the horse is asked to
+/// move. A second of silence is a client that went away mid-gallop, and a
+/// horse that galloped on across the plain with nobody asking would be the
+/// raft's ghost at the oars (`rafts::OARS_TIMEOUT`) with legs.
+const REINS_TIMEOUT: f32 = 1.0;
+
+/// How far off a stallion notices one of its mares has strayed, in blocks.
+const STALLION_RANGE: f32 = 26.0;
+
+/// How far from the stallion a mare is before it goes and fetches her.
+///
+/// **Past the herd's own comfort and short of its radius**, so the rules
+/// hand over rather than fight: inside `HERD_COMFORT` the mare's own herd
+/// rules keep her, and a mare wandering out toward `HERD_RADIUS` -- where
+/// no herd rule reaches -- is the one the stallion goes for.
+const STRAY: f32 = 9.0;
+
+/// What a horse brings to a ride, off its keeping and its gear: see
+/// `horse::Fettle`.
+fn fettle_of(keep: Option<&husbandry::Keeping>, gear: Option<&horse::Gear>) -> horse::Fettle {
+    horse::Fettle {
+        most_wind: keep.map_or(horse::GALLOP_SECONDS, |k| k.most_wind()),
+        // **Saddled and fed.** Bareback is a walk and a trot (`Gear::saddle`),
+        // and a hungry horse is the same (`Keeping::will_gallop`).
+        will_gallop: gear.is_some_and(|g| g.saddle) && keep.is_none_or(|k| k.will_gallop()),
+        load_kg: gear.map_or(0.0, |g| g.load_kg()),
+    }
 }
 
 /// Where one of an animal's own family is, as of the start of the tick.
@@ -2226,6 +2311,7 @@ impl Animal {
                 hurt: (self.hurt_for / HURT_SECONDS).clamp(0.0, 1.0),
                 attitude: self.attitude_now(),
                 growth: youth::to_wire(self.growth),
+                tack: self.tack(),
             },
             x: f64::from(self.at().0),
             // The *centre* of the animal, which is what the client draws
@@ -2237,6 +2323,15 @@ impl Animal {
             y: f64::from(self.at().1 + self.frame().height * 0.5),
             z: f64::from(self.at().2),
         }
+    }
+
+    /// The `horse::TACK_*` bits for everybody who can see it.
+    fn tack(&self) -> u8 {
+        let tame = self.keep.is_some_and(|k| k.tame);
+        self.gear.as_ref().map_or(0, |g| g.tack())
+            | if self.ride.is_some() { horse::TACK_RIDDEN } else { 0 }
+            | if tame { horse::TACK_HALTER } else { 0 }
+            | if self.stallion && !tame { horse::TACK_STALLION } else { 0 }
     }
 
     /// What its body is doing right now, as [`Animal::attitude`] says, with
@@ -2508,6 +2603,13 @@ pub struct Animals {
     dung: Vec<(f64, f64, f64)>,
     /// The night a raid on the pens was last rolled for: see `raid_the_pens`.
     raided: Option<i64>,
+    /// What dead horses left on the ground this step -- saddle, bags and the
+    /// load in them (`horse::Gear::left_behind`) -- for the tick loop to throw
+    /// down as items, which this file cannot do (see `staked`).
+    spilled: Vec<Spilled>,
+    /// Whether it is raining on the world, for the kept horses standing out
+    /// in it (`husbandry::EXPOSED_CONDITION_PER_DAY`). Told by the tick loop.
+    raining: bool,
     /// Line-of-sight rays cast since the world started. Test-only, for the
     /// budget test.
     #[cfg(test)]
@@ -2570,6 +2672,8 @@ impl Animals {
             parked: Vec::new(),
             dung: Vec::new(),
             raided: None,
+            spilled: Vec::new(),
+            raining: false,
             #[cfg(test)]
             rays_cast: 0,
             #[cfg(test)]
@@ -2777,6 +2881,17 @@ impl Animals {
         let mut body = self.animals.remove(index);
         self.killed += 1;
         let death = Death { species: body.species, at: body.at(), growth: body.growth };
+        // **A horse's saddle and load go down with it**, where it fell, for
+        // the tick loop to throw on the ground: see `horse::Gear::left_behind`
+        // for why all of it. The rider is put off by the tick loop, which
+        // finds the horse gone (`horses::tick`).
+        body.ride = None;
+        if let Some(gear) = body.gear.take() {
+            let left = gear.left_behind();
+            if !left.is_empty() {
+                self.spilled.push((body.position, left));
+            }
+        }
         if body.species.swims() {
             self.deaths.push(body.id);
             self.fallen.push(death);
@@ -3040,7 +3155,9 @@ impl Animals {
     /// Turns an animal to a stated heading. Tests only: which way one
     /// is facing is the simulation's business, and every test that cares
     /// about the hit box has to be able to say which way it is pointing.
-    #[cfg(test)]
+    ///
+    /// Not test-only: a scenario on the client stands a horse along its
+    /// strip of field with it (`Server::face_animal`).
     pub fn face_for_test(&mut self, id: EntityId, yaw: f32) {
         if let Some(animal) = self.animals.iter_mut().find(|a| a.id == id) {
             animal.yaw = yaw;
@@ -3141,6 +3258,10 @@ impl Animals {
             speed_cap: f32::INFINITY,
             dying_for: 0.0,
             keep: None,
+            stallion: false,
+            gear: None,
+            ride: None,
+            settle_for: 0.0,
         }
     }
 
@@ -3239,7 +3360,13 @@ impl Animals {
             // `swims` test in every rule of `think` and `walk`. What the
             // world does to it is one thing, and it is the opposite of what
             // it does to everything else: air.
-            let hazard = if animal.species.swims() {
+            // **Ridden, it goes where the reins say** and thinks nothing of its
+            // own: see `Ride`. What the world does to a body still does it --
+            // a fire, a roof falling in -- and a wolf can still bite it.
+            let hazard = if animal.ride.is_some() {
+                carry(animal, world, dt);
+                burn(animal, world, dt) + suffocate(animal, world, dt)
+            } else if animal.species.swims() {
                 think_fish(animal, players, &seen[index], world, &mut self.rng, dt);
                 swim(animal, world, dt);
                 gasp(animal, world, dt)
@@ -3288,6 +3415,7 @@ impl Animals {
                 bites.push(bite);
             }
             animal.hurt_for = (animal.hurt_for - dt).max(0.0);
+            animal.settle_for = (animal.settle_for - dt).max(0.0);
         }
         #[cfg(test)]
         {
@@ -3646,7 +3774,16 @@ impl Animals {
             // that never saw you and could not have leaves with the one that
             // did. Never less than `ALARM_RADIUS`, for the animals whose
             // hearing is short because they are busy eating.
-            let alarm_reach = animal.species.hearing().max(ALARM_RADIUS);
+            //
+            // **A herd of horses goes as one, stallion and all**: as far as
+            // the stallion ranges, so a mare grazing at the edge of the herd
+            // is off with the rest of it rather than left standing to be
+            // walked up to.
+            let alarm_reach = if animal.species == Species::Horse {
+                STALLION_RANGE
+            } else {
+                animal.species.hearing().max(ALARM_RADIUS)
+            };
             for &(id, species, (px, pz), heading) in &fleeing {
                 if id == animal.id || species != animal.species {
                     continue;
@@ -3669,7 +3806,7 @@ impl Animals {
             // approximately, since both read the same `dt` and nothing
             // between this call and that animal's own `think` call
             // touches its `next_thought`.
-            let (centre, quarry, threat, company, packmate, leader) = if animal.next_thought <= dt {
+            let (centre, quarry, threat, company, packmate, leader, straggler) = if animal.next_thought <= dt {
                 full_scans += 1;
                 let mut sum = (0.0f32, 0.0f32);
                 let mut count = 0usize;
@@ -3677,6 +3814,8 @@ impl Animals {
                 let mut threat: Option<((f32, f32, f32), f32)> = None;
                 let mut packmate: Option<(EntityId, (f32, f32, f32), f32)> = None;
                 let mut leader: Option<(EntityId, Leader)> = None;
+                let mut straggler: Option<((f32, f32), f32)> = None;
+                let keeps_herd = animal.stallion && !animal.keep.is_some_and(|k| k.tame);
                 let follows = matches!(animal.species.grouping(), Grouping::Herd | Grouping::Pack);
                 // A fed wolf is not hunting, so it does not need to be
                 // told where dinner is -- and, more to the point, the
@@ -3730,6 +3869,20 @@ impl Animals {
                     if other.species != animal.species {
                         continue;
                     }
+                    // The mare furthest out, for a stallion, if one is out
+                    // past `STRAY` -- and not one somebody has tamed, which is
+                    // no longer his.
+                    if keeps_herd
+                        && distance_sq > STRAY * STRAY
+                        && distance_sq <= STALLION_RANGE * STALLION_RANGE
+                        && !other.keep.is_some_and(|k| k.tame)
+                        && other.ride.is_none()
+                    {
+                        match straggler {
+                            Some((_, far)) if far >= distance_sq => {}
+                            _ => straggler = Some(((other.at().0, other.at().2), distance_sq)),
+                        }
+                    }
                     if distance_sq <= HERD_RADIUS * HERD_RADIUS {
                         sum.0 += other.at().0;
                         sum.1 += other.at().2;
@@ -3757,9 +3910,10 @@ impl Animals {
                     count,
                     packmate.map(|(id, at, _)| (id, at)),
                     leader.map(|(_, leader)| leader),
+                    straggler.map(|(at, _)| at),
                 )
             } else {
-                (None, None, None, 0, None, None)
+                (None, None, None, 0, None, None, None)
             };
 
             seen.push(Neighbours {
@@ -3770,6 +3924,7 @@ impl Animals {
                 threat,
                 packmate,
                 leader,
+                straggler,
             });
         }
         (seen, full_scans)
@@ -4155,9 +4310,12 @@ impl Animals {
         // allowance is free again. One herd is one meeting.
         let (low, high) = primitive_shared::animals::group_size(species);
         let wanted = low + self.rng.below(high - low + 1);
+        // The last of a herd of horses to arrive is its stallion: see
+        // `Animal::stallion`. Marked when the loop is done, however it ends.
+        let mut last = None;
         for _ in 1..wanted {
             if self.animals.len() >= MAX_ANIMALS {
-                return;
+                break;
             }
             let bearing = self.rng.range(0.0, std::f32::consts::TAU);
             let spread = self.rng.range(1.5, GROUP_SPREAD);
@@ -4177,7 +4335,12 @@ impl Animals {
             {
                 continue;
             }
-            self.spawn(species, (cx, ground as f32, cz));
+            last = self.spawn(species, (cx, ground as f32, cz)).or(last);
+        }
+        if species == Species::Horse {
+            if let Some(stallion) = last.and_then(|id| self.animals.iter_mut().find(|a| a.id == id)) {
+                stallion.stallion = true;
+            }
         }
     }
 
@@ -4446,8 +4609,14 @@ const TEND_REACH: f32 = 3.5;
 /// `Animals::tend`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tended {
-    /// It took the feed -- `tamed` if that was the feed that did it.
-    Fed { tamed: bool },
+    /// It took the feed -- `tamed` if that was the feed that did it --
+    /// `gentled` if it was the feed that made a horse willing to be tried
+    /// (`husbandry::needs_breaking`).
+    Fed { tamed: bool, gentled: bool },
+    /// A saddle went on its back: the one in the hand is spent.
+    Saddled,
+    /// Saddlebags went on: the pair in the hand is spent.
+    Bagged,
     /// Sheared: this much wool.
     Shorn(u32),
     /// A bowl of milk.
@@ -4473,9 +4642,17 @@ struct KeptRecord {
     keep: husbandry::Keeping,
     /// The world day it was parked on, if it was.
     parked_on: Option<f32>,
+    /// A horse's saddle, bags and load, and how far its breaking got. See
+    /// `HERD_FORMAT_VERSION` for why this is at the end.
+    gear: Option<horse::Gear>,
 }
 
-const HERD_FORMAT_VERSION: u32 = 1;
+/// **Two: the horse's gear went on the end of every record.** bincode writes
+/// a struct field by field with no names, so a version-one file read as the
+/// new shape would take the next animal's species for this one's gear. The
+/// old shape is read and comes in with no gear, which is what every animal
+/// in it had -- nothing was ever saddled before this.
+const HERD_FORMAT_VERSION: u32 = 2;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct HerdFile {
@@ -4484,6 +4661,45 @@ struct HerdFile {
     /// at the time counts its absence from.
     day: f32,
     animals: Vec<KeptRecord>,
+}
+
+/// Version one's record: `KeptRecord` before the horse. See
+/// `HERD_FORMAT_VERSION`.
+#[derive(serde::Deserialize)]
+struct KeptRecordV1 {
+    species: Species,
+    position: (f64, f64, f64),
+    yaw: f32,
+    health: f32,
+    growth: f32,
+    birth_rest: f32,
+    mother: Option<u32>,
+    keep: husbandry::Keeping,
+    parked_on: Option<f32>,
+}
+
+#[derive(serde::Deserialize)]
+struct HerdFileV1 {
+    #[allow(dead_code)]
+    version: u32,
+    day: f32,
+    animals: Vec<KeptRecordV1>,
+}
+
+#[derive(serde::Deserialize)]
+struct HerdVersion {
+    version: u32,
+}
+
+/// What a right click on a horse's back came to. See `Animals::mount`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mounting {
+    /// On, and riding: where the horse is, and what it has in it.
+    Riding { body: horse::Mount, fettle: horse::Fettle, broke: bool },
+    /// A gentled horse had them off (`husbandry::thrown`): where it stood.
+    Thrown { at: (f64, f64, f64) },
+    /// Not on, and why, in the words the player is told.
+    Refused(&'static str),
 }
 
 impl Animals {
@@ -4501,6 +4717,9 @@ impl Animals {
         let Some(held) = held else {
             return Tended::Refused("you have nothing in your hand");
         };
+        if primitive_shared::types::is_tack(held) {
+            return self.saddle_up(id, from, held);
+        }
         // Her lamb, while it is still one: asked before the mutable borrow.
         let has_lamb = self
             .find(id)
@@ -4541,10 +4760,21 @@ impl Animals {
                 Tended::Refused("she has no milk to give yet")
             };
         }
+        // **A wild horse will not eat from a hand it is running from.** The
+        // approach is the taming: a horse sees a walker at fourteen blocks
+        // and bolts (`Species::awareness`), and the player who reaches one
+        // is the player who crept (`Gait`). A horse caught at the end of a
+        // bolt by somebody who sprinted after it is still bolting.
+        let wild = !animal.keep.is_some_and(|k| k.tame);
+        if animal.species == Species::Horse && wild && animal.mind == Mind::Flee {
+            return Tended::Refused("it shies away from you: come at it slowly");
+        }
         let fresh = animal.keep.is_none();
+        let was_gentled = animal.keep.is_some_and(|k| k.gentled());
         let keep = animal.keep.get_or_insert_with(husbandry::Keeping::wild);
         match keep.feed(animal.species, held, at) {
             Ok(tamed) => {
+                let gentled = keep.gentled() && !was_gentled;
                 // Its head is in your hand: whatever it was wary of, it is
                 // not now.
                 animal.wary_for = 0.0;
@@ -4553,7 +4783,7 @@ impl Animals {
                 if animal.mind != Mind::Flee {
                     animal.mind = Mind::Idle;
                 }
-                Tended::Fed { tamed }
+                Tended::Fed { tamed, gentled }
             }
             Err(refused) => {
                 // Offered the wrong thing, a wild animal is still nobody's:
@@ -4575,6 +4805,233 @@ impl Animals {
         std::mem::take(&mut self.dung)
     }
 
+    /// What dead horses left on the ground since the tick loop last asked:
+    /// see `Animals::spilled`.
+    pub fn take_spilled(&mut self) -> Vec<Spilled> {
+        std::mem::take(&mut self.spilled)
+    }
+
+    /// Tells the animals whether it is raining, for the kept horses standing
+    /// out in it. A setter for `carrying_fire`'s reason.
+    pub fn rain(&mut self, raining: bool) {
+        self.raining = raining;
+    }
+
+    /// A saddle or saddlebags held out to animal `id`: on, if it is a broken
+    /// horse and not already wearing one.
+    ///
+    /// **Only on a tame horse.** A gentled one throws its rider still, and a
+    /// saddle on a horse nobody can sit is a saddle a player has to take the
+    /// word of the game for; the breaking is bareback, as it is.
+    fn saddle_up(&mut self, id: EntityId, from: (f32, f32, f32), held: primitive_shared::types::BlockId) -> Tended {
+        let Some(animal) = self.animals.iter_mut().find(|a| a.id == id) else {
+            return Tended::Refused("it is gone");
+        };
+        let at = animal.at();
+        let (dx, dy, dz) = (at.0 - from.0, at.1 - from.1, at.2 - from.2);
+        if (dx * dx + dy * dy + dz * dz).sqrt() > TEND_REACH + animal.species.width() * 0.5 {
+            return Tended::Refused("too far away");
+        }
+        if animal.species != Species::Horse {
+            return Tended::Refused("that goes on a horse");
+        }
+        if !animal.keep.is_some_and(|k| k.tame) {
+            return Tended::Refused("it will not stand for that: break it first");
+        }
+        if youth::is_young(animal.growth) {
+            return Tended::Refused("it is too young to carry anything");
+        }
+        let gear = animal.gear.get_or_insert_with(Default::default);
+        if primitive_shared::types::block_kind(held) == primitive_shared::types::BLOCK_SADDLE {
+            if gear.saddle {
+                return Tended::Refused("it already wears a saddle");
+            }
+            gear.saddle = true;
+            Tended::Saddled
+        } else {
+            if gear.bags.is_some() {
+                return Tended::Refused("it already carries saddlebags");
+            }
+            gear.bags = Some(primitive_shared::inventory::Inventory::new());
+            Tended::Bagged
+        }
+    }
+
+    /// A player at `from` getting on horse `id`.
+    ///
+    /// **Three answers, and the middle one is the breaking.** A tame horse
+    /// stands for its rider. A gentled one -- fed enough, never sat on
+    /// (`Keeping::gentled`) -- is tried: `husbandry::thrown` on the times it
+    /// has been got on already, and a throw puts the rider on the ground and
+    /// the horse off a few strides and unwilling for `SETTLE_SECONDS`. A horse
+    /// that stays still under them is broken on the spot, and home is where
+    /// it happened. Anything else refuses to be got near.
+    pub fn mount(&mut self, id: EntityId, rider: PlayerId, from: (f32, f32, f32)) -> Mounting {
+        if self.animals.iter().any(|a| a.ride.is_some_and(|r| r.rider == rider)) {
+            return Mounting::Refused("you are already riding");
+        }
+        let roll = self.rng.range(0.0, 1.0);
+        let Some(animal) = self.animals.iter_mut().find(|a| a.id == id) else {
+            return Mounting::Refused("it is gone");
+        };
+        if animal.species != Species::Horse {
+            return Mounting::Refused("you cannot ride that");
+        }
+        let at = animal.at();
+        if (at.0 - from.0).hypot(at.2 - from.2) > horse::MOUNT_REACH + animal.species.width() * 0.5
+            || (at.1 - from.1).abs() > 2.5
+        {
+            return Mounting::Refused("too far away");
+        }
+        if animal.ride.is_some() {
+            return Mounting::Refused("somebody is already on it");
+        }
+        if youth::is_young(animal.growth) {
+            return Mounting::Refused("it is too young to carry anybody");
+        }
+        let Some(keep) = animal.keep.as_mut() else {
+            return Mounting::Refused("it will not let you near its back: gentle it with food first");
+        };
+        let mut broke = false;
+        if !keep.tame {
+            if !keep.gentled() {
+                return Mounting::Refused("it will not let you near its back: gentle it with food first");
+            }
+            if animal.settle_for > 0.0 {
+                return Mounting::Refused("it is still wild-eyed from the last time: let it settle");
+            }
+            let gear = animal.gear.get_or_insert_with(Default::default);
+            let attempt = gear.rides;
+            gear.rides = gear.rides.saturating_add(1);
+            if husbandry::thrown(attempt, roll) {
+                animal.settle_for = husbandry::SETTLE_SECONDS;
+                // Off a few strides, the way from the rider it threw, and
+                // then it stands: a thrown rider is looking at a horse that
+                // has not gone anywhere, which is what makes the next try
+                // a decision rather than a chase.
+                let away = (at.2 - from.2).atan2(at.0 - from.0);
+                animal.mind = Mind::Flee;
+                animal.wants_yaw = away;
+                animal.next_thought = 1.2;
+                return Mounting::Thrown { at: animal.position };
+            }
+            keep.break_in(at);
+            broke = true;
+        }
+        let fettle = fettle_of(animal.keep.as_ref(), animal.gear.as_deref());
+        let (x, y, z) = animal.position;
+        let body = horse::Mount::standing(x, y, z, animal.yaw, fettle.most_wind);
+        animal.ride = Some(Ride { rider, body, reins: horse::Reins::SLACK, reins_age: 0.0, jump_for: 0.0 });
+        animal.mind = Mind::Idle;
+        animal.target = None;
+        animal.velocity = (0.0, 0.0, 0.0);
+        Mounting::Riding { body, fettle, broke }
+    }
+
+    /// Off horse `id`, if `rider` is the one on it. Answers where the horse
+    /// stood.
+    pub fn dismount(&mut self, id: EntityId, rider: PlayerId) -> Option<horse::Mount> {
+        let animal = self.animals.iter_mut().find(|a| a.id == id)?;
+        let ride = animal.ride.filter(|r| r.rider == rider)?;
+        animal.ride = None;
+        animal.velocity = (0.0, 0.0, 0.0);
+        animal.mind = Mind::Idle;
+        animal.next_thought = 2.0;
+        Some(ride.body)
+    }
+
+    /// The reins, from `rider`, for horse `id`. Ignored unless they are the
+    /// one on it -- a passer-by's reins steer nothing.
+    pub fn rein(&mut self, id: EntityId, rider: PlayerId, reins: horse::Reins) -> bool {
+        let Some(ride) = self.animals.iter_mut().find(|a| a.id == id).and_then(|a| a.ride.as_mut()) else {
+            return false;
+        };
+        if ride.rider != rider {
+            return false;
+        }
+        ride.reins = reins.clamped();
+        ride.reins_age = 0.0;
+        if reins.jump {
+            ride.jump_for = JUMP_LATCH;
+        }
+        true
+    }
+
+    /// The horse `rider` is on, where it is, and what it has in it.
+    pub fn ridden_by(&self, rider: PlayerId) -> Option<(EntityId, horse::Mount, horse::Fettle)> {
+        self.animals.iter().find_map(|a| {
+            let ride = a.ride.filter(|r| r.rider == rider)?;
+            Some((a.id, ride.body, fettle_of(a.keep.as_ref(), a.gear.as_deref())))
+        })
+    }
+
+    /// Everybody on a horse, and which: the tick loop's list, for putting the
+    /// riders on their saddles (`horses::tick`).
+    pub fn riders(&self) -> Vec<(PlayerId, EntityId, horse::Mount)> {
+        self.animals.iter().filter_map(|a| a.ride.map(|r| (r.rider, a.id, r.body))).collect()
+    }
+
+    /// A player went away: off whatever they were riding.
+    pub fn forget_rider(&mut self, rider: PlayerId) {
+        for animal in &mut self.animals {
+            if animal.ride.is_some_and(|r| r.rider == rider) {
+                animal.ride = None;
+                animal.velocity = (0.0, 0.0, 0.0);
+            }
+        }
+    }
+
+    /// The saddlebags on horse `id`, if it wears a pair and is within reach
+    /// of an eye at `from`: what `OpenBags` and every gesture at them ask.
+    pub fn bags_within(&mut self, id: EntityId, from: (f32, f32, f32), reach: f32) -> Option<&mut primitive_shared::inventory::Inventory> {
+        let animal = self.animals.iter_mut().find(|a| a.id == id)?;
+        let at = animal.at();
+        if (at.0 - from.0).hypot(at.2 - from.2) > reach + animal.species.width() * 0.5 || (at.1 - from.1).abs() > 3.0 {
+            return None;
+        }
+        animal.gear.as_mut()?.bags.as_mut()
+    }
+
+    /// Puts a keeping and gear on an animal outright: scenarios and mods, for
+    /// an animal somebody is meant to have kept already.
+    pub fn put_keeping(&mut self, id: EntityId, keep: husbandry::Keeping, gear: Option<horse::Gear>) {
+        if let Some(animal) = self.animals.iter_mut().find(|a| a.id == id) {
+            animal.keep = Some(keep);
+            animal.gear = gear.map(Box::new);
+        }
+    }
+
+    /// What a horse wears and carries.
+    pub fn gear(&self, id: EntityId) -> Option<horse::Gear> {
+        self.find(id).and_then(|a| a.gear.as_deref().cloned())
+    }
+
+    /// Where horse `id` is. A dead or forgotten horse is nowhere.
+    pub fn horse_at(&self, id: EntityId) -> Option<(f64, f64, f64)> {
+        self.find(id).filter(|a| a.species == Species::Horse).map(|a| a.position)
+    }
+
+    /// What a horse is wearing, for tests.
+    #[cfg(test)]
+    pub fn gear_for_test(&mut self, id: EntityId) -> Option<&mut horse::Gear> {
+        let animal = self.animals.iter_mut().find(|a| a.id == id)?;
+        Some(animal.gear.get_or_insert_with(Default::default))
+    }
+
+    /// Whether this animal is its herd's stallion. Tests.
+    #[cfg(test)]
+    pub fn is_stallion(&self, id: EntityId) -> bool {
+        self.find(id).is_some_and(|a| a.stallion)
+    }
+
+    /// Makes one its herd's stallion. Tests.
+    #[cfg(test)]
+    pub fn make_stallion_for_test(&mut self, id: EntityId) {
+        if let Some(animal) = self.animals.iter_mut().find(|a| a.id == id) {
+            animal.stallion = true;
+        }
+    }
+
     /// The days that went by, for every kept animal in the world: hunger,
     /// fleece, trust, condition and dung (`Keeping::pass_days`). **Grazing is
     /// asked of the ground under it**, so a pen on turf is half a flock's keep
@@ -4593,6 +5050,17 @@ impl Animals {
                 .is_some_and(is_pasture);
             for _ in 0..keep.pass_days(days, grazing) {
                 self.dung.push(animal.position);
+            }
+            // **A kept horse out in the rain** loses condition: see
+            // `husbandry::EXPOSED_CONDITION_PER_DAY`. The sky over its head,
+            // read from the cell its head is in; a roof anywhere above it is
+            // shelter, a tree included -- which is the lean-to's argument for
+            // a stable, not a rule against a wood.
+            if self.raining && animal.species == Species::Horse && keep.tame {
+                let head = (x.floor() as i32, y.floor() as i32 + 1, z.floor() as i32);
+                if primitive_shared::pit::open_to_the_sky(|bx, by, bz| world.block(bx, by, bz), head) {
+                    keep.exposed(days);
+                }
             }
             if keep.forgotten() {
                 animal.keep = None;
@@ -4737,6 +5205,7 @@ impl Animals {
                     mother: a.mother.and_then(index_of),
                     keep: a.keep?,
                     parked_on,
+                    gear: a.gear.as_deref().cloned(),
                 })
             })
             .collect();
@@ -4762,12 +5231,40 @@ impl Animals {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(e),
         };
-        let Ok(file) = bincode::deserialize::<HerdFile>(&bytes) else {
+        let Ok(version) = bincode::deserialize::<HerdVersion>(&bytes) else {
             return Ok(0);
         };
-        if file.version != HERD_FORMAT_VERSION {
-            return Ok(0);
-        }
+        let file = match version.version {
+            HERD_FORMAT_VERSION => match bincode::deserialize::<HerdFile>(&bytes) {
+                Ok(file) => file,
+                Err(_) => return Ok(0),
+            },
+            // Before the horse: the same records with no gear on them.
+            1 => match bincode::deserialize::<HerdFileV1>(&bytes) {
+                Ok(old) => HerdFile {
+                    version: HERD_FORMAT_VERSION,
+                    day: old.day,
+                    animals: old
+                        .animals
+                        .into_iter()
+                        .map(|r| KeptRecord {
+                            species: r.species,
+                            position: r.position,
+                            yaw: r.yaw,
+                            health: r.health,
+                            growth: r.growth,
+                            birth_rest: r.birth_rest,
+                            mother: r.mother,
+                            keep: r.keep,
+                            parked_on: r.parked_on,
+                            gear: None,
+                        })
+                        .collect(),
+                },
+                Err(_) => return Ok(0),
+            },
+            _ => return Ok(0),
+        };
         // Index in the file to the animal made for it, so the family can be
         // tied back up below. A record with a bad position is skipped, and
         // its lamb is simply motherless.
@@ -4786,6 +5283,7 @@ impl Animals {
             animal.growth = if record.growth.is_finite() { record.growth.clamp(0.0, youth::GROWN) } else { youth::GROWN };
             animal.birth_rest = record.birth_rest.max(0.0);
             animal.keep = Some(record.keep);
+            animal.gear = record.gear.clone().map(Box::new);
             made.push(Some(animal.id));
             self.parked.push((animal, record.parked_on.unwrap_or(file.day)));
         }
@@ -6797,6 +7295,17 @@ fn graze(
     // (`HERD_FOLLOW`), and graze near it when it does not -- more patiently
     // than it does, so the leader is the one that sets the herd off.
     let grouping = animal.species.grouping();
+    // **The stallion goes for the one that has strayed**, before any rule
+    // about his own place in the herd: out past her, so the herd's own rules
+    // -- which put her back toward the middle of whoever is near -- have him
+    // on the far side to put her back toward.
+    if let Some((sx, sz)) = seen.straggler {
+        let (dx, dz) = (sx - animal.at().0, sz - animal.at().2);
+        animal.mind = Mind::Wander;
+        animal.wants_yaw = open_heading(world, animal, dz.atan2(dx));
+        animal.next_thought = rng.range(0.8, 1.6);
+        return;
+    }
     if matches!(grouping, Grouping::Herd | Grouping::Pack) {
         if let Some((_, mate)) = seen.packmate {
             let (dx, dz) = (animal.at().0 - mate.0, animal.at().2 - mate.2);
@@ -9213,6 +9722,37 @@ fn gasp(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
 /// at the feet and at the middle of the body: a fire an animal is standing
 /// *in* reaches its feet, a wider one reaches into its flank, and a burning
 /// pit it stands *on* reaches it from under its feet.
+/// A ridden horse, a tick on: `horse::step` with the rider's reins, and the
+/// animal put where the body went.
+///
+/// **The same step the rider's client predicts with** (`horse`'s module note):
+/// what the server adds is the authority -- a stale rein runs out
+/// (`REINS_TIMEOUT`), and the wind, hunger and load are the server's own
+/// keeping and gear (`fettle_of`), never the client's word.
+fn carry(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) {
+    let fettle = fettle_of(animal.keep.as_ref(), animal.gear.as_deref());
+    let Some(ride) = animal.ride.as_mut() else {
+        return;
+    };
+    ride.reins_age += dt;
+    let mut reins = if ride.reins_age > REINS_TIMEOUT { horse::Reins::SLACK } else { ride.reins };
+    reins.jump = ride.jump_for > 0.0;
+    let was_up = !ride.body.on_ground;
+    horse::step(&mut ride.body, reins, fettle, &|x, y, z| world.block(x, y, z), dt);
+    // Spent by the jump it made, or run out: see `Ride::jump_for`.
+    ride.jump_for = if !was_up && !ride.body.on_ground && ride.body.vy > 0.0 { 0.0 } else { (ride.jump_for - dt).max(0.0) };
+    let body = ride.body;
+    animal.position = (body.x, body.y, body.z);
+    animal.yaw = body.yaw;
+    animal.wants_yaw = body.yaw;
+    animal.velocity = (body.vx, body.vy, body.vz);
+    animal.on_ground = body.on_ground;
+    animal.mind = Mind::Idle;
+    animal.next_thought = 1.0;
+    animal.attitude = primitive_shared::protocol::Attitude::Easy;
+    animal.fall_peak_y = None;
+}
+
 fn burn(animal: &Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
     let middle = animal.species.height() * 0.5;
     if !crate::logic::survival::touches_fire(animal.at(), &[middle], |x, y, z| world.block(x, y, z)) {
@@ -10327,6 +10867,7 @@ mod tests {
             threat: None,
             packmate: None,
             leader: None,
+            straggler: None,
         };
         let crowded = Neighbours { company: 2, ..alone };
         let mut animals = Animals::seeded(45);
@@ -15307,14 +15848,14 @@ mod husbandry_tests {
         let sheep = animals.spawn(Species::Sheep, (0.5, 21.0, 0.5)).expect("sheep");
         let eye = (2.0, 22.6, 0.5);
         animals.calendar(0.0);
-        assert_eq!(animals.tend(sheep, eye, Some(BLOCK_GRAIN)), Tended::Fed { tamed: false });
+        assert_eq!(animals.tend(sheep, eye, Some(BLOCK_GRAIN)), Tended::Fed { tamed: false, gentled: false });
         assert_eq!(animals.tend(sheep, eye, Some(BLOCK_GRAIN)), Tended::Refused("it is not hungry yet"));
         let mut tamed = false;
         for n in 1..=2 {
             animals.calendar(n as f32 * 0.6);
             animals.step(&world, &at(2.0, 0.5), 0.05, NOON);
             let eye = animals.position(sheep).map(|p| (p.0 + 1.5, 22.6, p.2)).expect("still here");
-            tamed = animals.tend(sheep, eye, Some(BLOCK_GRAIN)) == Tended::Fed { tamed: true };
+            tamed = animals.tend(sheep, eye, Some(BLOCK_GRAIN)) == Tended::Fed { tamed: true, gentled: false };
         }
         assert!(tamed, "the third feed did not tame it");
         assert!(animals.keeping(sheep).is_some_and(|k| k.tame && k.home.is_some()));
@@ -15591,6 +16132,284 @@ mod husbandry_tests {
         let bytes = bincode::serialize(&HerdFile { version: HERD_FORMAT_VERSION + 1, day: 0.0, animals: Vec::new() }).unwrap();
         std::fs::write(dir.join("herd.bin"), bytes).unwrap();
         assert_eq!(Animals::new().load_herd(&dir).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod horse_tests {
+    use super::*;
+    use crate::logic::falling::tests::TestWorld;
+    use primitive_shared::husbandry::Keeping;
+    use primitive_shared::types::{BLOCK_AIR, BLOCK_COPPER_ORE, BLOCK_SADDLE, BLOCK_SADDLEBAGS, BLOCK_STONE};
+
+    const NOON: f32 = 0.5;
+    const RIDER: PlayerId = 1;
+
+    fn meadow(span: i32) -> TestWorld {
+        let world = TestWorld::default();
+        for z in -span..=span {
+            for x in -span..=span {
+                world.put(x, 20, z, BLOCK_GRASS);
+                for y in 21..30 {
+                    world.put(x, y, z, BLOCK_AIR);
+                }
+            }
+        }
+        world
+    }
+
+    /// Somebody standing well off, so nothing is forgotten for being far
+    /// from everybody (`forget_the_distant`) and nothing is near enough to
+    /// be frightened of them.
+    fn watcher() -> Vec<(PlayerId, (f32, f32, f32))> {
+        vec![(9, (-40.0, 21.0, -40.0))]
+    }
+
+    fn tame() -> Keeping {
+        Keeping { trust: 1.0, tame: true, home: Some((0.5, 21.0, 0.5)), hunger: 0.0, well_fed: 1.0, ..Keeping::wild() }
+    }
+
+    fn gentled() -> Keeping {
+        Keeping { trust: 1.0, tame: false, hunger: 0.0, ..Keeping::wild() }
+    }
+
+    /// Standing a stride off its flank, where a rider gets on from.
+    fn beside(animals: &Animals, horse: EntityId) -> (f32, f32, f32) {
+        let p = animals.position(horse).expect("the horse is gone");
+        (p.0 + 1.2, p.1, p.2)
+    }
+
+    fn saddled_horse(animals: &mut Animals) -> EntityId {
+        let horse = animals.spawn(Species::Horse, (0.5, 21.0, 0.5)).expect("a horse");
+        animals.keep_for_test(horse, tame());
+        animals.gear_for_test(horse).expect("gear").saddle = true;
+        animals.face_for_test(horse, 0.0);
+        horse
+    }
+
+    /// `seconds` of riding with `reins` sent every quarter second, as a
+    /// client does: answers the horse's fastest speed over the ground.
+    fn ride(animals: &mut Animals, world: &TestWorld, horse: EntityId, reins: Option<horse::Reins>, seconds: f32) -> f32 {
+        let mut fastest = 0.0f32;
+        for tick in 0..(seconds / 0.05) as usize {
+            if let Some(reins) = reins.filter(|_| tick % 5 == 0) {
+                assert!(animals.rein(horse, RIDER, reins), "the reins went to nobody");
+            }
+            let at = animals.ridden_by(RIDER).map(|(_, body, _)| body.saddle());
+            let players: Vec<(PlayerId, (f32, f32, f32))> =
+                at.map(|s| vec![(RIDER, (s[0] as f32, s[1] as f32, s[2] as f32))]).unwrap_or_default();
+            animals.step(world, &players, 0.05, NOON);
+            if let Some((_, body, _)) = animals.ridden_by(RIDER) {
+                fastest = fastest.max(body.speed());
+            }
+        }
+        fastest
+    }
+
+    fn gallop() -> Option<horse::Reins> {
+        Some(horse::Reins { forward: 1.0, turn: 0.0, gait: horse::Gait::Gallop, jump: false })
+    }
+
+    #[test]
+    fn a_wild_horse_will_not_be_got_on_and_a_gentled_one_throws_its_rider_until_it_is_broken() {
+        let world = meadow(40);
+        let mut animals = Animals::seeded(11);
+        let horse = animals.spawn(Species::Horse, (0.5, 21.0, 0.5)).expect("a horse");
+        assert!(matches!(animals.mount(horse, RIDER, beside(&animals, horse)), Mounting::Refused(_)), "a wild horse let a stranger on");
+        animals.keep_for_test(horse, gentled());
+        let mut tries = 0;
+        let broke = loop {
+            tries += 1;
+            assert!(tries <= husbandry::THROW_CHANCES.len(), "still throwing its rider after {tries} tries");
+            match animals.mount(horse, RIDER, beside(&animals, horse)) {
+                Mounting::Riding { broke, .. } => break broke,
+                Mounting::Thrown { .. } => {
+                    // Too soon, and it will not be tried at all.
+                    assert!(matches!(animals.mount(horse, RIDER, beside(&animals, horse)), Mounting::Refused(_)));
+                    for _ in 0..((husbandry::SETTLE_SECONDS + 0.5) / 0.05) as usize {
+                        animals.step(&world, &watcher(), 0.05, NOON);
+                    }
+                }
+                Mounting::Refused(why) => panic!("a gentled horse refused a try: {why}"),
+            }
+        };
+        assert!(broke, "the ride that stayed on did not say it broke the horse");
+        assert!(animals.keeping(horse).is_some_and(|k| k.tame && k.home.is_some()), "a broken horse is not tame");
+        assert!(matches!(animals.mount(horse, 2, beside(&animals, horse)), Mounting::Refused(_)), "two riders on one horse");
+    }
+
+    #[test]
+    fn a_saddled_horse_gallops_faster_than_a_sprint_and_stands_when_the_reins_go_quiet() {
+        let world = meadow(120);
+        let mut animals = Animals::seeded(12);
+        let horse = saddled_horse(&mut animals);
+        assert!(matches!(animals.mount(horse, RIDER, beside(&animals, horse)), Mounting::Riding { broke: false, .. }));
+        let fastest = ride(&mut animals, &world, horse, gallop(), 4.0);
+        assert!(fastest > primitive_shared::animals::NOMINAL_SPRINT_SPEED * 1.5, "a gallop under a rider was {fastest}");
+        ride(&mut animals, &world, horse, None, 3.0);
+        let (_, body, _) = animals.ridden_by(RIDER).expect("fell off");
+        assert!(body.speed() < 0.1, "a horse nobody was asking went on at {}", body.speed());
+    }
+
+    #[test]
+    fn bareback_a_horse_trots_and_is_never_asked_to_gallop() {
+        let world = meadow(120);
+        let mut animals = Animals::seeded(13);
+        let horse = saddled_horse(&mut animals);
+        animals.gear_for_test(horse).expect("gear").saddle = false;
+        animals.mount(horse, RIDER, beside(&animals, horse));
+        let fastest = ride(&mut animals, &world, horse, gallop(), 4.0);
+        assert!(fastest <= horse::TROT + 0.05, "bareback it galloped at {fastest}");
+    }
+
+    #[test]
+    fn a_heavy_load_in_the_bags_slows_the_gallop() {
+        let world = meadow(120);
+        let speed_with = |ore: u32| {
+            let mut animals = Animals::seeded(14);
+            let horse = saddled_horse(&mut animals);
+            let mut bags = primitive_shared::inventory::Inventory::new();
+            if ore > 0 {
+                bags.add(BLOCK_COPPER_ORE, ore);
+            }
+            animals.gear_for_test(horse).expect("gear").bags = Some(bags);
+            animals.mount(horse, RIDER, beside(&animals, horse));
+            ride(&mut animals, &world, horse, gallop(), 4.0)
+        };
+        let (empty, laden) = (speed_with(0), speed_with(64));
+        assert!(laden < empty * 0.9, "sixty-four ore cost nothing: {empty} empty, {laden} laden");
+    }
+
+    #[test]
+    fn a_horse_killed_under_its_load_leaves_the_saddle_the_bags_and_every_stack() {
+        let mut animals = Animals::seeded(15);
+        let horse = saddled_horse(&mut animals);
+        let mut bags = primitive_shared::inventory::Inventory::new();
+        bags.add(BLOCK_COPPER_ORE, 30);
+        animals.gear_for_test(horse).expect("gear").bags = Some(bags);
+        animals.hurt(horse, 10_000.0).expect("it did not die");
+        let spilled = animals.take_spilled();
+        let all: Vec<(primitive_shared::types::BlockId, u32)> = spilled.into_iter().flat_map(|(_, left)| left).collect();
+        assert!(all.contains(&(BLOCK_SADDLE, 1)) && all.contains(&(BLOCK_SADDLEBAGS, 1)), "the tack vanished: {all:?}");
+        assert_eq!(all.iter().filter(|(b, _)| *b == BLOCK_COPPER_ORE).map(|(_, n)| n).sum::<u32>(), 30);
+    }
+
+    #[test]
+    fn a_kept_horse_left_out_in_the_rain_loses_condition_and_one_under_a_roof_does_not() {
+        let world = meadow(20);
+        // A slab of stone over the second horse's stall.
+        for z in 5..=7 {
+            for x in 5..=7 {
+                world.put(x, 24, z, BLOCK_STONE);
+            }
+        }
+        let mut animals = Animals::seeded(16);
+        let out = animals.spawn(Species::Horse, (-5.5, 21.0, -5.5)).expect("a horse");
+        let stabled = animals.spawn(Species::Horse, (6.5, 21.0, 6.5)).expect("a horse");
+        for horse in [out, stabled] {
+            animals.keep_for_test(horse, tame());
+        }
+        animals.rain(true);
+        animals.calendar(0.0);
+        animals.calendar(1.0);
+        animals.step(&world, &watcher(), 0.05, NOON);
+        let condition = |h| animals.keeping(h).expect("kept").condition;
+        assert!(
+            condition(out) < condition(stabled) - 0.3,
+            "the rain cost nothing: {} out, {} under a roof",
+            condition(out),
+            condition(stabled)
+        );
+    }
+
+    #[test]
+    fn a_stallion_goes_after_a_mare_that_has_strayed_and_a_mare_in_his_place_does_not() {
+        // The same herd twice, from the same seed: once with the fourth horse
+        // its stallion, once without.
+        let closest = |is_stallion: bool| {
+            let world = meadow(60);
+            let mut animals = Animals::seeded(17);
+            let lead = animals.spawn(Species::Horse, (0.5, 21.0, 0.5)).expect("a horse");
+            let _mare = animals.spawn(Species::Horse, (2.5, 21.0, 0.5)).expect("a horse");
+            let stray = animals.spawn(Species::Horse, (16.5, 21.0, 16.5)).expect("a horse");
+            let fourth = animals.spawn(Species::Horse, (1.5, 21.0, 2.5)).expect("a horse");
+            if is_stallion {
+                animals.make_stallion_for_test(fourth);
+                assert!(animals.is_stallion(fourth) && !animals.is_stallion(lead));
+            }
+            let gap = |a: &Animals| {
+                let (s, m) = (a.position(fourth).expect("the fourth"), a.position(stray).expect("the mare"));
+                (s.0 - m.0).hypot(s.2 - m.2)
+            };
+            let mut nearest = gap(&animals);
+            for _ in 0..(12.0 / 0.05) as usize {
+                animals.step(&world, &watcher(), 0.05, NOON);
+                nearest = nearest.min(gap(&animals));
+            }
+            nearest
+        };
+        let (stallion, mare) = (closest(true), closest(false));
+        // To within `STRAY` of her and a stride, which is where the herd's own
+        // rules take over: he goes to her, not onto her.
+        assert!(stallion <= STRAY + 2.5, "the stallion never went for the stray: at best {stallion}");
+        assert!(mare > STRAY + 2.5, "a plain mare went after the stray as well: {mare}");
+    }
+
+    #[test]
+    fn a_saddled_horse_and_its_load_come_back_from_the_herd_file_and_a_version_one_file_still_loads() {
+        let mut animals = Animals::seeded(18);
+        let horse = saddled_horse(&mut animals);
+        let mut bags = primitive_shared::inventory::Inventory::new();
+        bags.add(BLOCK_COPPER_ORE, 12);
+        animals.gear_for_test(horse).expect("gear").bags = Some(bags);
+        let dir = std::env::temp_dir().join(format!("primitive-horse-herd-{}", std::process::id()));
+        assert_eq!(animals.save_herd(&dir).expect("written"), 1);
+        let mut again = Animals::seeded(19);
+        assert_eq!(again.load_herd(&dir).expect("read"), 1);
+        let world = meadow(10);
+        again.step(&world, &[(RIDER, (2.0, 21.0, 0.5))], 0.05, NOON);
+        let back = again.ids().into_iter().find(|&id| again.horse_at(id).is_some()).expect("the horse did not come back");
+        let gear = again.gear_for_test(back).expect("gear");
+        assert!(gear.saddle, "the saddle did not come back");
+        assert_eq!(gear.bags.as_ref().map(|b| b.count(BLOCK_COPPER_ORE)), Some(12), "the load did not come back");
+
+        // The shape before the horse, written as it was written then.
+        #[derive(serde::Serialize)]
+        struct RecordV1 {
+            species: Species,
+            position: (f64, f64, f64),
+            yaw: f32,
+            health: f32,
+            growth: f32,
+            birth_rest: f32,
+            mother: Option<u32>,
+            keep: husbandry::Keeping,
+            parked_on: Option<f32>,
+        }
+        #[derive(serde::Serialize)]
+        struct FileV1 {
+            version: u32,
+            day: f32,
+            animals: Vec<RecordV1>,
+        }
+        let old = FileV1 {
+            version: 1,
+            day: 0.0,
+            animals: vec![RecordV1 {
+                species: Species::Sheep,
+                position: (1.5, 21.0, 1.5),
+                yaw: 0.0,
+                health: 10.0,
+                growth: youth::GROWN,
+                birth_rest: 0.0,
+                mother: None,
+                keep: tame(),
+                parked_on: None,
+            }],
+        };
+        std::fs::write(dir.join("herd.bin"), bincode::serialize(&old).unwrap()).unwrap();
+        assert_eq!(Animals::seeded(20).load_herd(&dir).expect("read"), 1, "a version-one flock was lost");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

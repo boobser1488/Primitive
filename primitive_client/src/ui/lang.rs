@@ -367,6 +367,7 @@ pub enum Msg {
     StrafeRight,
     Jump,
     Sprint,
+    Rein,
     DropItem,
     ToggleFog,
     ToggleStats,
@@ -450,6 +451,7 @@ pub enum Msg {
     /// The same screen over a jug, set down or in hand. One slot of loose
     /// goods -- see `types::opens_as_vessel`.
     Jug,
+    Saddlebags,
     /// What an empty jug's screen says: what may go in. The one thing a
     /// player cannot see from the slot, because the refusal is silent --
     /// a stack of meat dropped on the slot simply does not go in.
@@ -1051,6 +1053,7 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::StrafeRight,  en: "STRAFE RIGHT", simple: "STEP RIGHT", ru: "ШАГ ВПРАВО", pl: "KROK W PRAWO" },
     Line { msg: Msg::Jump,         en: "JUMP",         simple: "JUMP",       ru: "ПРЫЖОК", pl: "SKOK" },
     Line { msg: Msg::Sprint,       en: "SPRINT",       simple: "RUN",        ru: "БЕГ", pl: "SPRINT" },
+    Line { msg: Msg::Rein,         en: "WALK / GET OFF", simple: "HORSE SLOW / GET DOWN", ru: "ШАГОМ / СПЕШИТЬСЯ", pl: "STĘPA / ZSIĄDŹ" },
     Line { msg: Msg::DropItem,     en: "DROP ITEM",    simple: "THROW OUT",  ru: "ВЫБРОСИТЬ", pl: "WYRZUĆ" },
     Line { msg: Msg::ToggleFog,    en: "TOGGLE FOG",   simple: "HAZE ON/OFF", ru: "ТУМАН ВКЛ/ВЫКЛ", pl: "MGŁA WŁ/WYŁ" },
     Line { msg: Msg::ToggleStats,  en: "TOGGLE STATS", simple: "NUMBERS ON/OFF", ru: "СТАТИСТИКА", pl: "STATYSTYKI" },
@@ -1112,6 +1115,7 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::Corpse,       en: "YOUR BODY",    simple: "WHAT IS LEFT OF YOU", ru: "ТЕЛО", pl: "CIAŁO" },
     Line { msg: Msg::Remains,      en: "REMAINS",      simple: "BONES",      ru: "КОСТИ", pl: "KOŚCI" },
     Line { msg: Msg::Jug,          en: "JUG",          simple: "CLAY JUG",   ru: "КУВШИН", pl: "DZBAN" },
+    Line { msg: Msg::Saddlebags,   en: "SADDLEBAGS",   simple: "HORSE BAGS", ru: "ПЕРЕМЁТНЫЕ СУМЫ", pl: "JUKI" },
     Line { msg: Msg::VesselEmpty,  en: "grain, seeds, sand, flakes -- loose and dry", simple: "only loose dry things go in", ru: "зерно, семена, песок, отщепы -- сыпучее", pl: "ziarno, nasiona, piasek, odłupki -- sypkie" },
     Line { msg: Msg::VesselFull,   en: "full to the neck", simple: "it is full", ru: "полон до горла", pl: "pełny po szyjkę" },
     // Head, chest, legs, feet -- the whole word now, because it is read

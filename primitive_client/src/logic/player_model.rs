@@ -76,7 +76,7 @@
 //! snapshots and the interval between them -- so the legs swing without
 //! the server sending a single extra byte, exactly as an animal's do.
 
-use glam::{Mat4, Vec3};
+use glam::{Mat3, Mat4, Vec3};
 
 use primitive_shared::equipment::Slot;
 use primitive_shared::geometry::PLAYER_HEIGHT;
@@ -713,6 +713,65 @@ const SEATED_LEGS: f32 = std::f32::consts::FRAC_PI_2;
 /// the feet on rather than a leg's length above it.
 const SEAT_DROP: f32 = 10.0;
 
+/// How far a rider is let down, in model units: so the seat of their
+/// trousers -- the bottom of the torso, at the hip, twelve units up -- is on
+/// the top of the saddle.
+///
+/// **Measured off the horse, not written down here.** The server puts a
+/// rider's feet `horse::RIDER_LIFT` over the horse's (`horse::Horse::seat`),
+/// and the saddle is laid on the horse model's back (`animal_model::saddle_top`),
+/// so the gap between the two is the only number that decides where a rider
+/// sits -- and a horse made taller in Blockbench takes its rider up with it
+/// rather than sitting them inside its back. Usually a little over a unit:
+/// the lift is a block less than a leg under the saddle.
+fn mount_drop() -> f32 {
+    let seat = crate::logic::animal_model::saddle_top() - primitive_shared::horse::RIDER_LIFT;
+    PARTS[LEG_RIGHT].pivot - seat / SCALE
+}
+
+/// How far a rider's arms are carried forward, in radians: the hands low
+/// over the withers, where the reins come back to.
+const REINS: f32 = 0.75;
+
+/// Where a leg bends, in model units up from the foot: half way.
+///
+/// **A rider is the one pose a one-box leg cannot make.** Sitting on a
+/// chair, a straight leg stuck out in front reads as a doll sitting; astride,
+/// a straight leg either goes forward along the horse's neck -- the leg of
+/// a toy on a rocking horse -- or straight down through its barrel. What
+/// a rider's leg does is go *out* over the back and then *down* the flank,
+/// and that is two directions, so a mounted leg is drawn as two boxes: the
+/// top half of the same leg, laid along `THIGH`, and the bottom half along
+/// `SHIN`, each wearing its own half of the leg's picture (`astride`).
+///
+/// Rejected: **a knee on every figure**, which is a second joint in every
+/// walk cycle, a redrawn skin net and a test suite that indexes parts by
+/// arithmetic -- for a pose only a rider takes. Rejected too: **splaying the
+/// straight leg outward** until it clears the barrel, which needs the feet a
+/// block apart: a rider doing the splits.
+const KNEE: f32 = 6.0;
+
+/// How far each hip is moved out for a rider, in model units: the pelvis
+/// opening round the saddle.
+const HIP_SPREAD: f32 = 1.0;
+
+/// Which way a rider's right thigh runs from the hip, in model units:
+/// mostly out over the horse's back, a little down and a little forward.
+///
+/// **Out far enough that the knee is past the saddle's skirt**: the knee
+/// ends a little over seven units from the middle, and a horse's barrel and
+/// skirt are about six -- `a_rider_s_feet_hang_either_side_of_a_horse_and_not_through_it`
+/// holds the two apart. The left is this mirrored.
+const THIGH: Vec3 = Vec3::new(6.0, -2.0, -2.2);
+
+/// ...and the shin from the knee: straight down the flank, heel a little back
+/// and out, which is where the stirrup is.
+const SHIN: Vec3 = Vec3::new(0.6, -6.0, 0.6);
+
+/// How far each half of a bent leg runs past the knee, in model units, so the
+/// two boxes meet in a joint rather than at an edge with daylight in the angle.
+const KNEE_OVERLAP: f32 = 0.75;
+
 /// Where a lying figure's middle is, in model units up from its feet: the
 /// hip. The server lays a sleeper's feet at the middle of the bed, and the
 /// body is laid out either side of that point.
@@ -774,6 +833,7 @@ fn postured(posture: Posture, unit: Vec3) -> Vec3 {
     match posture {
         Posture::Standing => unit,
         Posture::Sitting => unit - Vec3::Y * SEAT_DROP,
+        Posture::Mounted => unit - Vec3::Y * mount_drop(),
         // (x, y, z) -> (x, -z, y): up goes to +z, front (-z) goes to up.
         Posture::Lying => Vec3::new(unit.x, -unit.z + LYING_LIFT, unit.y - LYING_MIDDLE),
         // A dead figure is not drawn with this -- it lies on its side through
@@ -864,6 +924,17 @@ pub fn joint_angle(joint: Joint, pose: &Pose) -> f32 {
     // furniture and nothing a leg should answer.
     match (pose.posture, joint) {
         (Posture::Sitting, Joint::LegRight | Joint::LegLeft) => return SEATED_LEGS,
+        // Astride, the legs are not swung at all: they are bent at the knee
+        // round the horse (`astride`), which a swing about the hip cannot do.
+        (Posture::Mounted, Joint::LegRight | Joint::LegLeft) => return 0.0,
+        // Both hands forward and low, on the reins over the withers -- and the
+        // right still carries whatever it is doing on top, so a rider can
+        // strike from the saddle.
+        (Posture::Mounted, Joint::ArmLeft) => return REINS,
+        (Posture::Mounted, Joint::ArmRight) => {
+            let base = REINS + held_lift(pose);
+            return base + arm_angle(pose, base);
+        }
         (Posture::Lying, Joint::LegRight | Joint::LegLeft | Joint::ArmRight | Joint::ArmLeft) => {
             return 0.0
         }
@@ -1133,22 +1204,31 @@ fn push_box(
     vertices: &mut Vec<ActorVertex>,
     indices: &mut Vec<u32>,
 ) {
+    push_box_with(|unit| place(pose, feet, joint, pivot, unit), at, size, sheet, tint, vertices, indices);
+}
+
+/// `push_box`, with where each corner goes handed in: `place` for a part
+/// swinging on its joint, and `astride`'s bend for the halves of a rider's
+/// leg -- one copy of the faces, the net and the normals for both.
+fn push_box_with(
+    placed: impl Fn(Vec3) -> Vec3,
+    at: [f32; 3],
+    size: [f32; 3],
+    sheet: impl Fn(usize) -> [f32; 4],
+    tint: [f32; 3],
+    vertices: &mut Vec<ActorVertex>,
+    indices: &mut Vec<u32>,
+) {
     for (face_index, face) in faces().iter().enumerate() {
         let [rx, ry, rw, rh] = sheet(face_index);
         let base = vertices.len() as u32;
         let mut corners = [[0.0f32; 3]; 4];
         for (slot, corner) in face.corners.iter().enumerate() {
-            corners[slot] = place(
-                pose,
-                feet,
-                joint,
-                pivot,
-                Vec3::new(
-                    at[0] + (corner[0] - 0.5) * size[0],
-                    at[1] + (corner[1] - 0.5) * size[1],
-                    at[2] + (corner[2] - 0.5) * size[2],
-                ),
-            )
+            corners[slot] = placed(Vec3::new(
+                at[0] + (corner[0] - 0.5) * size[0],
+                at[1] + (corner[1] - 0.5) * size[1],
+                at[2] + (corner[2] - 0.5) * size[2],
+            ))
             .to_array();
         }
         // **The normal is taken from the geometry that was just
@@ -1199,7 +1279,13 @@ pub fn append(
     vertices: &mut Vec<ActorVertex>,
     indices: &mut Vec<u32>,
 ) {
+    let mounted = pose.posture == Posture::Mounted;
+    let is_leg = |part: &Part| matches!(part.joint, Joint::LegRight | Joint::LegLeft);
     for part in PARTS {
+        if mounted && is_leg(part) {
+            astride(pose, feet, part, part.at, part.size, |face| net(part, face), tint, vertices, indices);
+            continue;
+        }
         push_box(
             pose,
             feet,
@@ -1258,6 +1344,12 @@ pub fn append(
             continue;
         };
         let (at, size) = garment_box(part, overlay.span);
+        if mounted && is_leg(part) {
+            // Trousers and boots bend with the leg in them.
+            let colour = garment_colour(block, tint);
+            astride(pose, feet, part, at, size, |face| garment_net(part, face, overlay.span), colour, vertices, indices);
+            continue;
+        }
         push_box(
             pose,
             feet,
@@ -1267,6 +1359,104 @@ pub fn append(
             size,
             |face| garment_net(part, face, overlay.span),
             garment_colour(block, tint),
+            vertices,
+            indices,
+        );
+    }
+}
+
+/// A turn that lays a box's own downward axis along `along`: how a half of a
+/// rider's leg is pointed (`astride`).
+///
+/// Built as three axes, each crossed from the last, so it is always a turn
+/// and never a mirror -- a mirrored box is wound inside out, and the left
+/// leg's direction is the right's mirrored, which is exactly the input that
+/// would build one if the axes were mirrored with it.
+fn pointing(along: Vec3) -> Mat3 {
+    let up = -along.normalize();
+    let across = up.cross(Vec3::Z).normalize();
+    Mat3::from_cols(across, up, across.cross(up))
+}
+
+/// Where the hip and the knee of a rider's leg are, in model units, before
+/// the posture's drop: the two points the halves of the leg hang from.
+fn astride_joints(leg: &Part) -> (Vec3, Vec3) {
+    let side = leg.at[0].signum();
+    let hip = Vec3::new(leg.at[0] + side * HIP_SPREAD, leg.pivot, leg.at[2]);
+    let thigh = THIGH * Vec3::new(side, 1.0, 1.0);
+    let knee_up = leg.at[1] - leg.size[1] * 0.5 + KNEE;
+    (hip, hip + thigh.normalize() * (leg.pivot - knee_up))
+}
+
+/// Where the sole of a rider's right foot is, in blocks from the point the
+/// server puts their feet (`horse::RIDER_LIFT` over the horse's), in the
+/// figure's own frame: x to their right, -z ahead, as the horse's model is.
+///
+/// **What the stirrup under a rider is hung from** (`animal_model::append_tack`),
+/// so the iron is under the boot however `THIGH` and `SHIN` are changed: a
+/// stirrup placed by a number of its own was a stirrup a hand's breadth
+/// behind the heel the first time anybody looked. The left foot is this
+/// mirrored.
+pub(crate) fn rider_foot() -> Vec3 {
+    let leg = &PARTS[LEG_RIGHT];
+    let (_, knee) = astride_joints(leg);
+    (knee + SHIN.normalize() * KNEE - Vec3::Y * mount_drop()) * SCALE
+}
+
+/// A box on a rider's leg -- the leg itself, or a garment over it -- bent at
+/// the knee round a horse. See `KNEE` for why a mounted leg is two boxes.
+///
+/// The box is cut at the knee into the band above it and the band below,
+/// each a little past it (`KNEE_OVERLAP`); the band above is turned about
+/// the hip to lie along `THIGH` and the band below about the knee to lie
+/// along `SHIN`. Each wears the matching band of the picture it would have
+/// worn whole, cut the way `garment_net` cuts a boot from a leg -- so the
+/// boot on a rider is still on the shin and the knee of the trousers is
+/// still at the knee.
+#[allow(clippy::too_many_arguments)]
+fn astride(
+    pose: &Pose,
+    feet: Vec3,
+    leg: &Part,
+    at: [f32; 3],
+    size: [f32; 3],
+    sheet: impl Fn(usize) -> [f32; 4],
+    tint: [f32; 3],
+    vertices: &mut Vec<ActorVertex>,
+    indices: &mut Vec<u32>,
+) {
+    let side = leg.at[0].signum();
+    let mirror = Vec3::new(side, 1.0, 1.0);
+    let (hip, knee) = astride_joints(leg);
+    let knee_up = leg.at[1] - leg.size[1] * 0.5 + KNEE;
+    let root = Vec3::new(leg.at[0], leg.pivot, leg.at[2]);
+    let bend = Vec3::new(leg.at[0], knee_up, leg.at[2]);
+    let (low, high) = (at[1] - size[1] * 0.5, at[1] + size[1] * 0.5);
+    let halves = [
+        (low.max(knee_up - KNEE_OVERLAP), high, root, hip, pointing(THIGH * mirror)),
+        (low, high.min(knee_up + KNEE_OVERLAP), bend, knee, pointing(SHIN * mirror)),
+    ];
+    for (bottom, top, from, to, turn) in halves {
+        if top <= bottom {
+            continue;
+        }
+        // The band of the picture, measured from the top as a net measures
+        // it; the crown and the sole are left whole, as `garment_net` leaves
+        // them.
+        let (t0, t1) = ((high - top) / size[1], (high - bottom) / size[1]);
+        push_box_with(
+            |unit| place(pose, feet, Joint::Fixed, 0.0, to + turn * (unit - from)),
+            [at[0], (top + bottom) * 0.5, at[2]],
+            [size[0], top - bottom, size[2]],
+            |face| {
+                let [x, y, w, h] = sheet(face);
+                if face < 2 {
+                    [x, y, w, h]
+                } else {
+                    [x, y + t0 * h, w, (t1 - t0) * h]
+                }
+            },
+            tint,
             vertices,
             indices,
         );
@@ -3545,5 +3735,53 @@ mod tests {
         // Fast out and slow home: the snap is a third of the time.
         let out = (0..=10).map(|k| arm(Some(Arm::Cast(ROD_CAST_OUT * k as f32 / 10.0))));
         assert!(out.clone().zip(out.skip(1)).all(|(a, b)| b <= a + 1e-5), "the snap forward turned back on itself");
+    }
+
+    #[test]
+    fn a_rider_s_feet_hang_either_side_of_a_horse_and_not_through_it() {
+        use primitive_shared::animals::Species;
+        // A horse standing at the origin with its feet on y = 0, and its
+        // rider where the server puts one: `RIDER_LIFT` over the horse's
+        // feet, at its middle, facing its way. Both models turn their own x
+        // into world z at a yaw of nought, so "across the horse" is z here.
+        let horse = crate::logic::animal_model::parts(Species::Horse);
+        let body = horse.iter().find(|part| part.name == "body").expect("the horse has a body");
+        let sixteenth = 1.0 / 16.0;
+        let middle = Species::Horse.height() * 0.5;
+        let back = middle + (body.at[1] + body.size[1] * 0.5) * sixteenth;
+        let belly = middle + (body.at[1] - body.size[1] * 0.5) * sixteenth;
+        // The barrel, and the saddle's skirt over it (`animal_model::append_tack`).
+        let flank = (body.size[0] * 0.5 + 0.7) * sixteenth;
+
+        let pose = Pose { posture: Posture::Mounted, ..Pose::default() };
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        append(&pose, Vec3::Y * primitive_shared::horse::RIDER_LIFT, [1.0; 3], &mut vertices, &mut indices);
+        // The body's boxes in `PARTS` order, and each leg as two: head,
+        // torso, two arms, then thigh and shin of the right and the left.
+        let boxed = |index: usize| &vertices[index * 24..index * 24 + 24];
+        assert_eq!(vertices.len(), (PARTS.len() + 2) * 24, "a mounted leg is not a thigh and a shin");
+
+        // Seated on the saddle, not in the horse and not hovering over it.
+        let (seat, _) = span(boxed(TORSO), 1);
+        let saddle = crate::logic::animal_model::saddle_top();
+        assert!((seat - saddle).abs() < 0.02, "the rider sits at {seat:.3} on a saddle whose top is {saddle:.3}");
+
+        for (shin, which) in [(5, "right"), (7, "left")] {
+            let (low, _) = span(boxed(shin), 1);
+            assert!(low < back - 0.2, "the {which} foot is at {low:.2}, which is not hanging down a back at {back:.2}");
+            assert!(low > belly * 0.5, "the {which} foot is at {low:.2}, dangling to the horse's knees");
+            let (near, far) = span(boxed(shin), 2);
+            let clear = if which == "right" { near } else { -far };
+            assert!(
+                clear > flank,
+                "the {which} shin comes within {clear:.3} of the middle, inside a barrel and skirt {flank:.3} across"
+            );
+        }
+        // ...and a thigh goes out over the back, starting on it.
+        for (thigh, which) in [(4, "right"), (6, "left")] {
+            let (low, _) = span(boxed(thigh), 1);
+            assert!(low > back - 0.25, "the {which} thigh is at {low:.2}, under a back at {back:.2}");
+        }
     }
 }

@@ -2707,6 +2707,15 @@ pub fn is_instrument(id: BlockId) -> bool {
     block_kind(id) == BLOCK_WATER_COMPASS
 }
 
+/// **A horse's tack**: a saddle or saddlebags, spent by being put on a
+/// horse (the server's `saddle_up`). Its own answer for the tests that ask
+/// every made thing what it is for, on `is_instrument`'s terms: it is not a
+/// tool, a garment or food, and it is used on an animal rather than on the
+/// world, which is why it is not an implement.
+pub fn is_tack(id: BlockId) -> bool {
+    matches!(block_kind(id), BLOCK_SADDLE | BLOCK_SADDLEBAGS)
+}
+
 pub fn is_workshop_tool(id: BlockId) -> bool {
     matches!(
         block_kind(id),
@@ -3431,6 +3440,29 @@ pub const BLOCK_DRY_STONE_WALL: BlockId = 426;
 pub const BLOCK_WATTLE: BlockId = 427;
 /// **A cob wall**, one to four lifts, the top one wet or dry.
 pub const BLOCK_COB_WALL: BlockId = 428;
+// ---- the horse ----
+//
+// **Three ids out of the gap after the sundew (480)**, not the lowest free
+// ones. Block kinds are ten bits and the room under 700 is shared with
+// whatever else is being written beside this; the lowest gaps (36-38) are
+// the ids anybody else reaches for first, and two branches that both took
+// 36 would merge into a world where a saddle is a stall. The test
+// `the_horses_ids_are_its_own` holds them apart from every other id.
+
+/// A horse where it fell -- see `animals::Species::carcass` -- on the
+/// savanna carcasses' terms: the butchering stage in the variant field, and
+/// drawn as the animal's own model lying on its side.
+pub const BLOCK_CARCASS_HORSE: BlockId = 484;
+/// **A saddle**: a wooden tree, a leather seat and girth, a cord to lace
+/// it. Put on a tame horse with a right click, and what makes a tame horse
+/// something to *ride* rather than something to lead (`horse`): bareback a
+/// broken horse will carry you at a walk and throw you at a gallop.
+pub const BLOCK_SADDLE: BlockId = 485;
+/// **Saddlebags**: two leather panniers over a horse's back. They give it a
+/// pack of its own (`horse::BAGS_SLOTS`), opened from beside it, and the
+/// load in them slows it (`horse::load_factor`) -- a horse carries a trip's
+/// ore home, and pays for it in pace.
+pub const BLOCK_SADDLEBAGS: BlockId = 486;
 /// A bolt of plain woven cotton, and the material of the cloth set.
 pub const BLOCK_CLOTH: BlockId = 190;
 /// What cloth is worn as, one per slot. What they do is in
@@ -4493,6 +4525,8 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     (BLOCK_CARCASS_ZEBRA, "carcass_zebra"),
     (BLOCK_CARCASS_ANTELOPE, "carcass_antelope"),
     (BLOCK_CARCASS_LION, "carcass_lion"),
+    // ...and the plains' horse, beside them. See `animals::Species::Horse`.
+    (BLOCK_CARCASS_HORSE, "carcass_horse"),
     (BLOCK_BASALT, "basalt"),
     (BLOCK_BRACKET_FUNGUS, "bracket_fungus"),
     // Fur, which shares the leather set's pictures the way the wool and
@@ -4584,6 +4618,9 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     (BLOCK_DRY_STONE_WALL, "dry_stone_wall"),
     (BLOCK_WATTLE, "wattle"),
     (BLOCK_COB_WALL, "cob_wall"),
+    // The horse's tack. See `BLOCK_SADDLE`.
+    (BLOCK_SADDLE, "saddle"),
+    (BLOCK_SADDLEBAGS, "saddlebags"),
     (BLOCK_CLOTH, "cloth"),
     (BLOCK_CLOTH_CAP, "cloth_cap"),
     (BLOCK_CLOTH_TUNIC, "cloth_tunic"),
@@ -6246,6 +6283,7 @@ pub fn is_carcass(id: BlockId) -> bool {
             | BLOCK_CARCASS_ZEBRA
             | BLOCK_CARCASS_ANTELOPE
             | BLOCK_CARCASS_LION
+            | BLOCK_CARCASS_HORSE
     )
 }
 
@@ -6653,7 +6691,7 @@ pub fn density(id: BlockId) -> f32 {
         BLOCK_ICE => 920.0,
         // Hide, leather and what is worn: waterlogged rather than
         // buoyant, and it sinks slowly.
-        BLOCK_HIDE | BLOCK_PELT | BLOCK_LEATHER | BLOCK_BEAR_HIDE | BLOCK_SINEW | BLOCK_SAIL => 1050.0,
+        BLOCK_HIDE | BLOCK_PELT | BLOCK_LEATHER | BLOCK_BEAR_HIDE | BLOCK_SINEW | BLOCK_SAIL | BLOCK_SADDLEBAGS => 1050.0,
         // Bone and clay.
         BLOCK_BONE | BLOCK_BONES | BLOCK_BONES_2 | BLOCK_BONES_3 | BLOCK_BONES_4 => 1800.0,
         BLOCK_CLAY | BLOCK_JUG | BLOCK_JUG_RAW | BLOCK_VESSEL | BLOCK_VESSEL_RAW | BLOCK_BOWL | BLOCK_BOWL_RAW
@@ -9863,6 +9901,10 @@ mod mining_tests {
                 if is_instrument(drop) {
                     continue;
                 }
+                // ...and tack, which is put on a horse (`is_tack`).
+                if is_tack(drop) {
+                    continue;
+                }
                 // ...and daub and cob, which are laid into a wall rather than
                 // crafted with (`build::is_laid`).
                 if crate::build::is_laid(drop) {
@@ -10063,6 +10105,7 @@ mod depth_tests {
                 "carcass_zebra",
                 "carcass_antelope",
                 "carcass_lion",
+                "carcass_horse",
                 "nest_eggs",
                 "nest",
                 // ...and the furniture, none of which fills its
@@ -10231,6 +10274,7 @@ mod depth_tests {
             BLOCK_CARCASS_ZEBRA,
             BLOCK_CARCASS_ANTELOPE,
             BLOCK_CARCASS_LION,
+            BLOCK_CARCASS_HORSE,
         ] {
             for stage in 0..8u16 {
                 let staged = carcass | (stage << VARIANT_SHIFT);
@@ -11189,5 +11233,32 @@ mod corpse_tests {
         // quietly deleting something valuable because nobody classified
         // it.
         assert!(!rots_with_a_body(60_000));
+    }
+}
+
+#[cfg(test)]
+mod horse_id_tests {
+    use super::*;
+
+    /// **The horse's three ids are its own**: under 700, inside the ten bits
+    /// of a kind, and named by nothing else in the table. The ids were taken
+    /// from the gap after the sundew rather than the lowest free ones (see
+    /// `BLOCK_CARCASS_HORSE`), and this is what says they were still free
+    /// when that was written -- and what goes red first if a merge lands
+    /// another block on one of them.
+    #[test]
+    fn the_horses_ids_are_its_own() {
+        for id in [BLOCK_CARCASS_HORSE, BLOCK_SADDLE, BLOCK_SADDLEBAGS] {
+            assert!(id < 700 && id & !KIND_MASK == 0, "{id} is out of a kind's room");
+            let named: Vec<&str> = ALL_BLOCK_IDS.iter().filter(|&&(other, _)| other == id).map(|&(_, n)| n).collect();
+            assert_eq!(named.len(), 1, "id {id} is named {named:?}");
+        }
+        // And every id in the table is one block's, which is the rule the
+        // three above lean on.
+        let mut ids: Vec<BlockId> = ALL_BLOCK_IDS.iter().map(|&(id, _)| id).collect();
+        ids.sort_unstable();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "two blocks share an id");
     }
 }

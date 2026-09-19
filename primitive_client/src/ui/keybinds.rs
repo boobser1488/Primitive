@@ -35,6 +35,13 @@ pub enum Action {
     Right,
     Jump,
     Sprint,
+    /// **On a horse: walk, and get down.** Held with forward, the horse
+    /// walks rather than trots (`horse::Gait`); pressed with the horse
+    /// standing, the rider gets off. A key of its own because the two it
+    /// might have borrowed are the horse's: the jump key jumps it and the
+    /// sprint key gallops it. On foot it does nothing -- see `Keybinds`'s
+    /// note on keys that mean something only somewhere.
+    Rein,
     /// Held to lay a *single layer* of loose material instead of a
     /// whole block. See `types::layer_placement`.
     Inventory,
@@ -82,13 +89,14 @@ pub enum Action {
 
 impl Action {
     /// Every action, in the order the controls screen lists them.
-    pub const ALL: [Action; 17] = [
+    pub const ALL: [Action; 18] = [
         Action::Forward,
         Action::Back,
         Action::Left,
         Action::Right,
         Action::Jump,
         Action::Sprint,
+        Action::Rein,
         Action::Inventory,
         Action::Drop,
         Action::Eat,
@@ -118,6 +126,7 @@ impl Action {
             Action::Right => Msg::StrafeRight,
             Action::Jump => Msg::Jump,
             Action::Sprint => Msg::Sprint,
+            Action::Rein => Msg::Rein,
             Action::Inventory => Msg::Inventory,
             Action::Drop => Msg::DropItem,
             Action::Eat => Msg::Eat,
@@ -141,6 +150,7 @@ impl Action {
             Action::Right => "right",
             Action::Jump => "jump",
             Action::Sprint => "sprint",
+            Action::Rein => "rein",
             Action::Inventory => "inventory",
             Action::Drop => "drop",
             Action::Eat => "eat",
@@ -163,6 +173,9 @@ impl Action {
             Action::Right => KeyCode::KeyD,
             Action::Jump => KeyCode::Space,
             Action::Sprint => KeyCode::ShiftLeft,
+            // C, where a crouch lives in every game that has one: the
+            // gesture a hand makes toward the reins.
+            Action::Rein => KeyCode::KeyC,
             Action::Inventory => KeyCode::KeyI,
             Action::Drop => KeyCode::KeyQ,
             // Next to the drop key, because the two are the same

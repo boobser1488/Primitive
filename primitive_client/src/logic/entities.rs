@@ -244,9 +244,9 @@ impl Entity {
     /// What the model needs to know about how this animal is moving.
     fn motion(&self, now: Instant) -> crate::logic::animal_model::Motion {
         let (walked, speed) = self.gait(now);
-        let (hurt, growth) = match self.kind {
-            EntityKind::Animal { hurt, growth, .. } => ((hurt > 0.0).then_some(hurt), growth),
-            _ => (None, u8::MAX),
+        let (hurt, growth, tack) = match self.kind {
+            EntityKind::Animal { hurt, growth, tack, .. } => ((hurt > 0.0).then_some(hurt), growth, tack),
+            _ => (None, u8::MAX, 0),
         };
         crate::logic::animal_model::Motion {
             walked,
@@ -257,6 +257,10 @@ impl Entity {
             age: self.age,
             youth: 1.0 - primitive_shared::youth::from_wire(growth),
             fallen: (self.dying / crate::logic::animal_model::FALL_SECONDS).clamp(0.0, 1.0),
+            // The saddle, the bags and the halter are drawn from this byte and
+            // nothing else: the client keeps no idea of its own about whose
+            // horse is saddled.
+            tack,
         }
     }
 }
@@ -346,6 +350,21 @@ pub struct Entities {
     /// the frame does, and the prediction only needs the one number at the
     /// one raft it steps. A frame late is a raft's length in a minute.
     river: (f32, f32),
+    /// The horse this client is riding, where its prediction has it: the id,
+    /// its feet and its yaw (`horseback::Horseback`), handed in every frame.
+    ///
+    /// **Drawn from here rather than from its snapshots**, for the rower's
+    /// raft's reason: the rider's eye is on the predicted saddle, and a horse
+    /// drawn a round trip behind it would be a horse sliding out from under
+    /// the camera at every gallop.
+    ridden: Option<(EntityId, DVec3, f32)>,
+    /// The horse this client rides, ahead of the server (`horseback`).
+    ///
+    /// **Here for the rower's reason** (`steering` above): the handler that
+    /// hears `ServerMessage::Mounted` and the snapshots that correct it has
+    /// this table and nothing else of the frame's. Public, because the frame
+    /// is what steps it with the keys.
+    pub horseback: Option<crate::logic::horseback::Horseback>,
 }
 
 impl Entities {
@@ -472,6 +491,48 @@ impl Entities {
     /// prediction. See `river`.
     pub fn set_river_current(&mut self, river: (f32, f32)) {
         self.river = river;
+    }
+
+    /// The horse this client rides, where the prediction has it this frame:
+    /// see `ridden`.
+    pub fn set_ridden(&mut self, ridden: Option<(EntityId, DVec3, f32)>) {
+        self.ridden = ridden;
+    }
+
+    /// What kind of animal an entity is, if it is one this table has seen.
+    /// What a right click asks before it is a leg up or a feed.
+    pub fn species_of(&self, id: EntityId) -> Option<primitive_shared::animals::Species> {
+        match self.entities.get(&id)?.kind {
+            EntityKind::Animal { species, .. } => Some(species),
+            _ => None,
+        }
+    }
+
+    /// Every horse with somebody on it, as it is drawn this frame: its feet
+    /// and its yaw. What `RemotePlayers::mount` sits the riders on.
+    ///
+    /// **Drawn, not latest**, for the raft's reason (`rafts`): a rider put on
+    /// the horse's newest snapshot sits a tick ahead of the horse under them,
+    /// and at a gallop a tick is half a block of saddle. The one this client
+    /// rides is where its prediction is, as the horse itself is drawn.
+    pub fn ridden_horses(&self, now: Instant) -> Vec<(DVec3, f32)> {
+        self.entities
+            .iter()
+            .filter_map(|(id, entity)| {
+                let EntityKind::Animal { species, growth, tack, .. } = entity.kind else {
+                    return None;
+                };
+                if tack & primitive_shared::horse::TACK_RIDDEN == 0 {
+                    return None;
+                }
+                if let Some((_, feet, yaw)) = self.ridden.filter(|(ridden, _, _)| ridden == id) {
+                    return Some((feet, yaw));
+                }
+                let size = primitive_shared::youth::size(primitive_shared::youth::from_wire(growth));
+                let feet = entity.drawn(now) - DVec3::Y * f64::from(species.height() * size * 0.5);
+                Some((feet, entity.drawn_yaw(now)))
+            })
+            .collect()
     }
 
     /// How far along a look ray a raft is, if the ray meets it.
@@ -1171,7 +1232,20 @@ impl Entities {
                     // edit to change what an animal looks like. This arm
                     // works out where it is, how far it has walked and
                     // how fast it is going, and hands those over.
-                    let centre = entity.drawn(now);
+                    //
+                    // **The horse under this client is drawn where its
+                    // prediction is** (see `ridden`), placed by its feet the
+                    // way the server places an animal by its middle. Its legs
+                    // and head still run on the snapshots: they are how it
+                    // moves, not where it is.
+                    let predicted = self.ridden.filter(|(ridden, _, _)| ridden == id);
+                    let centre = match predicted {
+                        Some((_, feet, _)) => {
+                            let size = primitive_shared::youth::size(primitive_shared::youth::from_wire(growth));
+                            feet + DVec3::Y * f64::from(species.height() * size * 0.5)
+                        }
+                        None => entity.drawn(now),
+                    };
                     let (sky, block_light) = sampled_light(centre, light);
                     let motion = entity.motion(now);
                     // **A body going down turns toward the carcass it is about
@@ -1199,7 +1273,7 @@ impl Entities {
                             yaw + turn * motion.fallen,
                         )
                     } else {
-                        (centre, entity.drawn_yaw(now))
+                        (centre, predicted.map_or_else(|| entity.drawn_yaw(now), |(_, _, yaw)| yaw))
                     };
                     crate::logic::animal_model::build(
                         species,
@@ -1782,7 +1856,7 @@ mod tests {
         let at = |yaw: f32| {
             vec![EntityState {
                 id: 1,
-                kind: EntityKind::Animal { species: Species::Deer, yaw, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX },
+                kind: EntityKind::Animal { species: Species::Deer, yaw, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0 },
                 x: 0.0,
                 y: 20.0,
                 z: 0.0,
@@ -1804,7 +1878,7 @@ mod tests {
         use primitive_shared::animals::Species;
         vec![EntityState {
             id: 1,
-            kind: EntityKind::Animal { species: Species::Deer, yaw: 0.0, hurt, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX },
+            kind: EntityKind::Animal { species: Species::Deer, yaw: 0.0, hurt, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0 },
             x: 4.0,
             y: 31.0,
             z: -2.0,
@@ -2087,6 +2161,7 @@ mod tests {
                 hurt: 0.0,
                 attitude,
                 growth: u8::MAX,
+                tack: 0,
             },
         };
         let mut entities = Entities::default();
@@ -2149,6 +2224,7 @@ mod tests {
                 hurt: 0.0,
                 attitude: primitive_shared::protocol::Attitude::Easy,
                 growth: u8::MAX,
+                tack: 0,
             },
         };
         entities.apply_snapshot(100, &[walked(0.0)]);
@@ -2248,6 +2324,7 @@ mod tests {
                 hurt: 0.0,
                 attitude: primitive_shared::protocol::Attitude::Easy,
                 growth: u8::MAX,
+                tack: 0,
             },
         };
         entities.apply_snapshot(10, &[at(0.0)]);
@@ -2328,7 +2405,7 @@ mod tests {
             let mut entities = Entities::default();
             let at = |x: f64| {
                 vec![
-                    EntityState { id: 1, kind: EntityKind::Animal { species: primitive_shared::animals::Species::Deer, yaw: 0.4, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX }, x: base.x + x, y: base.y + 21.0, z: base.z + 3.3 },
+                    EntityState { id: 1, kind: EntityKind::Animal { species: primitive_shared::animals::Species::Deer, yaw: 0.4, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0 }, x: base.x + x, y: base.y + 21.0, z: base.z + 3.3 },
                     EntityState { id: 2, kind: EntityKind::FallingBlock { block: BLOCK_SAND }, x: base.x + 5.0, y: base.y + 25.0 - x, z: base.z + 1.0 },
                 ]
             };
@@ -2481,6 +2558,7 @@ mod tests {
                 hurt: 0.0,
                 attitude: primitive_shared::protocol::Attitude::Easy,
                 growth: u8::MAX,
+                tack: 0,
             },
             x: 1.0,
             y: 1.4,
@@ -2558,6 +2636,7 @@ mod tests {
                 hurt: 0.0,
                 attitude: primitive_shared::protocol::Attitude::Easy,
                 growth: u8::MAX,
+                tack: 0,
             },
             x: f64::from(x),
             y: 20.0,
@@ -2710,7 +2789,7 @@ mod tests {
                     let species = Species::ALL[i % Species::ALL.len()];
                     EntityState {
                         id: i as u64 + 1,
-                        kind: EntityKind::Animal { species, yaw: i as f32 * 0.4, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX },
+                        kind: EntityKind::Animal { species, yaw: i as f32 * 0.4, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0 },
                         x: f64::from((i % 10) as f32 * 3.0 + shift),
                         y: f64::from(20.0 + species.height() * 0.5),
                         z: f64::from((i / 10) as f32 * 3.0),

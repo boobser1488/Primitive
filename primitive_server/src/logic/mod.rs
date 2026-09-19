@@ -60,6 +60,7 @@ pub mod pits;
 pub mod plugins;
 pub mod profiles;
 pub mod rafts;
+pub mod horses;
 pub mod rng;
 pub mod shelters;
 pub mod stalls;

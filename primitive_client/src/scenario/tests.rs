@@ -1003,3 +1003,225 @@ fn a_cob_lift_is_refused_on_a_wet_one_and_the_wall_waits_as_it_was_left() {
     assert_eq!(s.inventory.count(t::BLOCK_COB), 1, "the refused lump was spent");
     no_corrections(&s);
 }
+
+// ---------------------------------------------------------------- horses
+
+/// A broken horse with a saddle on, standing on the field two blocks along
+/// from where the player stands, facing along the strip.
+fn saddled_horse(s: &mut Scenario, x: i32, z: i32, bags: bool) -> primitive_shared::protocol::EntityId {
+    use primitive_shared::husbandry::Keeping;
+    let at = ((x + 2) as f32 + 0.5, (GROUND + 1) as f32, z as f32 + 0.5);
+    let horse = s.server().spawn_animal(primitive_shared::animals::Species::Horse, at).expect("no room for a horse");
+    let keep = Keeping { trust: 1.0, tame: true, home: Some(at), hunger: 0.0, well_fed: 1.0, ..Keeping::wild() };
+    let gear = primitive_shared::horse::Gear {
+        saddle: true,
+        bags: bags.then(primitive_shared::inventory::Inventory::new),
+        rides: 0,
+    };
+    s.server().keep_animal(horse, keep, Some(gear));
+    s.server().face_animal(horse, 0.0);
+    let seen = s.until(3.0, |s| s.entities.contains_key(&horse));
+    assert!(seen, "the horse never reached the client");
+    horse
+}
+
+/// Where the ridden horse is and what the server said about it, for a
+/// failure message.
+fn horse_story(s: &Scenario) -> String {
+    format!(
+        "horse at {:?} doing {:?} with {:?} wind, player at {:?}, corrections {:?}, said {:?}",
+        s.horseback.as_ref().map(|h| h.feet()),
+        s.horseback.as_ref().map(|h| h.body.speed()),
+        s.horseback.as_ref().map(|h| h.body.wind),
+        s.feet(),
+        s.corrections,
+        s.heard
+            .iter()
+            .filter(|m| matches!(m, ServerMessage::Chat { .. } | ServerMessage::Error(_) | ServerMessage::Mounted { horse: None, .. }))
+            .collect::<Vec<_>>()
+    )
+}
+
+/// Gets on `horse` the way the click does, and waits until the client is
+/// riding it.
+fn mount(s: &mut Scenario, horse: primitive_shared::protocol::EntityId) {
+    s.send(ClientMessage::Mount { horse });
+    let on = s.until(3.0, |s| s.horseback.as_ref().is_some_and(|h| h.horse == horse));
+    assert!(on, "never got on the horse: {:?}", s.heard.iter().rev().take(4).collect::<Vec<_>>());
+    // The horse turned to look along the strip, the way a rider turns it.
+    s.face(0.0);
+    s.seconds(0.3);
+}
+
+#[test]
+fn a_rider_gallops_a_saddled_horse_past_any_sprint_and_the_anticheat_never_corrects_them() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    let horse = saddled_horse(&mut s, x0, z, false);
+    mount(&mut s, horse);
+    assert_eq!(s.server().player_riding(), Some(horse), "the server does not have the player on the horse");
+    let start = s.feet();
+    s.hold(Action::Forward);
+    s.hold(Action::Sprint);
+    let mut top = 0.0f32;
+    for _ in 0..(5.0 / FRAME) as usize {
+        s.frame();
+        top = top.max(s.horseback.as_ref().expect("fell off").body.speed());
+    }
+    s.release_all();
+    let covered = (s.feet() - start).length();
+    // A sprinting player covers 6.45 a second. Five seconds of a gallop from
+    // a standstill -- two of them getting up to it -- is past what the same
+    // five seconds on foot could be, and the pace at the end is half as fast
+    // again as the sprint.
+    let sprint = f64::from(primitive_shared::animals::NOMINAL_SPRINT_SPEED);
+    assert!(covered > sprint * 5.0 * 1.2, "five seconds of gallop covered {covered:.1} blocks");
+    assert!(f64::from(top) > sprint * 1.5, "a gallop under a rider was {top:.1} blocks a second: {}", horse_story(&s));
+    // The server's horse is where the client rode it, give or take a round trip.
+    s.seconds(1.5);
+    let server = s.server().animal_position(horse).expect("the horse is gone");
+    let client = s.horseback.as_ref().expect("fell off").feet();
+    let apart = (client.x - f64::from(server.0)).hypot(client.z - f64::from(server.2));
+    assert!(apart < 1.0, "the client's horse stopped {apart:.2} blocks from the server's");
+    s.shot("horse_galloped");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_horse_stops_at_the_bank_of_deep_water_and_its_rider_gets_down_beside_it() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    // A river three deep across the strip, eight blocks on.
+    s.fill((x0 + 10, GROUND - 2, z - 4), (x0 + 13, GROUND, z + 4), t::BLOCK_WATER);
+    let horse = saddled_horse(&mut s, x0, z, false);
+    mount(&mut s, horse);
+    s.hold(Action::Forward);
+    s.seconds(4.0);
+    s.release_all();
+    s.seconds(1.0);
+    let feet = s.horseback.as_ref().expect("fell off").feet();
+    assert!(feet.x < (x0 + 10) as f64, "the horse went into the river: {feet:?}");
+    assert!(feet.y >= (GROUND + 1) as f64 - 0.01, "the horse is in the water: {feet:?}");
+    // Down, with the rein key, standing.
+    s.hold(Action::Rein);
+    s.frames(2);
+    s.release(Action::Rein);
+    let down = s.until(3.0, |s| s.horseback.is_none() && s.server().player_riding().is_none());
+    assert!(down, "the rein key did not get the rider down");
+    s.seconds(1.0);
+    assert!(s.player.grounded, "got down into the air");
+    let from_horse = (s.feet().x - feet.x).hypot(s.feet().z - feet.z);
+    assert!(from_horse > 0.6 && from_horse < 2.0, "got down {from_horse:.2} from the horse");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_horse_walks_up_a_step_and_jumps_a_ditch_it_could_not_climb_out_of() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    // A step up a block across the strip, and past it a ditch two wide and
+    // three deep: walked into, it is a pit a horse cannot step out of.
+    s.fill((x0 + 8, GROUND + 1, z - 3), (x0 + 40, GROUND + 1, z + 3), t::BLOCK_COBBLESTONE);
+    s.fill((x0 + 18, GROUND - 1, z - 3), (x0 + 19, GROUND + 1, z + 3), t::BLOCK_AIR);
+    let horse = saddled_horse(&mut s, x0, z, false);
+    mount(&mut s, horse);
+    s.hold(Action::Forward);
+    s.hold(Action::Sprint);
+    let up = s.until(4.0, |s| s.horseback.as_ref().is_some_and(|h| h.feet().y > (GROUND + 2) as f64 - 0.01));
+    assert!(up, "the horse did not walk up a step: {}", horse_story(&s));
+    // At the ditch, at a gallop, the jump asked two strides out.
+    let near = s.until(4.0, |s| s.horseback.as_ref().is_some_and(|h| h.feet().x > (x0 + 18) as f64 - 2.4));
+    assert!(near, "never came up to the ditch: {}", horse_story(&s));
+    let at_the_jump = horse_story(&s);
+    s.hold(Action::Jump);
+    s.frames(2);
+    s.release(Action::Jump);
+    let over = s.until(3.0, |s| {
+        s.horseback.as_ref().is_some_and(|h| h.feet().x > (x0 + 20) as f64 + 0.5 && h.body.on_ground)
+    });
+    assert!(over, "the horse did not jump the ditch: {} (at the jump {at_the_jump})", horse_story(&s));
+    assert!(
+        s.horseback.as_ref().is_some_and(|h| h.feet().y > (GROUND + 2) as f64 - 0.01),
+        "it landed in the ditch: {}",
+        horse_story(&s)
+    );
+    s.release_all();
+    s.seconds(1.0);
+    no_corrections(&s);
+}
+
+#[test]
+fn saddlebags_on_a_horse_take_a_load_from_beside_it_and_the_load_slows_it() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    let horse = saddled_horse(&mut s, x0, z, true);
+    s.give(t::BLOCK_COPPER_ORE, 64);
+    s.give(t::BLOCK_COPPER_ORE, 64);
+    s.send(ClientMessage::OpenBags { horse });
+    let open = s.until(3.0, |s| s.chest_screen.is_open());
+    assert!(open, "the saddlebags never opened");
+    assert_eq!(s.chest_screen.layout(), crate::ui::chest_screen::Layout::Bags);
+    s.send(ClientMessage::ChestBulkMove { to_chest: true });
+    let loaded = s.until(3.0, |s| {
+        s.server().horse_gear(horse).and_then(|g| g.bags).is_some_and(|b| b.count(t::BLOCK_COPPER_ORE) == 128)
+    });
+    assert!(loaded, "the ore did not go into the bags: {:?}", s.server().horse_gear(horse).and_then(|g| g.bags).map(|b| b.count(t::BLOCK_COPPER_ORE)));
+    // Twelve squares and no more: a thirteenth stack stays in the pack.
+    let bags = s.server().horse_gear(horse).and_then(|g| g.bags).expect("bags");
+    assert!(bags.slots().iter().skip(primitive_shared::horse::BAGS_SLOTS).all(Option::is_none));
+    s.send(ClientMessage::CloseChest);
+    s.close_screens();
+    s.seconds(0.3);
+    mount(&mut s, horse);
+    s.hold(Action::Forward);
+    s.hold(Action::Sprint);
+    s.seconds(3.0);
+    let laden = s.horseback.as_ref().expect("fell off").body.speed();
+    s.release_all();
+    assert!(
+        laden < primitive_shared::horse::GALLOP * 0.9,
+        "a hundred and twenty-eight ore made no difference to the gallop: {laden:.1}"
+    );
+    no_corrections(&s);
+}
+
+#[test]
+fn a_gentled_horse_throws_its_rider_until_it_is_broken_and_then_it_is_theirs() {
+    use primitive_shared::husbandry::Keeping;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    let at = ((x0 + 2) as f32 + 0.5, (GROUND + 1) as f32, z as f32 + 0.5);
+    let horse = s.server().spawn_animal(primitive_shared::animals::Species::Horse, at).expect("a horse");
+    // Fed five times over two days, which a scenario does not wait for.
+    s.server().keep_animal(horse, Keeping { trust: 1.0, tame: false, hunger: 0.0, ..Keeping::wild() }, None);
+    assert!(s.until(3.0, |s| s.entities.contains_key(&horse)));
+    let mut tries = 0;
+    while s.horseback.is_none() {
+        tries += 1;
+        assert!(tries <= primitive_shared::husbandry::THROW_CHANCES.len(), "thrown {tries} times");
+        // Back beside it, wherever it went after the last fall.
+        if let Some(p) = s.server().animal_position(horse) {
+            s.stand_at((f64::from(p.0) + 1.2, f64::from(p.1), f64::from(p.2)));
+        }
+        s.send(ClientMessage::Mount { horse });
+        let answered = s.until(3.0, |s| {
+            s.horseback.is_some() || s.heard.iter().any(|m| matches!(m, ServerMessage::Chat { text, .. } if text.contains("throws you")))
+        });
+        assert!(answered, "a try on its back came to nothing");
+        if s.horseback.is_none() {
+            // Thrown: it hurt, and the next try waits for it to settle.
+            s.heard.clear();
+            s.seconds(primitive_shared::husbandry::SETTLE_SECONDS + 0.5);
+        }
+    }
+    assert_eq!(s.server().player_riding(), Some(horse));
+    assert!(
+        s.heard.iter().any(|m| matches!(m, ServerMessage::Chat { text, .. } if text.contains("yours"))),
+        "breaking it was never said"
+    );
+}

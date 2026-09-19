@@ -49,7 +49,7 @@ pub mod settings;
 pub use logic::{
     animals, anticheat, carrion, chunkgen, climate, commands, containers, drying, falling, felling,
     fire, growth, peat, walls,
-    items, plugins, profiles, rafts, rng, simulation, smelting, stalls, survival, water, weather, world,
+    items, plugins, profiles, rafts, horses, rng, simulation, smelting, stalls, survival, water, weather, world,
 };
 #[cfg(feature = "mods")]
 pub use logic::mods;
@@ -691,6 +691,46 @@ impl Server {
         if let Some(handle) = self.ctx.registry.handles().into_iter().next() {
             teleport(&handle, x, y, z, "scenario");
         }
+    }
+
+    /// An animal of `species` at `at`, for a scenario: the spawner's own
+    /// `Animals::spawn`, so it is capped and announced like any other.
+    pub fn spawn_animal(&self, species: primitive_shared::animals::Species, at: (f32, f32, f32)) -> Option<primitive_shared::protocol::EntityId> {
+        self.ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).spawn(species, at)
+    }
+
+    /// Puts a keeping, and a horse's gear, on an animal outright: what a
+    /// scenario about riding does instead of spending two days gentling one.
+    pub fn keep_animal(
+        &self,
+        id: primitive_shared::protocol::EntityId,
+        keep: primitive_shared::husbandry::Keeping,
+        gear: Option<primitive_shared::horse::Gear>,
+    ) {
+        self.ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).put_keeping(id, keep, gear);
+    }
+
+    /// Turns an animal to face `yaw`: a scenario stands a horse along its
+    /// strip before it rides it.
+    pub fn face_animal(&self, id: primitive_shared::protocol::EntityId, yaw: f32) {
+        self.ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).face_for_test(id, yaw);
+    }
+
+    /// What a horse wears and carries, as the server has it.
+    pub fn horse_gear(&self, id: primitive_shared::protocol::EntityId) -> Option<primitive_shared::horse::Gear> {
+        self.ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).gear(id)
+    }
+
+    /// Where an animal's feet are, as the server has them.
+    pub fn animal_position(&self, id: primitive_shared::protocol::EntityId) -> Option<(f32, f32, f32)> {
+        self.ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).position(id)
+    }
+
+    /// Whether the one connected player is riding, as the server has it.
+    pub fn player_riding(&self) -> Option<primitive_shared::protocol::EntityId> {
+        let handle = self.ctx.registry.handles().into_iter().next()?;
+        let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.riding
     }
 
     /// What the world is doing to the one connected player.
@@ -2373,15 +2413,19 @@ async fn tick_loop(ctx: Arc<Context>) {
             // The rafts' wind (`raft::wind`), read with the sky's lock let go
             // before the animals' is taken: a hunter who has watched the smoke
             // lean knows which side to come at a deer from.
-            let wind = {
+            let (wind, raining) = {
                 let weather = ctx.sky.lock().unwrap_or_else(|e| e.into_inner()).weather();
-                primitive_shared::raft::wind(ctx.clock.world_days(), weather).vector()
+                (
+                    primitive_shared::raft::wind(ctx.clock.world_days(), weather).vector(),
+                    weather != primitive_shared::weather::Weather::Clear,
+                )
             };
             let (blows, births, deaths, fallen, staked, dung) = {
                 let mut animals = ctx.animals.lock().unwrap_or_else(|e| e.into_inner());
                 animals.carrying_fire(std::mem::take(&mut fire_bearers));
                 animals.player_signs(std::mem::take(&mut player_signs));
                 animals.feel_wind(wind);
+                animals.rain(raining);
                 // The calendar the young grow by and the spring they are
                 // born in. See `Animals::calendar`.
                 animals.calendar(ctx.clock.world_days());
@@ -2469,12 +2513,30 @@ async fn tick_loop(ctx: Arc<Context>) {
                     | Species::Pike
                     | Species::Herring
                     | Species::Gull
-                    | Species::Rat => Blow::Blunt,
+                    | Species::Rat
+                    | Species::Horse => Blow::Blunt,
                 };
                 let outcome = strike_player(&ctx, &victim, blow.damage, how, wound);
                 if !matches!(outcome, survival::Outcome::Unchanged) {
                     report_vitals(&ctx, &victim, outcome);
                 }
+            }
+        }
+
+        // --- riders, on the horses that have just moved ---
+        //
+        // After the animals and before the snapshots, for the reason the
+        // rafts go first (`horses::tick`): the rider and the horse in one
+        // snapshot are one instant. What a dead horse carried goes on the
+        // ground here too.
+        horses::spill(&ctx);
+        for (id, (dx, dy, dz)) in horses::tick(&ctx, &handles) {
+            // **Riding is not walking**, the raft's rule again: the ground a
+            // horse covers is not a stride the rider is billed hunger for.
+            if let Some(billed) = billed_position.get_mut(&id) {
+                billed.0 += dx;
+                billed.1 += dy;
+                billed.2 += dz;
             }
         }
 
@@ -7374,7 +7436,18 @@ pub(crate) fn tend_animal(
             handle.send(ServerMessage::Error(why.to_string()));
             return;
         }
-        animals::Tended::Fed { .. } => {
+        animals::Tended::Fed { gentled, .. } => {
+            state.inventory.take_from(slot, 1);
+            if gentled {
+                handle.send(ServerMessage::Chat {
+                    from: None,
+                    username: "server".to_string(),
+                    text: "the horse takes it from your hand: it may let you on its back now".to_string(),
+                });
+            }
+        }
+        // The saddle or the bags in the hand went onto the horse.
+        animals::Tended::Saddled | animals::Tended::Bagged => {
             state.inventory.take_from(slot, 1);
         }
         animals::Tended::Shorn(wool) => {
@@ -9567,6 +9640,11 @@ enum Roles {
     /// A barter stall: the counter takes anything, the till nothing by hand
     /// (`stall::accepts`). Who may touch either is `usable_chest`'s.
     Stall,
+    /// A horse's saddlebags: a chest's rules over `horse::BAGS_SLOTS`
+    /// squares. Never read off a cell -- the bags are on a horse, not in the
+    /// world -- so `roles_at` never answers it; `horses::with_open_bags`
+    /// hands it in.
+    Bags,
 }
 
 fn roles_at(ctx: &Arc<Context>, at: containers::ChestPos) -> Roles {
@@ -9628,6 +9706,7 @@ impl Roles {
             // came from -- so the length of the body is the rest of the
             // rule, and it is not a second thing to keep true here.
             Roles::Body => slot < primitive_shared::inventory::CORPSE_SLOTS,
+            Roles::Bags => slot < primitive_shared::horse::BAGS_SLOTS,
             Roles::Hearth(_) => primitive_shared::hearth::accepts(slot, block),
             Roles::Rack(trade) => primitive_shared::rack::accepts_on(trade, slot, block),
             // One slot, and only what a jug in the hand would take -- the
@@ -9702,6 +9781,15 @@ pub(crate) fn chest_move(
     to: (Side, u8),
     half: bool,
 ) {
+    // **The saddlebags first**: a player with a horse's bags open is at the
+    // bags, and has no chest open (`horses::open_bags` shuts it).
+    if horses::with_open_bags(ctx, handle, |pack, bags| {
+        container_move(pack, bags, Roles::Bags, (from.0, from.1 as usize), (to.0, to.1 as usize), half)
+    })
+    .is_some()
+    {
+        return;
+    }
     let Some(at) = usable_chest(ctx, handle) else {
         return;
     };
@@ -9846,6 +9934,14 @@ pub(crate) fn chest_quick_move(
     side: Side,
     slot: u8,
 ) {
+    if horses::with_open_bags(ctx, handle, |pack, bags| match side {
+        Side::Chest => primitive_shared::inventory::quick_move_between(bags, slot as usize, pack),
+        Side::Pack => shift_into_roles(pack, slot as usize, bags, Roles::Bags),
+    })
+    .is_some()
+    {
+        return;
+    }
     let Some(at) = usable_chest(ctx, handle) else {
         return;
     };
@@ -9885,6 +9981,9 @@ pub(crate) fn chest_quick_move(
 /// rule as `chest_quick_move` applied to every slot that holds the kind,
 /// and a hearth cannot be filled the wrong way round by it.
 pub(crate) fn chest_move_kind(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, side: Side, slot: u8) {
+    if horses::with_open_bags(ctx, handle, |pack, bags| move_kind(pack, bags, Roles::Bags, side, slot)).is_some() {
+        return;
+    }
     let Some(at) = usable_chest(ctx, handle) else {
         return;
     };
@@ -9892,43 +9991,53 @@ pub(crate) fn chest_move_kind(ctx: &Arc<Context>, handle: &Arc<players::PlayerHa
     let changed = {
         let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut chests = ctx.chests.lock().unwrap_or_else(|e| e.into_inner());
-        chests.edit(at, |chest| {
-            use primitive_shared::inventory::{quick_move_between, SLOTS};
-            use primitive_shared::types::block_kind;
-            let from: &primitive_shared::inventory::Inventory = match side {
-                Side::Chest => chest,
-                Side::Pack => &state.inventory,
-            };
-            let Some(kind) = from.block_in(slot as usize).map(block_kind) else {
-                return false;
-            };
-            let mut moved = false;
-            // Every square the side being emptied has -- a body's
-            // compartment included, for the reason `chest_bulk_move` gives.
-            let squares = match side {
-                Side::Chest => chest.slots().len(),
-                Side::Pack => SLOTS,
-            };
-            for each in 0..squares {
-                match side {
-                    Side::Chest => {
-                        if chest.block_in(each).map(block_kind) == Some(kind) {
-                            moved |= quick_move_between(chest, each, &mut state.inventory);
-                        }
-                    }
-                    Side::Pack => {
-                        if state.inventory.block_in(each).map(block_kind) == Some(kind) {
-                            moved |= shift_into_roles(&mut state.inventory, each, chest, roles);
-                        }
-                    }
-                }
-            }
-            moved
-        })
+        chests.edit(at, |chest| move_kind(&mut state.inventory, chest, roles, side, slot))
     };
     if changed {
         finish_chest_gesture(ctx, handle, at);
     }
+}
+
+/// The whole of a `ChestMoveKind` between a pack and a container: pure, so
+/// the chest and the saddlebags share it.
+fn move_kind(
+    pack: &mut primitive_shared::inventory::Inventory,
+    chest: &mut primitive_shared::inventory::Inventory,
+    roles: Roles,
+    side: Side,
+    slot: u8,
+) -> bool {
+    use primitive_shared::inventory::{quick_move_between, SLOTS};
+    use primitive_shared::types::block_kind;
+    let from: &primitive_shared::inventory::Inventory = match side {
+        Side::Chest => chest,
+        Side::Pack => pack,
+    };
+    let Some(kind) = from.block_in(slot as usize).map(block_kind) else {
+        return false;
+    };
+    let mut moved = false;
+    // Every square the side being emptied has -- a body's
+    // compartment included, for the reason `chest_bulk_move` gives.
+    let squares = match side {
+        Side::Chest => chest.slots().len(),
+        Side::Pack => SLOTS,
+    };
+    for each in 0..squares {
+        match side {
+            Side::Chest => {
+                if chest.block_in(each).map(block_kind) == Some(kind) {
+                    moved |= quick_move_between(chest, each, pack);
+                }
+            }
+            Side::Pack => {
+                if pack.block_in(each).map(block_kind) == Some(kind) {
+                    moved |= shift_into_roles(pack, each, chest, roles);
+                }
+            }
+        }
+    }
+    moved
 }
 
 /// A shift-click from the pack into a container with roles.
@@ -9958,6 +10067,7 @@ fn shift_into_roles(
         Roles::Rack(trade) => rack_target(trade, stack.block),
         // Onto the counter, the only place a hand puts anything.
         Roles::Stall => Some(primitive_shared::stall::STOCK),
+        Roles::Bags => Some(0..primitive_shared::horse::BAGS_SLOTS),
         // A jug's slot, capped at a jug's measure -- `add_within` would
         // cap it at a stack. See the same arm in `chest_move`.
         Roles::Vessel => {
@@ -9998,6 +10108,9 @@ pub(crate) fn chest_bulk_move(
     handle: &Arc<players::PlayerHandle>,
     to_chest: bool,
 ) {
+    if horses::with_open_bags(ctx, handle, |pack, bags| bulk_move(pack, bags, Roles::Bags, to_chest)).is_some() {
+        return;
+    }
     let Some(at) = usable_chest(ctx, handle) else {
         return;
     };
@@ -10005,27 +10118,35 @@ pub(crate) fn chest_bulk_move(
     let changed = {
         let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut chests = ctx.chests.lock().unwrap_or_else(|e| e.into_inner());
-        chests.edit(at, |chest| {
-            use primitive_shared::inventory::{quick_move_between, SLOTS};
-            let mut moved = false;
-            // Out of a container, every square it has: TAKE ALL at a body
-            // stopped at the fortieth, and the rucksack's compartment after
-            // it was the one part of a dead player's things the button
-            // did not reach.
-            let squares = if to_chest { SLOTS } else { chest.slots().len() };
-            for slot in 0..squares {
-                moved |= if to_chest {
-                    shift_into_roles(&mut state.inventory, slot, chest, roles)
-                } else {
-                    quick_move_between(chest, slot, &mut state.inventory)
-                };
-            }
-            moved
-        })
+        chests.edit(at, |chest| bulk_move(&mut state.inventory, chest, roles, to_chest))
     };
     if changed {
         finish_chest_gesture(ctx, handle, at);
     }
+}
+
+/// The whole of a `ChestBulkMove`: pure, for `move_kind`'s reason.
+fn bulk_move(
+    pack: &mut primitive_shared::inventory::Inventory,
+    chest: &mut primitive_shared::inventory::Inventory,
+    roles: Roles,
+    to_chest: bool,
+) -> bool {
+    use primitive_shared::inventory::{quick_move_between, SLOTS};
+    let mut moved = false;
+    // Out of a container, every square it has: TAKE ALL at a body
+    // stopped at the fortieth, and the rucksack's compartment after
+    // it was the one part of a dead player's things the button
+    // did not reach.
+    let squares = if to_chest { SLOTS } else { chest.slots().len() };
+    for slot in 0..squares {
+        moved |= if to_chest {
+            shift_into_roles(pack, slot, chest, roles)
+        } else {
+            quick_move_between(chest, slot, pack)
+        };
+    }
+    moved
 }
 
 /// Folds the part-stacks in an open container together.
@@ -13511,6 +13632,11 @@ pub(crate) fn stand_up(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, 
     if rowing.is_some() {
         rafts::forget(ctx, handle.id);
         handle.send(ServerMessage::Oars { raft: None });
+    }
+    // ...and getting up off a horse is getting off it.
+    if handle.state.lock().unwrap_or_else(|e| e.into_inner()).riding.is_some() {
+        horses::dismount(ctx, handle, why);
+        return;
     }
     if bed.is_none() && seat.is_none() && rowing.is_none() {
         return;

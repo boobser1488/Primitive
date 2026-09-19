@@ -187,6 +187,64 @@
 //!
 //! - **tail**: Hanging, not held out: a horse's tail is a rope, a wolf's is a brush.
 //!
+//! ## animals/horse.bbmodel
+//!
+//! The horse: the zebra's skeleton, grown to the animal a person rides.
+//!
+//! **Withers at a block and a half of `Species::Horse.height()`'s 1.6, and
+//! legs half of it**: the belly is at twelve and a half sixteenths and the
+//! back at twenty-three and a half, so a horse is as much daylight under it
+//! as body over it -- the one proportion that says "horse" rather than
+//! "pony" or "cow" before the head is seen. The barrel is eleven deep and
+//! nine and a half wide, and the rider is sat on it at the middle of the
+//! animal (`horse::RIDER_LIFT`, `animal_model::SADDLE_TOP`), which is why
+//! the body runs further behind the centre than in front of it: the saddle
+//! is behind the withers, a third of the way back along the barrel, and the
+//! centre the server sends is where the rider's seat has to be.
+//!
+//! **Its head group nods about the root of the neck**, not each box about
+//! its own top as the older animals do. Four neck and head boxes turning
+//! each about their own tops come apart the moment the head goes down to
+//! graze; one joint in the chest keeps them one neck.
+//!
+//! Bay: the sheet (`animals/horse.png`) is the deer's coat and head in a
+//! darker red-brown, with a star on the forehead, a near-black muzzle, and
+//! the mane, tail and lower legs black -- the "points" a bay is known by.
+//!
+//! - **withers**: The ridge in front of the saddle, a sixteenth and a tenth over the
+//!   back. Narrower than the barrel, so it reads as the top of the shoulder
+//!   blades rather than a step in the body.
+//!
+//! - **croup**: The rump, as high as the withers are and as wide as the quarters.
+//!   Without it the back is a flat plank from mane to tail.
+//!
+//! - **neck**: The base of the neck, deep, running into the chest. Its top is three
+//!   tenths under the withers' rather than level with it: level, the two
+//!   were one plane in two pictures over the root of the neck.
+//!
+//! - **neck middle**: The arch is three boxes stepping up and forward, each a fifth of a
+//!   sixteenth narrower than the one behind it -- a column of a neck that
+//!   curves, rather than the zebra's one box, which reads as a post.
+//!
+//! - **mane middle**: Two tenths narrower than the manes either side of it, which it
+//!   overlaps at the ends: the same width, their sides were one plane.
+//!
+//! - **head**: The skull, from the poll to the eyes. The long face is the muzzle,
+//!   hung lower in front of it, so the two boxes together are a head carried
+//!   nose-down the way a horse carries it without a box having to be turned.
+//!
+//! - **forelock**: The hair between the ears, a little proud of the face, so a horse
+//!   met head-on has its black forelock over the white star.
+//!
+//! - **ear left**: Upright and inside the three tenths of a block the collider allows
+//!   over the shoulder: the tips are at 1.89 blocks.
+//!
+//! - **fore cannon left**: The black lower leg and hoof, swinging from the top of the
+//!   forearm above it (its origin is that joint): swung about its own top
+//!   it would turn at the knee while the forearm turned at the elbow, and
+//!   leave a gap across the leg at every stride. Six sixteenths tall, which
+//!   is the six rows of the hoof picture it wears -- hair above, horn below.
+//!
 //! ## animals/antelope.bbmodel
 //!
 //! The antelope: small, slender, and known by two things -- the horns

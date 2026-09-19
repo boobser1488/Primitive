@@ -3981,6 +3981,50 @@ pub const RECIPES: &[Recipe] = &[
         returns: &[(crate::types::BLOCK_WHETSTONE, 1)],
         failure: 0.0,
     },
+    // ---- the horse's tack ----
+    //
+    // **A saddle is a tanner's piece**: a wooden tree, a seat and a girth cut
+    // to a pattern and laced with cord. It is made at the leather bench, and
+    // the bench row is the one a player is meant to find. The hand rows under
+    // it are the rule every workshop keeps
+    // (`a_workshop_row_is_a_cheaper_way_or_a_piece_of_the_house`): a
+    // workshop is a cheaper way, never a gate. A saddle cut on the ground
+    // wastes the corners of two more skins -- which is a real price for a
+    // player with a horse and no bench, and not a wall.
+    //
+    // Appended, at the end, because a row's place is its number on the wire.
+    Recipe {
+        name: "saddle",
+        inputs: &[(BLOCK_LEATHER, 3), (BLOCK_CORD, 2), (BLOCK_PLANKS, 2)],
+        output: (crate::types::BLOCK_SADDLE, 1),
+        station: Station::Leather,
+        returns: &[],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "saddlebags",
+        inputs: &[(BLOCK_LEATHER, 3), (BLOCK_CORD, 2)],
+        output: (crate::types::BLOCK_SADDLEBAGS, 1),
+        station: Station::Leather,
+        returns: &[],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "rough saddle",
+        inputs: &[(BLOCK_LEATHER, 5), (BLOCK_CORD, 3), (BLOCK_PLANKS, 2)],
+        output: (crate::types::BLOCK_SADDLE, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "rough bags",
+        inputs: &[(BLOCK_LEATHER, 4), (BLOCK_CORD, 3)],
+        output: (crate::types::BLOCK_SADDLEBAGS, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
 ];
 
 /// Why a craft cannot happen, or that it can.
@@ -5327,8 +5371,12 @@ mod tests {
                 // ...and the fourteenth: a lump of daub or cob, spent by being
                 // laid into a wall where it stands (`build::is_laid`).
                 let is_laid = crate::build::is_laid(r.output.0);
+                // ...and the fifteenth: tack, spent by being put on a horse.
+                // See `types::is_tack`.
+                let is_tack = crate::types::is_tack(r.output.0);
                 assert!(
                     is_tool
+                        || is_tack
                         || is_instrument
                         || is_laid
                         || is_workshop_tool

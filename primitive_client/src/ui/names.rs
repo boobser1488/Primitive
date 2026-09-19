@@ -298,12 +298,14 @@ const ANIMALS: &[Name] = &[
     Name { id: "pike", en: "pike", simple: "big lake fish", ru: "щука", pl: "szczupak" },
     Name { id: "herring", en: "herring", simple: "small sea fish", ru: "сельдь", pl: "śledź" },
     Name { id: "rat", en: "rat", simple: "rat", ru: "крыса", pl: "szczur" },
+    Name { id: "horse", en: "horse", simple: "horse", ru: "лошадь", pl: "koń" },
     // The young. See `youth::young_name`.
     Name { id: "fawn", en: "fawn", simple: "young deer", ru: "оленёнок", pl: "jelonek" },
     Name { id: "lamb", en: "lamb", simple: "young sheep", ru: "ягнёнок", pl: "jagnię" },
     Name { id: "piglet", en: "piglet", simple: "young wild pig", ru: "поросёнок", pl: "warchlak" },
     Name { id: "foal", en: "foal", simple: "young zebra", ru: "жеребёнок", pl: "źrebię" },
     Name { id: "antelope_calf", en: "antelope calf", simple: "young antelope", ru: "антилопёнок", pl: "młode antylopy" },
+    Name { id: "horse_foal", en: "foal", simple: "young horse", ru: "жеребёнок", pl: "źrebię" },
 ];
 
 /// How an animal killed somebody, in each language, keyed by `Species::name`:
@@ -451,6 +453,8 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "dry_stone_wall", en: "Dry stone wall", simple: "Stacked stone wall", ru: "Сухая каменная кладка", pl: "Murek z kamieni" },
     Name { id: "wattle", en: "Wattle", simple: "Woven stick wall", ru: "Плетень", pl: "Plecionka" },
     Name { id: "cob_wall", en: "Cob wall", simple: "Mud wall", ru: "Саманная стена", pl: "Ściana z gliny" },
+    Name { id: "saddle", en: "Saddle", simple: "Horse seat", ru: "Седло", pl: "Siodło" },
+    Name { id: "saddlebags", en: "Saddlebags", simple: "Horse bags", ru: "Перемётные сумы", pl: "Juki" },
     Name { id: "jug_raw", en: "Unfired jug", simple: "Wet clay jug", ru: "Сырой кувшин", pl: "Surowy dzban" },
     Name { id: "jug", en: "Jug", simple: "Jug", ru: "Кувшин", pl: "Dzban" },
     Name { id: "bowl_raw", en: "Unfired bowl", simple: "Wet clay bowl", ru: "Сырая миска", pl: "Surowa miska" },
@@ -561,6 +565,7 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "carcass_zebra", en: "Zebra carcass", simple: "Dead zebra", ru: "Туша зебры", pl: "Tusza zebry" },
     Name { id: "carcass_antelope", en: "Antelope carcass", simple: "Dead antelope", ru: "Туша антилопы", pl: "Tusza antylopy" },
     Name { id: "carcass_lion", en: "Lion carcass", simple: "Dead lion", ru: "Туша льва", pl: "Tusza lwa" },
+    Name { id: "carcass_horse", en: "Horse carcass", simple: "Dead horse", ru: "Туша лошади", pl: "Tusza konia" },
     Name { id: "basalt", en: "Basalt", simple: "Basalt", ru: "Базальт", pl: "Bazalt" },
     Name { id: "bracket_fungus", en: "Bracket fungus", simple: "Tree fungus", ru: "Трутовик", pl: "Huba" },
     Name { id: "fur_hood", en: "Fur hood", simple: "Fur hood", ru: "Меховой капюшон", pl: "Futrzany kaptur" },
@@ -1078,6 +1083,10 @@ pub const RECIPES: &[Name] = &[
     Name { id: "lime mortar", en: "Lime mortar", simple: "Strong brick glue", ru: "Известковый раствор", pl: "Zaprawa wapienna" },
     Name { id: "daub", en: "Daub", simple: "Clay and straw mud", ru: "Обмазка", pl: "Polepa" },
     Name { id: "cob", en: "Cob", simple: "Mud and straw lump", ru: "Саман", pl: "Glina ze słomą" },
+    Name { id: "saddle", en: "Saddle", simple: "Horse seat", ru: "Седло", pl: "Siodło" },
+    Name { id: "saddlebags", en: "Saddlebags", simple: "Horse bags", ru: "Перемётные сумы", pl: "Juki" },
+    Name { id: "rough saddle", en: "Rough saddle", simple: "Horse seat by hand", ru: "Грубое седло", pl: "Proste siodło" },
+    Name { id: "rough bags", en: "Rough bags", simple: "Horse bags by hand", ru: "Грубые сумы", pl: "Proste juki" },
     Name { id: "cane frame", en: "Cane frame", simple: "Frame from reed cane", ru: "Рама из трости", pl: "Rama z trzciny" },
     Name { id: "wax torch", en: "Wax torch", simple: "Torch with wax", ru: "Факел с воском", pl: "Pochodnia z woskiem" },
     Name { id: "wax rewad", en: "Wax rewad", simple: "New wax on a torch", ru: "Обмотка с воском", pl: "Owijka z woskiem" },

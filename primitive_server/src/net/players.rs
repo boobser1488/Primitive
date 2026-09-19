@@ -271,6 +271,15 @@ pub struct PlayerRuntime {
     /// The raft whose oars this player has, if any. Always a raft they are
     /// `aboard`, on its seat (`raft::SEAT`).
     pub rowing: Option<primitive_shared::protocol::EntityId>,
+    /// The horse this player is riding, if any. Their body is its saddle
+    /// every tick (`horses::tick`), and their own transforms are read by the
+    /// anti-cheat and move nothing.
+    pub riding: Option<primitive_shared::protocol::EntityId>,
+    /// When the rider was last told their horse's wind (`ServerMessage::Mounted`).
+    pub mount_told: Option<Instant>,
+    /// The horse whose saddlebags this player has open, if any: the chest's
+    /// `open_chest`, for a container that walks (`horses::with_open_bags`).
+    pub open_bags: Option<primitive_shared::protocol::EntityId>,
     /// In water past the waist, as the server's world has it this tick. Only
     /// for everybody else's picture of this player: see `Posture::Swimming`.
     pub swimming: bool,
@@ -404,6 +413,9 @@ impl PlayerHandle {
                 // body in the lake.
                 aboard: None,
                 rowing: None,
+                riding: None,
+                mount_told: None,
+                open_bags: None,
                 swimming: false,
                 gesture: primitive_shared::protocol::Gesture::default(),
                 digging_until: None,
@@ -517,6 +529,9 @@ impl PlayerHandle {
                 primitive_shared::protocol::Posture::Fallen
             } else if state.sleeping_in.is_some() {
                 primitive_shared::protocol::Posture::Lying
+            } else if state.riding.is_some() {
+                // Astride, whatever else: see `Posture::Mounted`.
+                primitive_shared::protocol::Posture::Mounted
             } else if state.sitting_on.is_some() || state.rowing.is_some() {
                 // A rower sits on the stern to pull, and is drawn so.
                 primitive_shared::protocol::Posture::Sitting

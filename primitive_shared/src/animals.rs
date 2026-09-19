@@ -344,6 +344,22 @@ pub enum Species {
     /// wire -- and it is the seventeenth, which is why
     /// `types::BLOCK_BONES_3` exists.
     Rat,
+    /// **The wild horse of the plains, and the first animal here that is
+    /// worth more under you than beside you.**
+    ///
+    /// A herd on open grass with a stallion that keeps it (the server's
+    /// `stallion`), faster than a sprinting player and with a long wind, so a
+    /// wild one is never run down: it is crept up on, fed, fed again, and
+    /// then sat on until it stops throwing you (`husbandry::Breaking`). What
+    /// that buys is the only thing in the world that carries a trip's ore
+    /// home and covers a day's walk in an hour (`crate::horse`) -- and what it
+    /// costs is a mouth to feed, a roof in the rain, and an animal a pack of
+    /// wolves will pull down where it stands tied.
+    ///
+    /// Appended, for `Species::Zebra`'s reason: the index is on the wire and
+    /// in every skeleton (`types::bones_of`) -- the eighteenth, which the
+    /// third bones block still has room for.
+    Horse,
 }
 
 /// How much commoner a wolf (by day) and a bear are in a wood than
@@ -403,6 +419,8 @@ impl Species {
         // A young animal is *not* a species (`crate::youth`) and costs no
         // room at all -- it dies into its parent's carcass and bones.
         Species::Rat,
+        // ...and the plains' horse, the eighteenth: one line, as promised.
+        Species::Horse,
     ];
 
     /// What to call it. Not translated, for the same reason block names
@@ -427,6 +445,7 @@ impl Species {
             Species::Pike => "pike",
             Species::Herring => "herring",
             Species::Rat => "rat",
+            Species::Horse => "horse",
         }
     }
 
@@ -465,7 +484,11 @@ impl Species {
             | Species::Pike
             | Species::Herring
             | Species::Gull
-            | Species::Rat => "was killed by an animal",
+            | Species::Rat
+            // A horse never comes at anybody; what it does to a person on
+            // its back is the server's (`BREAKING_THROW`), and that death is
+            // a fall rather than an animal's.
+            | Species::Horse => "was killed by an animal",
         }
     }
 
@@ -532,6 +555,12 @@ impl Species {
             // A little under the fowl: a gull stands on short legs with its
             // weight low, and its length is in the wings folded behind it.
             Species::Gull => 0.45,
+            // **Withers at a player's shoulder, head carried above it.** A
+            // horse is the one animal a person looks *up* at, and a rider sits
+            // with their eye over two blocks up -- which is half of what a
+            // horse is for on a plain. Taller than the zebra, its wild cousin
+            // on the savanna, by a hand and a half.
+            Species::Horse => 1.6,
         }
     }
 
@@ -565,6 +594,9 @@ impl Species {
             // Spread, it is three times that, and nothing up there collides
             // with a wingtip -- see the server's `walk`.
             Species::Gull => 0.35,
+            // Under a block, like everything else that walks: a horse that
+            // could not be led through a one-block gate could not be stabled.
+            Species::Horse => 0.8,
         }
     }
 
@@ -605,6 +637,9 @@ impl Species {
             Species::Rat => 0.42,
             // Bill to crossed wingtips.
             Species::Gull => 0.8,
+            // Nose to tail, with the head carried forward: the longest thing
+            // that walks here, which is also why a horse turns wide.
+            Species::Horse => 2.3,
         }
     }
 
@@ -683,6 +718,12 @@ impl Species {
             // Measured off `animal_model::GULL` standing -- the folded wing,
             // not the spread one: a blow lands on a bird on the ground.
             Species::Gull => (0.175, 0.225, 0.41),
+            // Measured off `animals/horse.bbmodel` like the rest: up is the
+            // ears, a block and nine tenths off the ground; along is the muzzle
+            // held out in front, which is further from the middle than the
+            // tail is because the middle is where the saddle is, behind the
+            // withers (`model_notes`, the horse).
+            Species::Horse => (0.3, 1.09, 1.44),
         }
     }
 
@@ -731,6 +772,10 @@ impl Species {
             // A slow waddle along the tideline. What a gull does on foot is
             // look about, not go anywhere.
             Species::Gull => 1.2,
+            // A long stride at no effort: still under a walking player, so a
+            // grazing herd is something a person can walk up to -- which is
+            // where taming one starts.
+            Species::Horse => 2.4,
         }
     }
 
@@ -860,6 +905,14 @@ impl Species {
             // nine blocks up before its speed means anything. The number
             // that is a hunt is `awareness`, not this.
             Species::Gull => 7.4,
+            // **Well over a sprint, and the whole of what a horse is.** A wild
+            // herd that has seen you is gone, and no player on foot follows it:
+            // a horse is caught by patience (`husbandry::Breaking`), never by a
+            // chase. Over the zebra and under the antelope's sprint, because a
+            // horse's gift is not the burst but the distance -- see
+            // `stamina_seconds`, and `horse::GALLOP`, which is the same animal
+            // with somebody on it and carrying them.
+            Species::Horse => 7.8,
         }
     }
 
@@ -949,6 +1002,11 @@ impl Species {
             // wide circle, not a flutter into the next bush. Its soaring
             // spends none of it (`logic::animals::Mind::Soar`).
             Species::Gull => 12.0,
+            // **The longest wind of anything that runs away**: a plains animal
+            // escapes by distance, and a wolf pack (eleven seconds) that has not
+            // closed before the herd looked up has lost it. Under the bear's,
+            // which keeps its promise.
+            Species::Horse => 18.0,
         }
     }
 
@@ -1014,6 +1072,9 @@ impl Species {
             // The fowl's: one good hit, which is why the hunt is the getting
             // near and not the fight.
             Species::Gull => 3.0,
+            // A zebra and a bit: a big animal, and what a wolf pack pulls down
+            // is a horse left standing, not a horse that can run.
+            Species::Horse => 16.0,
         }
     }
 
@@ -1042,7 +1103,11 @@ impl Species {
             // and the answer to it would be armour -- which is the one
             // answer this mechanic must not have. What a rat costs is
             // stores, and stores are defended with light and walls.
-            | Species::Rat => 0.0,
+            | Species::Rat
+            // A horse runs. The one way it hurts anybody is by throwing
+            // them, and that is the breaking's (`husbandry::Breaking`), not
+            // a blow it chooses to land.
+            | Species::Horse => 0.0,
             Species::Boar => 4.0,
             // **Between a boar and a bear.** Four bites is a dead player,
             // which makes a lion something you do not stand and trade blows
@@ -1091,14 +1156,22 @@ impl Species {
             // one reason a pen was never needed. With it in, a flock grazing
             // loose at night is a bet, and a wall two blocks high is the
             // answer to it (the server's `raid_the_pens`).
-            Species::Wolf => matches!(other, Species::Hare | Species::Deer | Species::Sheep),
+            //
+            // **And the horse**, which is the price of keeping one. A wild
+            // herd outlasts a pack (`stamina_seconds`), so what a wolf takes is
+            // the horse left tied at home through the night -- and the answer
+            // to that is the stable wall, the same one the sheep needed.
+            Species::Wolf => matches!(other, Species::Hare | Species::Deer | Species::Sheep | Species::Horse),
             // The savanna's grazers and nothing from the woods: the two
             // never share ground (`lives_in`), and a rule about a deer that
             // strayed over a border is a rule nobody ever sees working. Not
             // the hare either, which shares the grass: a lion does not run
             // down a mouthful, and a lion that did would be one more thing
             // emptying the place a player needs something in.
-            Species::Lion => matches!(other, Species::Zebra | Species::Antelope),
+            // ...and a horse that has grazed out onto the straw
+            // (`lives_in`): the savanna's edge is a border because both
+            // sides of it are dangerous in their own way.
+            Species::Lion => matches!(other, Species::Zebra | Species::Antelope | Species::Horse),
             _ => false,
         }
     }
@@ -1157,7 +1230,7 @@ impl Species {
             | Species::Gull
             | Species::Rat => 0.0,
             // A deer's coat turns a graze and no more.
-            Species::Deer | Species::Sheep | Species::Zebra => 0.4,
+            Species::Deer | Species::Sheep | Species::Zebra | Species::Horse => 0.4,
             // A mane and a thick hide over the shoulders, under a boar's
             // shield: a lion is killed with a spear, and a knife is a long
             // argument with something that bites back.
@@ -1285,6 +1358,14 @@ impl Species {
         use crate::worldgen::Biome;
         match self {
             Species::Zebra | Species::Antelope | Species::Lion => biome == Biome::Savanna,
+            // **The plains, and the edge of the savanna.** The open grass
+            // of the temperate country is the horse's, and the grass does not
+            // stop at a line: a herd grazing out onto the straw is what the
+            // border between the two looks like. It is rarer out there than
+            // the zebra (`spawn_weight_in`), so the savanna stays the
+            // zebra's country. Not the woods: a horse in a forest is a horse
+            // somebody rode there.
+            Species::Horse => matches!(biome, Biome::Plains | Biome::Savanna),
             Species::Deer | Species::Boar | Species::Wolf | Species::Sheep | Species::Bear => {
                 biome != Biome::Savanna
             }
@@ -1480,7 +1561,7 @@ impl Species {
     pub fn provoke_range(self) -> f32 {
         match self {
             Species::Hare | Species::Deer | Species::Zebra | Species::Antelope
-            | Species::Rat => 0.0,
+            | Species::Rat | Species::Horse => 0.0,
             Species::Boar => 3.0,
             // Between the bear's four and a half and the wolf's six, and
             // unlike the wolf's it means what it says: a lion does not wait
@@ -1527,7 +1608,8 @@ impl Species {
             // Nothing to hold. A rat that has been swung at runs, and
             // when it comes back it is because the store is still there,
             // not because it remembers you.
-            | Species::Rat => 0.0,
+            | Species::Rat
+            | Species::Horse => 0.0,
             Species::Boar => 12.0,
             // Under the wolf's twenty. A lion that has been hurt comes for
             // you, and then it has a zebra to think about.
@@ -1619,6 +1701,11 @@ impl Species {
             // weighed and left alone, because there is nothing here yet to
             // fletch and the thrown weapon is the spear's, not a new bow's.
             Species::Gull => &[(BLOCK_FEATHER, 2), (BLOCK_FOWL_MEAT, 1)],
+            // **The most meat of anything that runs, and a wretched trade.** A
+            // horse killed is a week of dinners and two hides; the same horse
+            // kept is every trip to the hills for as long as it is fed. Both
+            // are answers, which is why the number is this high.
+            Species::Horse => &[(BLOCK_RAW_MEAT, 5), (BLOCK_HIDE, 2)],
         }
     }
 
@@ -1645,6 +1732,7 @@ impl Species {
             Species::Zebra => BLOCK_CARCASS_ZEBRA,
             Species::Antelope => BLOCK_CARCASS_ANTELOPE,
             Species::Lion => BLOCK_CARCASS_LION,
+            Species::Horse => crate::types::BLOCK_CARCASS_HORSE,
             Species::Fish | Species::Cod | Species::Trout | Species::Pike | Species::Herring
             // Nothing to butcher. A rat drops what it drops where it
             // falls, like a gull, because a carcass is a thing you kneel
@@ -1763,6 +1851,15 @@ impl Species {
                 (BLOCK_BONE, 2),
                 (BLOCK_RAW_MEAT, 3),
             ],
+            // A zebra's cuts at a horse's size: the most meat on the plain
+            // and three bones, which is what a big frame leaves.
+            Species::Horse => &[
+                (BLOCK_HIDE, 2),
+                (BLOCK_FAT, 1),
+                (BLOCK_SINEW, 3),
+                (BLOCK_BONE, 3),
+                (BLOCK_RAW_MEAT, 5),
+            ],
             // No carcass, so no cuts: see `carcass`.
             Species::Fish | Species::Cod | Species::Trout | Species::Pike | Species::Herring | Species::Gull
             | Species::Rat => &[],
@@ -1866,6 +1963,10 @@ impl Species {
             // a dune, a rock, the dark. The server halves it for a flock
             // roosting after dusk.
             Species::Gull => 9.0,
+            // The zebra's open-ground eyes and a little more: a plains herd
+            // sees you across the grass, which is why taming starts with a
+            // creep and not a walk (`husbandry::horse_lets_you_near`).
+            Species::Horse => 14.0,
         }
     }
 
@@ -1940,6 +2041,7 @@ impl Species {
             Species::Pike => 7.0,
             // Over the noise of the surf.
             Species::Gull => 7.0,
+            Species::Horse => 11.0,
         }
     }
 
@@ -1991,6 +2093,7 @@ impl Species {
             Species::Sheep => 6.0,
             Species::Bear => 22.0,
             Species::Zebra => 12.0,
+            Species::Horse => 12.0,
             Species::Antelope => 10.0,
             Species::Lion => 12.0,
             // Birds and fish go by their eyes.
@@ -2017,7 +2120,7 @@ impl Species {
         match self {
             Species::Hare | Species::Fowl | Species::Gull | Species::Rat => -0.9,
             Species::Antelope => -0.85,
-            Species::Deer | Species::Sheep | Species::Zebra => -0.8,
+            Species::Deer | Species::Sheep | Species::Zebra | Species::Horse => -0.8,
             // A pig's eyes are halfway round.
             Species::Boar => -0.3,
             Species::Wolf | Species::Bear | Species::Lion => 0.0,
@@ -2028,7 +2131,7 @@ impl Species {
     /// How it lives with its own kind. See [`Grouping`].
     pub fn grouping(self) -> Grouping {
         match self {
-            Species::Deer | Species::Sheep | Species::Zebra | Species::Antelope => Grouping::Herd,
+            Species::Deer | Species::Sheep | Species::Zebra | Species::Antelope | Species::Horse => Grouping::Herd,
             Species::Wolf | Species::Lion => Grouping::Pack,
             Species::Hare | Species::Fowl | Species::Boar | Species::Gull | Species::Rat => Grouping::Loose,
             Species::Bear => Grouping::Alone,
@@ -2106,6 +2209,11 @@ impl Species {
         match (wooded, self, night) {
             (true, Species::Wolf, false) => base * WOODS_WOLF_BY_DAY,
             (true, Species::Bear, _) => base * WOODS_BEAR,
+            // **The savanna's edge, not its middle**: one in the zebra's four,
+            // so a herd of horses out on the straw is something a player
+            // crossing the border meets now and then, and the savanna is
+            // still the zebra's (`lives_in`).
+            (_, Species::Horse, _) if biome == Biome::Savanna => 1,
             _ => base,
         }
     }
@@ -2199,6 +2307,11 @@ impl Species {
             // after dark, when a flock is down on the sand and not arriving.
             (Species::Gull, false) => 4,
             (Species::Gull, true) => 2,
+            // A zebra's numbers on the plains, where it is the grazer a player
+            // sees from a hill; fewer after dark, when a herd stands and dozes
+            // rather than arriving. See `spawn_weight_in` for the savanna.
+            (Species::Horse, false) => 3,
+            (Species::Horse, true) => 2,
         }
     }
 }
@@ -2333,6 +2446,11 @@ pub const fn group_size(species: Species) -> (u32, u32) {
         // a bird that has lost its flock, and a flock is what goes up at
         // once when something comes along the beach.
         Species::Gull => (2, 3),
+        // **A stallion and his mares**: three to five, the zebra's herd, with
+        // the last of them the stallion that keeps the rest together (the
+        // server's `stallion`). Two would be a pair, not a herd, and nothing
+        // for a stallion to keep.
+        Species::Horse => (3, 5),
     }
 }
 
@@ -3377,12 +3495,18 @@ mod tests {
         // at all, and its metal age would begin with a walk to a wood.
         // Still one meal animal's hide per country, which is the price the
         // two-animal rule was holding.
+        //
+        // **Four, and the fourth is the horse** -- which does not break the
+        // rule so much as price it. A horse killed for its two hides is a
+        // horse nobody rides home, and taming one costs a week of feeding;
+        // nobody hunts the plains' best mount for leather while there are
+        // deer, and anybody who does has made the decision the horse is for.
         let full_hide: Vec<&str> = Species::ALL
             .iter()
             .filter(|s| s.drops().iter().any(|&(b, _)| b == BLOCK_HIDE))
             .map(|s| s.name())
             .collect();
-        assert_eq!(full_hide, ["deer", "boar", "zebra"]);
+        assert_eq!(full_hide, ["deer", "boar", "zebra", "horse"]);
     }
 
     #[test]
@@ -3402,7 +3526,9 @@ mod tests {
             .filter(|&&s| Species::ALL.iter().any(|p| p.hunts(s)))
             .map(|s| s.name())
             .collect();
-        assert_eq!(hunted, ["hare", "deer", "sheep", "zebra", "antelope"]);
+        // ...and the horse, by both: the pack on the plain and the lion at
+        // the savanna's edge (`lives_in`).
+        assert_eq!(hunted, ["hare", "deer", "sheep", "zebra", "antelope", "horse"]);
         // Nothing hunts itself, and the ones that fight back are left out
         // of each other's business.
         for &species in Species::ALL {
@@ -3493,8 +3619,11 @@ mod tests {
             // country (`Species::Fish`), and is not what this border is about.
             Species::ALL.iter().filter(|s| !s.swims() && s.lives_in(biome)).map(|s| s.name()).collect()
         };
-        assert_eq!(living_in(Biome::Savanna), ["hare", "fowl", "zebra", "antelope", "lion"]);
-        assert_eq!(living_in(Biome::Plains), ["hare", "deer", "boar", "wolf", "sheep", "bear", "fowl"]);
+        // The horse is on both sides of this one border and no other: the
+        // plains' own, grazing out onto the straw (`Species::Horse`'s
+        // `lives_in` row, and `spawn_weight_in` for how rarely).
+        assert_eq!(living_in(Biome::Savanna), ["hare", "fowl", "zebra", "antelope", "lion", "horse"]);
+        assert_eq!(living_in(Biome::Plains), ["hare", "deer", "boar", "wolf", "sheep", "bear", "fowl", "horse"]);
         // Every species lives somewhere -- except the one whose country
         // is a kitchen. A rat is not put into the world by biome at all
         // (see its `lives_in` row and `vermin::may_appear`), and giving

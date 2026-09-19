@@ -108,6 +108,10 @@ pub fn breeds(species: Species) -> bool {
     matches!(
         species,
         Species::Deer | Species::Boar | Species::Sheep | Species::Zebra | Species::Antelope
+            // ...and the horse, whose foal at its mother's side is the sight a
+            // plains herd is, and whose kept mare is how a second horse comes
+            // without a second breaking.
+            | Species::Horse
     )
 }
 
@@ -233,6 +237,9 @@ pub fn young_name(species: Species) -> Option<&'static str> {
         Species::Boar => Some("piglet"),
         Species::Zebra => Some("foal"),
         Species::Antelope => Some("antelope_calf"),
+        // A foal as well, and its own key: "foal" is the zebra's, and one
+        // row cannot say "young zebra" and "young horse" both.
+        Species::Horse => Some("horse_foal"),
         _ => None,
     }
 }

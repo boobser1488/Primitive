@@ -1432,6 +1432,8 @@ mod tests {
                 "carcass_zebra",
                 "carcass_antelope",
                 "carcass_lion",
+                // ...and the horse's, half a cell like the zebra's.
+                "carcass_horse",
                 "nest_eggs",
                 "nest",
                 // ...and the three low pieces of furniture. A bed

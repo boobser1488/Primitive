@@ -211,7 +211,7 @@ fn settled_entities() -> Entities {
         x: f64::from(x),
         y: f64::from(GROUND + species.height() * 0.5),
         z: f64::from(z),
-        kind: EntityKind::Animal { species, yaw: 0.0, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX },
+        kind: EntityKind::Animal { species, yaw: 0.0, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0 },
     };
     let states = vec![
         // In the sun, beside the reference row.

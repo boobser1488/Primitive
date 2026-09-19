@@ -1320,6 +1320,9 @@ fn idle_chance(species: Species, night: bool) -> f32 {
         Species::Boar => 0.35,
         Species::Deer => 0.12,
         Species::Zebra => 0.25,
+        // A herd that calls to itself now and then: a whinny across the
+        // grass is how a player on a hill learns there are horses below.
+        Species::Horse => 0.2,
         Species::Antelope => 0.08,
         Species::Bear => 0.12,
         Species::Gull => 0.7,
