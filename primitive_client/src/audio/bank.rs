@@ -1792,6 +1792,9 @@ mod tests {
             Species::Trout | Species::Pike | Species::Herring => Species::Fish,
             // ...and the rat, which is heard as a hare: see `voice_of`.
             Species::Rat => Species::Hare,
+            // ...and the horse, heard through the zebra's until a horse of
+            // its own is recorded (`voice_of`, `SOURCES.md`).
+            Species::Horse => Species::Zebra,
             other => other,
         };
         let mut owner: HashMap<usize, Species> = HashMap::new();

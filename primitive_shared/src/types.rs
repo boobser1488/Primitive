@@ -11070,3 +11070,30 @@ mod corpse_tests {
         assert!(!rots_with_a_body(60_000));
     }
 }
+
+#[cfg(test)]
+mod horse_id_tests {
+    use super::*;
+
+    /// **The horse's three ids are its own**: under 700, inside the ten bits
+    /// of a kind, and named by nothing else in the table. The ids were taken
+    /// from the gap after the sundew rather than the lowest free ones (see
+    /// `BLOCK_CARCASS_HORSE`), and this is what says they were still free
+    /// when that was written -- and what goes red first if a merge lands
+    /// another block on one of them.
+    #[test]
+    fn the_horses_ids_are_its_own() {
+        for id in [BLOCK_CARCASS_HORSE, BLOCK_SADDLE, BLOCK_SADDLEBAGS] {
+            assert!(id < 700 && id & !KIND_MASK == 0, "{id} is out of a kind's room");
+            let named: Vec<&str> = ALL_BLOCK_IDS.iter().filter(|&&(other, _)| other == id).map(|&(_, n)| n).collect();
+            assert_eq!(named.len(), 1, "id {id} is named {named:?}");
+        }
+        // And every id in the table is one block's, which is the rule the
+        // three above lean on.
+        let mut ids: Vec<BlockId> = ALL_BLOCK_IDS.iter().map(|&(id, _)| id).collect();
+        ids.sort_unstable();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "two blocks share an id");
+    }
+}

@@ -42,6 +42,13 @@ yelp and whine for the wolf, rabbits for the hare, chickens, pheasants and
 junglefowl for wild fowl, a donkey for the zebra past its one bray, goats
 for a wounded antelope.
 
+**The horse has no recording of its own yet.** It is heard through the
+zebra's files above -- a zebra's bray and a donkey's, the nearest equids
+this repository holds under CC0 (`audio::bank::voice_of`). A CC0 horse
+whinny, snort and gallop were not fetched: a new download needs its page
+read for the licence the way every file here was, and that has not been
+done. Until it is, nothing under `wild/` is a horse.
+
 Licence: https://creativecommons.org/publicdomain/zero/1.0/
 
 ## Kenney: Impact Sounds

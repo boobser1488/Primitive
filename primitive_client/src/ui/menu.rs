@@ -5836,7 +5836,9 @@ mod tests {
         // moves the shape and the colour hashes as well.
         // ...and HIDE INTERFACE (`keybinds::Action::ToggleHud`, Tab), one
         // more row of the same ninety-odd vertices.
-        ("controls", 2550, 4668233177528228350, 17432726353650680995),
+        // ...and WALK / GET OFF (`keybinds::Action::Rein`, C), the horse's
+        // key, one more row again.
+        ("controls", 2682, 13879285464829512363, 6314649886350392355),
         // Shape only: BACK is the middle third of the panel (`columns`).
         ("credits", 648, 4653236891393317696, 3024564837030182243),
         // Shape only, as the credits.
