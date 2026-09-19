@@ -8449,6 +8449,147 @@ pub(crate) mod offscreen_repro {
         println!("partial block pictures in {out}, tagged {tag}");
     }
 
+    /// Faces that look into the cell of a partial block, lit through the
+    /// real flood and the real shader.
+    ///
+    /// ```text
+    /// GPU_REPRO_DIR=shots/partial_light PARTIAL_LIGHT_TAG=after cargo test -p primitive_client \
+    ///     --bin primitive_client what_faces_beside_partial_blocks_look_like -- --ignored --nocapture
+    /// ```
+    ///
+    /// "у листвы, когда стоит рядом с неполным, чернеет бок": a column of
+    /// leaves beside the lip of a slope, its side black from the foot up to
+    /// the lip's cell. Every partial that stops light -- lips a quarter, a
+    /// half and three quarters down, a side bite, a heap, a slab, a step, a
+    /// roof -- in a row, and behind each row something different looking
+    /// into them: leaves, a whole block of turf, water, a chair. (A skin of
+    /// snow, a staged wall and a cairn stop none and were never dark.)
+    #[test]
+    #[ignore = "a tool: needs a GPU; draws faces beside partial blocks"]
+    fn what_faces_beside_partial_blocks_look_like() {
+        let Some((device, queue)) = gpu() else {
+            println!("no GPU adapter on this machine; skipping");
+            return;
+        };
+        let out = std::env::var("GPU_REPRO_DIR").unwrap_or_else(|_| ".".to_string());
+        let tag = std::env::var("PARTIAL_LIGHT_TAG").unwrap_or_else(|_| "now".to_string());
+        std::fs::create_dir_all(&out).expect("output directory");
+        let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
+        let settings = crate::settings::ClientSettings { anisotropy: 16, fov_degrees: 95.0, ..Default::default() };
+        let textures = TextureManager::load(device, queue, assets, settings.anisotropy).expect("textures load");
+
+        use crate::logic::chunk_manager::ChunkManager;
+        use primitive_shared::dig::{self, Side};
+        use primitive_shared::lighting::LightMap;
+        use primitive_shared::types::{
+            faced, Chunk, ChunkPos, Facing, BLOCK_AIR, BLOCK_CHAIR, BLOCK_DIRT, BLOCK_GRASS, BLOCK_LEAVES,
+            BLOCK_PLANK_STAIRS, BLOCK_THATCH_ROOF, BLOCK_TILE_SLAB, BLOCK_WATER,
+            CHUNK_SIZE_X, CHUNK_SIZE_Z, CHUNK_VOLUME,
+        };
+        let pos = ChunkPos::new(0, 0);
+        let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+        for z in 0..CHUNK_SIZE_Z {
+            for x in 0..CHUNK_SIZE_X {
+                blocks[Chunk::index(x, 0, z)] = BLOCK_DIRT;
+                blocks[Chunk::index(x, 1, z)] = BLOCK_GRASS;
+            }
+        }
+        let g = 2;
+        let partials = [
+            dig::lowered(BLOCK_GRASS, 3),
+            dig::lowered(BLOCK_GRASS, 2),
+            dig::lowered(BLOCK_GRASS, 1),
+            dig::next_bite(BLOCK_DIRT, Side::PosZ).and_then(|b| dig::next_bite(b, Side::PosZ)).expect("dirt bites"),
+            dig::heaped(BLOCK_DIRT),
+            BLOCK_TILE_SLAB,
+            faced(BLOCK_PLANK_STAIRS, Facing::South),
+            faced(BLOCK_THATCH_ROOF, Facing::South),
+        ];
+        for (i, partial) in partials.into_iter().enumerate() {
+            let x = 2 * i;
+            // Leaves: the photograph. A column three high beside the partial.
+            blocks[Chunk::index(x, g, 2)] = partial;
+            for y in g..g + 3 {
+                blocks[Chunk::index(x, y, 3)] = BLOCK_LEAVES;
+            }
+            // The next step of the slope: a whole block of turf.
+            blocks[Chunk::index(x, g, 6)] = partial;
+            blocks[Chunk::index(x, g, 7)] = BLOCK_DIRT;
+            blocks[Chunk::index(x, g + 1, 7)] = BLOCK_GRASS;
+            // Water beside it.
+            blocks[Chunk::index(x, g, 10)] = partial;
+            blocks[Chunk::index(x, g, 11)] = BLOCK_WATER;
+            // A model beside it.
+            blocks[Chunk::index(x, g, 13)] = partial;
+            blocks[Chunk::index(x, g, 14)] = faced(BLOCK_CHAIR, Facing::South);
+        }
+        let mut chunks = ChunkManager::new(4);
+        chunks.insert(Chunk { pos, blocks });
+        let mut light = LightMap::new();
+        light.load_chunk(&chunks, pos);
+        for (i, _) in partials.iter().enumerate() {
+            let x = 2 * i as i32;
+            println!(
+                "column {i}: sky in the partial's cell {} (leaves row), {} (turf row); over it {}",
+                light.sky(x, g as i32, 2),
+                light.sky(x, g as i32, 6),
+                light.sky(x, g as i32 + 1, 2),
+            );
+        }
+        let mut cache = crate::engine::mesh::Neighbourhood::default();
+        cache.fill(pos, &chunks, &light);
+        let mut mesh = crate::engine::mesh::MeshBuffers::default();
+        crate::engine::mesh::build_mesh(
+            pos,
+            &cache,
+            &textures.face_layers(),
+            &primitive_shared::worldgen::WorldGen::new(0),
+            &mut mesh,
+        );
+        let meshes = vec![(pos, mesh)];
+        let sky = crate::engine::sky::Sky::new(0.5, 900.0);
+        let size = (1280u32, 720u32);
+        let shoot = |name: &str, eye: Vec3, at: Vec3| {
+            let mut camera = Camera::new(eye.as_dvec3(), size.0 as f32 / size.1 as f32);
+            let d = (at - eye).normalize();
+            camera.yaw = d.z.atan2(d.x);
+            camera.pitch = d.y.asin();
+            camera.fov_y_radians = settings.fov_degrees.to_radians();
+            let mut picture = draw_scene(
+                device,
+                queue,
+                &textures,
+                &settings,
+                &camera,
+                &sky,
+                &meshes,
+                size,
+                include_str!("shader.wgsl"),
+                None,
+                None,
+                false,
+                settings.msaa.max(1),
+            );
+            for pixel in picture.pixels_mut() {
+                pixel.0[3] = 255;
+            }
+            picture.save(format!("{out}/{tag}_{name}.png")).expect("write png");
+        };
+        let eye = g as f32 + 1.62;
+        // The photograph: standing on the ground below the lips, close to
+        // the leaves, looking at the foot of the column.
+        shoot("leaves_player", Vec3::new(1.5, eye - 0.3, 0.3), Vec3::new(0.5, g as f32 + 0.4, 3.0));
+        shoot("leaves_row", Vec3::new(7.5, eye + 0.3, -2.5), Vec3::new(7.5, g as f32 + 0.5, 3.0));
+        shoot("turf_row", Vec3::new(7.5, eye + 0.3, 4.6), Vec3::new(7.5, g as f32 + 0.5, 7.0));
+        shoot("water_row", Vec3::new(7.5, eye + 0.6, 8.3), Vec3::new(7.5, g as f32 + 0.3, 11.0));
+        shoot("chair_row", Vec3::new(7.5, eye + 0.3, 11.8), Vec3::new(7.5, g as f32 + 0.5, 14.0));
+        // Round the leaves: west, east, and from behind over the column.
+        shoot("leaves_west", Vec3::new(-2.5, eye, 1.0), Vec3::new(3.0, g as f32 + 0.5, 2.5));
+        shoot("leaves_east", Vec3::new(17.5, eye, 1.0), Vec3::new(12.0, g as f32 + 0.5, 2.5));
+        shoot("leaves_behind", Vec3::new(7.5, eye + 2.5, 5.0), Vec3::new(7.5, g as f32 + 0.5, 2.0));
+        println!("pictures in {out}, tagged {tag}");
+    }
+
     /// Finds the first ruin in a world and photographs it.
     ///
     /// ```text

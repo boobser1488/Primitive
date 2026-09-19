@@ -94,6 +94,10 @@ pub enum Channel {
 /// sunlight is at full strength (the free-fall case), and different
 /// under anything that dims it -- water, leaves -- which is why it took
 /// partial-opacity blocks in the property test to surface it.
+///
+/// For a block that holds light (`holds_light`) this is the level in its
+/// own cell; what goes on down the column under it is nought, and the
+/// column passes ask [`sky_onward`] for that.
 #[inline]
 fn sky_below(level: u8, id: BlockId) -> u8 {
     if is_opaque(id) {
@@ -103,9 +107,156 @@ fn sky_below(level: u8, id: BlockId) -> u8 {
     if level == MAX_LIGHT && opacity == 0 {
         // Full-strength sunlight falls without loss.
         MAX_LIGHT
+    } else if opacity >= MAX_LIGHT {
+        match holds_light(id) {
+            Some(sealed) if sealed != UP => {
+                if level == MAX_LIGHT {
+                    MAX_LIGHT
+                } else {
+                    level.saturating_sub(1)
+                }
+            }
+            _ => 0,
+        }
     } else {
         level.saturating_sub(1u8.saturating_add(opacity))
     }
+}
+
+/// What the sky column carries on below a cell whose own level is `here`:
+/// `here` itself, unless the cell holds its light and passes none of it on.
+#[inline]
+fn sky_onward(here: u8, id: BlockId) -> u8 {
+    if here > 0 && holds_light(id).is_some() {
+        0
+    } else {
+        here
+    }
+}
+
+/// Index into [`NEIGHBOURS`] of straight up. The two directions of an axis
+/// sit side by side there, so the opposite of step `k` is `k ^ 1`.
+const UP: u8 = 2;
+
+/// **A block that stops light but does not fill its cell holds light**:
+/// the air in the rest of its cell is lit from the cells round it, and
+/// none of that light goes on through. `Some(side)` is the one side of the
+/// cell the block covers whole -- light cannot come in that way -- as an
+/// index into [`NEIGHBOURS`] of the step out of the cell through it.
+///
+/// "у листвы, когда стоит рядом с неполным, чернеет бок": the lip of a
+/// slope is turf lowered a quarter at a time (`dig::lowered`), and turf's
+/// row stops all light, so the flood left the lip's cell at nought -- under
+/// open noon sky. Every face that looks into that cell takes its light
+/// from it (`mesh`'s ring of nine), so the side of a column of leaves
+/// standing beside the lip, of the next whole block up the slope, of the
+/// water, was drawn black up to the lip's cell: a black band at the foot
+/// of every rise, on the part of the face that stands over the lip in
+/// plain daylight. A slab, a step, a roof and a bite out of a wall did the
+/// same to whatever they were set against.
+///
+/// Three ways to let the light in were weighed:
+///
+/// * *Take the opacity off partial blocks* -- light passes through them
+///   like a skin of snow. That lights the cell, and it lights everything
+///   past it too: a roof of slabs is the sky over the room, and a cave
+///   wall with a bite out of it is a window. "Caves do not get brighter"
+///   is not negotiable.
+/// * *Read the light over the partial in the mesher* rather than in its
+///   own cell. The mesher's neighbourhood is one cell deep, which is
+///   exactly the ring a face reads; the cells round *those* are outside
+///   it, so a seam would light the same cell two ways. And it mends one
+///   reader of many: the model on the lip, the player standing on it, the
+///   fire on a slab all read the same cell.
+/// * **Let the cell receive and not pass (chosen).** The cell is lit as
+///   the air in it is, a level under its brightest open neighbour, and the
+///   flood never steps out of it. Nothing beyond it can tell it is lit, so
+///   no light reaches anywhere it did not before. The one side the block
+///   covers whole is the one side it is not lit through: a bite into a
+///   cave's ceiling under a meadow stands in the top of its cell, and the
+///   daylight over that is on the other side of the rock.
+///
+/// Its own glow still leaves it -- `spreads` -- because an emitter's light
+/// is made in the cell rather than let through it.
+///
+/// Not the shut door, which is a thin board the way a bite is a thin rock
+/// but is a wall with a room on each side of it: see `types::light_opacity`
+/// for why its cell is dark.
+fn holds_light(id: BlockId) -> Option<u8> {
+    match holder_table()[id as usize] {
+        0 => None,
+        side => Some(side - 1),
+    }
+}
+
+/// The level a cell at `level` holding `id` gives away to its neighbours:
+/// all of it, unless it holds light, when only what it makes itself.
+#[inline]
+fn spreads(level: u8, id: BlockId, channel: Channel, holders: &[u8; 1 << 16]) -> u8 {
+    if holders[id as usize] == 0 {
+        level
+    } else if channel == Channel::Block {
+        light_emission(id).min(level)
+    } else {
+        0
+    }
+}
+
+/// Light arriving at a cell that holds light, through the step `k` of
+/// [`NEIGHBOURS`] from a cell at `level`: nought through the side it
+/// covers, full sun straight down through an open top, one level less
+/// otherwise -- the opacity of the block is not charged, because the light
+/// is in the air beside it and not in it.
+#[inline]
+fn into_holder(level: u8, hold: u8, k: usize, channel: Channel) -> u8 {
+    let sealed = hold - 1;
+    if usize::from(sealed) == k ^ 1 {
+        0
+    } else if channel == Channel::Sky && k == 3 && level == MAX_LIGHT {
+        MAX_LIGHT
+    } else {
+        level.saturating_sub(1)
+    }
+}
+
+/// [`holds_light`] for every id at once, one byte each: nought for
+/// everything else, the sealed side plus one for a holder. A table because
+/// the flood asks it of every cell it pops, and the answer depends on the
+/// id alone (the mesher's cover table is the same argument).
+fn holder_table() -> &'static [u8; 1 << 16] {
+    static TABLE: std::sync::OnceLock<Box<[u8; 1 << 16]>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = Box::new([0u8; 1 << 16]);
+        for (id, slot) in table.iter_mut().enumerate() {
+            let id = id as BlockId;
+            if is_opaque(id) || light_opacity(id) < MAX_LIGHT {
+                continue;
+            }
+            // The side the rock is pushed against is the one opposite the
+            // side it was eaten from (`dig::bite_box`).
+            let sealed = if let Some((side, _)) = crate::dig::bite(id) {
+                use crate::dig::Side;
+                match side {
+                    Side::PosX => 1,
+                    Side::NegX => 0,
+                    Side::PosY => 3,
+                    Side::NegY => 2,
+                    Side::PosZ => 5,
+                    Side::NegZ => 4,
+                }
+            } else if crate::types::is_partial(id) || crate::types::is_step(id) {
+                // A slab, a layer and every shape of step stand on the
+                // whole floor of their cell and nowhere cover a whole side
+                // (`geometry::step_pose_boxes`: the tread is the lower half
+                // in all of them).
+                3
+            } else {
+                continue;
+            };
+            *slot = sealed + 1;
+        }
+        table
+    })
 }
 
 const NEIGHBOURS: [(i32, i32, i32); 6] = [
@@ -452,11 +603,12 @@ impl LightMap {
         let mut level = MAX_LIGHT;
         for y in (0..CHUNK_SIZE_Y as i32).rev() {
             let id = src.block_at(gx, y, gz).unwrap_or(BLOCK_AIR);
-            level = sky_below(level, id);
-            if level > self.sky(gx, y, gz) {
-                self.set(Channel::Sky, gx, y, gz, level, &mut dirty);
+            let here = sky_below(level, id);
+            if here > self.sky(gx, y, gz) {
+                self.set(Channel::Sky, gx, y, gz, here, &mut dirty);
                 refill.push_back((gx, y, gz));
             }
+            level = sky_onward(here, id);
             if level == 0 {
                 break;
             }
@@ -483,13 +635,22 @@ impl LightMap {
         mut queue: VecDeque<(i32, i32, i32)>,
         dirty: &mut HashSet<ChunkPos>,
     ) {
+        let holders = holder_table();
         while let Some((gx, gy, gz)) = queue.pop_front() {
             let level = self.get(channel, gx, gy, gz);
             if level <= 1 {
                 continue;
             }
+            // A cell that holds light gives none of it away (`holds_light`).
+            let level = match src.block_at(gx, gy, gz) {
+                Some(here) => spreads(level, here, channel, holders),
+                None => level,
+            };
+            if level <= 1 {
+                continue;
+            }
 
-            for (dx, dy, dz) in NEIGHBOURS {
+            for (k, (dx, dy, dz)) in NEIGHBOURS.into_iter().enumerate() {
                 let (nx, ny, nz) = (gx + dx, gy + dy, gz + dz);
                 if ny < 0 || ny >= CHUNK_SIZE_Y as i32 {
                     continue;
@@ -505,19 +666,25 @@ impl LightMap {
                     continue;
                 }
 
-                let sunbeam =
-                    channel == Channel::Sky && dy == -1 && level == MAX_LIGHT && light_opacity(id) == 0;
-                let new_level = if sunbeam {
+                let opacity = light_opacity(id);
+                let hold = if opacity >= MAX_LIGHT { holders[id as usize] } else { 0 };
+                let sunbeam = channel == Channel::Sky && dy == -1 && level == MAX_LIGHT && opacity == 0;
+                let new_level = if hold != 0 {
+                    into_holder(level, hold, k, channel)
+                } else if sunbeam {
                     MAX_LIGHT
                 } else {
-                    level.saturating_sub(1u8.saturating_add(light_opacity(id)))
+                    level.saturating_sub(1u8.saturating_add(opacity))
                 };
                 if new_level == 0 {
                     continue;
                 }
                 if self.get(channel, nx, ny, nz) < new_level {
                     self.set(channel, nx, ny, nz, new_level, dirty);
-                    queue.push_back((nx, ny, nz));
+                    // Lit, and nothing to pass on: a holder is not queued.
+                    if hold == 0 {
+                        queue.push_back((nx, ny, nz));
+                    }
                 }
             }
         }
@@ -529,7 +696,7 @@ impl LightMap {
     /// other sources remain.
     fn remove<S: BlockSource>(
         &mut self,
-        _src: &S,
+        src: &S,
         channel: Channel,
         start: (i32, i32, i32),
         dirty: &mut HashSet<ChunkPos>,
@@ -541,8 +708,35 @@ impl LightMap {
         }
         self.set(channel, start.0, start.1, start.2, 0, dirty);
 
+        let holders = holder_table();
         let mut queue = VecDeque::from([(start, start_level)]);
         while let Some(((gx, gy, gz), level)) = queue.pop_front() {
+            // **Nothing was lit by a cell that holds light** (`holds_light`),
+            // so clearing one clears nothing round it: every lit neighbour
+            // is a way the light may come back in, and is kept. Not asked of
+            // the cell the edit is at -- the block there now is not the
+            // block the light flowed out of.
+            let holder = (gx, gy, gz) != start
+                && src.block_at(gx, gy, gz).is_some_and(|id| holders[id as usize] != 0);
+            if holder {
+                if channel == Channel::Block {
+                    let glow = src.block_at(gx, gy, gz).map_or(0, light_emission);
+                    if glow > 0 {
+                        self.set(channel, gx, gy, gz, glow, dirty);
+                        refill.push_back((gx, gy, gz));
+                    }
+                }
+                for (dx, dy, dz) in NEIGHBOURS {
+                    let (nx, ny, nz) = (gx + dx, gy + dy, gz + dz);
+                    if ny < 0 || ny >= CHUNK_SIZE_Y as i32 || !self.chunks.contains_key(&split(nx, ny, nz).0) {
+                        continue;
+                    }
+                    if self.get(channel, nx, ny, nz) > 0 {
+                        refill.push_back((nx, ny, nz));
+                    }
+                }
+                continue;
+            }
             for (dx, dy, dz) in NEIGHBOURS {
                 let (nx, ny, nz) = (gx + dx, gy + dy, gz + dz);
                 if ny < 0 || ny >= CHUNK_SIZE_Y as i32 {
@@ -693,15 +887,16 @@ pub fn compute_isolated(blocks: &[BlockId]) -> Vec<u8> {
                 if level[column] == 0 {
                     continue;
                 }
-                let next = sky_below(level[column], blocks[plane + column]);
-                level[column] = next;
+                let id = blocks[plane + column];
+                let next = sky_below(level[column], id);
+                level[column] = sky_onward(next, id);
                 // A whole byte rather than the low nibble of one: block
                 // light has not been written yet, so the high nibble is
                 // still the zero the array was made with. The emission
                 // pass below is the one that has to preserve what is
                 // already there.
                 data[plane + column] = next;
-                if next == 0 {
+                if level[column] == 0 {
                     alive -= 1;
                 }
             }
@@ -762,7 +957,8 @@ pub fn compute_isolated(blocks: &[BlockId]) -> Vec<u8> {
 /// `plane` is the index the cell's y layer starts at, so a neighbour is
 /// an add rather than three coordinates put back through `Chunk::index`.
 fn spreads_sideways(blocks: &[BlockId], data: &[u8], plane: usize, lx: usize, lz: usize, level: u8) -> bool {
-    for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+    // The four horizontal steps, as their indices in `NEIGHBOURS`.
+    for (k, (dx, dz)) in [(0usize, (1i32, 0i32)), (1, (-1, 0)), (4, (0, 1)), (5, (0, -1))] {
         let nx = lx as i32 + dx;
         let nz = lz as i32 + dz;
         if nx < 0 || nz < 0 || nx >= CHUNK_SIZE_X as i32 || nz >= CHUNK_SIZE_Z as i32 {
@@ -786,9 +982,18 @@ fn spreads_sideways(blocks: &[BlockId], data: &[u8], plane: usize, lx: usize, lz
         if is_opaque(id) {
             continue;
         }
-        let arriving = level.saturating_sub(1u8.saturating_add(light_opacity(id)));
+        let opacity = light_opacity(id);
+        let arriving = if opacity >= MAX_LIGHT {
+            match holder_table()[id as usize] {
+                0 => 0,
+                hold => into_holder(level, hold, k, Channel::Sky),
+            }
+        } else {
+            level.saturating_sub(1u8.saturating_add(opacity))
+        };
         if arriving > current {
-            return true;
+            // ...and only if this cell gives light away at all.
+            return holder_table()[blocks[plane + lz * CHUNK_SIZE_X + lx] as usize] == 0;
         }
     }
     false
@@ -803,12 +1008,15 @@ fn flood_local(
     let sx = CHUNK_SIZE_X;
     let sy = CHUNK_SIZE_Y;
     let sz = CHUNK_SIZE_Z;
+    let holders = holder_table();
 
     while let Some(idx) = queue.pop_front() {
         let level = match channel {
             Channel::Sky => data[idx] & 0x0F,
             Channel::Block => (data[idx] >> 4) & 0x0F,
         };
+        // A cell that holds light gives none of it away (`holds_light`).
+        let level = spreads(level, blocks[idx], channel, holders);
         if level <= 1 {
             continue;
         }
@@ -818,7 +1026,7 @@ fn flood_local(
         let z = (idx / sx) % sz;
         let y = idx / (sx * sz);
 
-        for (dx, dy, dz) in NEIGHBOURS {
+        for (k, (dx, dy, dz)) in NEIGHBOURS.into_iter().enumerate() {
             let nx = x as i32 + dx;
             let ny = y as i32 + dy;
             let nz = z as i32 + dz;
@@ -834,12 +1042,15 @@ fn flood_local(
                 continue;
             }
 
-            let sunbeam =
-                channel == Channel::Sky && dy == -1 && level == MAX_LIGHT && light_opacity(id) == 0;
-            let new_level = if sunbeam {
+            let opacity = light_opacity(id);
+            let hold = if opacity >= MAX_LIGHT { holders[id as usize] } else { 0 };
+            let sunbeam = channel == Channel::Sky && dy == -1 && level == MAX_LIGHT && opacity == 0;
+            let new_level = if hold != 0 {
+                into_holder(level, hold, k, channel)
+            } else if sunbeam {
                 MAX_LIGHT
             } else {
-                level.saturating_sub(1u8.saturating_add(light_opacity(id)))
+                level.saturating_sub(1u8.saturating_add(opacity))
             };
             if new_level == 0 {
                 continue;
@@ -854,7 +1065,10 @@ fn flood_local(
                     Channel::Sky => (data[nidx] & 0xF0) | new_level,
                     Channel::Block => (data[nidx] & 0x0F) | (new_level << 4),
                 };
-                queue.push_back(nidx);
+                // Lit, and nothing to pass on: a holder is not queued.
+                if hold == 0 {
+                    queue.push_back(nidx);
+                }
             }
         }
     }
@@ -1148,7 +1362,20 @@ pub(crate) mod tests {
             // ask how deep it was would light the world differently
             // depending on which half of the pair got there first, and
             // this is the test that would catch it.
-            let id = match lcg(&mut rng) % 8 {
+            //
+            // And the blocks that hold light (`holds_light`): lit, passing
+            // nothing on, and shut on one side -- the one rule in the flood
+            // that is not the same both ways across a face, which is
+            // exactly what an incremental removal can get wrong.
+            let id = match lcg(&mut rng) % 11 {
+                8 => crate::dig::lowered(crate::types::BLOCK_GRASS, 1 + (lcg(&mut rng) % 3) as u8),
+                9 => {
+                    use crate::dig::Side;
+                    let side = [Side::PosX, Side::NegX, Side::PosY, Side::NegY, Side::PosZ, Side::NegZ]
+                        [(lcg(&mut rng) % 6) as usize];
+                    crate::dig::next_bite(crate::types::BLOCK_DIRT, side).expect("dirt bites")
+                }
+                10 => [crate::types::BLOCK_TILE_SLAB, crate::types::BLOCK_PLANK_STAIRS][(lcg(&mut rng) % 2) as usize],
                 0 => BLOCK_STONE,
                 1 => BLOCK_GLOWSTONE,
                 2 => crate::types::BLOCK_WATER,
@@ -1200,6 +1427,125 @@ pub(crate) mod tests {
         }
     }
 
+    /// Every partial block that stops light: the lips of a slope, a heap, a
+    /// bite out of a side, a slab, a step, a roof.
+    fn light_holders() -> Vec<(&'static str, BlockId)> {
+        use crate::dig::{self, Side};
+        use crate::types::{faced, Facing, BLOCK_DIRT, BLOCK_GRASS, BLOCK_PLANK_STAIRS, BLOCK_THATCH_ROOF, BLOCK_TILE_SLAB};
+        vec![
+            ("a lip a quarter down", dig::lowered(BLOCK_GRASS, 3)),
+            ("a lip half down", dig::lowered(BLOCK_GRASS, 2)),
+            ("a lip three quarters down", dig::lowered(BLOCK_GRASS, 1)),
+            ("a heap", dig::heaped(BLOCK_DIRT)),
+            ("a side bite", dig::next_bite(BLOCK_DIRT, Side::PosX).expect("dirt bites")),
+            ("a slab", BLOCK_TILE_SLAB),
+            ("a step", faced(BLOCK_PLANK_STAIRS, Facing::North)),
+            ("a roof", faced(BLOCK_THATCH_ROOF, Facing::East)),
+        ]
+    }
+
+    /// Lights `edits` on the stone slab both ways -- from scratch, and one
+    /// block at a time into a map already lit -- and insists they agree.
+    fn lit_both_ways(edits: &[((i32, i32, i32), BlockId)]) -> LightMap {
+        let pos = ChunkPos::new(0, 0);
+        let (mut world, mut incremental) = world_with(&[pos]);
+        for &((x, y, z), id) in edits {
+            world.set(x, y, z, id);
+            incremental.set_block(&world, x, y, z, id);
+        }
+        let mut fresh = LightMap::new();
+        fresh.load_chunk(&world, pos);
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 0..CHUNK_SIZE_Y as i32 {
+                    assert_eq!(incremental.sky(x, y, z), fresh.sky(x, y, z), "sky at ({x},{y},{z})");
+                    assert_eq!(incremental.block(x, y, z), fresh.block(x, y, z), "fire at ({x},{y},{z})");
+                }
+            }
+        }
+        fresh
+    }
+
+    /// "у листвы, когда стоит рядом с неполным, чернеет бок": the lip of a
+    /// slope stops light, as the turf it is does, so the flood left its cell
+    /// at nought under open sky -- and every face looking into that cell,
+    /// the side of a column of leaves beside it, the next block up the
+    /// slope, was drawn black where it stands over the lip in daylight.
+    /// The air over a partial block is lit like air; what is under it is
+    /// lit only from the side, because none of the light goes on through.
+    #[test]
+    fn a_cell_with_a_partial_block_in_it_is_lit_by_the_air_over_it() {
+        for (what, id) in light_holders() {
+            // On the ground, and hung in the air with nothing under it.
+            let light = lit_both_ways(&[((4, 31, 4), id), ((10, 36, 10), id)]);
+            assert_eq!(light.sky(4, 31, 4), MAX_LIGHT, "{what} on the ground stands in daylight");
+            assert_eq!(light.sky(10, 36, 10), MAX_LIGHT, "{what} in the air stands in daylight");
+            assert_eq!(
+                light.sky(10, 35, 10),
+                MAX_LIGHT - 1,
+                "under {what} the light comes in from the side, not through it"
+            );
+        }
+    }
+
+    /// The other half of the rule: the cell is lit, and nothing past it is.
+    /// A room under a roof of slabs stays dark, and so does a cave behind a
+    /// wall with a bite out of it, whichever side the bite was taken from --
+    /// and a bite into the ceiling, which stands in the top of its cell
+    /// against the daylight over it, is not lit through the rock.
+    #[test]
+    fn a_full_wall_with_a_partial_block_in_it_still_keeps_the_light_out() {
+        use crate::dig::{self, Side};
+        use crate::types::{BLOCK_DIRT, BLOCK_TILE_SLAB};
+        // A room three wide, deep in the stone, at y 20..=22, round (8, 8).
+        let mut room = Vec::new();
+        for x in 7..=9 {
+            for z in 7..=9 {
+                for y in 20..=22 {
+                    room.push(((x, y, z), BLOCK_AIR));
+                }
+            }
+        }
+        // A shaft from the meadow down to the room's ceiling at y 23, and a
+        // second one beside the room, with a wall a block thick at x 10.
+        let shaft = |x: i32, z: i32, from: i32| (from..=30).map(move |y| ((x, y, z), BLOCK_AIR));
+        let dark = |light: &LightMap, what: &str| {
+            for x in 7..=9 {
+                for z in 7..=9 {
+                    for y in 20..=22 {
+                        assert_eq!(light.sky(x, y, z), 0, "{what}: the room at ({x},{y},{z})");
+                    }
+                }
+            }
+        };
+
+        let roof = BLOCK_TILE_SLAB;
+        let mut edits = room.clone();
+        edits.extend(shaft(8, 8, 24));
+        edits.push(((8, 23, 8), roof));
+        let light = lit_both_ways(&edits);
+        assert_eq!(light.sky(8, 23, 8), MAX_LIGHT, "the slab under the shaft stands in daylight");
+        dark(&light, "a slab roof");
+
+        let up_into_the_ceiling = dig::next_bite(BLOCK_DIRT, Side::NegY).expect("dirt bites");
+        let mut edits = room.clone();
+        edits.extend(shaft(8, 8, 24));
+        edits.push(((8, 23, 8), up_into_the_ceiling));
+        let light = lit_both_ways(&edits);
+        assert_eq!(light.sky(8, 23, 8), 0, "a bite up into the ceiling is lit from the room, not the meadow");
+        dark(&light, "a bite into the ceiling");
+
+        for (side, lit) in [(Side::PosX, true), (Side::NegX, false)] {
+            let bitten = dig::next_bite(BLOCK_DIRT, side).expect("dirt bites");
+            let mut edits = room.clone();
+            edits.extend((20..=22).map(|y| ((11, y, 8), BLOCK_AIR)));
+            edits.extend(shaft(11, 8, 23));
+            edits.push(((10, 21, 8), bitten));
+            let light = lit_both_ways(&edits);
+            assert_eq!(light.sky(10, 21, 8) > 0, lit, "a wall bitten from {side:?} is lit from the side it is open to");
+            dark(&light, "a bitten wall");
+        }
+    }
 
     #[test]
     fn unloading_frees_the_memory() {
@@ -1454,8 +1800,9 @@ mod real_terrain_lighting {
                 let mut level = MAX_LIGHT;
                 for y in (0..CHUNK_SIZE_Y).rev() {
                     let idx = Chunk::index(lx, y, lz);
-                    level = sky_below(level, blocks[idx]);
-                    data[idx] = (data[idx] & 0xF0) | level;
+                    let here = sky_below(level, blocks[idx]);
+                    data[idx] = (data[idx] & 0xF0) | here;
+                    level = sky_onward(here, blocks[idx]);
                     if level == 0 {
                         break;
                     }
@@ -1538,3 +1885,4 @@ mod bench {
         println!("\ncompute_isolated: {:.4} ms per chunk", best / chunks.len() as f64);
     }
 }
+

@@ -11051,6 +11051,72 @@ mod frontier_tests {
         }
     }
 
+    /// "у листвы, когда стоит рядом с неполным, чернеет бок": a face takes
+    /// its light from the cell it looks into, and the cell of a lip, a slab,
+    /// a step or a bite -- anything that stops light and does not fill its
+    /// cell -- was left at nought by the flood under open noon sky. The side
+    /// of a column of leaves beside the lip of a slope was drawn black from
+    /// its foot up; the next block of turf up the slope and the water beside
+    /// a slab were dimmed the same way. Through the real flood
+    /// (`lighting::holds_light`) and the real mesher, every such face now
+    /// takes the daylight standing over the partial block.
+    #[test]
+    fn a_face_beside_a_partial_block_is_lit_by_the_air_over_its_top() {
+        use primitive_shared::dig::{self, Side};
+        use primitive_shared::types::{
+            faced, Facing, BLOCK_DIRT, BLOCK_GRASS, BLOCK_LEAVES, BLOCK_PLANK_STAIRS, BLOCK_THATCH_ROOF,
+            BLOCK_TILE_SLAB,
+        };
+        let partials = [
+            ("a lip a quarter down", dig::lowered(BLOCK_GRASS, 3)),
+            ("a lip three quarters down", dig::lowered(BLOCK_GRASS, 1)),
+            ("a heap", dig::heaped(BLOCK_DIRT)),
+            ("a side bite", dig::next_bite(BLOCK_DIRT, Side::PosZ).expect("dirt bites")),
+            ("a slab", BLOCK_TILE_SLAB),
+            ("a step", faced(BLOCK_PLANK_STAIRS, Facing::South)),
+            ("a roof", faced(BLOCK_THATCH_ROOF, Facing::East)),
+        ];
+        let pos = ChunkPos::new(0, 0);
+        for (what, partial) in partials {
+            for (beside, block) in [("leaves", BLOCK_LEAVES), ("a whole block", BLOCK_DIRT), ("water", BLOCK_WATER)] {
+                let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+                for z in 0..CHUNK_SIZE_Z {
+                    for x in 0..CHUNK_SIZE_X {
+                        blocks[Chunk::index(x, 0, z)] = BLOCK_DIRT;
+                        blocks[Chunk::index(x, 1, z)] = BLOCK_GRASS;
+                    }
+                }
+                // The partial at (4, 2, 4); what looks into it north of it.
+                blocks[Chunk::index(4, 2, 4)] = partial;
+                blocks[Chunk::index(4, 2, 5)] = block;
+                let mut chunks = ChunkManager::new(4);
+                chunks.insert(Chunk { pos, blocks });
+                let mut light = LightMap::new();
+                light.load_chunk(&chunks, pos);
+                let mesh = mesh_it(&chunks, &light, pos);
+                // Its face toward the partial: facing -Z, in the plane z = 5.
+                let face: Vec<_> = mesh
+                    .vertices
+                    .iter()
+                    .filter(|v| {
+                        (v.light() >> 10) & 7 == 5
+                            && (v.position[2] - 5.0).abs() < 1e-4
+                            && (4.0..=5.0).contains(&v.position[0])
+                            && (2.0..=3.0).contains(&v.position[1])
+                    })
+                    .collect();
+                assert!(!face.is_empty(), "{beside} beside {what} drew no face toward it");
+                for v in face {
+                    assert!(
+                        v.light() & 15 >= 12,
+                        "{beside} beside {what} is lit at sky {} where it looks into the partial's cell",
+                        v.light() & 15
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_lake_at_the_edge_of_the_world_grows_no_walls() {
         const SURFACE: usize = 19;
