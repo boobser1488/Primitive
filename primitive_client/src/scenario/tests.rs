@@ -1005,6 +1005,36 @@ fn a_cob_lift_is_refused_on_a_wet_one_and_the_wall_waits_as_it_was_left() {
     no_corrections(&s);
 }
 
+/// **A course is paid from the pack, not only from the square in the hand.**
+/// A dry stone course takes two stones; with the last one in the hand and a
+/// stack of them beside it, the server said "you are not carrying enough of
+/// that" to a player carrying a hundred and twenty-nine.
+#[test]
+fn a_course_of_dry_stone_is_laid_with_one_stone_in_the_hand_and_the_rest_in_the_pack() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let stone = t::BLOCK_GRANITE_PEBBLE;
+    s.stand_at(feet_on(x0, z));
+    let ground = (x0 + 2, GROUND, z + 1);
+    let wall = (x0 + 2, GROUND + 1, z + 1);
+    let first = primitive_shared::build::lay(stone, stone, false, t::BLOCK_STONE, false).expect("a footing").result;
+    s.build(&[(wall, first)]);
+    assert!(s.until(3.0, |s| s.block(wall) == Some(first)), "the first course never arrived");
+    // A full stack and one more: the one is a square of its own.
+    let limit = t::stack_limit(stone);
+    s.give(stone, limit + 1);
+    let single = (0..crate::logic::inventory::HOTBAR_SLOTS)
+        .find(|&slot| s.inventory.block_in(slot) == Some(stone) && s.inventory.count_in(slot) == 1)
+        .expect("no square with a single stone");
+    s.input.hotbar_slot = single;
+    s.send(ClientMessage::SelectSlot { slot: single as u8 });
+    s.frames(3);
+    let laid = lay_on(&mut s, ground, wall, 1)[0];
+    assert_eq!(primitive_shared::build::courses(laid), 2, "{}", t::block_name(laid));
+    assert!(s.until(3.0, |s| s.inventory.count(stone) == limit - 1), "the course cost {} stones", limit + 1 - s.inventory.count(stone));
+    no_corrections(&s);
+}
+
 // ---------------------------------------------------------------- horses
 
 /// A broken horse with a saddle on, standing on the field two blocks along
@@ -1256,6 +1286,98 @@ fn a_gentled_horse_throws_its_rider_until_it_is_broken_and_then_it_is_theirs() {
         s.heard.iter().any(|m| matches!(m, ServerMessage::Notice { what: Notice::HorseIsYours })),
         "breaking it was never said"
     );
+}
+
+/// **A horse broken against a wall does not throw its rider into the wall.**
+/// The throw lands behind where the rider was looking, and it used to land
+/// there whatever stood in the way: a player trying a gentled horse with a
+/// wall at its far flank came down inside the stone.
+#[test]
+fn a_gentled_horse_by_a_wall_throws_its_rider_onto_open_ground_and_not_into_the_wall() {
+    use primitive_shared::husbandry::Keeping;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0 + 4, z));
+    let at = ((x0 + 2) as f32 + 0.5, (GROUND + 1) as f32, z as f32 + 0.5);
+    let horse = s.server().spawn_animal(primitive_shared::animals::Species::Horse, at).expect("a horse");
+    s.server().keep_animal(horse, Keeping { trust: 1.0, tame: false, hunger: 0.0, ..Keeping::wild() }, None);
+    assert!(s.until(3.0, |s| s.entities.contains_key(&horse)));
+    // The wall on its far side, once: the throw goes over its back.
+    s.fill((x0 + 1, GROUND + 1, z - 1), (x0 + 1, GROUND + 3, z + 1), t::BLOCK_STONE);
+    let mut throws = 0;
+    for _ in 0..3 * primitive_shared::husbandry::THROW_CHANCES.len() {
+        if s.horseback.is_some() || throws >= 2 {
+            break;
+        }
+        // Beside it on its near side, looking away from it.
+        let p = s.server().animal_position(horse).expect("the horse went");
+        s.stand_at((f64::from(p.0) + 1.3, f64::from(p.1), f64::from(p.2)));
+        s.face(0.0);
+        s.seconds(0.3);
+        s.send(ClientMessage::Mount { horse });
+        let answered = s.until(3.0, |s| {
+            s.horseback.is_some()
+                || s.heard.iter().any(|m| matches!(m, ServerMessage::Notice { what: Notice::HorseThrowsYou | Notice::TooFarAway }))
+        });
+        assert!(answered, "a try on its back came to nothing: {:?}", s.heard.iter().rev().take(6).collect::<Vec<_>>());
+        // It shifted its feet while the player walked round: stand beside it again.
+        let too_far = s.heard.iter().any(|m| matches!(m, ServerMessage::Notice { what: Notice::TooFarAway }));
+        if too_far {
+            s.heard.clear();
+        } else if s.horseback.is_none() {
+            throws += 1;
+            // Where the server put the body, which is the truth: the client
+            // may shove itself out of the stone afterwards, and the server's
+            // copy of it is still in the wall.
+            let feet = s
+                .heard
+                .iter()
+                .find_map(|m| match m {
+                    ServerMessage::PositionCorrection { x, y, z, reason } if reason == "thrown" => Some(DVec3::new(*x, *y, *z)),
+                    _ => None,
+                })
+                .expect("thrown without being put anywhere");
+            for dx in [-0.29, 0.29] {
+                for dz in [-0.29, 0.29] {
+                    for dy in [0.1, 1.0, 1.7] {
+                        let cell = cell_of(feet + DVec3::new(dx, dy, dz));
+                        assert!(!s.physics_solid(cell), "thrown into the wall: feet at {feet:?}, stone at {cell:?}");
+                    }
+                }
+            }
+            s.heard.clear();
+            s.seconds(primitive_shared::husbandry::SETTLE_SECONDS + 0.5);
+        }
+    }
+    assert!(throws > 0 || s.horseback.is_some(), "never thrown and never on");
+}
+
+/// **A rider who leaves the game comes back beside the horse, not in it.**
+/// The profile was written with the body on the saddle, so the rider
+/// reconnected standing in the middle of their own horse, a metre and a half
+/// up, and dropped through it.
+#[test]
+fn a_rider_who_disconnects_in_the_saddle_comes_back_standing_beside_the_horse() {
+    let mut host = Scenario::new();
+    let (x0, z) = FIELD;
+    host.stand_at(feet_on(x0 - 3, z + 3));
+    let mut rider = host.join("rider");
+    rider.stand_at(feet_on(x0, z));
+    let horse = saddled_horse(&mut rider, x0, z, false);
+    mount(&mut rider, horse);
+    drop(rider);
+    host.seconds(1.0);
+    let mut back = host.join("rider");
+    assert!(back.until(5.0, |s| s.world_ready), "the rider never came back");
+    back.seconds(1.0);
+    let feet = back.feet();
+    let at = host.server().animal_position(horse).expect("the horse went");
+    let apart = (feet.x - f64::from(at.0)).hypot(feet.z - f64::from(at.2));
+    assert!(
+        apart > f64::from(primitive_shared::horse::HALF_WIDTH),
+        "came back {apart:.2} from the horse's middle, inside it: feet {feet:?}, horse {at:?}"
+    );
+    no_corrections(&back);
 }
 
 // ---------------------------------------------------------------- a night out, and the wet

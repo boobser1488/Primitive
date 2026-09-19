@@ -534,6 +534,39 @@ impl Rot {
             })
         };
 
+        // ---- the saddlebags ----
+        //
+        // **A horse's bags are a chest that walks, and they keep no better
+        // than one.** They were on no clock at all, so meat, milk and bread
+        // carried in them kept for ever, a wet bundle stayed wet and a green
+        // log stayed green: a horse was the best larder in the game. Aged by
+        // the air where the horse stands, as a chest is by its own. The
+        // positions are listed under the animals' lock alone, the air is
+        // sampled under the fires' alone and the bags written under the
+        // animals' again -- never two at once, for the chests' reason.
+        let bagged = ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).bags_to_age(Self::holds_changing);
+        if !bagged.is_empty() {
+            let airs: Vec<(primitive_shared::protocol::EntityId, Ambient)> = {
+                let fires = ctx.fires.lock().unwrap_or_else(|e| e.into_inner());
+                bagged
+                    .into_iter()
+                    .map(|(id, at)| (id, Ambient::of(&ctx.world, &fires, at, time_of_day, weather)))
+                    .collect()
+            };
+            let step = self.step;
+            let changed = ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).edit_bags(&airs, |bags, ambient| {
+                let aged = match Keeping::of(ambient).clock(step) {
+                    Some(own) => Self::age_inventory(bags, own),
+                    None => false,
+                };
+                let cured = Self::cure_inventory(bags, step, ambient);
+                aged || cured
+            });
+            for id in changed {
+                crate::horses::tell_bags(ctx, id);
+            }
+        }
+
         // ---- the log piles ----
         //
         // Green wood stacked in a pile seasons on this clock (`wood`), unless

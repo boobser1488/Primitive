@@ -70,7 +70,13 @@ pub(crate) fn mount(
             // player's own fall, through the door every blow comes through,
             // so armour and the death screen both know about it.
             let (sin, cos) = (lock(&handle.state).yaw + std::f32::consts::PI).sin_cos();
-            let down = (at.0 + f64::from(cos * STEP_DOWN * 1.5), at.1, at.2 + f64::from(sin * STEP_DOWN * 1.5));
+            let thrown = (at.0 + f64::from(cos * STEP_DOWN * 1.5), at.1, at.2 + f64::from(sin * STEP_DOWN * 1.5));
+            // **Only where a body fits.** The throw used to land wherever
+            // the arithmetic said, so a horse broken against a wall threw
+            // its rider into the wall: a correction into stone, or a body
+            // stuck in it. Where the player stood to get on is a place they
+            // fitted a moment ago, and it is beside the horse.
+            let down = if fits(ctx, thrown) { thrown } else { feet_before(handle) };
             {
                 let mut state = lock(&handle.state);
                 state.position = down;
@@ -166,6 +172,29 @@ pub(crate) fn dismount(
 /// direction its client happens to pick. Checked against the world with the
 /// player's own box, so a rider who got off against a wall is not in it.
 fn step_down_from(ctx: &std::sync::Arc<crate::Context>, body: &Mount) -> (f64, f64, f64) {
+    let clear = |x: f64, y: f64, z: f64| fits(ctx, (x, y, z));
+    let (sin, cos) = body.yaw.sin_cos();
+    let left = (sin, -cos);
+    for (dx, dz) in [left, (-left.0, -left.1), (-cos, -sin)] {
+        let (x, z) = (body.x + f64::from(dx * STEP_DOWN), body.z + f64::from(dz * STEP_DOWN));
+        for rise in [0.0, 1.0] {
+            if clear(x, body.y + rise, z) {
+                return (x, body.y + rise, z);
+            }
+        }
+    }
+    let saddle = body.saddle();
+    (saddle[0], saddle[1], saddle[2])
+}
+
+/// Where a player's feet are now: the place they stood to try a horse's back.
+fn feet_before(handle: &std::sync::Arc<crate::players::PlayerHandle>) -> (f64, f64, f64) {
+    lock(&handle.state).position
+}
+
+/// Does a standing player's box fit with its feet at `at`? Checked against
+/// every cell's own boxes, so a slab or a step counts as what it is.
+fn fits(ctx: &std::sync::Arc<crate::Context>, (x, y, z): (f64, f64, f64)) -> bool {
     use primitive_shared::geometry::{PLAYER_HALF_WIDTH, PLAYER_HEIGHT};
     let block = |x: i32, y: i32, z: i32| ctx.world.cached_block(x, y, z);
     let clear = |x: f64, y: f64, z: f64| {
@@ -186,18 +215,7 @@ fn step_down_from(ctx: &std::sync::Arc<crate::Context>, body: &Mount) -> (f64, f
         }
         true
     };
-    let (sin, cos) = body.yaw.sin_cos();
-    let left = (sin, -cos);
-    for (dx, dz) in [left, (-left.0, -left.1), (-cos, -sin)] {
-        let (x, z) = (body.x + f64::from(dx * STEP_DOWN), body.z + f64::from(dz * STEP_DOWN));
-        for rise in [0.0, 1.0] {
-            if clear(x, body.y + rise, z) {
-                return (x, body.y + rise, z);
-            }
-        }
-    }
-    let saddle = body.saddle();
-    (saddle[0], saddle[1], saddle[2])
+    clear(x, y, z)
 }
 
 /// `ClientMessage::Rein`.
@@ -385,6 +403,29 @@ pub(crate) fn with_open_bags(
     Some(())
 }
 
+/// Tells everybody with horse `id`'s bags open what is in them now: the rot
+/// clock changed them (`rot::Rot::pass`), and a screen showing fresh meat
+/// that has gone off is a screen that lies about the next click.
+pub(crate) fn tell_bags(ctx: &std::sync::Arc<crate::Context>, id: EntityId) {
+    let Some(inventory) = lock(&ctx.animals).gear(id).and_then(|gear| gear.bags) else {
+        return;
+    };
+    let cell = bags_cell(id);
+    for other in ctx.registry.handles() {
+        if lock(&other.state).open_bags == Some(id) {
+            other.send(ServerMessage::ChestState {
+                global_x: cell.0,
+                global_y: cell.1,
+                global_z: cell.2,
+                inventory: inventory.clone(),
+                kind: primitive_shared::protocol::ContainerKind::Saddlebags,
+                hearth: None,
+                rack: None,
+            });
+        }
+    }
+}
+
 /// Puts every rider on their horse's saddle, and gets anybody off whose horse
 /// is gone. **Called after the animals have moved and before the snapshots**,
 /// for `rafts::tick`'s reason. Answers how far each rider was carried, which
@@ -445,11 +486,11 @@ pub(crate) fn spill(ctx: &std::sync::Arc<crate::Context>) {
     let now = Instant::now();
     let mut items = lock(&ctx.items);
     for (at, left) in spilled {
-        for (index, (block, count)) in left.into_iter().enumerate() {
+        for (index, (block, count, damage)) in left.into_iter().enumerate() {
             // Thrown apart, like the raft's timber, so a horse's load reads
             // as a horse's load spilled and not as one heap.
             let (sin, cos) = (index as f32 * 1.7).sin_cos();
-            items.spawn(block, count, (at.0, at.1 + 0.8, at.2), (cos * 1.5, 2.5, sin * 1.5), None, now);
+            items.spawn_worn(block, count, damage, (at.0, at.1 + 0.8, at.2), (cos * 1.5, 2.5, sin * 1.5), None, now);
         }
     }
 }

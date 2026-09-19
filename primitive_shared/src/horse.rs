@@ -243,14 +243,20 @@ impl Gear {
     /// that took half the copper with it into the grass would be a tax on
     /// dying rather than a loss somebody can go back for -- which is the
     /// bargain a player's own body already keeps (the bones).
-    pub fn left_behind(&self) -> Vec<(BlockId, u32)> {
+    ///
+    /// **Each as `(block, count, damage)`, the stack's whole word.** It was
+    /// `(block, count)`, and the word is three facts (`Stack::damage`): a
+    /// worn axe carried in the bags came out of a dead horse unworn, a
+    /// fine-made knife came out plain, and a jug of milk came out an empty
+    /// jug.
+    pub fn left_behind(&self) -> Vec<(BlockId, u32, u32)> {
         let mut left = Vec::new();
         if self.saddle {
-            left.push((crate::types::BLOCK_SADDLE, 1));
+            left.push((crate::types::BLOCK_SADDLE, 1, 0));
         }
         if let Some(bags) = &self.bags {
-            left.push((crate::types::BLOCK_SADDLEBAGS, 1));
-            left.extend(bags.slots().iter().flatten().map(|stack| (stack.block, stack.count)));
+            left.push((crate::types::BLOCK_SADDLEBAGS, 1, 0));
+            left.extend(bags.slots().iter().flatten().map(|stack| (stack.block, stack.count, stack.damage)));
         }
         left
     }
@@ -886,11 +892,20 @@ mod tests {
         assert_eq!(bags.add(BLOCK_COPPER_ORE, 20), 0);
         let gear = Gear { saddle: true, bags: Some(bags), rides: 0 };
         let left = gear.left_behind();
-        assert!(left.contains(&(BLOCK_SADDLE, 1)) && left.contains(&(BLOCK_SADDLEBAGS, 1)));
-        assert_eq!(left.iter().filter(|(b, _)| *b == BLOCK_COPPER_ORE).map(|(_, n)| n).sum::<u32>(), 20);
+        assert!(left.contains(&(BLOCK_SADDLE, 1, 0)) && left.contains(&(BLOCK_SADDLEBAGS, 1, 0)));
+        assert_eq!(left.iter().filter(|(b, _, _)| *b == BLOCK_COPPER_ORE).map(|(_, n, _)| n).sum::<u32>(), 20);
         assert!(gear.load_kg() > 0.0);
         assert_eq!(gear.tack(), TACK_SADDLE | TACK_BAGS);
         assert!(Gear::default().left_behind().is_empty());
+    }
+
+    #[test]
+    fn a_worn_axe_in_a_dead_horses_bags_comes_out_as_worn_as_it_went_in() {
+        use crate::types::BLOCK_COPPER_AXE;
+        let mut bags = crate::inventory::Inventory::new();
+        assert_eq!(bags.add_worn(BLOCK_COPPER_AXE, 1, 37), 0);
+        let gear = Gear { saddle: false, bags: Some(bags), rides: 0 };
+        assert!(gear.left_behind().contains(&(BLOCK_COPPER_AXE, 1, 37)), "{:?}", gear.left_behind());
     }
 
     #[test]
