@@ -930,6 +930,13 @@ const SAVANNA_GROVE_SPACING: u32 = 70;
 const SAVANNA_OPEN_SPACING: u32 = 2000;
 /// The deposit field above this is grove. See `WorldGen::savanna_grove`.
 const SAVANNA_GROVE_THRESHOLD: f64 = 0.28;
+/// Hill country's trees, inside a grove and between them: a grove is a
+/// closed stand of broadleaf a few dozen metres across, and the open down
+/// between has a tree now and then. Denser inside than the acacias, because
+/// an oak's crown is narrower than an acacia's plate and a grove of them
+/// that did not close would be a scatter.
+const HILL_GROVE_SPACING: u32 = 26;
+const HILL_OPEN_SPACING: u32 = 900;
 /// One lone savanna tree in this many is a baobab. See `WorldGen::old_tree_at`.
 const SAVANNA_LONE_BAOBAB_SHARE: u32 = 4;
 
@@ -1235,6 +1242,13 @@ mod surface_metal_tests;
 #[cfg(test)]
 mod hive_tests;
 pub use scale::Scale;
+/// Hill country and plain country, rivers that drain to the sea, relief that
+/// follows the rock: what `Scale::Landforms` adds over `Scale::Earth`. See
+/// its module note.
+mod landforms;
+/// Its tests, apart for `surface_metal_tests`' reason.
+#[cfg(test)]
+mod landforms_tests;
 
 pub struct WorldGen {
     seed: u32,
@@ -1321,6 +1335,11 @@ struct Surface {
 /// tundra) is still readable in the numbers it started from.
 const BERRY_THINNING: u32 = 3;
 
+/// How wet hill country can be and still be open downs rather than wooded
+/// hills: a little past the forest line (0.10), because a hill sheds its rain
+/// and a grove on a down is the wood the same rain grows on flat ground.
+const HILL_WOOD_LINE: f64 = 0.20;
+
 /// A named region of the world.
 ///
 /// Derived from height, temperature and humidity rather than being a
@@ -1401,6 +1420,25 @@ pub enum Biome {
     /// continent spline already says which, so `biome_from` asks it
     /// rather than asking the water.
     River,
+    /// Open grassland on flat country: feather grass and fescue on black
+    /// earth to the horizon, a lone tree or a thicket in a hollow, and a
+    /// river's line of willows now and then.
+    ///
+    /// **Plain country where a meadow is not wet enough for a wood**, which
+    /// is the steppe's whole definition: it is the plain landform
+    /// (`landforms`) and the dry side of the forest line together. A meadow
+    /// on broken country stays `Plains`; a steppe is where the ground is
+    /// flat as well as open, so it is the place to see a herd coming a
+    /// kilometre off -- and the place with nowhere to hide from one.
+    Steppe,
+    /// Rolling downs: rounded hills of turf with groves in the hollows and
+    /// brooks in the folds between them.
+    ///
+    /// **Hill country with rain enough for grass and not enough to close
+    /// into forest.** Wetter hills are wooded and read as the wood they are;
+    /// this is the open middle, where a hilltop is a lookout and a grove is
+    /// the only timber for a while.
+    Hills,
 }
 
 impl Biome {
@@ -1423,6 +1461,8 @@ impl Biome {
             Biome::Mountains => "mountains",
             Biome::SnowyPeaks => "snowy peaks",
             Biome::River => "river",
+            Biome::Steppe => "steppe",
+            Biome::Hills => "hills",
         }
     }
 
@@ -1452,6 +1492,8 @@ impl Biome {
         Biome::Mountains,
         Biome::SnowyPeaks,
         Biome::River,
+        Biome::Steppe,
+        Biome::Hills,
     ];
 
     /// What the climate alone would put on top of a column.
@@ -1532,6 +1574,14 @@ impl Biome {
             // if there are enough of them to close the view.
             Biome::DeadForest => Some(26),
             Biome::Plains => Some(140),
+            // **A lone tree in a day's view**, and the steppe is what that
+            // tree is for: something to steer by. The groves are in the
+            // hollows by the water, where `tree_at` does not reach and a
+            // player looks anyway.
+            Biome::Steppe => Some(1_100),
+            // The rate between the groves; inside one `tree_at` closes it
+            // up to a wood. See `HILL_GROVE_SPACING`.
+            Biome::Hills => Some(HILL_OPEN_SPACING),
             // Grass to the horizon and an acacia every so often, so the
             // eye has something to measure the distance against.
             //
@@ -1660,6 +1710,10 @@ impl Biome {
             Biome::Forest => Some(22),
             Biome::BirchForest => Some(18),
             Biome::Plains => Some(6),
+            // A grove on a down is where the wild apples are, and a lone tree
+            // on a steppe is as likely a wild pear as anything.
+            Biome::Hills => Some(8),
+            Biome::Steppe => Some(4),
             _ => None,
         }
     }
@@ -1792,7 +1846,8 @@ impl Biome {
     /// two is where a field reads as grass without every column paying.
     fn grass_spacing(self) -> Option<u32> {
         match self {
-            Biome::Plains => Some(2),
+            // Both are their grass, as the savanna is below.
+            Biome::Plains | Biome::Steppe | Biome::Hills => Some(2),
             // As thick as a meadow's. A savanna *is* its grass -- with the
             // trees far apart, it is the ground you are looking at -- and
             // while it was thinner than a meadow's it read as a meadow in
@@ -1968,6 +2023,10 @@ impl Biome {
             Biome::Forest => Some(110 * BERRY_THINNING),
             Biome::BirchForest => Some(99 * BERRY_THINNING),
             Biome::Plains => Some(132 * BERRY_THINNING),
+            // The edges of the groves, like a wood's; and the steppe's few,
+            // in its thickets.
+            Biome::Hills => Some(120 * BERRY_THINNING),
+            Biome::Steppe => Some(200 * BERRY_THINNING),
             Biome::Swamp => Some(144 * BERRY_THINNING),
             // Sparse in the cold, and absent past it. A taiga will feed
             // a patient player; a tundra will not feed anybody, which is
@@ -2011,6 +2070,9 @@ impl Biome {
             Biome::BirchForest => Some(60),
             Biome::Taiga => Some(90),
             Biome::Plains => Some(120),
+            Biome::Hills => Some(110),
+            // The steppe's thickets of sloe and broom: the only cover there is.
+            Biome::Steppe => Some(170),
             Biome::Savanna => Some(150),
             Biome::Swamp => Some(80),
             // A dead wood keeps its scrub: dead standing timber does not
@@ -2047,6 +2109,11 @@ impl Biome {
             // never has to leave.
             Biome::Savanna => Some(170),
             Biome::Plains => Some(190),
+            // **The steppe is where the wild grasses of bread grow thickest**,
+            // as they did on the Earth: the cereals were first gathered off
+            // open, dry grassland, not out of a wood.
+            Biome::Steppe => Some(120),
+            Biome::Hills => Some(210),
             // The dry edge of a wood, and nothing under a closed canopy.
             Biome::Forest => Some(320),
             _ => None,
@@ -2111,6 +2178,10 @@ impl Biome {
     fn flower_spacing(self) -> Option<u32> {
         match self {
             Biome::Plains => Some(57),
+            // Chalk downs are the flowery grassland of the temperate world;
+            // a steppe flowers less and further apart.
+            Biome::Hills => Some(48),
+            Biome::Steppe => Some(80),
             Biome::Forest | Biome::BirchForest => Some(93),
             // Few. A flower is what makes open country read as a meadow,
             // and dry grassland is the one open country that should not.
@@ -2237,7 +2308,13 @@ impl Biome {
     /// for cord, with a knife.
     fn nettle_bank_spacing(self) -> Option<u32> {
         match self {
-            Biome::Plains | Biome::Forest | Biome::BirchForest | Biome::Swamp | Biome::Taiga => Some(9),
+            Biome::Plains
+            | Biome::Steppe
+            | Biome::Hills
+            | Biome::Forest
+            | Biome::BirchForest
+            | Biome::Swamp
+            | Biome::Taiga => Some(9),
             _ => None,
         }
     }
@@ -2257,6 +2334,7 @@ impl Biome {
             Biome::Forest => Some(60 * BERRY_THINNING),
             Biome::Taiga => Some(110 * BERRY_THINNING),
             Biome::Plains => Some(160 * BERRY_THINNING),
+            Biome::Hills => Some(150 * BERRY_THINNING),
             _ => None,
         }
     }
@@ -2267,7 +2345,8 @@ impl Biome {
     /// is the open grassland first. On the savanna's dry turf too, thinly.
     fn plantain_spacing(self) -> Option<u32> {
         match self {
-            Biome::Plains => Some(40),
+            Biome::Plains | Biome::Hills => Some(40),
+            Biome::Steppe => Some(60),
             Biome::Forest | Biome::BirchForest => Some(80),
             Biome::Swamp => Some(90),
             Biome::Taiga => Some(130),
@@ -2285,7 +2364,7 @@ impl Biome {
         match self {
             Biome::Swamp => Some(7),
             Biome::River => Some(12),
-            Biome::Plains | Biome::Forest | Biome::BirchForest => Some(18),
+            Biome::Plains | Biome::Steppe | Biome::Hills | Biome::Forest | Biome::BirchForest => Some(18),
             _ => None,
         }
     }
@@ -2355,7 +2434,8 @@ impl Biome {
         match self {
             Biome::Forest | Biome::BirchForest => Some(117),
             Biome::Swamp => Some(93),
-            Biome::Plains => Some(172),
+            Biome::Plains | Biome::Hills => Some(172),
+            Biome::Steppe => Some(150),
             _ => None,
         }
     }
@@ -2374,7 +2454,7 @@ impl Biome {
             // is the one plant the cold does not drive out.
             Biome::Bog => Some(6),
             Biome::River => Some(9),
-            Biome::Plains | Biome::Forest | Biome::BirchForest => Some(14),
+            Biome::Plains | Biome::Steppe | Biome::Hills | Biome::Forest | Biome::BirchForest => Some(14),
             _ => None,
         }
     }
@@ -2577,21 +2657,23 @@ impl WorldGen {
         Self::with_scale(seed, preset, zone, Self::new_worlds_scale())
     }
 
-    /// The scale a world made now is drawn at: the Earth's.
+    /// The generator a world made now is drawn by: the Earth's scale, with
+    /// its landforms.
     ///
-    /// **The tests can ask for the regional one**, with
-    /// `PRIMITIVE_TEST_SCALE=regional`: every generator test then runs against
-    /// a world from before the Earth's scale, which is how a test the new
-    /// scale broke is told from one something else broke in the same week.
+    /// **The tests can ask for an older one**, with
+    /// `PRIMITIVE_TEST_SCALE=regional` or `=earth`: every generator test then
+    /// runs against a world from before that change, which is how a test the
+    /// new generator broke is told from one something else broke in the same
+    /// week.
     /// Read only in a test build; a game never has the variable to read.
     #[cfg(test)]
     fn new_worlds_scale() -> Scale {
-        std::env::var("PRIMITIVE_TEST_SCALE").ok().and_then(|name| Scale::parse(&name)).unwrap_or(Scale::Earth)
+        std::env::var("PRIMITIVE_TEST_SCALE").ok().and_then(|name| Scale::parse(&name)).unwrap_or(Scale::Landforms)
     }
 
     #[cfg(not(test))]
     fn new_worlds_scale() -> Scale {
-        Scale::Earth
+        Scale::Landforms
     }
 
     /// The generator for a world drawn at a given scale. Every new world is
@@ -2645,7 +2727,19 @@ impl WorldGen {
             mineral_noise: Perlin::new(seed.wrapping_add(41)),
             strata_noise: Perlin::new(seed.wrapping_add(43)),
         };
-        laid.planet_origin.0 = laid.meridian_with_land();
+        // **The landforms change the ground, not where a world is cut from.**
+        // The meridian is the first stride along the parallel whose ground is
+        // low and dry by the sea, and the landforms flatten a plain into
+        // that test at strides the Earth's ground failed: the dry belt's seed
+        // 7 moved two thousand kilometres west to a cool coast with not one
+        // palm on it, and the north's seed 0 to a beach with an island in
+        // view. So a world with landforms stands where the Earth's generator
+        // put the same seed and zone -- one seed, one place on the planet,
+        // whichever generator draws it.
+        laid.planet_origin.0 = match scale {
+            Scale::Landforms => Self::laid_at(seed, preset, zone, origin_degrees, Scale::Earth).planet_origin.0,
+            _ => laid.meridian_with_land(),
+        };
         laid
     }
 
@@ -3443,6 +3537,15 @@ impl WorldGen {
         if field.abs() > scale::RIVER_SLOPE_BOUND * frequency * order.valley {
             return banks::RiverCut::NONE;
         }
+        // A tributary only near what it feeds (`landforms::tributary_reach`);
+        // asked after the cull, so it costs a sample only where a channel is.
+        let feeding = match order.feeds {
+            Some(_) => self.tributary_reach(order, x, z),
+            None => 1.0,
+        };
+        if feeding <= 0.0 {
+            return banks::RiverCut::NONE;
+        }
         let step = RIVER_GRADIENT_STEP;
         // **Two more samples at the Earth's scale, four in a regional world.**
         // A forward difference from the sample already in hand is as good a
@@ -3508,6 +3611,7 @@ impl WorldGen {
             land_height,
         );
         let mask = on_land * lowland;
+        let mask = if order.feeds.is_some() { mask * feeding } else { mask };
         banks::RiverCut { channel: channel * mask, valley: valley * mask, mask, bank }
     }
 
@@ -3623,6 +3727,11 @@ impl WorldGen {
         let highland = self.highland(gx, gz);
         let lean = self.unworn_lean(highland);
         let unworn = smoothstep(0.2 + lean, -0.45 + lean, erosion);
+        // **The landforms**, and nothing at all in an older world: hill or
+        // plain country, and how hard the rock wears. See `landforms`.
+        let (plain, hill) = self.landform(gx, gz, highland);
+        let landformed = self.scale == Scale::Landforms;
+        let region = if landformed { self.rock_region(gx, gz) } else { 0.0 };
         // **Wider and taller together, or the world only gets flatter.**
         // Moving the frequencies alone spreads the same twenty-four
         // blocks of relief over half again the distance, which is a
@@ -3673,7 +3782,37 @@ impl WorldGen {
 
         // The broad rises of the Earth-scale landscape, and the highest
         // ground folded under the ceiling. Both nothing in a regional world.
-        let land_height = self.soft_ceiling(base + relief + hills + detail + self.rolling(gx, gz, highland) * land);
+        let land_height = if landformed {
+            // Plain country turns every term down to a swell; hill country
+            // trades its ridges and benches for rounded downs. The broad
+            // rises stay under both, a little lower on a plain, so a steppe
+            // still has a skyline.
+            //
+            // **The ridges stand as high as their rock is hard**, and only
+            // the ridges: the benches, the roughness and the small hills
+            // read `unworn` as they always did. Hardness laid on `unworn`
+            // was tried first, and it took the faces off every soft-rock
+            // hillside with the benches -- the scree under them went from
+            // a find to none in a hundred and sixty-nine chunks. (So did
+            // lowering the ridges on soft rock; see `HARD_ROCK_GAIN`.)
+            let relief = relief * Self::hardness(region) * (1.0 - 0.9 * plain) * (1.0 - 0.6 * hill);
+            let hills = hills * (1.0 - 0.85 * plain) * (1.0 - 0.5 * hill);
+            let detail = detail * (1.0 - 0.8 * plain - 0.3 * hill);
+            let rolling = self.rolling(gx, gz, highland) * (1.0 - 0.6 * plain);
+            // **Downs on low ground only.** Rolling hill country is a
+            // lowland's shape; laid over an upland already forty blocks up,
+            // the crowns stood over the mountain line and a hill country
+            // read from afar as a range (`a_mountain_belt_stands_high_and_a_lowland_does_not`).
+            let under = base + relief + hills + rolling * land;
+            let downs = if hill > 0.0 {
+                hill * self.downs(gx, gz, region) * smoothstep(SEA_LEVEL as f64 + 36.0, SEA_LEVEL as f64 + 16.0, under)
+            } else {
+                0.0
+            };
+            self.soft_ceiling(base + relief + hills + detail + (rolling + downs) * land)
+        } else {
+            self.soft_ceiling(base + relief + hills + detail + self.rolling(gx, gz, highland) * land)
+        };
 
         // Benches, and the faces between them.
         //
@@ -3729,6 +3868,9 @@ impl WorldGen {
             // percent of the seams that have any step in them at all,
             // which is nothing anybody can see.
             * 0.30;
+        // No benches in hill or plain country: a down is rounded, and a plain
+        // with steps across it is a flight of terraces nobody cut.
+        let terracing = if landformed { terracing * (1.0 - plain) * (1.0 - hill) } else { terracing };
         (land_height + (stepped - land_height) * terracing, on_island)
     }
 
@@ -3793,7 +3935,7 @@ impl WorldGen {
     /// most cells refused and the rest wandering over two thirds of
     /// their width, there is no spacing to see.
     fn lake_candidate(&self, cell_x: i32, cell_z: i32) -> (i32, i32, i32, i32) {
-        if self.scale == scale::Scale::Earth {
+        if self.scale.earthly() {
             return self.earth_pond_candidate(cell_x, cell_z);
         }
         let roll = hash2(cell_x, cell_z, self.seed.wrapping_add(0x1A4E));
@@ -4045,8 +4187,23 @@ impl WorldGen {
             return (rock, 8 + swing(2.0), granite_from);
         }
         let lowland = |other: BlockId, above: f64| if region > above { other } else { BLOCK_LIMESTONE };
+        // **The soft rock is where the vales are**, in a world with
+        // landforms: the region field that picks the rock is the one that
+        // holds the relief up (`landforms::hardness`), so its low end -- the
+        // ground worn lowest -- is shale, the mud of old vales turned to
+        // rock, under whatever grows on it. Chalk downs over clay vales is
+        // the commonest lowland on the Earth that has any shape at all.
+        if self.scale == Scale::Landforms
+            && region < -0.25
+            && matches!(biome, Biome::Plains | Biome::Forest | Biome::BirchForest | Biome::Steppe | Biome::Hills)
+        {
+            return (BLOCK_SHALE, 11 + swing(3.0), granite_from);
+        }
         match biome {
-            Biome::Plains | Biome::Forest => (lowland(BLOCK_CHALK, 0.2), 11 + swing(3.0), granite_from),
+            Biome::Plains | Biome::Forest | Biome::Steppe => (lowland(BLOCK_CHALK, 0.2), 11 + swing(3.0), granite_from),
+            // Downs are chalk where the rock is at all hard -- the hardness
+            // that stood them up -- and limestone below it.
+            Biome::Hills => (lowland(BLOCK_CHALK, 0.05), 11 + swing(3.0), granite_from),
             Biome::BirchForest | Biome::Savanna => (lowland(BLOCK_DOLOMITE, 0.15), 11 + swing(3.0), granite_from),
             Biome::Swamp | Biome::Bog | Biome::River => (lowland(BLOCK_SHALE, -0.1), 11 + swing(3.0), granite_from),
             Biome::Mountains => {
@@ -4146,6 +4303,9 @@ impl WorldGen {
         // forest province, a grove in a steppe, a marsh in a floodplain --
         // which the tint and the air do not read. See `mosaic_wetness`.
         let humidity = self.humidity(gx, gz) + self.mosaic_wetness(gx, gz, height);
+        // Hill or plain country: (0, 0) in any world without landforms, so
+        // every test below reads as it always did there.
+        let (plain, hill) = if self.scale == Scale::Landforms { self.landform(gx, gz, self.highland(gx, gz)) } else { (0.0, 0.0) };
 
         // High ground. Snow line follows temperature rather than a fixed
         // altitude, so a peak in the tropics can still be bare rock
@@ -4168,7 +4328,12 @@ impl WorldGen {
         // land into bare "mountains" -- measured, 35 to 50 per cent against
         // 11 to 18 before -- and the woods on every hillside went with it.
         // Scaled with the relief, the shares come back to what they were.
-        if height > SEA_LEVEL + 42 {
+        //
+        // **Higher in hill country**, by as much as the downs stand: a down
+        // is turf to its crown, and one whose crown crossed the line would be
+        // a bald patch of "mountains" on every hilltop of the downs.
+        let mountain_line = SEA_LEVEL + 42 + (hill * 20.0) as i32;
+        if height > mountain_line {
             return if temperature < -0.60 {
                 Biome::SnowyPeaks
             } else {
@@ -4250,6 +4415,18 @@ impl WorldGen {
         // Temperate, split by rainfall into bands that each look like
         // something: bare dead wood, open plain, closed forest. The
         // fourth, swamp, was taken out above the hot band.
+        //
+        // **The landforms first** (`landforms`): open hill country from the
+        // dry edge of the meadow to a little into the forest's rain -- a
+        // down is grass with groves, and rain enough for a closed wood is a
+        // wooded hill, which is a forest -- and steppe on plain country
+        // wherever a meadow would be, unless it burned.
+        if hill > 0.5 && humidity > -0.26 && humidity <= HILL_WOOD_LINE {
+            return Biome::Hills;
+        }
+        if plain > 0.5 && humidity <= 0.10 && (humidity > -0.26 || !self.burnt(gx, gz)) {
+            return Biome::Steppe;
+        }
         if humidity > 0.10 {
             // Wet temperate country, split once more by temperature.
             // Birch takes the cool half, which puts it between the oak
@@ -4959,7 +5136,7 @@ impl WorldGen {
         // only of ground that passed everything else, because a biome is the
         // climate fields again. Not asked of a regional world, whose spawn a
         // player without a bed respawns at and which may not move.
-        if self.scale == Scale::Earth && matches!(self.biome_from(gx, gz, height), Biome::Swamp | Biome::Bog) {
+        if self.scale.earthly() && matches!(self.biome_from(gx, gz, height), Biome::Swamp | Biome::Bog) {
             return None;
         }
         // **And it has to be the country the form promised.**
@@ -4984,7 +5161,7 @@ impl WorldGen {
         // hunting a picture rather than a climate. `Scale::Regional` is
         // exempt for the marsh rule's reason -- an old world's spawn is
         // where a player without a bed comes back to, and it may not move.
-        if self.scale == Scale::Earth && self.band_at(gx, gz, height) != self.zone_band() {
+        if self.scale.earthly() && self.band_at(gx, gz, height) != self.zone_band() {
             return None;
         }
         Some(drop)
@@ -5605,6 +5782,10 @@ impl WorldGen {
                     };
                     let pair = match biome {
                         Biome::Plains => Some((BLOCK_TIMOTHY, BLOCK_FEATHER_GRASS)),
+                        // The steppe's own pair: feather grass and fescue,
+                        // with no hay grass among them.
+                        Biome::Steppe => Some((BLOCK_FEATHER_GRASS, BLOCK_FESCUE)),
+                        Biome::Hills => Some((BLOCK_TIMOTHY, BLOCK_BLUEGRASS)),
                         Biome::Forest | Biome::BirchForest => Some((BLOCK_BLUEGRASS, BLOCK_TIMOTHY)),
                         Biome::Swamp | Biome::River => Some((BLOCK_SEDGE, BLOCK_SEDGE)),
                         Biome::Bog => Some((BLOCK_COTTON_GRASS, BLOCK_SEDGE)),
@@ -7488,6 +7669,10 @@ fn broken_course(hash: u32) -> i32 {
             } else {
                 SAVANNA_OPEN_SPACING
             }
+        } else if biome == Biome::Hills && self.savanna_grove(gx, gz) {
+            // The same grove field: groves in the downs lie where the
+            // savanna's would, which no player standing in either can see.
+            HILL_GROVE_SPACING
         } else {
             spacing
         };
@@ -9172,7 +9357,7 @@ fn build_column_tile(gen: &WorldGen, tx: i32, tz: i32) -> ColumnTile {
                     Biome::Forest => Some(BLOCK_LOAM),
                     // The steppe's black earth, and loess where the wind laid
                     // it: the same strata field at its own offset.
-                    Biome::Plains => Some(
+                    Biome::Plains | Biome::Steppe => Some(
                         if fbm(&gen.strata_noise, gx as f64 + 2203.0, gz as f64 - 1409.0, 0.008, 1) > 0.25 {
                             BLOCK_LOESS
                         } else {
@@ -9182,7 +9367,9 @@ fn build_column_tile(gen: &WorldGen, tx: i32, tz: i32) -> ColumnTile {
                     Biome::Taiga => Some(BLOCK_PODZOL),
                     Biome::Savanna => Some(BLOCK_LATERITE),
                     Biome::Swamp => Some(BLOCK_GLEY),
-                    Biome::BirchForest => Some(BLOCK_RENDZINA),
+                    // Rendzina is the soil of chalk and limestone, which is
+                    // what downs are made of.
+                    Biome::BirchForest | Biome::Hills => Some(BLOCK_RENDZINA),
                     Biome::DeadForest => Some(BLOCK_ANDOSOL),
                     Biome::Tundra => Some(BLOCK_PERMAFROST),
                     _ => None,
@@ -11410,9 +11597,35 @@ mod tests {
         }
         assert!(Biome::Savanna.arundo_spacing().is_some() && Biome::Desert.arundo_spacing().is_some());
         let mut reeds = 0;
+        // **Chunks of that country with water in them**, not the first
+        // sixty-four of it: the landforms' brooks run only near their rivers
+        // (`landforms::tributary_reach`), and the first sixty-four chunks of
+        // savanna and desert near seed 31337's origin held no bank at all --
+        // a claim about what grows at the water asked of ground with none.
+        let watered = |gen: &WorldGen, country: Biome| -> Vec<Chunk> {
+            let mut out = Vec::new();
+            for cz in (-360..360).step_by(3) {
+                for cx in (-160..160).step_by(3) {
+                    let (x0, z0) = (cx * CHUNK_SIZE_X as i32, cz * CHUNK_SIZE_Z as i32);
+                    if gen.biome_at(x0 + 8, z0 + 8) != country {
+                        continue;
+                    }
+                    let wet = (0..16).step_by(3).any(|lz| {
+                        (0..16).step_by(3).any(|lx| gen.height_at(x0 + lx, z0 + lz) < gen.water_level_at(x0 + lx, z0 + lz))
+                    });
+                    if wet {
+                        out.push(gen.generate_chunk(ChunkPos::new(cx, cz)));
+                        if out.len() == 16 {
+                            return out;
+                        }
+                    }
+                }
+            }
+            out
+        };
         for chunk in [Biome::Savanna, Biome::Desert].into_iter().flat_map(|country| {
             let gen = world_for(31337, country);
-            chunks_in(&gen, country, 64)
+            watered(&gen, country)
         }) {
             for y in 1..CHUNK_SIZE_Y - 1 {
                 for lz in 0..CHUNK_SIZE_Z {
@@ -11430,7 +11643,7 @@ mod tests {
                 }
             }
         }
-        assert!(reeds > 0, "sixty-four chunks each of savanna and desert and not one giant reed at the water");
+        assert!(reeds > 0, "sixteen watered chunks each of savanna and desert and not one giant reed at the water");
     }
 
     #[test]
@@ -12600,7 +12813,13 @@ mod tests {
             let generator = WorldGen::new(seed);
             for gz in (-800..800).step_by(11) {
                 for gx in (-800..800).step_by(11) {
-                    if generator.biome_at(gx, gz) == Biome::BirchForest {
+                    // With birch wood east of it too, since the chunks read
+                    // below lie that way: the first birch column of a sweep
+                    // can be the last one before a coast, and six chunks of
+                    // sea with no birch in them say nothing about a wood.
+                    if generator.biome_at(gx, gz) == Biome::BirchForest
+                        && generator.biome_at(gx + 3 * CHUNK_SIZE_X as i32, gz) == Biome::BirchForest
+                    {
                         found = Some((seed, gx, gz));
                         break 'search;
                     }
@@ -13071,7 +13290,19 @@ mod tests {
                 if run > 0 && run <= 24 && gen.height_at(gx - run - 1, gz) >= SEA_LEVEL {
                     rivers += 1;
                 }
-                if run > 24 && run <= 90 && gen.height_at(gx - run - 1, gz) >= SEA_LEVEL {
+                // ...unless it is the channel of an order that is meant to be
+                // wide. A river thirty metres across is a river, and since
+                // the landforms one runs within a walk of every origin
+                // (`landforms::LANDFORM_RIVERS`), crossed slantwise by every
+                // transect of this square.
+                let middle = gen.on_planet(gx - run / 2 - 1, gz);
+                let a_wide_order = || {
+                    gen.river_orders().iter().filter(|order| order.half_width > 12.0).any(|order| {
+                        let land = gen.land_before_rivers(middle.0, middle.1).0;
+                        gen.river(order, middle.0, middle.1, land).channel > 0.3
+                    })
+                };
+                if run > 24 && run <= 90 && gen.height_at(gx - run - 1, gz) >= SEA_LEVEL && !a_wide_order() {
                     wide += 1;
                 }
                 run = 0;
@@ -13654,7 +13885,13 @@ mod tests {
         // the latitude and nothing else -- has none.
         let feet = |zone: Zone| -> usize {
             let gen = WorldGen::with_zone(7, Preset::Normal, zone);
-            beach_chunks(&gen, 8)
+            // Twenty-four, not eight: the first beach chunks of a row-major
+            // sweep are one stretch of one coast, and since the landforms
+            // moved the dry belt's seed 7 along its parallel (`meridian_with_
+            // land`), the first eight are a desert shore whose saxauls crowd
+            // the palms off it. A claim about a climate wants more than one
+            // beach.
+            beach_chunks(&gen, 24)
                 .into_iter()
                 .map(|pos| {
                     let chunk = gen.generate_chunk(pos);
@@ -14485,7 +14722,13 @@ mod tests {
         let generator = WorldGen::new(2024);
         for biome in [Biome::Forest, Biome::BirchForest, Biome::Taiga] {
             let (mut shade, mut shade_n, mut open, mut open_n) = (0u32, 0u32, 0u32, 0u32);
-            for chunk in chunks_in(&generator, biome, 6) {
+            // **Chunks wholly inside the wood**, not chunks whose middle is:
+            // this asks how closed a wood is, and a chunk half over its edge
+            // is half a meadow. It was the middle column until the downs came
+            // (`Biome::Hills`), whose open groves take the dry fringe of
+            // every oak wood in hill country; the six chunks the old search
+            // found then straddled that fringe and read 45 per cent.
+            for chunk in solid_chunks_in(&generator, biome, 6) {
                 let light = crate::lighting::compute_isolated(&chunk.blocks);
                 for z in 4..CHUNK_SIZE_Z - 4 {
                     for x in 4..CHUNK_SIZE_X - 4 {
@@ -15535,6 +15778,8 @@ mod tests {
             Biome::Tundra => [178, 190, 186],
             Biome::Mountains => [128, 124, 120],
             Biome::SnowyPeaks => [244, 246, 250],
+            Biome::Steppe => [196, 192, 110],
+            Biome::Hills => [98, 158, 70],
         }
     }
 
@@ -16028,9 +16273,46 @@ mod climate_tests {
     /// turns over in hundreds of blocks rather than thousands. Slowing
     /// the climate down is allowed to make a *band* kilometres wide; it
     /// is not allowed to make the walk across one featureless.
+    ///
+    /// **Outside the landforms' open country.** A steppe is flat grass for
+    /// kilometres and a down country is turf over every crown, and that is
+    /// what they were asked for ("a wide horizon"): counted here, seed 7's
+    /// transects went from 186 blocks a run to 320, and that said nothing
+    /// about whether the rest of the world still changes underfoot. Samples
+    /// in hill or plain country are taken out -- a wood standing on a plain
+    /// is as flat as the steppe beside it -- and the edge of that country
+    /// ends a run as a change of biome does; what is inside it is
+    /// `landforms_tests`' business.
     fn country_size(gen: &WorldGen) -> f64 {
-        let probe = |gen: &WorldGen, gx, gz| gen.biome_at(gx, gz);
-        mean_run(gen, false, probe).max(mean_run(gen, true, probe))
+        let run = |along_x: bool| {
+            let (mut blocks, mut runs) = (0i64, 0i64);
+            for line in -6..6 {
+                // Hill or plain country at all, not only where it is a steppe
+                // or a down: a wood on plain country stands on a plain too.
+                let walk = transect(gen, line_start(along_x, line), along_x, 12_000, |gen: &WorldGen, gx, gz| {
+                    let (px, pz) = gen.on_planet(gx, gz);
+                    let (plain, hill) = gen.landform(px, pz, gen.highland(px, pz));
+                    (plain < 0.1 && hill < 0.1).then(|| gen.biome_at(gx, gz))
+                });
+                // A run ends at a change of biome and at the edge of open
+                // country alike: the meadows either side of a steppe are two
+                // meadows, not one run across it.
+                let mut last = None;
+                for biome in walk {
+                    let Some(biome) = biome else {
+                        last = None;
+                        continue;
+                    };
+                    if last != Some(biome) {
+                        runs += 1;
+                    }
+                    last = Some(biome);
+                    blocks += i64::from(PROBE_STEP);
+                }
+            }
+            blocks as f64 / runs as f64
+        };
+        run(false).max(run(true))
     }
 
     /// The shortest walk, anywhere on the sampled transects, from a
@@ -16191,6 +16473,12 @@ mod climate_tests {
                     // out over it is a swim, and it told the test that seed 7
                     // held only the sea.
                     if walk.iter().filter(|b| **b == Biome::Ocean).count() * 2 > walk.len() {
+                        continue;
+                    }
+                    // **Nor a walk across a steppe or a down country**, which
+                    // is one open country for kilometres by design; see
+                    // `country_size`.
+                    if walk.iter().filter(|b| matches!(b, Biome::Steppe | Biome::Hills)).count() * 2 > walk.len() {
                         continue;
                     }
                     let kinds: std::collections::HashSet<Biome> = walk.into_iter().collect();
@@ -18471,7 +18759,9 @@ mod climate_gradient_tests {
             | Biome::Forest
             | Biome::BirchForest
             | Biome::Swamp
-            | Biome::Plains => 2,
+            | Biome::Plains
+            | Biome::Steppe
+            | Biome::Hills => 2,
             Biome::Savanna | Biome::Desert => 3,
         })
     }
@@ -18692,6 +18982,8 @@ mod climate_gradient_tests {
                             Biome::Forest
                             | Biome::BirchForest
                             | Biome::Plains
+                            | Biome::Steppe
+                            | Biome::Hills
                             | Biome::DeadForest
                             | Biome::Swamp => Some(TEMPERATE),
                             Biome::Tundra | Biome::Taiga | Biome::Bog | Biome::SnowyPeaks => {
@@ -19284,8 +19576,12 @@ mod strata_tests {
             let found = first_rock_under(&gen, &chunk, biome);
             assert!(found.len() > 20, "only {} columns of {} to check", found.len(), biome.name());
             for (gx, gz, id) in found {
+                // ...or shale in a vale, where the landforms put the soft
+                // rock (`WorldGen::stratum`, `landforms::hardness`).
+                let (px, pz) = gen.on_planet(gx, gz);
+                let vale = gen.scale() == Scale::Landforms && gen.rock_region(px, pz) < -0.25;
                 assert!(
-                    rocks.contains(&id),
+                    rocks.contains(&id) || (vale && id == crate::types::BLOCK_SHALE && biome != Biome::Desert),
                     "the rock under {} at {gx},{gz} is {}",
                     biome.name(),
                     crate::types::block_name(id)
@@ -19469,7 +19765,14 @@ mod strata_tests {
         for gx in (-600..600).step_by(9) {
             for gz in (-600..600).step_by(11) {
                 let (rock, depth, _) = gen.stratum(gx, gz, Biome::Plains, turf);
-                assert!(matches!(rock, BLOCK_LIMESTONE | crate::types::BLOCK_CHALK), "a meadow on {}", crate::types::block_name(rock));
+                // Shale only in a vale of a world with landforms: see
+                // `WorldGen::stratum`.
+                let vale = gen.scale() == Scale::Landforms && gen.rock_region(gx, gz) < -0.25;
+                assert!(
+                    matches!(rock, BLOCK_LIMESTONE | crate::types::BLOCK_CHALK) || (vale && rock == crate::types::BLOCK_SHALE),
+                    "a meadow on {}",
+                    crate::types::block_name(rock)
+                );
                 assert!((8..=14).contains(&depth), "limestone {depth} layers thick");
                 thicknesses.insert(depth);
             }

@@ -226,9 +226,10 @@ impl Worlds {
         std::fs::create_dir_all(&directory)
             .map_err(|e| format!("could not create {}: {e}", directory.display()))?;
 
-        // Every new world is drawn at the Earth's scale; only a world that
-        // already has edits on the regional ground stays on it.
-        let scale = Scale::Earth;
+        // Every new world is drawn by the newest generator -- the Earth's
+        // scale with its landforms; a world that already has edits on older
+        // ground stays on the generator that drew it (`Scale`).
+        let scale = Scale::Landforms;
         let meta = WorldMeta {
             name: name.to_string(),
             seed,
@@ -513,8 +514,28 @@ mod tests {
         worlds.create_in("New", 3, Preset::Normal, Zone::Temperate).unwrap();
         let reloaded = Worlds::load(dir.path());
         let scale_of = |name: &str| reloaded.list().iter().find(|w| w.name == name).unwrap().scale;
-        assert_eq!(scale_of("New"), Scale::Earth);
+        assert_eq!(scale_of("New"), Scale::Landforms);
         assert_eq!(scale_of("Old"), Scale::Regional);
+    }
+
+    #[test]
+    fn a_world_from_before_the_landforms_keeps_the_earth_generator_over_a_reload() {
+        // The same promise one generator later: a world that wrote `earth`
+        // was drawn without hills and steppe, and its unexplored chunks have
+        // to come out of that generator or they meet the explored ones at a
+        // seam (`worldgen::landforms`).
+        let dir = TempDir::new("before-landforms");
+        let earth = dir.path().join("earth");
+        std::fs::create_dir_all(&earth).unwrap();
+        std::fs::write(
+            earth.join(META),
+            "name = \"Earth\"\nseed = 3\npreset = \"normal\"\nzone = \"temperate\"\nscale = \"earth\"\nlast_played = 0\n",
+        )
+        .unwrap();
+        assert_eq!(Worlds::load(dir.path()).list()[0].scale, Scale::Earth);
+        let mut worlds = Worlds::load(dir.path());
+        worlds.mark_played(0);
+        assert_eq!(Worlds::load(dir.path()).list()[0].scale, Scale::Earth, "a reload moved it to the new generator");
     }
 
     #[test]

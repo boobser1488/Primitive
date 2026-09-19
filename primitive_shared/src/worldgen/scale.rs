@@ -134,6 +134,19 @@ use super::{
 /// ground that never existed. See the module note.
 ///
 /// Serialised by name, as the others are: a person reads `world.toml`.
+///
+/// **It is the generator's version now, not only its scale.** The landforms
+/// -- hill and plain country, rivers that run to the sea, relief that follows
+/// the rock -- change the ground of every chunk nobody has walked into yet,
+/// and an Earth world's saved edits stand on the ground the Earth generator
+/// drew. So they are a third value here rather than a change to the second.
+///
+/// Rejected: a separate `generator = 2` beside the scale. Every place a scale
+/// goes -- `world.toml`, the server's settings, the handshake, the key the
+/// column tiles are remembered under -- is exactly where a version has to go,
+/// and a second field is a second thing each of them could forget. Two
+/// fields would also admit a regional world at generator two, which is a
+/// world nobody ever made.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scale {
@@ -145,20 +158,27 @@ pub enum Scale {
     Regional,
     /// Oceans and continents thousands of kilometres across, forest and
     /// steppe provinces and mountain belts hundreds, rivers by order, lakes,
-    /// and trees as tall as their kind. Every new world.
-    #[default]
+    /// and trees as tall as their kind. Every world made from 1.5 until the
+    /// landforms.
     Earth,
+    /// The Earth's scale with landforms in it: rolling hill country and open
+    /// steppe, rivers whose courses run out to the sea instead of round in
+    /// rings, and ridges where the rock is hard. Every new world. See
+    /// `landforms`.
+    #[default]
+    Landforms,
 }
 
 impl Scale {
     /// Every scale, oldest first.
-    pub const ALL: &'static [Scale] = &[Scale::Regional, Scale::Earth];
+    pub const ALL: &'static [Scale] = &[Scale::Regional, Scale::Earth, Scale::Landforms];
 
     /// What `world.toml` and `settings.toml` call it.
     pub fn name(self) -> &'static str {
         match self {
             Scale::Regional => "regional",
             Scale::Earth => "earth",
+            Scale::Landforms => "landforms",
         }
     }
 
@@ -173,6 +193,13 @@ impl Scale {
     /// would be the wrong answer about an old one.
     pub fn unrecorded() -> Scale {
         Scale::Regional
+    }
+
+    /// Whether the country is drawn at the Earth's scale -- either of the two
+    /// generators that do. Every question the Earth scale answered differently
+    /// from the regional world, the landforms answer the Earth's way.
+    pub fn earthly(self) -> bool {
+        self != Scale::Regional
     }
 }
 
@@ -232,7 +259,7 @@ const _: () = assert!(BASIN_OCTAVES as usize <= TURNS.len(), "a slow field with 
 
 /// A point turned about the origin by an octave's own angle. See `far`: no
 /// two octaves share an angle, and none is a multiple of a right angle.
-fn turned(x: f64, z: f64, octave: u32) -> (f64, f64) {
+pub(super) fn turned(x: f64, z: f64, octave: u32) -> (f64, f64) {
     let (sin, cos) = TURNS[octave as usize];
     (x * cos - z * sin, x * sin + z * cos)
 }
@@ -245,6 +272,11 @@ const SLOW_HIGHLAND: usize = 1;
 const SLOW_WEATHER: usize = 2;
 const SLOW_RAIN: usize = 3;
 const SLOW_ROLLING: usize = 4;
+/// Hill country or plain country, -1 .. 1: read only by a world with
+/// landforms, and left at zero on every lattice point of any other, so an
+/// Earth world pays nothing for it. See `landforms`.
+const SLOW_LANDFORM: usize = 5;
+const SLOW_FIELDS: usize = 6;
 
 /// How far apart the slow fields are sampled, how many of those steps a
 /// remembered tile is on a side, and how many tiles a thread keeps.
@@ -278,7 +310,7 @@ const SLOW_TILES_KEPT: usize = 64;
 /// One tile's lattice of slow fields: `SLOW_POINTS` a side, row by row, the
 /// far edge included so a tile never has to ask its neighbour.
 struct SlowTile {
-    points: Box<[[f64; 5]]>,
+    points: Box<[[f64; SLOW_FIELDS]]>,
 }
 
 thread_local! {
@@ -288,23 +320,35 @@ thread_local! {
 impl WorldGen {
     /// Every slow field at a column, read from the noise: what a lattice
     /// point holds. See `SLOW_STEP`.
-    fn slow_exact(&self, gx: i32, gz: i32) -> [f64; 5] {
+    fn slow_exact(&self, gx: i32, gz: i32) -> [f64; SLOW_FIELDS] {
         let upland = far(&self.erosion_noise, gx, gz, UPLAND_SPACING, 3, 0.5, 1_777.0);
         let line = far(&self.ridge_noise, gx, gz, BELT_SPACING, 3, 0.5, 2_113.0);
         let belt = 1.0 - smoothstep(0.0, BELT_HALF_WIDTH, (line + BELT_LINE).abs());
-        let mut fields = [0.0; 5];
+        let mut fields = [0.0; SLOW_FIELDS];
         fields[SLOW_BASIN] = far(&self.continent_noise, gx, gz, BASIN_SPACING, BASIN_OCTAVES, BASIN_PERSISTENCE, 1_331.0);
         fields[SLOW_HIGHLAND] = (HIGHLAND_AT_HOME + UPLAND_WEIGHT * upland + BELT_WEIGHT * belt).clamp(0.0, 1.0);
         fields[SLOW_WEATHER] = far(&self.temperature_noise, gx, gz, WEATHER_SPACING, 3, 0.5, 3_301.0);
         fields[SLOW_RAIN] = far(&self.humidity_noise, gx, gz, RAIN_SPACING, 3, 0.5, 4_409.0);
         fields[SLOW_ROLLING] = far(&self.hill_noise, gx, gz, ROLLING_SPACING, 3, 0.5, 977.0);
+        if self.scale == Scale::Landforms {
+            fields[SLOW_LANDFORM] = far(&self.hill_noise, gx, gz, super::landforms::LANDFORM_SPACING, 2, 0.45, 2_203.0);
+        }
         fields
+    }
+
+    /// Hill country or plain country at a column, -1 .. 1, read off the
+    /// lattice. Zero in any world without landforms. See `landforms`.
+    pub(super) fn landform_field(&self, gx: i32, gz: i32) -> f64 {
+        if self.scale != Scale::Landforms {
+            return 0.0;
+        }
+        self.slow(gx, gz)[SLOW_LANDFORM]
     }
 
     /// Every slow field at a column, read between the lattice points round
     /// it. Only ever asked by an Earth-scale world: a regional one answers
     /// its constants before it gets here.
-    fn slow(&self, gx: i32, gz: i32) -> [f64; 5] {
+    fn slow(&self, gx: i32, gz: i32) -> [f64; SLOW_FIELDS] {
         let side = SLOW_STEP * SLOW_CELLS;
         let (tx, tz) = (gx.div_euclid(side), gz.div_euclid(side));
         let (lx, lz) = (gx.rem_euclid(side), gz.rem_euclid(side));
@@ -465,7 +509,7 @@ impl WorldGen {
     pub(super) fn basin_lift(&self, basin: f64) -> f64 {
         match self.scale {
             Scale::Regional => 0.0,
-            Scale::Earth => basin * BASIN_GAIN + COAST_LEAN,
+            Scale::Earth | Scale::Landforms => basin * BASIN_GAIN + COAST_LEAN,
         }
     }
 
@@ -477,7 +521,7 @@ impl WorldGen {
         let coast = self.continent_on(gx, gz, basin).clamp(-1.0, 1.0);
         match self.scale {
             Scale::Regional => coast,
-            Scale::Earth => COAST_SHARE * coast + INTERIOR_SHARE * (basin / INTERIOR_SPAN).clamp(-1.0, 1.0),
+            Scale::Earth | Scale::Landforms => COAST_SHARE * coast + INTERIOR_SHARE * (basin / INTERIOR_SPAN).clamp(-1.0, 1.0),
         }
     }
 
@@ -489,10 +533,10 @@ impl WorldGen {
     pub(super) fn coast_profile(&self, continent: f64, basin: f64) -> f64 {
         match self.scale {
             Scale::Regional => spline(CONTINENT_SPLINE, continent),
-            Scale::Earth if continent >= 0.0 => {
+            Scale::Earth | Scale::Landforms if continent >= 0.0 => {
                 spline(CONTINENT_SPLINE, continent.min(INLAND_CAP)) + INTERIOR_RISE * smoothstep(0.02, 0.3, basin)
             }
-            Scale::Earth => {
+            Scale::Earth | Scale::Landforms => {
                 spline(CONTINENT_SPLINE, continent)
                     - ABYSS_DROP * smoothstep(ABYSS_FROM, ABYSS_TO, continent)
             }
@@ -816,7 +860,7 @@ impl WorldGen {
     pub(super) fn relief_amplitude(&self, highland: f64) -> f64 {
         match self.scale {
             Scale::Regional => 80.0,
-            Scale::Earth => RELIEF_LOWLAND + RELIEF_SPAN * highland,
+            Scale::Earth | Scale::Landforms => RELIEF_LOWLAND + RELIEF_SPAN * highland,
         }
     }
 
@@ -831,8 +875,8 @@ impl WorldGen {
     pub(super) fn unworn_lean(&self, highland: f64) -> f64 {
         match self.scale {
             Scale::Regional => 0.0,
-            Scale::Earth if highland > HIGHLAND_AT_HOME => 0.25 * (highland - HIGHLAND_AT_HOME),
-            Scale::Earth => 0.6 * (highland - HIGHLAND_AT_HOME),
+            Scale::Earth | Scale::Landforms if highland > HIGHLAND_AT_HOME => 0.25 * (highland - HIGHLAND_AT_HOME),
+            Scale::Earth | Scale::Landforms => 0.6 * (highland - HIGHLAND_AT_HOME),
         }
     }
 
@@ -903,7 +947,7 @@ impl WorldGen {
     pub(super) fn weather_mix(&self, gx: i32, gz: i32, local: f64) -> f64 {
         match self.scale {
             Scale::Regional => local,
-            Scale::Earth => WEATHER_LOCAL * local + WEATHER_REGIONAL * self.slow(gx, gz)[SLOW_WEATHER],
+            Scale::Earth | Scale::Landforms => WEATHER_LOCAL * local + WEATHER_REGIONAL * self.slow(gx, gz)[SLOW_WEATHER],
         }
     }
 
@@ -912,7 +956,7 @@ impl WorldGen {
     pub(super) fn rain_mix(&self, gx: i32, gz: i32, local: f64) -> f64 {
         match self.scale {
             Scale::Regional => local,
-            Scale::Earth => RAIN_LOCAL * local + RAIN_REGIONAL * self.slow(gx, gz)[SLOW_RAIN],
+            Scale::Earth | Scale::Landforms => RAIN_LOCAL * local + RAIN_REGIONAL * self.slow(gx, gz)[SLOW_RAIN],
         }
     }
 
@@ -978,6 +1022,16 @@ pub(super) struct RiverOrder {
     /// flat and white where it leaves the hills; a brook is quick and shallow
     /// and a wading player stands in it whatever it does.
     pub flow: super::currents::Flow,
+    /// Which way this order's courses run, in radians before the world's own
+    /// turn, and how far off the origin the nearest one lies, as a share of a
+    /// wave: `Some` only at `Scale::Landforms`, whose rivers are drawn as
+    /// lines that cross the country rather than as the zero of a field that
+    /// closes on itself. See `landforms::drained_field`.
+    pub course: Option<(f64, f64)>,
+    /// The order this one is a tributary of, by index in its world's list:
+    /// `Some` only for the landforms' brooks, which run only near the river
+    /// they feed. See `landforms::tributary_reach`.
+    pub feeds: Option<usize>,
 }
 
 /// The regional world's one river: every number what it was.
@@ -990,6 +1044,8 @@ pub(super) const REGIONAL_RIVERS: [RiverOrder; 1] = [RiverOrder {
     fades: (80.0, 25.0),
     meander: None,
     flow: super::currents::Flow { calm: 0.6, rapid: 2.2, reach: 48.0 },
+    course: None,
+    feeds: None,
 }];
 
 /// The Earth's three orders, widest first -- the order they are cut in, so a
@@ -1045,6 +1101,8 @@ pub(super) const EARTH_RIVERS: [RiverOrder; 3] = [
         fades: (110.0, 45.0),
         meander: Some((3_500.0, 450.0)),
         flow: super::currents::Flow { calm: 0.9, rapid: 1.4, reach: 240.0 },
+        course: None,
+        feeds: None,
     },
     RiverOrder {
         frequency: 0.000_14,
@@ -1055,6 +1113,8 @@ pub(super) const EARTH_RIVERS: [RiverOrder; 3] = [
         fades: (80.0, 25.0),
         meander: Some((900.0, 110.0)),
         flow: super::currents::Flow { calm: 0.7, rapid: 2.6, reach: 64.0 },
+        course: None,
+        feeds: None,
     },
     // **Fourteen and six, not thirty and ten.** The water of every river here
     // stands at the sea's level, so a brook up a hillside is a ditch down to
@@ -1076,6 +1136,8 @@ pub(super) const EARTH_RIVERS: [RiverOrder; 3] = [
         fades: (14.0, 6.0),
         meander: None,
         flow: super::currents::Flow { calm: 0.4, rapid: 1.2, reach: 24.0 },
+        course: None,
+        feeds: None,
     },
 ];
 
@@ -1100,6 +1162,7 @@ impl WorldGen {
         match self.scale {
             Scale::Regional => &REGIONAL_RIVERS,
             Scale::Earth => &EARTH_RIVERS,
+            Scale::Landforms => &super::landforms::LANDFORM_RIVERS,
         }
     }
 
@@ -1114,6 +1177,9 @@ impl WorldGen {
             // Turned, for `far`'s reason: a river on a lattice line is a
             // straight line fifty kilometres long.
             Some(shift) => {
+                if let Some(course) = order.course {
+                    return self.drained_field(order, x, z, shift, course);
+                }
                 // The meander first, off the warp field at its own whole
                 // offsets -- so the origin is still where it was. See
                 // `RiverOrder::meander`.
@@ -1202,7 +1268,7 @@ impl WorldGen {
     pub(super) fn pond_cell(&self) -> i32 {
         match self.scale {
             Scale::Regional => LAKE_CELL,
-            Scale::Earth => EARTH_POND_CELL,
+            Scale::Earth | Scale::Landforms => EARTH_POND_CELL,
         }
     }
 
@@ -1211,7 +1277,7 @@ impl WorldGen {
     pub(super) fn pond_wobble(&self, radius: i32) -> f64 {
         match self.scale {
             Scale::Regional => LAKE_WOBBLE,
-            Scale::Earth => (f64::from(radius) * EARTH_POND_WOBBLE).max(LAKE_WOBBLE),
+            Scale::Earth | Scale::Landforms => (f64::from(radius) * EARTH_POND_WOBBLE).max(LAKE_WOBBLE),
         }
     }
 
@@ -1220,7 +1286,7 @@ impl WorldGen {
     pub(super) fn pond_radii(&self) -> std::ops::RangeInclusive<i32> {
         match self.scale {
             Scale::Regional => 3..=LAKE_MAX_RADIUS,
-            Scale::Earth => EARTH_POND_SMALLEST..=EARTH_POND_LARGEST,
+            Scale::Earth | Scale::Landforms => EARTH_POND_SMALLEST..=EARTH_POND_LARGEST,
         }
     }
 
@@ -1578,7 +1644,7 @@ impl WorldGen {
             return regional;
         }
         match biome {
-            Biome::Forest | Biome::Plains => (6, 10),
+            Biome::Forest | Biome::Plains | Biome::Hills | Biome::Steppe => (6, 10),
             Biome::BirchForest => (7, 11),
             Biome::Swamp => (5, 8),
             Biome::Taiga => (10, 14),
@@ -1592,7 +1658,7 @@ impl WorldGen {
     pub(super) fn old_trunks(&self) -> (i32, i32) {
         match self.scale {
             Scale::Regional => (OLD_TRUNK_SHORTEST, OLD_TRUNK_TALLEST),
-            Scale::Earth => EARTH_OLD_TRUNK,
+            Scale::Earth | Scale::Landforms => EARTH_OLD_TRUNK,
         }
     }
 }
@@ -1678,6 +1744,8 @@ mod tools {
             Biome::Tundra => [182, 192, 186],
             Biome::Mountains => [132, 126, 120],
             Biome::SnowyPeaks => [246, 248, 252],
+            Biome::Steppe => [200, 196, 112],
+            Biome::Hills => [96, 156, 64],
         }
     }
 
@@ -1794,7 +1862,7 @@ mod tools {
         match biome {
             Biome::Ocean | Biome::River => Cover::Water,
             Biome::Forest | Biome::BirchForest | Biome::Swamp | Biome::Taiga => Cover::Wood,
-            Biome::Plains | Biome::Savanna | Biome::DeadForest | Biome::Beach => Cover::Open,
+            Biome::Plains | Biome::Steppe | Biome::Hills | Biome::Savanna | Biome::DeadForest | Biome::Beach => Cover::Open,
             Biome::Desert => Cover::Desert,
             Biome::Tundra | Biome::Bog => Cover::Cold,
             Biome::Mountains | Biome::SnowyPeaks => Cover::Rock,
@@ -2389,7 +2457,8 @@ mod tests {
     /// version flattened the country round the origin of every seed.
     #[test]
     fn no_order_of_river_is_drawn_through_the_origin_of_every_world() {
-        for order in &EARTH_RIVERS {
+        let courses = super::super::landforms::LANDFORM_RIVERS;
+        for order in EARTH_RIVERS.iter().chain(courses.iter()) {
             let through = [0u32, 1, 7, 1337, 99_999]
                 .iter()
                 .filter(|&&seed| WorldGen::new(seed).river_field(order, 0.0, 0.0).abs() < 1e-6)
@@ -2446,7 +2515,8 @@ mod tests {
     #[test]
     fn the_river_cull_is_steeper_than_the_river_field_ever_gets() {
         let gen = WorldGen::new(4242);
-        for order in REGIONAL_RIVERS.iter().chain(EARTH_RIVERS.iter()) {
+        let courses = super::super::landforms::LANDFORM_RIVERS;
+        for order in REGIONAL_RIVERS.iter().chain(EARTH_RIVERS.iter()).chain(courses.iter()) {
             let step = 0.001 / order.frequency;
             let mut steepest = 0.0f64;
             for i in 0..200_000 {
@@ -2694,13 +2764,14 @@ mod tests {
     fn a_brook_a_river_and_a_great_river_are_each_as_wide_as_their_order() {
         let gen = WorldGen::new(1337);
         let wet = |gx: i32, gz: i32| gen.height_at(gx, gz) < SEA_LEVEL;
-        for (index, (order, (narrowest, widest))) in EARTH_RIVERS.iter().zip([(100, 300), (15, 60), (2, 6)]).enumerate() {
+        let orders = gen.river_orders();
+        for (index, (order, (narrowest, widest))) in orders.iter().zip([(100, 300), (15, 60), (2, 6)]).enumerate() {
             let stride = (0.02 / order.frequency).max(4.0);
             let mut widths: Vec<i32> = Vec::new();
             // A brook's zero inside a great river's water is the great
             // river's width; only crossings outside every wider order's
             // valley say anything about this order.
-            let wider = &EARTH_RIVERS[..index];
+            let wider = &orders[..index];
             'lines: for line in 0..40 {
                 let z = f64::from(line * 7_919 - 150_000);
                 let mut last = gen.river_field(order, -400_000.0, z);
@@ -2717,7 +2788,24 @@ mod tests {
                     if !wet(gx, gz) || gen.biome_at(gx, gz) != Biome::River {
                         continue;
                     }
-                    if wider.iter().any(|w| gen.river_field(w, x, z).abs() <= RIVER_SLOPE_BOUND * w.frequency * w.valley) {
+                    // Inside a wider order's valley, by the distance to its
+                    // line rather than the cull's bound: a brook of the
+                    // landforms runs only near its river (`landforms::
+                    // tributary_reach`), all of it inside the cull's reach,
+                    // so the bound left nothing but the lakes to measure.
+                    let inside = |w: &RiverOrder| {
+                        let f = gen.river_field(w, x, z);
+                        let gx = gen.river_field(w, x + 1.0, z) - f;
+                        let gz = gen.river_field(w, x, z + 1.0) - f;
+                        f.abs() / (gx * gx + gz * gz).sqrt().max(f64::EPSILON) <= w.valley
+                    };
+                    if wider.iter().any(inside) {
+                        continue;
+                    }
+                    // ...and this order's own channel, not a pond or a wide
+                    // lake the line happens to cross.
+                    let (px, pz) = (x.round() as i32, z.round() as i32);
+                    if gen.river(order, px, pz, gen.land_before_rivers(px, pz).0).channel < 0.5 {
                         continue;
                     }
                     let e = 1.0;

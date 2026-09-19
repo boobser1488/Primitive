@@ -37,7 +37,7 @@ pub struct ServerSettings {
     /// `Scale::Regional` -- the field's own default, not the struct's: a
     /// server upgraded under an existing world keeps the ground its players
     /// built on, and a server writing its first settings file writes the
-    /// Earth's. Not something to change under a world with edits in it, for
+    /// newest generator's (`Scale::Landforms`). Not something to change under a world with edits in it, for
     /// the seed's reason.
     #[serde(default = "primitive_shared::worldgen::Scale::unrecorded")]
     pub world_scale: primitive_shared::worldgen::Scale,
@@ -238,7 +238,7 @@ impl Default for ServerSettings {
             world_seed: 1337,
             world_preset: primitive_shared::worldgen::Preset::Normal,
             world_zone: primitive_shared::worldgen::Zone::Temperate,
-            world_scale: primitive_shared::worldgen::Scale::Earth,
+            world_scale: primitive_shared::worldgen::Scale::Landforms,
             max_players: 256,
 
             tick_rate_hz: 20.0,
