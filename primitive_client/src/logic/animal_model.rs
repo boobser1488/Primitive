@@ -45,6 +45,7 @@
 use glam::Vec3;
 
 use primitive_shared::animals::Species;
+use primitive_shared::horse::{TACK_BAGS, TACK_HALTER, TACK_RIDDEN, TACK_SADDLE, TACK_STALLION};
 use primitive_shared::protocol::Attitude;
 
 use crate::engine::texture::FaceLayers;
@@ -475,6 +476,10 @@ pub struct Motion {
     /// stiff and ends in the carcass's own pose (`fallen_pose`), so the block
     /// that replaces it takes over without a jump.
     pub fallen: f32,
+    /// What a horse is wearing: `horse::TACK_*` bits, straight off the
+    /// snapshot (`EntityKind::Animal::tack`). Nought on every other animal and
+    /// on a wild horse, which is what `Motion::default()` draws. See `tack`.
+    pub tack: u8,
 }
 
 /// How long the client takes to roll a dying animal over, in seconds: a
@@ -625,7 +630,9 @@ pub(crate) fn build_parts(
     vertices: &mut Vec<crate::engine::mesh::Vertex>,
     indices: &mut Vec<u32>,
 ) {
-    let Motion { walked, speed, hurt, head, turning, age, youth, fallen } = motion;
+    let Motion { walked, speed, hurt, head, turning, age, youth, fallen, tack } = motion;
+    // Only a horse wears anything; a stray bit on another animal draws nothing.
+    let tack = if species == Species::Horse { tack } else { 0 };
     // The death fall, eased so it goes slowly at first and hits the ground.
     // See `Motion::fallen`.
     let falling = fallen.clamp(0.0, 1.0);
@@ -685,10 +692,30 @@ pub(crate) fn build_parts(
         standing
     };
 
+    // A nod, at the *same* rate as the legs and a fraction of the amplitude.
+    // It used to run at twice the rate, which is not a nod, it is a tic: a
+    // head bobs once per stride, because it is the stride that bobs it.
+    //
+    // ...over wherever the attitude is carrying the head. The two add because
+    // they are two different things happening to one neck: a grazing animal
+    // that takes a step still bobs, and a head that has reached the grass has
+    // stopped bobbing already, because it has stopped walking and `swing` is
+    // zero. Named once because a halter nods with the head it is on (`tack`).
+    let nod = head + phase.sin() * swing * 0.10;
+
     for part in model {
         if !part.gait.shown(aloft) {
             continue;
         }
+        // The herd's stallion: the same boxes, a heavier neck and mane. See
+        // `stallion`.
+        let heavier;
+        let part = if tack & TACK_STALLION != 0 {
+            heavier = stallion(part);
+            &heavier
+        } else {
+            part
+        };
         let angle = match part.gait {
             Gait::Folded => 0.0,
             // Not running on nothing, and not nodding to a stride it is not
@@ -702,17 +729,8 @@ pub(crate) fn build_parts(
             // when the block took over.
             Gait::LegFront => phase.sin() * swing * (1.0 - falling) + STIFF_LEGS * (std::f32::consts::PI * falling).sin(),
             Gait::LegBack => -phase.sin() * swing * (1.0 - falling) - STIFF_LEGS * (std::f32::consts::PI * falling).sin(),
-            // A nod, at the *same* rate as the legs and a fraction of
-            // the amplitude. It used to run at twice the rate, which is
-            // not a nod, it is a tic: a head bobs once per stride,
-            // because it is the stride that bobs it.
-            //
-            // ...over wherever the attitude is carrying the head. The two add
-            // because they are two different things happening to one neck: a
-            // grazing animal that takes a step still bobs, and a head that has
-            // reached the grass has stopped bobbing already, because it has
-            // stopped walking and `swing` is zero.
-            Gait::Head => head + phase.sin() * swing * 0.10,
+            // See `nod`.
+            Gait::Head => nod,
             // **Still, unless the model named it something that is not.** See
             // `secondary`: a tail and an ear are the two parts that move when
             // nothing else does, and the files already say which is which.
@@ -721,6 +739,258 @@ pub(crate) fn build_parts(
         append_part_posed(
             part, species, centre, yaw, angle, pose, Dressing::Coat, hurt, layers, light,
             vertices, indices,
+        );
+    }
+
+    if tack & (TACK_SADDLE | TACK_BAGS | TACK_HALTER) != 0 {
+        append_tack(model, tack, centre, yaw, nod, pose, hurt, layers, light, vertices, indices);
+    }
+}
+
+/// How far the top of a saddle's seat is over the horse's back, in
+/// sixteenths: the leather over the pad.
+const SADDLE_SEAT: f32 = 1.4;
+
+/// How high the top of a saddle's seat is, in blocks over a grown horse's
+/// feet: what a rider sits on.
+///
+/// **Measured off the loaded model, not written down beside it**, for the
+/// reason `half_extents` is: the saddle is laid on the top of the horse's
+/// `body` box (`append_tack`), so a horse made taller in Blockbench carries
+/// its saddle up with it -- and the rider, whose seat this is
+/// (`player_model::mount_drop`), goes up with the saddle rather than being
+/// left sitting in the horse's back.
+pub fn saddle_top() -> f32 {
+    let body = parts(Species::Horse).iter().find(|part| part.name == "body");
+    let back = body.map_or(0.0, |body| body.at[1] + body.size[1] * 0.5);
+    (back + SADDLE_SEAT) * SCALE + Species::Horse.height() * 0.5
+}
+
+/// The herd stallion's version of a part: the same box, heavier where a
+/// stallion is heavier.
+///
+/// **Scaled in code rather than a second model file**, because what makes
+/// a stallion is two proportions and not a shape: a crest of neck a
+/// sixteenth wider and a mane half again as thick and standing higher. A
+/// `horse_stallion.bbmodel` would be twenty-three boxes copied to change
+/// seven of them, and the day the mare's legs are moved the stallion's
+/// would stay where they were. Rejected too: **a darker picture**, which is
+/// a second sheet and a layer for a difference the bay's mane already
+/// makes black -- at forty blocks what a player picks out is the outline.
+fn stallion(part: &Part) -> Part {
+    let mut heavier = *part;
+    if part.name.starts_with("mane") || part.name == "forelock" {
+        heavier.size[0] *= 1.6;
+        // Grown upward only -- its foot stays in the crest -- and by a whole
+        // sixteenth, because by less its top lands in the plane of the neck
+        // box it stands on.
+        heavier.size[1] += 1.0;
+        heavier.at[1] += 0.5;
+    } else if part.name == "neck" || part.name == "neck middle" {
+        // The base and the middle of the neck, where a stallion's crest is.
+        // Not the top of it: the upper neck is a fifth of a sixteenth inside
+        // the skull's sides, and grown it would be in their plane.
+        heavier.size[0] += 0.8;
+    }
+    heavier
+}
+
+/// What a piece of tack is made of.
+#[derive(Clone, Copy)]
+enum Tack {
+    /// The cured skin of the hide frame (`Material::Leather`), cut from
+    /// inside its laced margin -- see `append_tack`.
+    Leather,
+    /// A saddle pad: the wool block's own picture.
+    Fleece,
+    /// Stirrups, bit rings and buckles.
+    Iron,
+}
+
+/// One box of tack, in sixteenths, as `[x0, y0, z0]..[x1, y1, z1]` in the
+/// horse's own frame (its centre, -Z forward), and what it is made of.
+struct Strap {
+    name: &'static str,
+    from: [f32; 3],
+    to: [f32; 3],
+    of: Tack,
+    /// Rides the head -- nods with it, about the same joint -- rather than
+    /// the body.
+    on_head: bool,
+}
+
+/// A strap, and the same strap on the horse's other side.
+fn both_sides(out: &mut Vec<Strap>, strap: Strap) {
+    let mirrored = Strap { from: [-strap.to[0], strap.from[1], strap.from[2]], to: [-strap.from[0], strap.to[1], strap.to[2]], ..strap };
+    out.push(strap);
+    out.push(mirrored);
+}
+
+/// The tack on a horse, from the bits of `horse::TACK_*` it is wearing.
+///
+/// **Laid on the model's own boxes, not on numbers of its own.** The
+/// saddle's height is the top of `body`, its skirts are the width of it,
+/// the halter goes round whatever `muzzle` and `head` are -- so a horse
+/// reshaped in Blockbench keeps its saddle on its back and its halter on
+/// its face. Along the body the saddle is fixed at the middle, because the
+/// middle is where the server puts the rider (`horse::RIDER_LIFT`, at the
+/// horse's own x and z) whatever shape the horse is.
+///
+/// **Drawn in code rather than as more boxes in the model file**, toggled by
+/// group name the way `loaded` and `bare` toggle a rack's skin. Rejected,
+/// because the file's pictures are the *animal's* sheet: a saddle in it would
+/// have to be painted into the horse's squares -- a leather tile in the slot
+/// the sheet calls `Tusk` -- which is the confusion `Skin` exists to stop,
+/// and what the tack is made of is already in the atlas as the hide frame's
+/// leather, the wool block and the furniture's iron. Rejected too: **tack
+/// as a second entity** riding the horse, which is a snapshot and an
+/// interpolation for boxes that never leave it.
+///
+/// Every face kept clear of every other it could lie flush with by a fifth
+/// of a sixteenth or more, for `model_overlap`'s reason: a skirt flush with
+/// the pad under it is two pictures the depth buffer picks between.
+#[allow(clippy::too_many_arguments)]
+fn append_tack(
+    model: &[Part],
+    tack: u8,
+    centre: Vec3,
+    yaw: f32,
+    nod: f32,
+    pose: Pose,
+    hurt: Option<f32>,
+    layers: &FaceLayers,
+    light: (u8, u8),
+    vertices: &mut Vec<crate::engine::mesh::Vertex>,
+    indices: &mut Vec<u32>,
+) {
+    use crate::engine::mesh::Material;
+    let named = |name: &str| model.iter().find(|part| part.name == name);
+    let (Some(body), Some(head), Some(muzzle)) = (named("body"), named("head"), named("muzzle")) else {
+        return;
+    };
+    let top = |part: &Part| part.at[1] + part.size[1] * 0.5;
+    let bottom = |part: &Part| part.at[1] - part.size[1] * 0.5;
+    let back = top(body);
+    let belly = bottom(body);
+    let flank = body.size[0] * 0.5;
+    let mut straps = Vec::new();
+    let strap = |name, from, to, of| Strap { name, from, to, of, on_head: false };
+
+    if tack & TACK_SADDLE != 0 {
+        // The seat, with a pommel before it and a higher cantle behind: the
+        // three boxes that make a saddle rather than a blanket.
+        straps.push(strap("seat", [-3.6, back - 0.2, -4.0], [3.6, back + SADDLE_SEAT, 3.6], Tack::Leather));
+        straps.push(strap("pommel", [-2.2, back + 1.0, -4.5], [2.2, back + 2.5, -3.1], Tack::Leather));
+        straps.push(strap("cantle", [-2.8, back + 1.0, 2.4], [2.8, back + 2.9, 3.9], Tack::Leather));
+        // The pale fleece under it, showing at the edges: without it a
+        // leather saddle on a bay horse is brown on brown.
+        straps.push(strap("pad", [-flank - 0.4, back - 1.5, -5.0], [flank + 0.4, back + 0.5, 4.6], Tack::Fleece));
+        // The girth, round the barrel behind the forelegs.
+        straps.push(strap("girth", [-flank - 0.2, belly - 0.2, -2.6], [flank + 0.2, back - 1.0, -1.4], Tack::Leather));
+        both_sides(&mut straps, strap("skirt", [-flank - 0.7, back - 6.0, -3.8], [-flank + 0.15, back + 0.25, 2.8], Tack::Leather));
+        // The stirrups hang whether anybody is in them: an empty saddle
+        // with its irons down is a horse waiting for somebody. With a rider
+        // on, each iron is under a boot -- where the rider's own model says
+        // the sole is (`player_model::rider_foot`), out beside the flank
+        // where the leg has to be to clear the barrel -- and not down
+        // against the horse's side, a hand's breadth from the foot.
+        both_sides(&mut straps, strap("stirrup leather", [-flank - 0.95, back - 7.5, -0.3], [-flank - 0.7, back - 0.5, 0.3], Tack::Leather));
+        if tack & TACK_RIDDEN != 0 {
+            let sole = crate::logic::player_model::rider_foot() / SCALE;
+            let lift = (primitive_shared::horse::RIDER_LIFT - Species::Horse.height() * 0.5) / SCALE;
+            let (x, y, z) = (sole.x, sole.y + lift, sole.z);
+            both_sides(&mut straps, strap("stirrup", [-x - 0.9, y - 0.7, z - 1.0], [-x + 0.9, y + 0.2, z + 1.0], Tack::Iron));
+        } else {
+            both_sides(&mut straps, strap("stirrup", [-flank - 1.75, back - 8.3, -1.0], [-flank - 0.45, back - 7.3, 1.0], Tack::Iron));
+        }
+    }
+    if tack & TACK_BAGS != 0 {
+        // Behind the saddle, over the loins, where a pack animal carries
+        // its load -- and where a rider's legs are not.
+        both_sides(&mut straps, strap("bag", [-flank - 2.1, back - 7.0, 4.2], [-flank + 0.2, back - 1.0, 9.6], Tack::Leather));
+        both_sides(&mut straps, strap("bag lid", [-flank - 2.3, back - 2.6, 4.0], [-flank - 0.1, back - 0.6, 9.8], Tack::Leather));
+        both_sides(&mut straps, strap("bag buckle", [-flank - 2.55, back - 3.6, 6.5], [-flank - 2.2, back - 2.4, 7.3], Tack::Iron));
+        straps.push(strap("bag strap", [-flank - 0.3, back - 1.0, 6.2], [flank + 0.3, back + 1.0, 7.6], Tack::Leather));
+    }
+    if tack & TACK_HALTER != 0 {
+        let head_strap = |name, from, to, of| Strap { name, from, to, of, on_head: true };
+        let (mw, hw) = (muzzle.size[0] * 0.5, head.size[0] * 0.5);
+        let muzzle_front = muzzle.at[2] - muzzle.size[2] * 0.5;
+        let head_front = head.at[2] - head.size[2] * 0.5;
+        let head_back = head.at[2] + head.size[2] * 0.5;
+        // Across the upper third of the long face, and half a sixteenth
+        // clear of the skull's underside, whose plane the cheek strap's own
+        // underside would otherwise lie in.
+        let cheek = top(muzzle) - 1.6;
+        // A band round the nose, a strap up each cheek, and one over the
+        // poll behind the ears: what reads as "somebody's horse" across a
+        // field, which is the halter's whole job (`horse::TACK_HALTER`).
+        straps.push(head_strap(
+            "noseband",
+            [-mw - 0.25, bottom(muzzle) - 0.25, muzzle_front + 2.3],
+            [mw + 0.25, top(muzzle) + 0.25, muzzle_front + 3.3],
+            Tack::Leather,
+        ));
+        both_sides(&mut straps, head_strap("nose cheek", [-mw - 0.2, cheek, muzzle_front + 3.3], [-mw + 0.15, cheek + 0.7, head_front], Tack::Leather));
+        both_sides(&mut straps, head_strap("cheek", [-hw - 0.15, cheek, head_front + 0.2], [-hw + 0.2, cheek + 0.7, head_back - 1.0], Tack::Leather));
+        straps.push(head_strap(
+            "headpiece",
+            [-hw - 0.35, bottom(head) - 0.2, head_back - 1.0],
+            [hw + 0.35, top(head) + 0.3, head_back - 0.2],
+            Tack::Leather,
+        ));
+        if tack & TACK_RIDDEN != 0 {
+            // Reins from the rings of the noseband back along the neck to
+            // where a rider's hands are, over the withers.
+            both_sides(&mut straps, head_strap("bit ring", [-3.35, cheek - 0.1, muzzle_front + 1.9], [-mw - 0.2, cheek + 0.7, muzzle_front + 2.7], Tack::Iron));
+            both_sides(&mut straps, head_strap("rein", [-3.15, cheek + 0.1, muzzle_front + 2.3], [-2.95, cheek + 0.5, body.at[2] - body.size[2] * 0.5 + 0.5], Tack::Leather));
+        }
+    }
+
+    // The head's own joint, so the halter nods exactly as the head does.
+    let head_joint = head.pivot.unwrap_or([top(head), head.at[2]]);
+    let (sky, block_light) = light;
+    let block_light = match hurt {
+        Some(flash) => block_light.max((primitive_shared::types::MAX_LIGHT as f32 * flash) as u8),
+        None => block_light,
+    };
+    let leather = Material::Leather.layer(layers);
+    let fleece = Material::Wool.layer(layers);
+    let iron = Material::Iron.layer(layers);
+    for strap in &straps {
+        let size = std::array::from_fn(|a| strap.to[a] - strap.from[a]);
+        let part = Part {
+            name: strap.name,
+            at: std::array::from_fn(|a| (strap.from[a] + strap.to[a]) * 0.5),
+            size,
+            gait: if strap.on_head { Gait::Head } else { Gait::Still },
+            pivot: strap.on_head.then_some(head_joint),
+            ..PART
+        };
+        let swing = if strap.on_head { nod } else { 0.0 };
+        push_posed_box(
+            &part,
+            centre,
+            yaw,
+            swing,
+            pose,
+            |face| {
+                let [_, _, du, dv] = material_cut(size, face);
+                match strap.of {
+                    // **From inside the laced margin**: the cured skin's
+                    // picture is drawn for a whole slab, cords and all, and
+                    // `material_cut`'s piece from the corner is the cord --
+                    // a girth one sixteenth wide was a dark line of lacing.
+                    // Two texels in, and never more than the twelve the
+                    // margin leaves.
+                    Tack::Leather => (leather, Some([2.0 / 16.0, 2.0 / 16.0, du.min(0.75), dv.min(0.75)])),
+                    Tack::Fleece => (fleece, Some([0.0, 0.0, du, dv])),
+                    Tack::Iron => (iron, Some([0.0, 0.0, du, dv])),
+                }
+            },
+            (sky, block_light),
+            vertices,
+            indices,
         );
     }
 }

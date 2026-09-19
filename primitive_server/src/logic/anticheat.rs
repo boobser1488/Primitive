@@ -59,6 +59,13 @@ const W_OUT_OF_RANGE_CHUNK: f32 = 0.25;
 const W_RATE_LIMIT: f32 = 1.5;
 const W_REPLAY: f32 = 0.5;
 
+/// **A rider's speed limit**, in blocks a second: a gallop and a third
+/// again. The third is the client's prediction, which runs a round trip ahead
+/// of the horse the server has and is corrected toward it in easings rather
+/// than in steps -- a burst the budget's second and a half absorbs, not a
+/// sustained speed. A saddle doing twenty blocks a second is not on a horse.
+pub const MOUNTED_SPEED: f32 = primitive_shared::horse::GALLOP * 1.35;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
     /// Request is plausible; apply it.
@@ -152,6 +159,16 @@ pub struct AntiCheat {
     /// sends can reach it.
     flying: bool,
 
+    /// **On a horse**: the transforms are a rider's saddle, not a pair of
+    /// feet, and are judged as such -- see `set_mounted`. Set only by the
+    /// server (`horses::seat`, `horses::dismount`).
+    mounted: bool,
+    /// The distance budget a rider's saddle is held to, the horse's own
+    /// gallop and the slack a prediction a round trip ahead needs. Its own
+    /// bucket so a gallop does not spend the walker's, and the walker's
+    /// full budget is waiting when they get down.
+    mount_budget: TokenBucket,
+
     msg_bucket: TokenBucket,
     edit_bucket: TokenBucket,
     chunk_bucket: TokenBucket,
@@ -186,17 +203,17 @@ pub struct AntiCheat {
 ///
 /// Four corners of the collider, so what counts as ground is what the
 /// collider actually rests on.
-fn ground_under(world: &crate::logic::world::World, x: f64, y: f64, z: f64) -> Option<bool> {
-    use primitive_shared::geometry::PLAYER_HALF_WIDTH;
-
+///
+/// `half` is the half-width of what is standing: a player's, or a horse's
+/// under a rider (`AntiCheat::set_mounted`). **The horse's, and it was a
+/// kick.** A horse walks up a step as soon as its front hooves are over it,
+/// with its middle -- where the rider sits -- still over the lower ground; a
+/// rider's four corners there were over air, rising, and claiming ground,
+/// and the first scenario that rode at a step was put off its horse for it.
+fn ground_under(world: &crate::logic::world::World, x: f64, y: f64, z: f64, half: f32) -> Option<bool> {
     let foot = (y - 0.1).floor() as i32;
     let mut known = false;
-    for (dx, dz) in [
-        (-PLAYER_HALF_WIDTH, -PLAYER_HALF_WIDTH),
-        (PLAYER_HALF_WIDTH, -PLAYER_HALF_WIDTH),
-        (-PLAYER_HALF_WIDTH, PLAYER_HALF_WIDTH),
-        (PLAYER_HALF_WIDTH, PLAYER_HALF_WIDTH),
-    ] {
+    for (dx, dz) in [(-half, -half), (half, -half), (-half, half), (half, half)] {
         match world.cached_block((x + f64::from(dx)).floor() as i32, foot, (z + f64::from(dz)).floor() as i32) {
             // Anything solid under any corner is ground. A player with
             // one foot on a ledge is standing on it.
@@ -229,6 +246,8 @@ impl AntiCheat {
         let now = Instant::now();
         Self {
             flying: false,
+            mounted: false,
+            mount_budget: TokenBucket::new(MOUNTED_SPEED, 1.5, now),
             move_budget: TokenBucket::new(cfg.max_horizontal_speed, 1.5, now),
             msg_bucket: TokenBucket::new(cfg.max_messages_per_sec, 2.0, now),
             edit_bucket: TokenBucket::new(cfg.max_block_edits_per_sec, 2.0, now),
@@ -380,13 +399,25 @@ impl AntiCheat {
         }
 
         // --- horizontal speed, as a refillable budget ---
-        self.move_budget.refill(now);
-        if !self.move_budget.take(horizontal, now) {
-            return self.flag(
-                W_SPEED,
-                format!("sustained speed above {:.1} b/s", self.cfg.max_horizontal_speed),
-            );
+        //
+        // A rider's against the horse's (`set_mounted`), a walker's against
+        // their own.
+        let (budget, limit) = if self.mounted {
+            (&mut self.mount_budget, MOUNTED_SPEED.max(self.cfg.max_horizontal_speed))
+        } else {
+            (&mut self.move_budget, self.cfg.max_horizontal_speed)
+        };
+        budget.refill(now);
+        if !budget.take(horizontal, now) {
+            return self.flag(W_SPEED, format!("sustained speed above {limit:.1} b/s"));
         }
+        // Where the ground and the water are looked for: the hooves, for a
+        // rider (`set_mounted`). **A name of its own and not `y` shadowed**:
+        // it was shadowed, and the position kept for the next transform's
+        // climb was then the hooves while the next transform named the
+        // saddle -- every transform a rider sent in the air "climbed" the
+        // horse's back again, and a jump was a flight by its fourth sample.
+        let probe_y = if self.mounted { y - f64::from(primitive_shared::horse::RIDER_LIFT) } else { y };
 
         // --- water ---
         // Swimming upward is a sustained climb with no ground contact,
@@ -413,7 +444,7 @@ impl AntiCheat {
         let in_water = [0.0f32, PLAYER_HEIGHT * 0.5, PLAYER_HEIGHT * 0.9]
             .iter()
             .any(|offset| {
-                let height = y + f64::from(*offset);
+                let height = probe_y + f64::from(*offset);
                 let (cx, cy, cz) = (x.floor() as i32, height.floor() as i32, z.floor() as i32);
                 world.cached_block(cx, cy, cz).is_some_and(|id| {
                     let above = world
@@ -431,7 +462,12 @@ impl AntiCheat {
         // `below` is None when we simply don't have that chunk cached; in
         // that case we give the player the benefit of the doubt rather
         // than generating terrain to prove a point.
-        let below = ground_under(world, x, y, z);
+        let half = if self.mounted {
+            primitive_shared::horse::HALF_WIDTH
+        } else {
+            primitive_shared::geometry::PLAYER_HALF_WIDTH
+        };
+        let below = ground_under(world, x, probe_y, z, half);
 
         if in_water {
             // Buoyancy legitimately holds a player up and lets them
@@ -635,6 +671,43 @@ impl AntiCheat {
         self.flying
     }
 
+    /// On a horse, or off it.
+    ///
+    /// **An allowance and not an exemption, which is the difference from
+    /// `set_flying`.** Three things change for a rider and nothing else does:
+    ///
+    /// * the speed budget is a horse's (`MOUNTED_SPEED`), because a gallop is
+    ///   eleven blocks a second and a man is not;
+    /// * the ground and the water are looked for under the *horse's* hooves,
+    ///   `horse::RIDER_LIFT` below the saddle the transform names -- measured
+    ///   under the rider's own feet, every trot across a meadow was a player
+    ///   hovering a block over the grass and every step up a hill a claim of
+    ///   ground over air;
+    /// * the ascent run, the hover clock, the vertical speed and the sanity
+    ///   checks are exactly a walker's. A horse jumps a block and a quarter and
+    ///   comes down; a saddle that climbs four blocks without touching
+    ///   anything is a flying rider, and is caught by the rule that catches a
+    ///   flying walker.
+    ///
+    /// Rejected: **pinning a rider's transforms like a rower's** and judging
+    /// nothing. It is what the raft does, and the raft can afford it because a
+    /// rower's client never says where it is. A rider's client does, twenty
+    /// times a second, and a check that never looked at it would be a door a
+    /// modified client could keep open for as long as it claimed to be on a
+    /// horse.
+    pub fn set_mounted(&mut self, mounted: bool) {
+        self.mounted = mounted;
+        self.ascent_run = 0.0;
+        self.airborne_since = None;
+        let now = Instant::now();
+        self.mount_budget.refill(now);
+        self.move_budget.refill(now);
+    }
+
+    pub fn is_mounted(&self) -> bool {
+        self.mounted
+    }
+
     pub fn reset_to(&mut self, pos: (f64, f64, f64)) {
         self.last_pos = Some(pos);
         self.ascent_run = 0.0;
@@ -678,6 +751,76 @@ mod tests {
             blocks,
         });
         world
+    }
+
+    /// A world with a floor of cobble at y = 19, sixteen blocks either way.
+    fn a_floor() -> World {
+        use primitive_shared::types::{Chunk, ChunkPos, BLOCK_AIR, CHUNK_VOLUME};
+        let world = World::new(1, 64);
+        for (cx, cz) in [(0, 0), (1, 0), (2, 0), (3, 0)] {
+            let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+            for z in 0..16 {
+                for x in 0..16 {
+                    blocks[Chunk::index(x, 19, z)] = BLOCK_COBBLESTONE;
+                }
+            }
+            world.insert(Chunk { pos: ChunkPos::new(cx, cz), blocks });
+        }
+        world
+    }
+
+    /// Transforms of a saddle going along x at `speed` and up at `climb`
+    /// blocks a second, `n` of them about a twentieth of a second apart --
+    /// **placed by the time that really passed**, because a sleep on Windows
+    /// is a sixteenth of a second as often as a twentieth, and a path laid
+    /// out by the count of sleeps is a slower path than it says.
+    fn ride_along(ac: &mut AntiCheat, world: &World, speed: f32, climb: f32, n: u32) -> Vec<Verdict> {
+        let saddle = 20.0 + f64::from(primitive_shared::horse::RIDER_LIFT);
+        let start = Instant::now();
+        (1..=n)
+            .map(|i| {
+                std::thread::sleep(Duration::from_millis(50));
+                let t = start.elapsed().as_secs_f64();
+                let x = 1.5 + f64::from(speed) * t;
+                ac.check_transform(x, saddle + f64::from(climb) * t, 8.5, climb == 0.0, i, world)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_galloping_rider_and_one_catching_up_with_the_servers_horse_are_inside_the_mounted_allowance() {
+        let world = a_floor();
+        let saddle = 20.0 + f64::from(primitive_shared::horse::RIDER_LIFT);
+        let mut riding = AntiCheat::new(cfg(), 8, (1.5, saddle, 8.5));
+        riding.set_mounted(true);
+        let gallop = primitive_shared::horse::GALLOP;
+        let verdicts = ride_along(&mut riding, &world, gallop, 0.0, 40);
+        assert!(verdicts.iter().all(Verdict::is_allowed), "a gallop was flagged: {:?}", riding.last_reason);
+        // A prediction a round trip ahead of the server's horse, catching up:
+        // faster than a walker is ever allowed, and a rider's slack.
+        let fast = cfg().max_horizontal_speed + 2.0;
+        assert!(fast < MOUNTED_SPEED);
+        let mut catching_up = AntiCheat::new(cfg(), 8, (1.5, saddle, 8.5));
+        catching_up.set_mounted(true);
+        let verdicts = ride_along(&mut catching_up, &world, fast, 0.0, 40);
+        assert!(verdicts.iter().all(Verdict::is_allowed), "a rider catching up was flagged: {:?}", catching_up.last_reason);
+    }
+
+    #[test]
+    fn a_rider_whose_saddle_climbs_into_the_sky_is_caught_as_a_flyer() {
+        let world = a_floor();
+        let saddle = 20.0 + f64::from(primitive_shared::horse::RIDER_LIFT);
+        let mut riding = AntiCheat::new(cfg(), 8, (1.5, saddle, 8.5));
+        riding.set_mounted(true);
+        // Two blocks a second upward at a trot, claiming no ground: a horse
+        // jumps a block and a quarter and comes down.
+        let verdicts = ride_along(&mut riding, &world, 6.0, 2.0, 60);
+        assert!(verdicts.iter().any(|v| !v.is_allowed()), "a flying rider was never caught");
+        // ...and one galloping at forty blocks a second is not on a horse.
+        let mut racing = AntiCheat::new(cfg(), 8, (1.5, saddle, 8.5));
+        racing.set_mounted(true);
+        let verdicts = ride_along(&mut racing, &world, 40.0, 0.0, 60);
+        assert!(verdicts.iter().any(|v| !v.is_allowed()), "a saddle at forty blocks a second passed");
     }
 
     #[test]

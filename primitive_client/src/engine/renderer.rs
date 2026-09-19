@@ -21913,6 +21913,406 @@ mod raft_repro {
         }
         println!("pictures in {out}");
     }
+
+    /// **The horse, wild beside the zebra and the deer, then as a herd's
+    /// stallion, and saddled with its bags and a rider astride**, through the
+    /// real shaders, the entity list and the actor pipeline -- the raft's
+    /// photograph, on the grass beside its lake.
+    ///
+    /// ```text
+    /// GPU_REPRO_DIR=C:/absolute/dir cargo test -p primitive_client --lib \
+    ///     what_a_horse_looks_like_wild_saddled_and_ridden -- --ignored --nocapture
+    /// ```
+    ///
+    /// The zebra and the deer are there so a horse is judged against animals
+    /// nobody is arguing about: a horse is a zebra grown by a head, and a deer
+    /// is what it must not be mistaken for. The rider is put on the saddle by
+    /// the same `RemotePlayers::mount` the frame loop calls, from the same
+    /// `Entities::ridden_horses` -- so a picture with the rider floating or
+    /// sunk in the horse is a bug in the game and not in the photograph.
+    #[test]
+    #[ignore = "a tool: needs a GPU; writes pictures of horses, saddled and ridden, to GPU_REPRO_DIR"]
+    fn what_a_horse_looks_like_wild_saddled_and_ridden() {
+        let Some((device, queue)) = crate::engine::test_gpu() else {
+            println!("no GPU adapter on this machine; skipping");
+            return;
+        };
+        let out = std::env::var("GPU_REPRO_DIR").unwrap_or_else(|_| ".".to_string());
+        std::fs::create_dir_all(&out).expect("output directory");
+        let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
+        let textures = TextureManager::load(device, queue, assets, 16).expect("textures load");
+        let layers = textures.face_layers();
+
+        // ---- the world ----
+        let chunks = lake();
+        let mut light = LightMap::new();
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                light.load_chunk(&chunks, ChunkPos::new(cx, cz));
+            }
+        }
+        let generator = primitive_shared::worldgen::WorldGen::new(0);
+        let mut arena = crate::engine::arena::Arena::new(device, std::mem::size_of::<Vertex>() as u64);
+        let mut meshes: Vec<([f32; 3], GpuMesh)> = Vec::new();
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                let pos = ChunkPos::new(cx, cz);
+                let mut cache = Neighbourhood::default();
+                cache.fill(pos, &chunks, &light);
+                let mut buffers = MeshBuffers::default();
+                build_mesh(pos, &cache, &layers, &generator, &mut buffers);
+                if buffers.indices.is_empty() {
+                    continue;
+                }
+                let (vertex_block, index_block) =
+                    arena.upload(device, queue, &buffers.vertices, &buffers.indices).expect("the scene fits the arena");
+                let count = buffers.indices.len() as u32;
+                let min = [(cx * CHUNK_SIZE_X as i32) as f32, 0.0, (cz * CHUNK_SIZE_Z as i32) as f32];
+                meshes.push((
+                    min,
+                    GpuMesh {
+                        vertex_block,
+                        index_block,
+                        num_indices: count,
+                        solid_indices: buffers.solid_index_count.min(count),
+                        leaf_end: buffers.leaf_end.min(count),
+                        sprite_end: buffers.sprite_end.min(count),
+                        leaves_solid: buffers.leaves_solid,
+                        solid_groups: buffers.solid_groups.map(|end| end.min(count)),
+                        up_faces_from: buffers.up_faces_from,
+                        down_faces_to: buffers.down_faces_to,
+                        top: buffers.top,
+                    },
+                ));
+            }
+        }
+
+        // ---- the line: deer, zebra, a wild horse, a stallion, a saddled
+        // horse with its bags on and somebody on it -- side on to a camera on
+        // the -Z side, all facing +X, on the grass north of the lake. ----
+        use primitive_shared::animals::Species;
+        use primitive_shared::horse::{RIDER_LIFT, TACK_BAGS, TACK_HALTER, TACK_RIDDEN, TACK_SADDLE, TACK_STALLION};
+        let ground = 4.0f32;
+        let lane = -8.0f32;
+        let saddled = TACK_SADDLE | TACK_BAGS | TACK_HALTER | TACK_RIDDEN;
+        let line = [
+            (Species::Deer, -12.0f32, 0u8),
+            (Species::Zebra, -8.0, 0),
+            (Species::Horse, -3.5, 0),
+            (Species::Horse, 1.5, TACK_STALLION),
+            (Species::Horse, 7.0, saddled),
+        ];
+        let states: Vec<EntityState> = line
+            .iter()
+            .enumerate()
+            .map(|(n, &(species, x, tack))| EntityState {
+                id: primitive_shared::protocol::entity_id(primitive_shared::protocol::EntitySource::Animal, n as u64 + 1),
+                kind: EntityKind::Animal {
+                    species,
+                    yaw: 0.0,
+                    hurt: 0.0,
+                    attitude: primitive_shared::protocol::Attitude::Easy,
+                    growth: u8::MAX,
+                    tack,
+                },
+                x: f64::from(x),
+                y: f64::from(ground + species.height() * 0.5),
+                z: f64::from(lane),
+            })
+            .collect();
+        let mut entities = Entities::default();
+        entities.set_tick_rate(20.0);
+        entities.apply_snapshot(1, &states);
+        entities.tick(0.0);
+        let (mut ev, mut ei, mut iv, mut ii) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        entities.build_meshes_into(ORIGIN, &layers, &light, Some(&textures), &mut ev, &mut ei, &mut iv, &mut ii);
+        assert!(!ev.is_empty(), "no animals to photograph");
+        let rigs = [("horses", ev, ei)];
+
+        // The rider: their snapshot a little off the saddle, the way two
+        // things eased at two rates are, and `mount` putting them on it.
+        let mut players = RemotePlayers::default();
+        let mut worn = Outfit::BARE;
+        worn.worn[primitive_shared::equipment::Slot::Feet.index()] = primitive_shared::types::BLOCK_LEATHER_BOOTS;
+        players.apply_snapshot(
+            1,
+            &[PlayerState {
+                id: 1,
+                x: 7.1,
+                y: f64::from(ground + RIDER_LIFT) + 0.05,
+                z: f64::from(lane),
+                yaw: 0.3,
+                pitch: 0.0,
+                on_ground: false,
+                outfit: worn,
+                posture: Posture::Mounted,
+                gesture: Default::default(),
+                limp: 0,
+                limp_left: false,
+            }],
+            None,
+        );
+        players.tick(0.0);
+        players.mount(&entities.ridden_horses(std::time::Instant::now()));
+        let (mut av, mut ai) = (Vec::new(), Vec::new());
+        crate::net::remote_players::build_actor_mesh_into(&players, None, ORIGIN, &light, &mut av, &mut ai);
+        assert!(!av.is_empty(), "nobody to photograph");
+
+        // ---- the pipelines, as `GraphicsState::new` builds them ----
+        //
+        // At the lighting step a new player starts on, which is the picture
+        // most people see -- and the one step certain to be built the way the
+        // game builds it.
+        let quality: Quality = crate::settings::ClientSettings::default().lighting;
+        let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raft globals"),
+            size: std::mem::size_of::<Globals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raft globals layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
+        });
+        let globals_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raft globals bind"),
+            layout: &globals_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals_buffer.as_entire_binding() }],
+        });
+        let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raft texture layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let texture_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raft textures"),
+            layout: &texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&textures.texture_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&textures.sampler) },
+            ],
+        });
+        let skin_bind = player_skin(device, queue, assets, &textures.sampler, &texture_layout, crate::engine::texture::AtlasSplit::ONE);
+        let cloud_layout = crate::engine::texture::CloudTexture::bind_group_layout(device);
+        let cloud_bind = textures.clouds().bind_group(device, &cloud_layout);
+        let terrain_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raft terrain layout"),
+            bind_group_layouts: &[&globals_layout, &texture_layout],
+            push_constant_ranges: &[],
+        });
+        let sky_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raft sky layout"),
+            bind_group_layouts: &[&globals_layout, &cloud_layout],
+            push_constant_ranges: &[],
+        });
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: FORMAT,
+            width: WIDTH,
+            height: HEIGHT,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 1,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        };
+        let look = LookPipelines::new(device, &config, &terrain_layout, &sky_layout, wgpu::MultisampleState::default(), quality, crate::engine::texture::AtlasSplit::ONE);
+        let zero_offset = buffer(device, "raft zero offset", bytemuck::cast_slice(&[[0.0f32; 4]]), wgpu::BufferUsages::VERTEX);
+        let offsets: Vec<[f32; 4]> = meshes.iter().map(|(min, _)| [min[0] - ORIGIN.x, -ORIGIN.y, min[2] - ORIGIN.z, 0.0]).collect();
+        let chunk_offsets = buffer(device, "raft chunk offsets", bytemuck::cast_slice(&offsets), wgpu::BufferUsages::VERTEX);
+        let rig_buffers: Vec<(&str, wgpu::Buffer, wgpu::Buffer, u32)> = rigs
+            .iter()
+            .map(|(rig, ev, ei)| {
+                (
+                    *rig,
+                    buffer(device, "raft entity vertices", bytemuck::cast_slice(ev), wgpu::BufferUsages::VERTEX),
+                    buffer(device, "raft entity indices", bytemuck::cast_slice(ei), wgpu::BufferUsages::INDEX),
+                    ei.len() as u32,
+                )
+            })
+            .collect();
+        let actor_vb = buffer(device, "raft actor vertices", bytemuck::cast_slice(&av), wgpu::BufferUsages::VERTEX);
+        let actor_ib = buffer(device, "raft actor indices", bytemuck::cast_slice(&ai), wgpu::BufferUsages::INDEX);
+        let extent = wgpu::Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 };
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raft target"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&Default::default());
+        let depth_view = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("raft depth"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+
+        let at = |x: f32, up: f32| Vec3::new(x, ground + up, lane);
+        let views = [
+            ("line_side", Vec3::new(-2.5, ground + 1.5, lane - 7.5), at(-2.5, 0.9)),
+            ("saddled_side", Vec3::new(7.0, ground + 1.5, lane - 3.4), at(7.0, 1.2)),
+            ("saddled_three_quarter", Vec3::new(9.4, ground + 2.0, lane - 2.3), at(7.2, 1.2)),
+            ("saddled_head_on", Vec3::new(9.8, ground + 1.7, lane - 0.4), at(7.0, 1.2)),
+            ("saddled_from_behind", Vec3::new(4.4, ground + 2.3, lane - 1.3), at(7.0, 1.2)),
+            ("stallion_head", Vec3::new(3.9, ground + 1.9, lane - 1.9), at(2.4, 1.6)),
+            ("wild_face", Vec3::new(-1.1, ground + 1.7, lane - 1.6), at(-2.3, 1.5)),
+        ];
+        for (_, entity_vb, entity_ib, entity_count) in &rig_buffers {
+            let time_of_day = 0.4f32;
+            for (name, eye, at) in views {
+                let settings = crate::settings::ClientSettings { lighting: quality, ..Default::default() };
+                let sky = crate::engine::sky::Sky::new(time_of_day, 900.0);
+                let sun = sky.sun_direction();
+                let fog = crate::engine::fog::Fog::for_frame(&settings, &sky, RENDER_DISTANCE, true, false);
+                let aspect = WIDTH as f32 / HEIGHT as f32;
+                let eye_rel = eye - ORIGIN;
+                let view_proj = glam::Mat4::perspective_rh(80.0f32.to_radians(), aspect, 0.05, 1000.0)
+                    * glam::Mat4::look_at_rh(eye_rel, at - ORIGIN, Vec3::Y);
+                let mut globals: Globals = bytemuck::Zeroable::zeroed();
+                globals.view_proj = view_proj.to_cols_array_2d();
+                globals.camera_pos = [eye_rel.x, eye_rel.y, eye_rel.z, 0.0];
+                globals.sun = [sun.x, sun.y, sun.z, sky.sun_intensity()];
+                globals.fog_color = [fog.color.x, fog.color.y, fog.color.z, 1.0];
+                globals.fog_params = [fog.start, fog.end, settings.ambient_light, aspect];
+                globals.extra = [settings.block_light_boost, settings.ambient_occlusion, 0.0, 1.0];
+                globals.texture_params = [textures.resolution as f32, 1.0, 0.0, 0.0];
+                globals.inv_view_proj = view_proj.inverse().to_cols_array_2d();
+                globals.sky_params = [time_of_day, settings.cloudiness, 40.0, 0.0];
+                globals.render_origin = [ORIGIN.x, ORIGIN.y, ORIGIN.z, 0.0];
+                globals.hand_view_proj = glam::Mat4::perspective_rh(HAND_FOV_Y, aspect, 0.01, 4.0).to_cols_array_2d();
+                globals.anim = [
+                    textures.flame_layer() as f32,
+                    crate::engine::texture::FLAME_FRAMES as f32,
+                    crate::engine::texture::FLAME_FPS,
+                    (crate::engine::texture::FLAME_FRAMES * crate::engine::texture::FLAME_SHEETS) as f32,
+                ];
+                let (sun_colour, fill) = (sky.sun_color_for(quality), sky.fill_color_for(quality));
+                globals.sun_color = [sun_colour.x, sun_colour.y, sun_colour.z, 0.0];
+                globals.fill_color = [fill.x, fill.y, fill.z, 0.0];
+                globals.horizon_glow = fog.glow.to_array();
+                globals.sun_haze = fog.haze.to_array();
+                globals.glow_dir = glow_dir(sun);
+                queue.write_buffer(&globals_buffer, 0, bytemuck::bytes_of(&globals));
+
+                let mut encoder = device.create_command_encoder(&Default::default());
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("raft main pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &target_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: f64::from(fog.color.x),
+                                    g: f64::from(fog.color.y),
+                                    b: f64::from(fog.color.z),
+                                    a: 1.0,
+                                }),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &depth_view,
+                            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    let chunk = Terrain { globals: &globals_bind, textures: &texture_bind, arena: &arena, offsets: &chunk_offsets, meshes: &meshes };
+                    chunk.draw(&mut pass, &look.chunk_pipeline, |mesh| (0, mesh.solid_indices));
+                    chunk.draw(&mut pass, &look.cutout_pipeline, |mesh| (mesh.solid_indices, mesh.sprite_end));
+                    pass.set_pipeline(&look.sky_pipeline);
+                    pass.set_bind_group(0, &globals_bind, &[]);
+                    pass.set_bind_group(1, &cloud_bind, &[]);
+                    pass.draw(0..3, 0..1);
+                    // The raft, through the pass the entity list is drawn in.
+                    pass.set_pipeline(&look.cutout_pipeline);
+                    pass.set_bind_group(0, &globals_bind, &[]);
+                    pass.set_bind_group(1, &texture_bind, &[]);
+                    pass.set_vertex_buffer(0, entity_vb.slice(..));
+                    pass.set_vertex_buffer(1, zero_offset.slice(..));
+                    pass.set_index_buffer(entity_ib.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..*entity_count, 0, 0..1);
+                    // The people on it.
+                    pass.set_pipeline(&look.actor_pipeline);
+                    pass.set_bind_group(0, &globals_bind, &[]);
+                    pass.set_bind_group(1, &skin_bind, &[]);
+                    pass.set_vertex_buffer(0, actor_vb.slice(..));
+                    pass.set_index_buffer(actor_ib.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..ai.len() as u32, 0, 0..1);
+                    // And the water over all of it, last, as `render` blends it.
+                    chunk.draw(&mut pass, &look.transparent_pipeline, |mesh| (mesh.sprite_end, mesh.num_indices));
+                }
+                queue.submit(std::iter::once(encoder.finish()));
+
+                let bytes_per_row = (WIDTH * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+                let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("raft readback"),
+                    size: u64::from(bytes_per_row * HEIGHT),
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.copy_texture_to_buffer(
+                    target.as_image_copy(),
+                    wgpu::ImageCopyBuffer {
+                        buffer: &readback,
+                        layout: wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(bytes_per_row), rows_per_image: Some(HEIGHT) },
+                    },
+                    extent,
+                );
+                queue.submit(std::iter::once(encoder.finish()));
+                let slice = readback.slice(..);
+                let (tx, rx) = std::sync::mpsc::channel();
+                slice.map_async(wgpu::MapMode::Read, move |result| {
+                    let _ = tx.send(result);
+                });
+                device.poll(wgpu::Maintain::Wait);
+                rx.recv().expect("map never completed").expect("map failed");
+                let data = slice.get_mapped_range();
+                let image = image::RgbaImage::from_fn(WIDTH, HEIGHT, |x, y| {
+                    let at = (y * bytes_per_row + x * 4) as usize;
+                    image::Rgba([data[at], data[at + 1], data[at + 2], 255])
+                });
+                drop(data);
+                readback.unmap();
+                image.save(format!("{out}/horse_{name}.png")).expect("write png");
+            }
+        }
+        println!("pictures in {out}");
+    }
 }
 
 /// Plants, fire and blocks near and far at anisotropy off, 4 and 16, side by

@@ -718,9 +718,12 @@ impl Species {
             // Measured off `animal_model::GULL` standing -- the folded wing,
             // not the spread one: a blow lands on a bird on the ground.
             Species::Gull => (0.175, 0.225, 0.41),
-            // Measured off `animal_model::HORSE` like the rest: up is the ears
-            // on a raised head, along is the muzzle held out in front.
-            Species::Horse => (0.3, 1.1, 1.25),
+            // Measured off `animals/horse.bbmodel` like the rest: up is the
+            // ears, a block and nine tenths off the ground; along is the muzzle
+            // held out in front, which is further from the middle than the
+            // tail is because the middle is where the saddle is, behind the
+            // withers (`model_notes`, the horse).
+            Species::Horse => (0.3, 1.09, 1.44),
         }
     }
 

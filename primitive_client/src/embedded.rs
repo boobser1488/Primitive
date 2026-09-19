@@ -329,6 +329,9 @@ pub const TEXTURES: &[(&str, &[u8])] = &[
     // The raft and its two parts.
     ("tools/sail.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/tools/sail.png"))),
     ("tools/oar.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/tools/oar.png"))),
+    // The horse's tack.
+    ("tools/saddle.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/tools/saddle.png"))),
+    ("tools/saddlebags.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/tools/saddlebags.png"))),
     ("tools/raft.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/tools/raft.png"))),
     // 1.5: the orchard, the peg and the fastened board.
     ("plants/apple_leaves.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/plants/apple_leaves.png"))),

@@ -49,6 +49,7 @@ pub mod player_model;
 pub mod posture;
 pub mod raft_model;
 pub mod riding;
+pub mod horseback;
 pub mod shake;
 pub mod stamina;
 pub mod worlds;

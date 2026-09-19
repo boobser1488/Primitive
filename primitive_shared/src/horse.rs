@@ -191,6 +191,59 @@ pub fn load_factor(kg: f32) -> f32 {
     1.0 - over * (1.0 - floor)
 }
 
+/// What a kept horse wears and carries, and how far its breaking has got.
+///
+/// **The server's to keep and the save file's to hold** (the herd file's
+/// `KeptRecord`), here rather than on the server so the rules that read it --
+/// what the tack byte says, what the bags weigh, what a dead horse leaves --
+/// are one set of rules for both ends and the tests.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Gear {
+    /// A saddle on its back. Without one a broken horse carries a rider at a
+    /// walk and a trot and is never asked to gallop: bareback at eleven blocks
+    /// a second is a rider on the ground.
+    pub saddle: bool,
+    /// Its saddlebags and what is in them, if it wears a pair. An inventory
+    /// of the pack's shape, of which only the first [`BAGS_SLOTS`] are ever
+    /// filled (the server's `Roles::Bags`).
+    pub bags: Option<crate::inventory::Inventory>,
+    /// Times it has been got on while gentled, for `husbandry::thrown`.
+    pub rides: u8,
+}
+
+impl Gear {
+    /// The `TACK_*` bits it shows, without the rider, halter or stallion,
+    /// which are not gear.
+    pub fn tack(&self) -> u8 {
+        (if self.saddle { TACK_SADDLE } else { 0 }) | (if self.bags.is_some() { TACK_BAGS } else { 0 })
+    }
+
+    /// Kilos in the bags.
+    pub fn load_kg(&self) -> f32 {
+        self.bags.as_ref().map_or(0.0, |bags| bags.total_weight())
+    }
+
+    /// What it leaves on the ground when it dies: the saddle, the bags, and
+    /// everything that was in them.
+    ///
+    /// **All of it, and not a share.** The load is the thing the player
+    /// risked by leaving the horse where a pack could reach it, and a horse
+    /// that took half the copper with it into the grass would be a tax on
+    /// dying rather than a loss somebody can go back for -- which is the
+    /// bargain a player's own body already keeps (the bones).
+    pub fn left_behind(&self) -> Vec<(BlockId, u32)> {
+        let mut left = Vec::new();
+        if self.saddle {
+            left.push((crate::types::BLOCK_SADDLE, 1));
+        }
+        if let Some(bags) = &self.bags {
+            left.push((crate::types::BLOCK_SADDLEBAGS, 1));
+            left.extend(bags.slots().iter().flatten().map(|stack| (stack.block, stack.count)));
+        }
+        left
+    }
+}
+
 /// What the rider is asking for.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Reins {
@@ -812,6 +865,20 @@ mod tests {
         let mut body = Mount::standing(50.5, 20.0, 0.5, 0.0, GALLOP_SECONDS);
         ride(&ground, &mut body, on(Gait::Gallop), 4.0);
         assert!(body.x < 61.0, "it galloped off the loaded world to {}", body.x);
+    }
+
+    #[test]
+    fn a_dead_horse_leaves_its_saddle_its_bags_and_every_stack_in_them() {
+        use crate::types::{BLOCK_COPPER_ORE, BLOCK_SADDLE, BLOCK_SADDLEBAGS};
+        let mut bags = crate::inventory::Inventory::new();
+        assert_eq!(bags.add(BLOCK_COPPER_ORE, 20), 0);
+        let gear = Gear { saddle: true, bags: Some(bags), rides: 0 };
+        let left = gear.left_behind();
+        assert!(left.contains(&(BLOCK_SADDLE, 1)) && left.contains(&(BLOCK_SADDLEBAGS, 1)));
+        assert_eq!(left.iter().filter(|(b, _)| *b == BLOCK_COPPER_ORE).map(|(_, n)| n).sum::<u32>(), 20);
+        assert!(gear.load_kg() > 0.0);
+        assert_eq!(gear.tack(), TACK_SADDLE | TACK_BAGS);
+        assert!(Gear::default().left_behind().is_empty());
     }
 
     #[test]

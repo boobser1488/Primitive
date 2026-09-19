@@ -170,6 +170,13 @@ const NOMINAL_TICK_SECONDS: f64 = 0.05;
 /// The animals' number (`entities::MAX_STRIDE`).
 const MAX_STRIDE: f32 = 3.0;
 
+/// How far a mounted player's snapshot seat may be from the horse they are
+/// put on, in blocks (`RemotePlayers::mount`): a gallop's worth of the two
+/// being eased apart and then some. The nearest horse wins inside it, so two
+/// horses ridden side by side each keep their own rider; outside it a rider
+/// is left where their snapshot is rather than handed to a stranger's horse.
+const MOUNT_REACH: f64 = 2.0;
+
 /// How quickly the gait's speed follows the pace between the snapshots drawn,
 /// per second: about what it was when it was eased once a snapshot.
 const SPEED_EASE_PER_SEC: f32 = 10.0;
@@ -605,6 +612,37 @@ impl RemotePlayers {
         }
     }
 
+    /// Puts everyone on horseback onto the saddle of the horse as it is drawn
+    /// (`Entities::ridden_horses`): their feet `horse::RIDER_LIFT` over its
+    /// feet, facing its way.
+    ///
+    /// **After `tick`, and it overrules it for riders**, as `ride` does for a
+    /// raft and for the same reason: the player and the horse are eased toward
+    /// their snapshots at two different rates, so a rider drawn at their own
+    /// eased position bobs a hand's breadth fore and aft of the saddle on
+    /// every snapshot. The server already put the rider exactly on the horse,
+    /// so there is nothing of the rider's own position to keep -- only which
+    /// horse, which is the nearest one with somebody on it to where the
+    /// snapshot says they sit, within `MOUNT_REACH`.
+    pub fn mount(&mut self, horses: &[(glam::DVec3, f32)]) {
+        let lift = glam::DVec3::Y * f64::from(primitive_shared::horse::RIDER_LIFT);
+        for player in self.players.values_mut() {
+            if player.posture != primitive_shared::protocol::Posture::Mounted {
+                continue;
+            }
+            let under = player.target_pos - lift;
+            let nearest = horses
+                .iter()
+                .map(|&(feet, yaw)| (feet.distance(under), feet, yaw))
+                .filter(|&(apart, _, _)| apart < MOUNT_REACH)
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((_, feet, yaw)) = nearest {
+                player.interpolated_pos = feet + lift;
+                player.yaw = yaw;
+            }
+        }
+    }
+
     /// Records how fast the server this session is connected to ticks, out
     /// of the handshake -- the length a snapshot's tick is played back over.
     /// A rate that is not a sane positive number is ignored rather than
@@ -882,6 +920,9 @@ impl RemotePlayers {
                 posture: match std::env::var("PRIMITIVE_POSE_POSTURE").as_deref() {
                     Ok("sitting") => primitive_shared::protocol::Posture::Sitting,
                     Ok("lying") => primitive_shared::protocol::Posture::Lying,
+                    // Astride, with nothing under them: the legs bent round
+                    // where a horse's barrel would be (`player_model::astride`).
+                    Ok("mounted") => primitive_shared::protocol::Posture::Mounted,
                     _ => primitive_shared::protocol::Posture::Standing,
                 },
                 // `PRIMITIVE_POSE_GESTURE`, frozen at `PRIMITIVE_POSE_PHASE`
@@ -1738,5 +1779,34 @@ mod tests {
         assert_eq!(players.take_own_gesture(), Some(Action::Eat));
         assert_eq!(players.take_own_gesture(), None);
         assert!(players.is_empty(), "the local player was drawn as somebody else");
+    }
+
+    #[test]
+    fn a_rider_is_drawn_on_the_saddle_of_the_horse_as_it_is_drawn_and_nobody_else_is() {
+        use primitive_shared::horse::RIDER_LIFT;
+        let mut players = RemotePlayers::default();
+        players.set_tick_rate(20.0);
+        let lift = f64::from(RIDER_LIFT);
+        // Their snapshot has them a little behind the horse under them --
+        // the two are eased at different rates -- and a second horse with a
+        // rider on it stands a block and a half away.
+        let rider = PlayerState { posture: primitive_shared::protocol::Posture::Mounted, y: 30.0 + lift, ..state(1, 10.3) };
+        let walker = state(2, 10.3);
+        players.apply_snapshot(1, &[rider, walker], None);
+        players.tick(0.05);
+        let under = glam::DVec3::new(10.0, 30.0, 0.0);
+        let neighbour = glam::DVec3::new(10.0, 30.0, 1.5);
+        players.mount(&[(neighbour, 2.0), (under, 0.7)]);
+
+        let drawn = &players.players[&1];
+        assert!(
+            (drawn.interpolated_pos - (under + glam::DVec3::Y * lift)).length() < 1e-9,
+            "the rider was drawn at {:?}, not on the saddle of the horse under them",
+            drawn.interpolated_pos
+        );
+        assert!((drawn.yaw - 0.7).abs() < 1e-6, "the rider faces {:.2} on a horse facing 0.70", drawn.yaw);
+        // Somebody standing beside a ridden horse is not put on it.
+        let beside = &players.players[&2];
+        assert!(beside.interpolated_pos.y < 30.5, "a player on their feet was lifted onto a horse");
     }
 }

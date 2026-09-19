@@ -818,8 +818,10 @@ cord = "tools/cord.png"
 # pictures that are already in the atlas (`logic::raft_model`).
 sail = "tools/sail.png"
 oar = "tools/oar.png"
-saddle = "tools/sail.png"
-saddlebags = "tools/sail.png"
+# The horse's tack, drawn in the copper tools' leather: a saddle seen from
+# the side with its stirrup hanging, and two panniers on their strap.
+saddle = "tools/saddle.png"
+saddlebags = "tools/saddlebags.png"
 raft = "tools/raft.png"
 wedged_axe = "tools/wedged_axe.png"
 wedged_pickaxe = "tools/wedged_pickaxe.png"

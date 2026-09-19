@@ -2969,6 +2969,30 @@ fn run(
                             }
                         }
                         let held = inventory.block_in(input.hotbar_slot);
+                        // **A horse takes a click with nothing to tend it in
+                        // hand**: a leg up, or -- with the rein key held --
+                        // a hand into its saddlebags. Whether it will have
+                        // you is the server's (`ClientMessage::Mount`), and a
+                        // wild horse says so; feed, a saddle or the bags in
+                        // hand go on to the tending below instead.
+                        if let Some(net) = net.as_ref() {
+                            let tending = held.is_some_and(primitive_shared::husbandry::is_tending_tool);
+                            let aimed = entities.aimed_at(camera.position, camera.forward(), INTERACT_RANGE);
+                            if let Some((horse, distance)) = aimed.filter(|_| !tending && entities.horseback.is_none()) {
+                                if entities.species_of(horse) == Some(primitive_shared::animals::Species::Horse)
+                                    && physics::raycast_block(&chunks, camera.position, camera.forward(), distance).is_none()
+                                {
+                                    let bags = input.action_down(&settings.keybinds, keybinds::Action::Rein);
+                                    net.send(if bags {
+                                        ClientMessage::OpenBags { horse }
+                                    } else {
+                                        ClientMessage::Mount { horse }
+                                    });
+                                    debug_stats.network_messages_out_this_second += 1;
+                                    return;
+                                }
+                            }
+                        }
                         // **An animal takes the click next, with something to
                         // tend it with in hand** -- feed, a knife, a bowl
                         // (`husbandry::is_tending_tool`) -- and nothing else
@@ -4565,6 +4589,55 @@ fn run(
                         let decks = entities.rafts();
                         riding.carry_player(&decks, &mut player.position, &mut camera.yaw);
                         player.decks = decks.iter().map(|pose| pose.now).collect();
+                        // --- a horse: the reins, and the body on its saddle ---
+                        //
+                        // **On a horse the keys that walk ride**, the oars'
+                        // rule: forward and back, left and right off the same
+                        // wish the walk is made of, measured against the
+                        // camera so a rider looking over their shoulder still
+                        // rides where the keys say (`Horseback::reins_from_keys`).
+                        // The body is put on the predicted saddle and not
+                        // stepped at all -- see the physics loop below.
+                        let on_horse = entities.horseback.is_some();
+                        if let Some(mut horseback) = entities.horseback.take() {
+                            let (forward, turn) = if frozen {
+                                (0.0, 0.0)
+                            } else {
+                                (
+                                    wish_dir.dot(camera.forward_horizontal()) * input.stick_speed(),
+                                    wish_dir.dot(camera.right_horizontal()) * input.stick_speed(),
+                                )
+                            };
+                            let reins = logic::horseback::Horseback::reins_from_keys(
+                                forward,
+                                turn,
+                                !frozen && input.action_down(&settings.keybinds, keybinds::Action::Sprint),
+                                !frozen && input.action_down(&settings.keybinds, keybinds::Action::Rein),
+                                !frozen && input.action_pressed(&settings.keybinds, keybinds::Action::Jump),
+                            );
+                            horseback.predict(reins, &|x, y, z| chunks.block_at(x, y, z), dt);
+                            if let Some(message) = horseback.rein_message(now) {
+                                net.send(message);
+                                debug_stats.network_messages_out_this_second += 1;
+                            }
+                            // **Getting down**: the rein key with the horse
+                            // standing and nothing asked of it. At a trot the
+                            // same key is a walk, which is how a rider comes
+                            // to a stop and then off.
+                            if !frozen
+                                && forward.abs() < 0.05
+                                && horseback.may_get_down()
+                                && input.action_pressed(&settings.keybinds, keybinds::Action::Rein)
+                            {
+                                net.send(ClientMessage::Dismount);
+                                debug_stats.network_messages_out_this_second += 1;
+                            }
+                            player.position = horseback.rider_feet();
+                            player.velocity = Vec3::ZERO;
+                            player.grounded = horseback.body.on_ground;
+                            entities.set_ridden(Some((horseback.horse, horseback.feet(), horseback.body.yaw)));
+                            entities.horseback = Some(horseback);
+                        }
                         // **Getting up.** The screen said "asleep -- press
                         // any key to get up" for as long as sleep existed,
                         // and nothing behind it listened: the only way out of
@@ -4590,8 +4663,12 @@ fn run(
                             && !journal.is_open()
                             && !chat.is_typing();
                         // A rower's movement keys are the oars, so only the
-                        // jump gets a rower up off the stern.
+                        // jump gets a rower up off the stern -- and a rider's
+                        // are the reins and the jump is the horse's, so
+                        // nothing here gets a rider down (the rein key does,
+                        // above).
                         let asked = controls_free
+                            && !on_horse
                             && ((rowing.is_none()
                                 && wish_direction(&input, &camera, &settings.keybinds) != Vec3::ZERO)
                                 || input.action_pressed(&settings.keybinds, keybinds::Action::Jump));
@@ -4744,7 +4821,10 @@ fn run(
                         // through the wall beside them. The server moves
                         // nobody who is asleep, so nothing is lost by not
                         // stepping.
-                        while left > 0.0 && !matches!(resting, logic::posture::Resting::Lying { .. }) {
+                        // ...and a rider's is carried by the horse: it was put
+                        // on the saddle above, and a collider stepped under it
+                        // would drop it through the horse's back.
+                        while left > 0.0 && !on_horse && !matches!(resting, logic::posture::Resting::Lying { .. }) {
                             let step = left.min(PHYSICS_STEP);
                             player.update(
                                 &chunks,
@@ -4798,6 +4878,10 @@ fn run(
                         // `RemotePlayers::ride`).
                         riding.settle(&decks, player.position);
                         remote_players.ride(&decks, dt);
+                        // ...and everyone astride a horse put on its saddle as
+                        // it is drawn this frame (`RemotePlayers::mount`), the
+                        // decks' reason again.
+                        remote_players.mount(&entities.ridden_horses(Instant::now()));
                         really_running = (sprinting
                             && player.grounded
                             && !player.swimming
@@ -5841,8 +5925,9 @@ fn run(
                         health: health.to_bits(),
                         max_health: max_health.to_bits(),
                         recent_health: recent_health.to_bits(),
-                        stamina: stamina.fraction().to_bits(),
-                        exhausted: stamina.is_exhausted(),
+                        // The horse's wind while riding, as the strip draws it.
+                        stamina: entities.horseback.as_ref().map_or(stamina.fraction(), |h| h.wind_fraction()).to_bits(),
+                        exhausted: entities.horseback.as_ref().map_or(stamina.is_exhausted(), |h| h.body.wind <= 0.0),
                         breath: breath.to_bits(),
                         nourishment: nourishment.to_bits(),
                         heat,
@@ -5926,8 +6011,12 @@ fn run(
                             health,
                             max_health,
                             recent_health,
-                            stamina.fraction(),
-                            stamina.is_exhausted(),
+                            // **On a horse the strip is the horse's wind**:
+                            // the rider is not spending their own, and the
+                            // number that decides whether the next stretch
+                            // can be a gallop is the horse's.
+                            entities.horseback.as_ref().map_or(stamina.fraction(), |h| h.wind_fraction()),
+                            entities.horseback.as_ref().map_or(stamina.is_exhausted(), |h| h.body.wind <= 0.0),
                             breath,
                             nourishment,
                             body,
@@ -8224,6 +8313,11 @@ fn drain_network(
             }
 
             ServerMessage::Entities { tick, states } => {
+                // The horse under this client, as the server has it: what the
+                // prediction is eased toward (`Horseback::server_saw`).
+                if let Some(riding) = entities.horseback.as_mut() {
+                    riding.server_saw(&states);
+                }
                 // The tick, not the clock: see `Entities::apply_snapshot`
                 // for why measuring the gap between arrivals made
                 // animals spin.
@@ -8495,7 +8589,13 @@ fn drain_network(
                 chest_screen.show(
                     (global_x, global_y, global_z),
                     contents,
-                    chunks.block_at(global_x, global_y, global_z),
+                    // A horse's bags are not in a cell: the screen is told
+                    // what it is by the kind, which is all there is to say.
+                    if kind == primitive_shared::protocol::ContainerKind::Saddlebags {
+                        Some(primitive_shared::types::BLOCK_SADDLEBAGS)
+                    } else {
+                        chunks.block_at(global_x, global_y, global_z)
+                    },
                     kind,
                     hearth,
                     rack,
@@ -8699,6 +8799,29 @@ fn drain_network(
             ServerMessage::Oars { raft } => {
                 entities.steer(raft);
             }
+            // **On a horse or off it**, and what it has in it. The first names
+            // the horse and starts the prediction where the server has it; the
+            // ones after it, twice a second, only correct the wind
+            // (`Horseback::told`). The `Posture` beside the first has already
+            // put the body on the saddle.
+            ServerMessage::Mounted { horse, at, yaw, wind, fettle } => match horse {
+                Some(id) => match entities.horseback.as_mut().filter(|h| h.horse == id) {
+                    Some(riding) => riding.told(wind, fettle),
+                    None => {
+                        entities.horseback = Some(logic::horseback::Horseback::new(
+                            id,
+                            glam::DVec3::new(at.0, at.1, at.2),
+                            yaw,
+                            wind,
+                            fettle,
+                        ));
+                    }
+                },
+                None => {
+                    entities.horseback = None;
+                    entities.set_ridden(None);
+                }
+            },
             ServerMessage::Posture { posture, at, yaw } => {
                 // The block the body was put on, for whether the seat has a
                 // front to face (`Resting::from_wire`). A seat's top is the

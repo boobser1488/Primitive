@@ -543,6 +543,10 @@ pub type PlayerId = u64;
 /// both are carried by 57 for the reason the rest of 57 is.
 /// ...and keeping animals: `TendAnimal` out, appended, and a bowl of milk at
 /// id 694 (`types::BLOCK_BOWL_MILK`). 57 still, which no release speaks.
+/// ...and the horse: `Mount`, `Dismount`, `Rein` and `OpenBags` out,
+/// `Mounted` back, `ContainerKind::Saddlebags`, `Posture::Mounted`, a `tack`
+/// byte on `EntityKind::Animal`, and a species appended to `Species` (its
+/// index is on the wire). All appended, and 57 for the reason the rest is.
 pub const PROTOCOL_VERSION: u32 = 57;
 
 /// What kind of container a screen is showing.
@@ -560,6 +564,12 @@ pub enum ContainerKind {
     /// A jug set down on something: one slot of loose goods, up to
     /// `inventory::JUG_UNITS`. See `types::opens_as_vessel`.
     Vessel,
+    /// A horse's saddlebags: `horse::BAGS_SLOTS` squares, opened from beside
+    /// the horse (`ClientMessage::OpenBags`). The position a `ChestState`
+    /// carries for it is the horse's cell when it was opened, and means
+    /// nothing: the bags go where the horse goes. Appended, so it rides
+    /// fifty-seven's bump.
+    Saddlebags,
 }
 
 /// What a hearth is doing, for the screen that is watching it.
@@ -1911,6 +1921,37 @@ pub enum ClientMessage {
     TendAnimal {
         animal: EntityId,
     },
+    /// **Get on that horse.** A right click on a horse with nothing in hand
+    /// that tends it. The server decides everything that follows: whether it
+    /// will have you at all (tame, or gentled and willing to be tried --
+    /// `husbandry::needs_breaking`), whether you stay on (`husbandry::thrown`),
+    /// and where you sit. Named like `UseRaft`: the horse and nothing else.
+    Mount {
+        horse: EntityId,
+    },
+    /// Get off, beside it.
+    Dismount,
+    /// **The reins**, while riding: what the rider's keys ask for this
+    /// moment (`horse::Reins`). Sent on change and every quarter second while
+    /// the horse is asked to move, as `Row` is for the oars -- and it names the
+    /// horse, so a stale message about the last horse moves nothing.
+    Rein {
+        horse: EntityId,
+        forward: f32,
+        turn: f32,
+        /// `horse::Gait::to_wire`.
+        gait: u8,
+        jump: bool,
+    },
+    /// **Open that horse's saddlebags**, from beside it (sneak and right
+    /// click). Answered with a `ChestState` of `ContainerKind::Saddlebags`,
+    /// and every chest gesture after it is against the bags until
+    /// `CloseChest` -- the chest's screen and messages, because a pack on a
+    /// horse is a container like any other and a second set of gestures
+    /// for it would be a second set of rules to keep straight.
+    OpenBags {
+        horse: EntityId,
+    },
 }
 
 /// Messages the server sends to the client.
@@ -2559,6 +2600,28 @@ pub enum ServerMessage {
     /// fifty-seven's bump.
     Shelter {
         reading: crate::shelter::Reading,
+    },
+    /// **You are riding this horse, or you are not** (`None`), and what it
+    /// has in it for the ride.
+    ///
+    /// **What turns the movement keys into reins**, as `Oars` turns them into
+    /// strokes: until it arrives the keys walk the body; after it they ride,
+    /// and the client starts predicting the horse from the snapshot's
+    /// (`horseback`). Sent on mounting and again twice a second while riding,
+    /// because `wind` is the one thing the client cannot keep exactly -- it
+    /// spends it on its own frames and the server on its ticks -- and a gauge
+    /// that drifted from the horse under it would be a rider told they can
+    /// gallop by a horse that will not. Appended, so it rides fifty-seven's
+    /// bump.
+    Mounted {
+        horse: Option<EntityId>,
+        /// Where the horse's feet are and which way it faces, as the server
+        /// has it: what the client starts its prediction from on mounting.
+        at: (f64, f64, f64),
+        yaw: f32,
+        /// Seconds of gallop left (`horse::Mount::wind`).
+        wind: f32,
+        fettle: crate::horse::Fettle,
     },
 }
 

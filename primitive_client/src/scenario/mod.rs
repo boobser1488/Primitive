@@ -141,6 +141,22 @@ pub struct Scenario {
     grace: Option<(DVec3, u64)>,
     /// Frames the jump key is to be reported as freshly pressed.
     jump_edge: bool,
+    /// The horse this client is riding, ahead of the server: the frame's own
+    /// `Entities::horseback`, stepped by `step_body` the way `run` steps it.
+    pub horseback: Option<crate::logic::horseback::Horseback>,
+    /// How long the last frame really took, in seconds.
+    ///
+    /// **The horse is predicted by it and not by `FRAME`**, and that is the
+    /// one place this harness steps by the wall. The body steps by `FRAME`
+    /// because the anticheat only ever sees it go *slower* than it could; a
+    /// horse predicted at a sixtieth a frame while a debug frame takes a
+    /// twentieth is a horse at a third of the speed of the server's one,
+    /// which the rider's reins are moving in real time -- and the
+    /// prediction snapped back to it every second. `run` steps both by the
+    /// frame's own length, which is what this is.
+    frame_dt: f32,
+    /// The latest snapshot of every entity the server has sent, by id.
+    pub entities: HashMap<primitive_shared::protocol::EntityId, primitive_shared::protocol::EntityState>,
 }
 
 /// The server a scenario plays on: the test world, the validator on.
@@ -232,6 +248,9 @@ impl Scenario {
             expected_move: None,
             grace: None,
             jump_edge: false,
+            horseback: None,
+            frame_dt: FRAME,
+            entities: HashMap::new(),
         };
         let ready = scenario.until(20.0, |s| s.world_ready && s.player.grounded);
         assert!(ready, "the world never arrived round the spawn");
@@ -466,6 +485,10 @@ impl Scenario {
         if due > now {
             std::thread::sleep(due - now);
         }
+        // The frame's own length, as `run` measures it, for the one thing
+        // here that is stepped by the wall and not by `FRAME`: see
+        // `frame_dt`.
+        self.frame_dt = Instant::now().saturating_duration_since(self.last_frame).as_secs_f32().clamp(FRAME, 0.1);
         self.last_frame = Instant::now();
         let now = self.last_frame;
 
@@ -520,6 +543,39 @@ impl Scenario {
 
     fn step_body(&mut self) {
         let frozen = self.chest_screen.is_open() || self.station_screen.is_open();
+        // **On a horse the keys ride**, exactly as `run` has them (the horse
+        // block after the raft's there): the reins off the same wish, the
+        // horse predicted, the reins sent, the body put on the saddle and not
+        // stepped.
+        if let Some(mut horseback) = self.horseback.take() {
+            let wish = if frozen { Vec3::ZERO } else { crate::wish_direction(&self.input, &self.camera, &self.binds) };
+            let forward = wish.dot(self.camera.forward_horizontal()) * self.input.stick_speed();
+            let turn = wish.dot(self.camera.right_horizontal()) * self.input.stick_speed();
+            let reins = crate::logic::horseback::Horseback::reins_from_keys(
+                forward,
+                turn,
+                !frozen && self.input.action_down(&self.binds, Action::Sprint),
+                !frozen && self.input.action_down(&self.binds, Action::Rein),
+                !frozen && (self.jump_edge || self.input.action_pressed(&self.binds, Action::Jump)),
+            );
+            horseback.predict(reins, &|x, y, z| self.chunks.block_at(x, y, z), self.frame_dt);
+            if let Some(message) = horseback.rein_message(Instant::now()) {
+                self.net.send(message);
+            }
+            if !frozen
+                && forward.abs() < 0.05
+                && horseback.may_get_down()
+                && self.input.action_pressed(&self.binds, Action::Rein)
+            {
+                self.net.send(ClientMessage::Dismount);
+            }
+            self.player.position = horseback.rider_feet();
+            self.player.velocity = Vec3::ZERO;
+            self.player.grounded = horseback.body.on_ground;
+            self.camera.position = self.player.eye_position();
+            self.horseback = Some(horseback);
+            return;
+        }
         let carried = self.inventory.total_weight() + self.equipment.weight();
         self.player.speed_scale = primitive_shared::load::speed_scale(carried)
             * self.equipment.worn().mobility()
@@ -659,6 +715,36 @@ impl Scenario {
                     }
                 }
                 ServerMessage::SetDownItem { x, y, z, item } => self.chunks.note_set_down((*x, *y, *z), *item),
+                // The horse arms of `drain_network`, the same statements.
+                ServerMessage::Mounted { horse, at, yaw, wind, fettle } => match horse {
+                    Some(id) => match self.horseback.as_mut().filter(|h| h.horse == *id) {
+                        Some(riding) => riding.told(*wind, *fettle),
+                        None => {
+                            self.horseback = Some(crate::logic::horseback::Horseback::new(
+                                *id,
+                                DVec3::new(at.0, at.1, at.2),
+                                *yaw,
+                                *wind,
+                                *fettle,
+                            ));
+                        }
+                    },
+                    None => self.horseback = None,
+                },
+                ServerMessage::Posture { at: Some((x, y, z)), .. } => {
+                    self.player.teleport(DVec3::new(*x, *y, *z));
+                    self.camera.position = self.player.eye_position();
+                }
+                ServerMessage::Entities { states, .. } => {
+                    if let Some(riding) = self.horseback.as_mut() {
+                        riding.server_saw(states);
+                    }
+                    for state in states {
+                        self.entities.insert(state.id, *state);
+                    }
+                    // Snapshots are twenty a second: not kept in `heard`.
+                    continue;
+                }
                 _ => {}
             }
             self.heard.push(message);

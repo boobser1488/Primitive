@@ -270,13 +270,23 @@ pub enum Layout {
     /// compartment is one whose contents are that long. See
     /// [`ChestScreen::layout`].
     Body { rucksack: bool },
+    /// A horse's saddlebags: the chest's grid, of which only the first
+    /// `horse::BAGS_SLOTS` squares are there.
+    ///
+    /// **The chest's screen with squares missing, not a screen of its own.**
+    /// Everything a player does at bags is what they do at a chest -- drag,
+    /// shift-click, take all -- and a second screen would be a second set of
+    /// gestures to learn for twelve squares. What is not drawn is not hit
+    /// (`chest_square`, one function for both), so a square the server
+    /// would refuse (`Roles::Bags`) is a square nobody can click.
+    Bags,
 }
 
 impl Layout {
     /// Whether this is one of the two layouts that are a grid over the
     /// pack -- a chest or a body -- with the action bar between them.
     pub fn grid(self) -> bool {
-        matches!(self, Layout::Chest | Layout::Body { .. })
+        matches!(self, Layout::Chest | Layout::Body { .. } | Layout::Bags)
     }
 
     pub fn of(kind: primitive_shared::protocol::ContainerKind) -> Layout {
@@ -286,6 +296,7 @@ impl Layout {
             ContainerKind::Hearth(_) => Layout::Hearth,
             ContainerKind::Rack => Layout::Rack,
             ContainerKind::Vessel => Layout::Vessel,
+            ContainerKind::Saddlebags => Layout::Bags,
         }
     }
 }
@@ -1282,7 +1293,7 @@ impl ChestScreen {
             Layout::Hearth => self.draw_hearth(&mut p, layers, hovered, language),
             Layout::Rack => self.draw_rack(&mut p, layers, hovered, language),
             Layout::Vessel => self.draw_vessel(&mut p, layers, hovered, language),
-            Layout::Chest => {}
+            Layout::Chest | Layout::Bags => {}
             Layout::Body { rucksack } => {
                 // The body's own word on its tab rather than a new one:
                 // the heading already says BODY or BONES, and the tab
@@ -1537,6 +1548,11 @@ fn heading_for(block: primitive_shared::types::BlockId) -> Msg {
     if primitive_shared::types::opens_as_vessel(block) {
         return Msg::Jug;
     }
+    // A horse's bags are named by the client for the screen (see the
+    // `ChestState` arm in `drain_network`): there is no cell to ask.
+    if primitive_shared::types::block_kind(block) == primitive_shared::types::BLOCK_SADDLEBAGS {
+        return Msg::Saddlebags;
+    }
     // Where you died, and what is left of it once the ground has had the
     // soft half -- and the pack an older world may still be holding, which
     // nothing lays any more (`types::BLOCK_BACKPACK`).
@@ -1718,7 +1734,7 @@ fn work_tray(layout: Layout) -> Option<Rect> {
         Layout::Hearth => hearth_top(),
         Layout::Rack => rack_top(),
         Layout::Vessel => vessel_top(),
-        Layout::Chest | Layout::Body { .. } => return None,
+        Layout::Chest | Layout::Body { .. } | Layout::Bags => return None,
     };
     Some(Rect::new(
         grid_left() - TRAY_PAD,
@@ -1799,7 +1815,7 @@ fn panel_rect(layout: Layout) -> Rect {
         Layout::Hearth => hearth_top() + LABEL_HEIGHT,
         Layout::Rack => rack_top() + LABEL_HEIGHT,
         Layout::Vessel => vessel_top() + LABEL_HEIGHT,
-        Layout::Chest => content_top() + LABEL_HEIGHT,
+        Layout::Chest | Layout::Bags => content_top() + LABEL_HEIGHT,
         // The tabs are stacked on top of the chest's own panel rather than
         // cut out of it, so not one slot moves between a chest and a body
         // -- and the body's forty are clicked exactly where a chest's are.
@@ -2372,7 +2388,7 @@ pub fn slot_at(cursor: (f32, f32), layout: Layout) -> Option<(Side, usize)> {
         Layout::Vessel => vessel_slot_rect(primitive_shared::inventory::VESSEL_SLOT)
             .filter(|rect| rect.contains(cursor.0, cursor.1))
             .map(|_| primitive_shared::inventory::VESSEL_SLOT),
-        Layout::Chest | Layout::Body { .. } => {
+        Layout::Chest | Layout::Body { .. } | Layout::Bags => {
             // A place under the pointer that shows no square -- the two
             // bare rows under a rucksack's twenty -- is nothing at all,
             // not the pack slot that is never there.
@@ -2409,6 +2425,7 @@ fn chest_square(layout: Layout, place: usize) -> Option<usize> {
             let offset = place.checked_sub(HOTBAR_SLOTS)?;
             (offset < BACKPACK_SLOTS).then_some(CORPSE_COMPARTMENT.start + offset)
         }
+        Layout::Bags => (place < primitive_shared::horse::BAGS_SLOTS).then_some(place),
         _ => (place < CHEST_SLOTS).then_some(place),
     }
 }

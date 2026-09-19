@@ -404,6 +404,7 @@ async fn run_connection(
     // ...and off the oars of any raft, which would otherwise keep a rower
     // nobody can reach: nobody else could take them until the raft broke.
     crate::rafts::forget(&ctx, id);
+    crate::horses::forget(&ctx, id);
 
     // ...and out of the registry immediately after, for the same reason
     // and one more. Until this happens the player is still online as far
@@ -1192,6 +1193,44 @@ async fn read_loop(
                 if pinned {
                     continue;
                 }
+                // **A rider's transform is judged and moves nothing.** The
+                // body is the saddle of the server's horse (`horses::tick`);
+                // what the client says is where the saddle of *its* horse is,
+                // and the anti-cheat reads that path with a mounted allowance
+                // (`AntiCheat::set_mounted`). A gallop is inside it; a rider
+                // whose saddle climbs into the sky is not, and is put off the
+                // horse and back where the server has them.
+                let riding = handle.state.lock().unwrap_or_else(|e| e.into_inner()).riding.is_some();
+                if riding {
+                    let verdict = {
+                        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+                        let verdict = state.anticheat.check_transform(x, y, z, on_ground, sequence, &ctx.world);
+                        if verdict.is_allowed() {
+                            if yaw.is_finite() {
+                                state.yaw = yaw;
+                            }
+                            if pitch.is_finite() {
+                                state.pitch = pitch;
+                            }
+                        }
+                        verdict
+                    };
+                    match verdict {
+                        Verdict::Allow => {}
+                        Verdict::Reject { reason, .. } => {
+                            ctx.metrics.anticheat_flags.fetch_add(1, Ordering::Relaxed);
+                            crate::horses::dismount(&ctx, &handle, None);
+                            let at = handle.state.lock().unwrap_or_else(|e| e.into_inner()).position;
+                            handle.send(ServerMessage::PositionCorrection { x: at.0, y: at.1, z: at.2, reason });
+                        }
+                        Verdict::Kick(reason) => {
+                            ctx.metrics.anticheat_flags.fetch_add(1, Ordering::Relaxed);
+                            handle.request_kick(DisconnectReason::AntiCheat(reason));
+                            return Ok(());
+                        }
+                    }
+                    continue;
+                }
                 let verdict = {
                     let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
                     let verdict = state
@@ -1540,6 +1579,7 @@ async fn read_loop(
             }
 
             ClientMessage::CloseChest => {
+                handle.state.lock().unwrap_or_else(|e| e.into_inner()).open_bags = None;
                 // The mod API's `ContainerClosed` promises "closed it, or was
                 // made to", and it used to fire only when the block went: a
                 // mod counting who stands at a chest saw every player open it
@@ -1648,6 +1688,22 @@ async fn read_loop(
 
             ClientMessage::UseRaft { raft } => {
                 crate::rafts::use_raft(&ctx, &handle, raft);
+            }
+
+            ClientMessage::Mount { horse } => {
+                crate::horses::mount(&ctx, &handle, horse);
+            }
+
+            ClientMessage::Dismount => {
+                crate::horses::dismount(&ctx, &handle, None);
+            }
+
+            ClientMessage::Rein { horse, forward, turn, gait, jump } => {
+                crate::horses::rein(&ctx, &handle, horse, forward, turn, gait, jump);
+            }
+
+            ClientMessage::OpenBags { horse } => {
+                crate::horses::open_bags(&ctx, &handle, horse);
             }
 
             ClientMessage::Row { raft, stroke, turn } => {
