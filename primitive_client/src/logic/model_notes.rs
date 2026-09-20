@@ -438,8 +438,12 @@
 //!   `Gait::Wing` in the air), which is what is here. It costs four boxes in
 //!   the table that are never drawn together, and nothing else.
 //!
-//! Which pair is chosen by speed (`AIRBORNE_SPEED`), because speed is the
-//! one thing the client knows about a flight. The folded tips and the spread
+//! Which pair is chosen by speed (`AIRBORNE_SPEED`). **And what the spread
+//! pair then does is chosen by the rise** (`Motion::rise`), which the client
+//! works out from the same snapshots: a climbing bird beats hard and often,
+//! a gliding one holds its wings out and still, and the body banks, pitches,
+//! fans its tail and puts its feet out to match. Neither number is sent --
+//! both come off positions the wire was already carrying. The folded tips and the spread
 //! ones wear the ear tile, which a bird has no ear for and which the sheet
 //! fills with the black tip and its two white mirrors.
 //!

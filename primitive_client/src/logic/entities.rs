@@ -89,6 +89,11 @@ const NOMINAL_INTERVAL: Duration = Duration::from_millis(50);
 /// and none of those are strides. See `apply_snapshot`.
 const MAX_STRIDE: f32 = 3.0;
 
+/// ...and the same bound going up or down, in blocks a second: the fastest
+/// anything in this world climbs or plunges (`animals::FLIGHT_SPEED` and a
+/// gull's `DIVE_SPEED`) with room over it. See `Entity::rising`.
+const MAX_RISE: f32 = 16.0;
+
 struct Entity {
     kind: EntityKind,
     /// Where the previous snapshot put it, and where the latest one did.
@@ -146,6 +151,17 @@ struct Entity {
     /// Seconds this entity has been on screen: the clock the idle motions
     /// run on. See `animal_model::Motion::age`.
     age: f32,
+    /// Where a bird is in its wingbeat, in whole beats: see
+    /// `animal_model::Motion::beat`.
+    ///
+    /// **Kept here, like `head` and for the same reason**, and it is the
+    /// only way a beat can answer to the effort of the flight at all: the
+    /// rate has to change with the climb (`animal_model::CLIMB_BEATS`), and
+    /// a rate multiplied into the argument of a sine snaps the wing to a
+    /// different part of the beat the instant it changes. A phase that is
+    /// integrated, a frame at a time, changes rate without moving. Nought
+    /// and untouched for everything that does not fly.
+    beat: f32,
     /// Seconds since the snapshot first said it was dying
     /// (`Attitude::Dying`), for the roll onto its side: see
     /// `animal_model::Motion::fallen`. Nought for everything alive.
@@ -210,6 +226,19 @@ impl Entity {
         )
     }
 
+    /// How fast it is rising, in blocks a second: negative is coming down.
+    ///
+    /// **From the two heights the snapshots already carry**, for the reason
+    /// `turning` is measured here and not sent. Clamped at what nothing in
+    /// this world can climb or dive at, so the one interval in which an
+    /// entity is teleported -- or reuses an id, or re-enters the interest
+    /// radius -- does not hand the wings a rise of two hundred blocks a
+    /// second. That is `MAX_STRIDE`'s argument in the other axis.
+    fn rising(&self) -> f32 {
+        let interval = self.interval.as_secs_f32().max(1e-4);
+        (((self.current.y - self.previous.y) as f32) / interval).clamp(-MAX_RISE, MAX_RISE)
+    }
+
     /// How fast it is turning, in radians a second, positive to its left.
     ///
     /// **Measured from the two facings the client is already easing between**,
@@ -251,6 +280,8 @@ impl Entity {
         crate::logic::animal_model::Motion {
             walked,
             speed,
+            rise: self.rising(),
+            beat: self.beat,
             hurt,
             head: self.head,
             turning: self.turning(),
@@ -894,6 +925,12 @@ impl Entities {
                     // what every other per-animal phase in this game is spread
                     // by (the server's `spread`), and it is all the client has.
                     age: (state.id % 977) as f32 * 0.021,
+                    // ...and from a different point of the wingbeat, for
+                    // exactly the reason `age` is spread: a covey that came
+                    // into view together and beat in unison would be one
+                    // bird drawn three times. The server spreads its own
+                    // climb-and-glide from the same id (`Animal::air_phase`).
+                    beat: (state.id % 331) as f32 * 0.037,
                     dying: 0.0,
 });
         }
@@ -1004,6 +1041,21 @@ impl Entities {
             let wanted = entity.head_wanted();
             entity.head += (wanted - entity.head).clamp(-step, step);
             entity.age += dt;
+            // **The wingbeat, turned by the flight rather than by the
+            // ground covered.** See `Entity::beat`: the rate answers to how
+            // hard the bird is climbing, which is a rate that changes, and
+            // only an integrated phase may change rate without jumping.
+            // Wrapped into whole beats so it stays a small number for the
+            // life of the entity -- the same precision argument the
+            // server's `turn_towards` makes about an accumulated yaw.
+            if matches!(entity.kind, EntityKind::Animal { species, .. } if species.flies()) {
+                let rate = crate::logic::animal_model::beat_rate(
+                    entity.gait(now).1,
+                    entity.rising(),
+                );
+                entity.beat =
+                    (entity.beat + rate * dt).rem_euclid(crate::logic::animal_model::BEAT_WRAP);
+            }
             if matches!(entity.kind, EntityKind::Animal { attitude: primitive_shared::protocol::Attitude::Dying, .. }) {
                 entity.dying += dt;
             }

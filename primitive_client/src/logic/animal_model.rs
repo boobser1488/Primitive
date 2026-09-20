@@ -375,10 +375,28 @@ pub fn parts(species: Species) -> &'static [Part] {
 /// (`soundscape::in_the_air`).
 pub const AIRBORNE_SPEED: f32 = 2.6;
 
-/// Wingbeats per block flown: about three a second at a gull's cruise.
-/// Tied to distance, like the legs' `STRIDE`, so a bird that is going
-/// nowhere is not beating its wings on the spot.
-const WINGBEATS_PER_BLOCK: f32 = 0.6;
+/// Wingbeats per block of *air flown through*: about three a second at a
+/// gull's cruise. Tied to distance, like the legs' `STRIDE`, so a bird that
+/// is going nowhere is not beating its wings on the spot -- and to the whole
+/// path rather than to the ground covered, so a bird going up steeply is
+/// beating for the height as well as for the way.
+pub(crate) const WINGBEATS_PER_BLOCK: f32 = 0.6;
+
+/// ...and how much harder it works to climb: at a full climb the beat is
+/// this much faster again.
+///
+/// **A climb is the one thing a wing plainly strains at**, and it is half of
+/// what "птицы летают как деревяшки" was: a bird rising off the sand beat at
+/// exactly the rate of one gliding down onto it.
+///
+/// **Counted into a phase this client keeps** (`Entity::beat`) rather than
+/// multiplied into the argument of the sine. Rejected, and it is worth
+/// stating because it is the obvious way: `sin(distance * rate)` with a
+/// `rate` that answers to the climb is a sine whose argument jumps the
+/// instant the bird stops climbing -- the wing snaps to a new part of the
+/// beat, which is the single worst artefact a cycle can have. A phase that
+/// is integrated can change rate and stay continuous.
+const CLIMB_BEATS: f32 = 1.4;
 
 /// How far a beating wing goes either side of the glide, in radians.
 const FLAP: f32 = 0.75;
@@ -387,30 +405,77 @@ const FLAP: f32 = 0.75;
 /// is a paper plane.
 const GLIDE: f32 = 0.1;
 
-/// **Beats in bouts, glides between them**: `BEAT_BOUT` blocks of beating in
-/// every `GLIDE_BOUT` flown, faded in and out so a bout does not begin with
-/// a wing snapping up. A bird that beat without stopping would read as a
-/// clockwork toy, and one that never beat would be a kite.
-const BEAT_BOUT: f32 = 5.0;
-const GLIDE_BOUT: f32 = 16.0;
+/// **Beats in bouts, glides between them**: `BEAT_BOUT` beats of beating in
+/// every `GLIDE_BOUT`, faded in and out so a bout does not begin with a wing
+/// snapping up. A bird that beat without stopping would read as a clockwork
+/// toy, and one that never beat would be a kite.
+const BEAT_BOUT: f32 = 3.0;
+const GLIDE_BOUT: f32 = 9.6;
+
+/// How many beats the kept phase (`Entity::beat`) runs before it wraps.
+///
+/// **A whole number of beats *and* a whole number of bouts**, or the wrap is
+/// a jump: forty-eight is five bouts of `GLIDE_BOUT` and forty-eight whole
+/// sines. It is wrapped at all for the reason the server wraps an
+/// accumulated yaw -- a float that only ever grows stops being able to tell
+/// one beat from the next, and a gull that has been circling a beach for an
+/// hour is exactly the case that reaches it. Held by
+/// `the_wingbeat_phase_wraps_without_moving_the_wing`.
+pub(crate) const BEAT_WRAP: f32 = 48.0;
 
 /// Faster than this a bird beats the whole way: it has been frightened, and
 /// a frightened bird is not gliding.
 const HARD_FLIGHT: f32 = 6.5;
 
-/// How far a spread wing is raised, `walked` blocks into a flight at `speed`.
-fn wingbeat(walked: f32, speed: f32) -> f32 {
-    let strength = if speed > HARD_FLIGHT {
+/// The flight path angle, as a fraction of the way it is going, at which a
+/// bird is plainly climbing -- beating the whole time, whatever the bout
+/// says -- and at which it is plainly gliding, wings held out and still.
+///
+/// **A glide is wings that do not move, and that is the whole point of it.**
+/// Between the two the bout decides, which is the ordinary cruise.
+const CLIMBING: f32 = 0.18;
+const GLIDING: f32 = -0.12;
+
+/// How far a spread wing is raised, `beat` cycles into a flight whose path
+/// climbs at `climb` (rise over speed: positive is up).
+fn wingbeat(beat: f32, speed: f32, climb: f32) -> f32 {
+    let strength = if speed > HARD_FLIGHT || climb > CLIMBING {
         1.0
+    } else if climb < GLIDING {
+        // Held out, and still: see `GLIDING`.
+        0.0
     } else {
-        let into = walked.rem_euclid(GLIDE_BOUT);
+        let into = beat.rem_euclid(GLIDE_BOUT);
         if into < BEAT_BOUT {
             (1.3 * (std::f32::consts::PI * into / BEAT_BOUT).sin()).min(1.0)
         } else {
             0.0
         }
     };
-    GLIDE + strength * FLAP * (walked * WINGBEATS_PER_BLOCK * std::f32::consts::TAU).sin()
+    GLIDE + strength * FLAP * (beat * std::f32::consts::TAU).sin()
+}
+
+/// How fast a bird's wing phase turns, in beats a second, at `speed` blocks
+/// a second across and `rise` up.
+///
+/// **Here rather than in the client's entity bookkeeping** because it is a
+/// fact about a wing, and the same arithmetic has to answer for a bird drawn
+/// from a snapshot and for one posed by a test.
+pub fn beat_rate(speed: f32, rise: f32) -> f32 {
+    let along = speed.hypot(rise);
+    let climb = flight_path(speed, rise);
+    along * WINGBEATS_PER_BLOCK * (1.0 + CLIMB_BEATS * climb.max(0.0))
+}
+
+/// How steeply a bird is going, as rise over the way it is making: nought is
+/// level, one is straight up, minus one straight down.
+///
+/// **Divided by the speed and not by the path**, so a bird hanging almost
+/// still and sinking reads as a full dive rather than as a gentle one, and
+/// clamped, because a bird that is not going anywhere across has no flight
+/// path at all and the arithmetic must not say it has an infinite one.
+pub fn flight_path(speed: f32, rise: f32) -> f32 {
+    (rise / speed.max(1.0)).clamp(-1.0, 1.0)
 }
 
 /// How far a leg swings, in radians, at a full run.
@@ -429,8 +494,26 @@ pub struct Motion {
     /// between, so a walk cycle costs the server nothing at all. See
     /// `Entity::gait`.
     pub walked: f32,
-    /// How fast it is going now, in blocks a second.
+    /// How fast it is going now, in blocks a second. Across the ground: see
+    /// `rise` for the other half of a bird's going.
     pub speed: f32,
+    /// How fast it is rising, in blocks a second: negative is coming down.
+    ///
+    /// **Measured on this client from the two heights it is already easing
+    /// between** (`Entity::rising`), for the reason `turning` is measured
+    /// and not sent -- a number two numbers on the wire already say has no
+    /// business being a third. It is the whole of what the client knows
+    /// about the *effort* of a flight: a bird going up is working, a bird
+    /// coming down is resting, and everything the wings, the body, the tail
+    /// and the legs do about that follows from this one figure.
+    pub rise: f32,
+    /// Where this bird is in its wingbeat, in whole beats.
+    ///
+    /// **A phase kept between frames** (`Entity::beat`), not a distance, and
+    /// `CLIMB_BEATS` is where that is argued: the rate answers to the climb,
+    /// and a rate that changes may only move a phase that is integrated.
+    /// Nought for everything that does not fly.
+    pub beat: f32,
     /// How recently it was struck, 0..1, or `None`. Both the red flash and
     /// the flinch -- see `STAGGER_ROLL`.
     pub hurt: Option<f32>,
@@ -542,6 +625,76 @@ const LEAN_PER_TURN: f32 = 0.16;
 /// from thirty blocks and little enough that four feet stay on the ground.
 const LEAN_MOST: f32 = 0.2;
 
+// ---- what a bird does with its body, which is everything ----
+//
+// **"Птицы летают как деревяшки."** The wings beat and the box they were
+// bolted to flew dead level through every turn, every climb and every
+// landing -- so what a player watched was a plank with two flaps on it. A
+// body that does not answer to what it is doing is the whole complaint, and
+// four things answer to it here: the bank, the pitch, the tail and the legs.
+// All four come off one number, `Motion::rise`, which the client already had
+// in its hands and was throwing away.
+
+/// How far a bird banks into a turn, in radians per radian a second, and how
+/// far it is allowed to go.
+///
+/// **Three times a four-legged animal's lean, and it is not the same thing.**
+/// A deer leans because the ground shoves it round; a bird banks because
+/// tilting the wing *is* how it turns -- the lean is the mechanism and not a
+/// side effect of it, so it is large, and at a hard turn it is most of a
+/// right angle. Anything less and a circling gull reads as a disc sliding
+/// round a track.
+const AIR_LEAN_PER_TURN: f32 = 0.55;
+const AIR_LEAN_MOST: f32 = 0.95;
+
+/// How far a bird pitches with its flight path, in radians per unit of rise
+/// over speed, and the most it goes to.
+///
+/// A bird climbing steeply is nose-up and a bird diving is nose-down, and it
+/// is the difference between a thing flying and a thing being carried.
+const PITCH_PER_PATH: f32 = 0.7;
+const PITCH_MOST: f32 = 0.55;
+
+/// How far the nose comes up in a full flare, in radians -- over and above
+/// whatever the path says.
+///
+/// **A landing is the one time a bird points somewhere it is not going.** It
+/// rears, spills the speed off the wing and drops the last foot; a bird that
+/// came in nose-down onto a branch would be a bird crashing into it.
+const FLARE_PITCH: f32 = 0.5;
+
+/// What counts as a flare: slowed to somewhere between `FLARE_SPEED` and
+/// `AIRBORNE_SPEED`, and sinking at `FLARE_PATH` of the way it is making.
+///
+/// Both, and not either -- a gull diving on a fish is sinking hard and going
+/// fast, and it is not landing on anything.
+const FLARE_SPEED: f32 = 4.2;
+const FLARE_PATH: f32 = 0.14;
+
+/// How far a bird's legs are drawn up in flight, and how far they reach
+/// forward in a full flare, in radians.
+///
+/// **Negative is back and up, under the tail**, which is where a flying
+/// bird's feet are; the old drawing left them hanging straight down all the
+/// way across the bay. The reach is forward and down: feet first, for the
+/// branch. They meet at the touch-down, where the wings fold
+/// (`AIRBORNE_SPEED`) and the legs are simply standing.
+const LEG_TUCK: f32 = -1.45;
+const LEG_REACH: f32 = 0.7;
+
+/// How much wider and longer a bird's tail is drawn in a full flare, and how
+/// far it is dropped, in radians.
+///
+/// **Fanned, because that is what a tail is for**, and it is the clearest
+/// signal in the whole approach that a bird is about to stop: the one part
+/// of a bird that changes *shape*. The box is grown for the frame rather
+/// than a second tail being put in the model file -- twelve feathers is
+/// twelve boxes, and a tail that only exists while a bird is landing is a
+/// part every measure of the model (`half_extents`, the carcass, the
+/// skeleton) would have to learn to ignore.
+const TAIL_FAN: f32 = 0.9;
+const TAIL_DROP: f32 = 0.55;
+
 /// How far a blow throws the body, in radians of roll and blocks of shove.
 ///
 /// **A struck animal flashed red and went on walking.** The flash has been on
@@ -630,7 +783,7 @@ pub(crate) fn build_parts(
     vertices: &mut Vec<crate::engine::mesh::Vertex>,
     indices: &mut Vec<u32>,
 ) {
-    let Motion { walked, speed, hurt, head, turning, age, youth, fallen, tack } = motion;
+    let Motion { walked, speed, rise, beat, hurt, head, turning, age, youth, fallen, tack } = motion;
     // A sheep's coat off (`horse::TACK_SHORN`), read before the byte is
     // narrowed to the horse's: it is the one bit that means something on a
     // sheep.
@@ -664,14 +817,40 @@ pub(crate) fn build_parts(
     // **A bird in the air is a different drawing**: wings spread and
     // beating, legs tucked. See `GULL` and `AIRBORNE_SPEED`.
     let aloft = species.flies() && speed > AIRBORNE_SPEED;
-    let flap = if aloft { wingbeat(walked, speed) } else { 0.0 };
+    // How steeply it is going, and therefore how hard it is working: see
+    // `flight_path`. Nought for everything that walks, so nothing below has
+    // to ask twice whether this is a bird.
+    let climb = if aloft { flight_path(speed, rise) } else { 0.0 };
+    let flap = if aloft { wingbeat(beat, speed, climb) } else { 0.0 };
+    // **The flare**, 0..1: slowed *and* sinking, which is a landing and not a
+    // dive. See `FLARE_SPEED`.
+    let flare = if aloft {
+        let slowed = ((FLARE_SPEED - speed) / (FLARE_SPEED - AIRBORNE_SPEED)).clamp(0.0, 1.0);
+        let sinking = (-climb / FLARE_PATH).clamp(0.0, 1.0);
+        slowed * sinking
+    } else {
+        0.0
+    };
     // **The lean.** A turn is a bank, and only while there is speed to bank
-    // with: see `LEAN_PER_TURN`.
-    let lean = (turning * LEAN_PER_TURN * pace).clamp(-LEAN_MOST, LEAN_MOST);
+    // with: see `LEAN_PER_TURN` -- and in the air the bank *is* the turn,
+    // which is why it is several times as far over (`AIR_LEAN_PER_TURN`).
+    let lean = if aloft {
+        (turning * AIR_LEAN_PER_TURN).clamp(-AIR_LEAN_MOST, AIR_LEAN_MOST)
+    } else {
+        (turning * LEAN_PER_TURN * pace).clamp(-LEAN_MOST, LEAN_MOST)
+    };
+    // **The pitch**: nose up on a climb, down on a glide, and up again in
+    // the flare. See `PITCH_PER_PATH`.
+    let pitch = if aloft {
+        (climb * PITCH_PER_PATH).clamp(-PITCH_MOST, PITCH_MOST) + FLARE_PITCH * flare
+    } else {
+        0.0
+    };
     // **The flinch.** See `STAGGER_ROLL`: the number was already on the wire
     // for the red tint, and this is the body moving with the blow.
     let flash = hurt.unwrap_or(0.0);
     let standing = Pose {
+        pitch,
         roll: lean + STAGGER_ROLL * flash,
         // Sideways along the flinch, so the body is shoved rather than
         // pivoted on the spot. Negative because `Pose::shift` is taken *off*
@@ -690,6 +869,8 @@ pub(crate) fn build_parts(
         Pose {
             roll: standing.roll + (rest.roll - standing.roll) * falling,
             shift: standing.shift + (lying - standing.shift) * falling,
+            // A dead bird is not flying, so there is no pitch to ease out of.
+            pitch: standing.pitch * (1.0 - falling),
             scale: standing.scale,
         }
     } else {
@@ -720,6 +901,11 @@ pub(crate) fn build_parts(
         } else if shorn && part.name == FLEECE_PART {
             heavier = cropped(part);
             &heavier
+        } else if flare > 0.0 && part.name.contains("tail") {
+            // The fan. See `TAIL_FAN`: the box itself is grown, because a
+            // spread tail is a different shape and not a different angle.
+            heavier = fanned(part, flare);
+            &heavier
         } else {
             part
         };
@@ -729,9 +915,16 @@ pub(crate) fn build_parts(
         let dressing = if shorn && part.name == FLEECE_PART { Dressing::Hide } else { Dressing::Coat };
         let angle = match part.gait {
             Gait::Folded => 0.0,
-            // Not running on nothing, and not nodding to a stride it is not
-            // taking: a bird's head in the air is the steadiest part of it.
-            Gait::LegFront | Gait::LegBack | Gait::Head if aloft => 0.0,
+            // **Up under the tail across the bay, forward for the branch.**
+            // See `LEG_TUCK`: legs left hanging are an undercarriage nobody
+            // retracted. They pass through the standing pose on the way, so
+            // the moment the wings fold the feet are already down.
+            Gait::LegFront | Gait::LegBack if aloft => LEG_TUCK + (LEG_REACH - LEG_TUCK) * flare,
+            // **The head is the steadiest part of a bird**, and that is not
+            // a figure of speech: it holds level while the body pitches
+            // under it, which is why it is given the pitch back. Not nodding
+            // either -- there is no stride to nod to.
+            Gait::Head if aloft => -pitch,
             Gait::Wing(_) => flap,
             // Stiff, when it is dead: the stride goes, the legs kick out as it
             // goes over and lock straight as it lands -- straight, because
@@ -742,6 +935,12 @@ pub(crate) fn build_parts(
             Gait::LegBack => -phase.sin() * swing * (1.0 - falling) - STIFF_LEGS * (std::f32::consts::PI * falling).sin(),
             // See `nod`.
             Gait::Head => nod,
+            // A fanned tail is dropped as well as spread: it is a brake, and
+            // a brake edge-on to the air brakes nothing. See `TAIL_DROP`.
+            Gait::Still if flare > 0.0 && part.name.contains("tail") => -TAIL_DROP * flare,
+            // A flying bird's tail does not swish, and nothing else it has
+            // is a part that moves on its own.
+            Gait::Still if aloft => 0.0,
             // **Still, unless the model named it something that is not.** See
             // `secondary`: a tail and an ear are the two parts that move when
             // nothing else does, and the files already say which is which.
@@ -823,6 +1022,23 @@ fn cropped(part: &Part) -> Part {
     bare.size[0] -= 2.0;
     bare.size[1] -= 2.0;
     bare
+}
+
+/// A landing bird's tail: fanned, `flare` of the way to `TAIL_FAN`.
+///
+/// Wider and longer, and grown *backward* -- its front edge stays where the
+/// body ends. Grown about the middle it would slide a third of its length
+/// into the rump, and what shows of a box inside another box is nothing at
+/// all, which would have read as a tail that got shorter as it spread.
+fn fanned(part: &Part, flare: f32) -> Part {
+    let mut spread = *part;
+    let grow = 1.0 + TAIL_FAN * flare;
+    spread.size[0] *= grow;
+    spread.size[2] *= grow;
+    // Half of what it gained in length, away from the body: the model faces
+    // -Z, so a tail is at +Z and its front edge is the smaller one.
+    spread.at[2] += part.size[2] * (grow - 1.0) * 0.5;
+    spread
 }
 
 /// What a piece of tack is made of.
@@ -1750,7 +1966,7 @@ pub(crate) fn resting_pose(model: &[Part], roll: f32, swing_of: impl Fn(usize) -
     for (index, part) in model.iter().enumerate() {
         for face in faces().iter() {
             for corner in face.corners.iter() {
-                let point = posed_local(part, *corner, swing_of(index), roll);
+                let point = posed_local(part, *corner, swing_of(index), roll, 0.0);
                 low = low.min(point);
                 high = high.max(point);
             }
@@ -1758,6 +1974,9 @@ pub(crate) fn resting_pose(model: &[Part], roll: f32, swing_of: impl Fn(usize) -
     }
     Pose {
         roll,
+        // A body on the ground is level with it: nothing that has come to
+        // rest is still pointing anywhere.
+        pitch: 0.0,
         shift: Vec3::new((low.x + high.x) * 0.5, low.y - LIFT, (low.z + high.z) * 0.5),
         scale: 1.0,
     }
@@ -1802,7 +2021,7 @@ pub(crate) fn posed_quads(
         for face in faces().iter() {
             let mut quad = [[0.0f32; 3]; 4];
             for (slot, corner) in face.corners.iter().enumerate() {
-                let swung = posed_local(part, *corner, swing_of(index), pose.roll) - pose.shift;
+                let swung = posed_local(part, *corner, swing_of(index), pose.roll, pose.pitch) - pose.shift;
                 let (fx, fz) = (-swung.z, swung.x);
                 quad[slot] = [
                     ground.x + fx * yaw_cos - fz * yaw_sin,
@@ -1920,6 +2139,16 @@ pub enum Dressing {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Pose {
     pub(crate) roll: f32,
+    /// A turn about the across axis through its own middle, in radians:
+    /// positive is nose up. Applied *before* the roll -- see `posed_local`
+    /// for why that order is not a preference.
+    ///
+    /// **Nought on everything that walks.** It is here for the one animal
+    /// whose body points where it is going rather than where the ground is:
+    /// a bird climbing is nose-up and a bird gliding is nose-down, and
+    /// without it the body is a plank with wings on it, which is exactly
+    /// what the player said it was.
+    pub(crate) pitch: f32,
     /// Subtracted from every local point after the roll, so that the
     /// point handed in lands on `centre`: a fallen animal is placed by
     /// the middle of its underside, not by the body centre it walks
@@ -1940,7 +2169,7 @@ pub(crate) struct Pose {
 /// `append_part_posed` with a pose the frame computed, and this is what the
 /// geometry tests measure against.
 #[cfg(test)]
-const STANDING_POSE: Pose = Pose { roll: 0.0, shift: Vec3::ZERO, scale: 1.0 };
+const STANDING_POSE: Pose = Pose { roll: 0.0, pitch: 0.0, shift: Vec3::ZERO, scale: 1.0 };
 
 // (`append_part`, which was this pair of lines with `STANDING_POSE` baked in,
 // is gone: a walking animal has a pose of its own now -- it leans into its
@@ -1971,7 +2200,7 @@ const STANDING_POSE: Pose = Pose { roll: 0.0, shift: Vec3::ZERO, scale: 1.0 };
 /// where this is a constant.
 const SEAM_BITE: f32 = 0.02;
 
-fn posed_local(part: &Part, corner: [f32; 3], swing: f32, roll: f32) -> Vec3 {
+fn posed_local(part: &Part, corner: [f32; 3], swing: f32, roll: f32, pitch: f32) -> Vec3 {
     let half = Vec3::from(part.size) * (0.5 * SCALE);
     let at = Vec3::from(part.at) * SCALE;
     // Its own top, unless the table names the joint it hangs from (see
@@ -2019,10 +2248,28 @@ fn posed_local(part: &Part, corner: [f32; 3], swing: f32, roll: f32) -> Vec3 {
             )
         }
     };
+    // **Pitch before roll, about the animal's own middle.**
+    //
+    // The order is the aircraft's and it is not a preference: a bank is a
+    // roll *about the nose*, so the nose has to be pointed first. Rolled and
+    // then pitched, a gull banked hard into a turn and climbing would have
+    // its nose swing out sideways instead of up, which reads as a bird
+    // sliding off the edge of its own circle.
+    //
+    // A rotation about the across axis, exactly like the swing above -- and
+    // it is the same axis, which is what lets `push_posed_box` light a
+    // pitched part by adding the two angles rather than by carrying a third
+    // pair of sines through `world_face_of`.
+    let (pitch_sin, pitch_cos) = pitch.sin_cos();
+    let pitched = Vec3::new(
+        swung.x,
+        swung.y * pitch_cos - swung.z * pitch_sin,
+        swung.y * pitch_sin + swung.z * pitch_cos,
+    );
     Vec3::new(
-        swung.x * roll_cos - swung.y * roll_sin,
-        swung.x * roll_sin + swung.y * roll_cos,
-        swung.z,
+        pitched.x * roll_cos - pitched.y * roll_sin,
+        pitched.x * roll_sin + pitched.y * roll_cos,
+        pitched.z,
     )
 }
 
@@ -2184,9 +2431,12 @@ pub(crate) fn push_posed_box(
     // its faces are turned by the roll and not by the swing. The two are
     // turns about the same axis as the pose's roll, so they simply add --
     // and a wing lit by the swing would be lit as a leg kicked forward.
+    // ...and the pitch is a turn about that same across axis (`posed_local`),
+    // so it simply adds to the swing -- for a wing too, whose own beat is a
+    // roll and whose faces still have to know the body is nose-up.
     let (face_swing, face_roll) = match part.gait {
-        Gait::Wing(hinge) => (0.0, pose.roll + if part.at[0] >= hinge as f32 { swing } else { -swing }),
-        _ => (swing, pose.roll),
+        Gait::Wing(hinge) => (pose.pitch, pose.roll + if part.at[0] >= hinge as f32 { swing } else { -swing }),
+        _ => (swing + pose.pitch, pose.roll),
     };
     let (swing_sin, swing_cos) = face_swing.sin_cos();
     let (roll_sin, roll_cos) = face_roll.sin_cos();
@@ -2291,7 +2541,7 @@ fn corner_bits(corner: [f32; 3]) -> usize {
 fn placed_corners(part: &Part, swing: f32, pose: Pose) -> [Vec3; 8] {
     std::array::from_fn(|bits| {
         let corner = [(bits & 1) as f32, ((bits >> 1) & 1) as f32, ((bits >> 2) & 1) as f32];
-        (posed_local(part, corner, swing, pose.roll) - pose.shift) * pose.scale
+        (posed_local(part, corner, swing, pose.roll, pose.pitch) - pose.shift) * pose.scale
     })
 }
 
@@ -2310,12 +2560,12 @@ mod tests {
                 for swing in [0.0f32, 0.37, -0.8] {
                     for pose in [
                         STANDING_POSE,
-                        Pose { roll: 0.4, shift: Vec3::new(0.1, -0.2, 0.3), scale: 1.0 },
+                        Pose { roll: 0.4, pitch: -0.25, shift: Vec3::new(0.1, -0.2, 0.3), scale: 1.0 },
                     ] {
                         let placed = placed_corners(part, swing, pose);
                         for face in crate::engine::mesh::faces() {
                             for corner in face.corners {
-                                let asked = posed_local(part, corner, swing, pose.roll) - pose.shift;
+                                let asked = posed_local(part, corner, swing, pose.roll, pose.pitch) - pose.shift;
                                 assert_eq!(
                                     placed[corner_bits(corner)].to_array().map(f32::to_bits),
                                     asked.to_array().map(f32::to_bits),
@@ -2354,7 +2604,7 @@ mod tests {
             for part in &field {
                 for face in &faces {
                     for corner in &face.corners {
-                        std::hint::black_box(posed_local(part, *corner, swing, 0.0) - STANDING_POSE.shift);
+                        std::hint::black_box(posed_local(part, *corner, swing, 0.0, 0.0) - STANDING_POSE.shift);
                     }
                 }
             }
@@ -2558,7 +2808,7 @@ mod tests {
         for x in [0.0, 1.0] {
             for y in [0.0, 1.0] {
                 for z in [0.0, 1.0] {
-                    corners.push(posed_local(bone, [x, y, z], 0.0, 0.0) / SCALE);
+                    corners.push(posed_local(bone, [x, y, z], 0.0, 0.0, 0.0) / SCALE);
                 }
             }
         }
@@ -2568,7 +2818,7 @@ mod tests {
     /// Which way a bone lying on the ground points as it is drawn: from the
     /// middle of its -X end to the middle of its +X end.
     fn drawn_axis(bone: &Part) -> Vec3 {
-        (posed_local(bone, [1.0, 0.5, 0.5], 0.0, 0.0) - posed_local(bone, [0.0, 0.5, 0.5], 0.0, 0.0)).normalize()
+        (posed_local(bone, [1.0, 0.5, 0.5], 0.0, 0.0, 0.0) - posed_local(bone, [0.0, 0.5, 0.5], 0.0, 0.0, 0.0)).normalize()
     }
 
     /// **The legs lie out from the belly in parallel pairs, not splayed
@@ -2795,7 +3045,7 @@ mod tests {
             faces()
                 .iter()
                 .map(|face| {
-                    let c = face.corners.map(|corner| posed_local(bone, corner, 0.0, 0.0) / SCALE);
+                    let c = face.corners.map(|corner| posed_local(bone, corner, 0.0, 0.0, 0.0) / SCALE);
                     ((c[1] - c[0]).cross(c[2] - c[1]).normalize(), c)
                 })
                 .collect()
@@ -3023,7 +3273,13 @@ mod tests {
             // where the server said" from "built around zero".
             TEST_CENTRE,
             yaw,
-            Motion { walked, speed, ..Default::default() },
+            // **`walked` doubles as the wingbeat's phase here**, so a test
+            // that hands this a distance still gets a wing part-way through
+            // a beat. On a real bird the two are different clocks -- the
+            // legs run on the ground covered and the wings on a phase the
+            // client integrates (`Motion::beat`) -- but a bird drawn once,
+            // from numbers, has no history to integrate.
+            Motion { walked, speed, beat: walked, ..Default::default() },
             &FaceLayers::empty_for_test(),
             (15, 0),
             &mut vertices,
@@ -3323,6 +3579,154 @@ mod tests {
         }
     }
 
+
+    /// A bird flying level at a cruise, and the same bird turning hard.
+    ///
+    /// The model faces -Z and a yaw of nought points its front along +X
+    /// (`push_posed_box`), so a bird's wings span the world's z -- and the
+    /// height between the two wingtips is how far over it is banked.
+    fn wingtips_apart(drawn: &[crate::engine::mesh::Vertex]) -> f32 {
+        let (mut left, mut right) = ((f32::MAX, 0.0f32), (f32::MIN, 0.0f32));
+        for vertex in drawn {
+            let (z, y) = (vertex.position[2], vertex.position[1]);
+            if z < left.0 {
+                left = (z, y);
+            }
+            if z > right.0 {
+                right = (z, y);
+            }
+        }
+        right.1 - left.1
+    }
+
+    #[test]
+    fn a_bird_banks_into_its_turns() {
+        // **A turning bird tips its wings over, and that is the turn.** It is
+        // not the lean a deer takes into a corner: a wing is the only thing
+        // pushing a bird sideways, so the angle is large and it is the
+        // mechanism. Flying dead level it is not tipped at all, and the two
+        // ways round tip the opposite ways.
+        let flying = |turning: f32| {
+            posed(Species::Gull, Motion { speed: 6.0, walked: 4.0, beat: 4.0, turning, ..Default::default() })
+        };
+        let straight = wingtips_apart(&flying(0.0));
+        let left = wingtips_apart(&flying(1.6));
+        let right = wingtips_apart(&flying(-1.6));
+        assert!(straight.abs() < 0.02, "a bird flying straight is banked {straight:.3} blocks over");
+        assert!(left.abs() > 1.0, "a hard turn banked a gull only {left:.2} blocks: it is flying flat");
+        assert!(left * right < 0.0, "a gull banks the same way into both turns: {left:.2} and {right:.2}");
+        // ...and what it does on its feet is still the four-legged lean,
+        // which is a fraction of it: `LEAN_MOST` against `AIR_LEAN_MOST`.
+        let walking = wingtips_apart(&posed(
+            Species::Gull,
+            Motion { speed: 1.2, walked: 4.0, turning: 1.6, ..Default::default() },
+        ));
+        assert!(
+            walking.abs() * 3.0 < left.abs(),
+            "a gull on the sand leans {walking:.2} and one in the air banks {left:.2}"
+        );
+    }
+
+    #[test]
+    fn a_climb_beats_faster_than_a_glide() {
+        // **The wings answer to the work.** Going up is the only part of a
+        // flight a wing plainly strains at, and coming down is the part it
+        // does nothing at all for -- see `CLIMB_BEATS` and `GLIDING`.
+        let (climbing, level, gliding) = (beat_rate(5.0, 3.0), beat_rate(5.0, 0.0), beat_rate(5.0, -3.0));
+        println!("beats a second: climbing {climbing:.2}, level {level:.2}, gliding {gliding:.2}");
+        assert!(climbing > gliding * 1.5, "a climb beats at {climbing:.2} and a glide at {gliding:.2}");
+        assert!(climbing > level * 1.5, "a climb beats at {climbing:.2} and level flight at {level:.2}");
+        // A gliding bird's wings are held out and do not move through a
+        // whole cycle of the phase...
+        let glide = flight_path(5.0, -3.0);
+        let held = wingbeat(0.0, 5.0, glide);
+        for step in 0..48 {
+            let at = wingbeat(step as f32 * 0.25, 5.0, glide);
+            assert!((at - held).abs() < 1e-6, "a gliding wing moved to {at:.3} from {held:.3}");
+        }
+        // ...and a climbing one's sweeps the whole beat.
+        let climb = flight_path(5.0, 3.0);
+        let (mut low, mut high) = (f32::MAX, f32::MIN);
+        for step in 0..48 {
+            let at = wingbeat(step as f32 * 0.25, 5.0, climb);
+            low = low.min(at);
+            high = high.max(at);
+        }
+        assert!(high - low > FLAP, "a climbing wing only swept {:.2} radians", high - low);
+    }
+
+    #[test]
+    fn the_wingbeat_phase_wraps_without_moving_the_wing() {
+        // `BEAT_WRAP` is a whole number of beats and a whole number of
+        // bouts, or the wrap is a wing jumping once every few minutes.
+        for &(speed, rise) in &[(5.0f32, 0.0f32), (5.0, 3.0), (7.5, -1.0), (3.0, 0.5)] {
+            let path = flight_path(speed, rise);
+            for step in 0..97 {
+                let at = step as f32 * 0.1;
+                let (before, after) = (wingbeat(at, speed, path), wingbeat(at + BEAT_WRAP, speed, path));
+                assert!(
+                    (before - after).abs() < 1e-3,
+                    "the wing jumps at the wrap: {before:.4} at {at:.1} beats, {after:.4} a lap later"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_landing_birds_feet_reach_the_branch() {
+        // **Tucked across the bay, out in front for the perch.** See
+        // `LEG_TUCK`: the legs are the one part of the old drawing that said
+        // outright that nobody had thought about the flight -- they hung
+        // straight down for the whole crossing, which is an undercarriage.
+        let layers = FaceLayers::empty_for_test();
+        for species in [Species::Gull, Species::Fowl] {
+            let legs: Vec<Part> = parts(species)
+                .iter()
+                .filter(|part| matches!(part.gait, Gait::LegFront | Gait::LegBack))
+                .copied()
+                .collect();
+            assert!(!legs.is_empty(), "{} has no legs to tuck", species.name());
+            // The lowest point of the legs and how far forward they reach.
+            // A yaw of nought points the bird's front along +X.
+            let feet = |motion: Motion| {
+                let (mut v, mut i) = (Vec::new(), Vec::new());
+                build_parts(&legs, species, TEST_CENTRE, 0.0, motion, &layers, (15, 0), &mut v, &mut i);
+                v.iter().fold((f32::MAX, f32::MIN), |(low, front), vertex| {
+                    (low.min(vertex.position[1]), front.max(vertex.position[0]))
+                })
+            };
+            let cruise = feet(Motion { speed: 6.0, walked: 4.0, beat: 4.0, ..Default::default() });
+            let flare = feet(Motion { speed: 2.8, walked: 4.0, beat: 4.0, rise: -1.0, ..Default::default() });
+            let standing = feet(Motion::default());
+            println!(
+                "{}: cruise {:?}, flare {:?}, standing {:?}",
+                species.name(),
+                cruise,
+                flare,
+                standing
+            );
+            assert!(
+                flare.0 < cruise.0 - SCALE,
+                "{}'s feet came down only {:.3} blocks for the branch",
+                species.name(),
+                cruise.0 - flare.0
+            );
+            assert!(
+                flare.1 > cruise.1 + SCALE,
+                "{}'s feet reached only {:.3} blocks forward for the branch",
+                species.name(),
+                flare.1 - cruise.1
+            );
+            // ...and across the bay they are drawn *up*, not hanging.
+            assert!(
+                cruise.0 > standing.0 + SCALE * 0.5,
+                "{}'s legs hang at a cruise: {:.3} against {:.3} standing",
+                species.name(),
+                cruise.0,
+                standing.0
+            );
+        }
+    }
 
     /// The same animal, drawn with something other than a plain walk.
     fn posed(species: Species, motion: Motion) -> Vec<crate::engine::mesh::Vertex> {
@@ -4104,13 +4508,21 @@ mod tests {
 
     #[test]
     fn a_gliding_gull_holds_its_wings_still_and_a_frightened_one_beats_them() {
-        let top = |speed: f32, walked: f32| {
-            mesh(Species::Gull, 0.0, speed, walked).iter().map(|v| v.position[1]).fold(f32::MIN, f32::max)
+        // **A glide is a bird coming down, not a bird part-way through a
+        // bout.** It used to be read off the distance flown -- so many
+        // blocks beating, so many gliding -- and what says it now is the
+        // rise (`GLIDING`): wings out and still all the way down, whatever
+        // the phase has got to.
+        let top = |speed: f32, rise: f32, beat: f32| {
+            posed(Species::Gull, Motion { speed, rise, beat, walked: beat, ..Default::default() })
+                .iter()
+                .map(|v| v.position[1])
+                .fold(f32::MIN, f32::max)
         };
-        let gliding: Vec<f32> = (0..10).map(|i| top(5.0, BEAT_BOUT + 0.5 + i as f32)).collect();
+        let gliding: Vec<f32> = (0..12).map(|i| top(5.0, -1.5, i as f32 * 0.9)).collect();
         let (low, high) = gliding.iter().fold((f32::MAX, f32::MIN), |(l, h), &y| (l.min(y), h.max(y)));
         assert!(high - low < 1e-3, "a gliding gull's wingtips moved {:.3} blocks", high - low);
-        let beating: Vec<f32> = (0..20).map(|i| top(7.2, i as f32 * 0.1)).collect();
+        let beating: Vec<f32> = (0..20).map(|i| top(7.2, 0.0, i as f32 * 0.1)).collect();
         let (low, high) = beating.iter().fold((f32::MAX, f32::MIN), |(l, h), &y| (l.min(y), h.max(y)));
         assert!(high - low > 0.3, "a frightened gull's wingtips moved only {:.3} blocks", high - low);
     }
@@ -4132,7 +4544,7 @@ mod tests {
                     // with any thickness swings those a hair either side of
                     // the hinge as it turns, which is a plate and not a wing
                     // coming loose.
-                    let shoulder = posed_local(arm, [inner, 0.5, z], angle, 0.0);
+                    let shoulder = posed_local(arm, [inner, 0.5, z], angle, 0.0, 0.0);
                     assert!(
                         (shoulder.x - hinge * SCALE).abs() < 0.01,
                         "the {} left its shoulder: {:.3} against {:.3}",
@@ -4143,8 +4555,8 @@ mod tests {
                     // The arm's outer edge and the hand's inner edge, at the
                     // same corner of the plate, stay within a seam of each
                     // other.
-                    let wrist = posed_local(arm, [1.0 - inner, y, 0.5], angle, 0.0);
-                    let hand_inner = posed_local(hand, [inner, y, 0.5], angle, 0.0);
+                    let wrist = posed_local(arm, [1.0 - inner, y, 0.5], angle, 0.0, 0.0);
+                    let hand_inner = posed_local(hand, [inner, y, 0.5], angle, 0.0, 0.0);
                     let apart = Vec3::new(wrist.x - hand_inner.x, wrist.y - hand_inner.y, 0.0).length();
                     assert!(apart < 0.01, "the {} came off its wing by {apart:.3} at {angle:.2}", hand.name);
                 }

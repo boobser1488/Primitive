@@ -391,6 +391,85 @@ const CLIMB_PER_SPEED: f32 = 0.8;
 /// a second leaves the sand like a thing on a rope.
 const CALM_CLIMB: f32 = 3.0;
 
+// ---- the air is not still, and a bird does not fly a ruler line ----
+//
+// **"Птицы летают как деревяшки."** Everything above had already stopped the
+// bird flying like a drone; what was left was that it flew like a *plank*. A
+// gull held nine blocks exactly, at one speed exactly, along a heading it was
+// handed twice a second -- so a flock over a beach was a set of identical
+// discs sliding round at one altitude, and a grouse crossing a clearing drew
+// a ruler line from tree to tree. Nothing in it was wrong and none of it was
+// alive.
+//
+// What a bird actually does is trade height for speed and back again, all
+// day: it beats up a little, glides down a little, goes faster on the way
+// down and slower on the way up, and lets the air do the rest where the air
+// is going up. Three numbers here, all of them reading state that is already
+// on the animal, and **no scan, no search and no extra block read** -- the
+// slope comes out of the look-ahead column `flight_floor` was already taking.
+//
+// Rejected: **a wind field**, which is a second world to keep in step with
+// the first and a thing a player cannot see the cause of. Rejected too:
+// **randomising the altitude per thought**, which is a bird that teleports
+// up and down every second rather than one that climbs and glides.
+
+/// How long one climb-and-glide takes, in seconds.
+///
+/// Seven: slow enough to read as a bird working the air rather than as a
+/// bobbing float, and long enough that two birds spread over it
+/// (`Animal::air_phase`) are plainly not in step.
+const AIR_CYCLE: f32 = 7.0;
+
+/// How far above and below its cruise that cycle carries a bird, in blocks.
+///
+/// A block and a half. It is deliberately smaller than `AIR_CLIMB_REACH`, so
+/// the cycle never argues with the look-ahead that keeps a bird off a canopy:
+/// what clears a tree is still the floor, and this rides on top of it.
+const CYCLE_LIFT: f32 = 1.5;
+
+/// How much of the rise in the ground ahead a bird gets for nothing, as
+/// height held and as blocks a second of extra climb.
+///
+/// **The slope's updraught, and it costs one subtraction.** `flight_floor`
+/// already reads the column under the bird and the column
+/// `AIR_LOOK_AHEAD` down its nose; the difference between them is how fast
+/// the ground is coming up, and air pushed up a hillside is the one piece of
+/// real aerodynamics a voxel world hands over free. What it buys is that a
+/// bird crossing a ridge *rises before the ridge does* and tops it with room,
+/// instead of scrabbling up the near face at the climb rate the spring
+/// allows.
+const SLOPE_LIFT: f32 = 0.5;
+const SLOPE_CLIMB: f32 = 0.35;
+
+/// How much airspeed a bird gains for each block a second it is sinking, and
+/// loses for each block a second it is climbing.
+///
+/// **Height is speed.** A bird that climbed and sank at one airspeed was the
+/// single loudest thing about the old flight: the wings said one thing and
+/// the ground under them said another. Just under a half, so a gull dropping
+/// at three is going a block and a third a second faster than one holding
+/// its height, and one climbing at three is that much slower -- a difference
+/// an eye reads at thirty blocks without being able to name it.
+const SPEED_PER_SINK: f32 = 0.45;
+
+/// How far a cruising bird wanders either side of the straight line to where
+/// it is going, in radians, and how many of those wanders there are to a
+/// cycle.
+///
+/// **A quarter of a radian is a bird, a straight line is a dart.** The weave
+/// is faded out on the approach (see `walk`), because a bird that wandered
+/// while it was landing would miss the perch -- and it is added to the
+/// *wanted* heading rather than to the yaw, so the bank that follows it is
+/// the same banked turn everything else uses (`AIR_TURN_ACCEL`) and the
+/// obstacle steering still has the last word (`air_heading`).
+const WEAVE: f32 = 0.26;
+const WEAVES_PER_CYCLE: f32 = 2.5;
+
+/// How far out a cruising bird has to still be for the weave to be at full
+/// width, in blocks: inside this it fades to nothing and the bird flies the
+/// line in.
+const WEAVE_FADES_AT: f32 = 8.0;
+
 // ---- the shore, and what a gull does over it ----
 //
 // **The fowl's body with a different life.** A grouse lives round a tree
@@ -2152,6 +2231,19 @@ pub struct Animal {
     /// air. See `AIR_ROLL`: a wing banks into a turn and out of it, so the
     /// rate itself cannot jump.
     turn_rate: f32,
+    /// Where this bird is in its own climb-and-glide, in seconds, wrapped
+    /// into `AIR_CYCLE`. Advanced only while it is in the air.
+    ///
+    /// **Per bird and not per world**, and that is the whole of what makes a
+    /// flock read as a flock rather than as one bird drawn six times: a clock
+    /// everything shared would have every gull over the beach topping its
+    /// climb on the same tick. Seeded from the ordinal the way `thirst` and
+    /// `next_home_scan` are, so a seeded world still plays out the same.
+    ///
+    /// Only while it is up: a bird standing on the sand does not resume its
+    /// glide half way through when it takes off again, it starts a fresh
+    /// climb, which is what a take-off is.
+    air_phase: f32,
     /// What its body is doing, for everybody who can see it. See
     /// [`primitive_shared::protocol::Attitude`], which carries the argument.
     ///
@@ -3351,6 +3443,10 @@ impl Animals {
             wary_for: 0.0,
             threat_at: None,
             turn_rate: 0.0,
+            // Spread over the cycle from the ordinal, for the reason
+            // `next_home_scan` is: a covey spawned in one call must not beat
+            // and glide in unison. See `Animal::air_phase`.
+            air_phase: spread(self.next_ordinal, 0x9E37_79B9) * AIR_CYCLE,
             attitude: primitive_shared::protocol::Attitude::Easy,
             growth: youth::GROWN,
             mother: None,
@@ -6430,10 +6526,31 @@ fn seabird(
             }
             // Otherwise the circle drifts along the shore a little, so a
             // flock works the coast rather than one patch of sky over it.
+            //
+            // **Drifting toward where the others are, not round the nest.**
+            // The centre used to be drawn round `home` for every bird, so
+            // six gulls held six independent circles that happened to share
+            // a middle -- a flock by arithmetic and not by sight. Half way
+            // to where it can see the rest of them (`about`, which `survey`
+            // has already worked out and nothing here pays for) and a drift
+            // on top puts their circles over one another without putting
+            // them on one line: each bird still flies its own radius
+            // (`circling`) and its own hand, which is what keeps the
+            // formation loose. Held inside `GULL_RANGE` of home, or a flock
+            // that kept following its own centre would walk itself off the
+            // coast a few blocks a minute.
             if rng.chance(0.2) {
+                let centre = (centre.0 * 0.35 + about.0 * 0.65, centre.1 * 0.35 + about.1 * 0.65);
                 let bearing = rng.range(0.0, std::f32::consts::TAU);
-                let reach = rng.range(0.0, GULL_RANGE * 0.6);
-                animal.bound_for = Some((home.0 + bearing.cos() * reach, home.1 + bearing.sin() * reach));
+                let reach = rng.range(0.0, GULL_RANGE * 0.3);
+                let to = (centre.0 + bearing.cos() * reach, centre.1 + bearing.sin() * reach);
+                let (out_x, out_z) = (to.0 - home.0, to.1 - home.1);
+                let out = out_x.hypot(out_z);
+                animal.bound_for = Some(if out > GULL_RANGE {
+                    (home.0 + out_x / out * GULL_RANGE, home.1 + out_z / out * GULL_RANGE)
+                } else {
+                    to
+                });
             }
         }
         _ => {
@@ -6556,13 +6673,20 @@ fn landing_spot(
 ///
 /// Which way round is the bird's own, from its id, so a flock does not all
 /// wheel one way like a mobile over a cot.
+/// **Each bird on its own circle, not on one ring.** The radius is the
+/// bird's own -- `SOAR_RADIUS` give or take a third, from the id -- which is
+/// what turns a flock sharing a centre into a *loose* formation: they hold
+/// together over the same stretch of shore and no two of them fly the same
+/// line, which is the difference between a flock and a fairground ride. It
+/// costs one more term out of the same id the hand already comes from.
 fn circling(animal: &Animal, centre: (f32, f32)) -> f32 {
     let (dx, dz) = (animal.at().0 - centre.0, animal.at().2 - centre.1);
     let distance = (dx * dx + dz * dz).sqrt();
     let around = dz.atan2(dx);
     let hand = if animal.id.is_multiple_of(2) { 1.0 } else { -1.0 };
+    let radius = SOAR_RADIUS * (0.7 + 0.6 * spread(animal.id, 0x27D4_EB2F));
     // Past the circle, turned further in than a tangent; inside it, less.
-    let bend = ((distance - SOAR_RADIUS) / SOAR_RADIUS).clamp(-0.8, 1.2);
+    let bend = ((distance - radius) / radius).clamp(-0.8, 1.2);
     around + hand * (std::f32::consts::FRAC_PI_2 + bend)
 }
 
@@ -6622,7 +6746,14 @@ fn sea_or_ground_under(world: &dyn BlockWorld, x: f32, from_y: f32, z: f32) -> O
 /// `None` only when there is nothing under the bird at all -- unloaded
 /// ground -- which `walk` reads as "hold the flight level" rather than as
 /// a reason to fall.
-fn flight_floor(world: &dyn BlockWorld, animal: &Animal) -> Option<f32> {
+///
+/// **The second number is the slope's updraught**: how far the ground ahead
+/// stands above the ground below, in blocks, and never less than nought.
+/// It is the subtraction between the two columns this function was already
+/// reading, which is why `SLOPE_LIFT` costs nothing -- and it is nought
+/// whenever the look-ahead is not taken at all, so a landing bird gets no
+/// free lift from a hill it is not flying at.
+fn flight_floor(world: &dyn BlockWorld, animal: &Animal) -> Option<(f32, f32)> {
     // Over the sea a gull's floor is the sea (`sea_or_ground_under`); a
     // grouse's is still whatever it could stand on.
     let column = |x: f32, z: f32| {
@@ -6640,7 +6771,7 @@ fn flight_floor(world: &dyn BlockWorld, animal: &Animal) -> Option<f32> {
         None => !matches!(animal.mind, Mind::Flee | Mind::Soar),
     };
     if landing || animal.on_ground {
-        return under;
+        return under.map(|under| (under, 0.0));
     }
     // Down the nose rather than down the velocity: the nose is where the
     // wings are taking it (see the flight in `walk`), and a bird part-way
@@ -6653,8 +6784,8 @@ fn flight_floor(world: &dyn BlockWorld, animal: &Animal) -> Option<f32> {
     // which lets a bird top a canopy and not a mountain.
     let reach = y + AIR_CLIMB_REACH;
     match (under, ahead) {
-        (Some(under), Some(ahead)) => Some(under.max(ahead.min(reach))),
-        (under, _) => under,
+        (Some(under), Some(ahead)) => Some((under.max(ahead.min(reach)), (ahead - under).max(0.0))),
+        (under, _) => under.map(|under| (under, 0.0)),
     }
 }
 
@@ -8927,10 +9058,26 @@ fn walk(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
     // drone was: two hundred degrees a second of instant turn, which on the
     // ground is a hare pivoting and in the air is a thing with rotors.
     let airborne_bird = animal.species.flies() && !animal.on_ground && !wading;
+    // **A bird does not fly a ruler line.** See `WEAVE`: a wander on the
+    // heading it *wants*, so what comes of it is the ordinary banked turn and
+    // not a body sliding sideways -- and faded out over the last
+    // `WEAVE_FADES_AT` blocks of an approach, because a bird that weaved
+    // while it was landing would never find the branch. A circle
+    // (`Mind::Soar`) already bends every tick and is left alone.
+    let aim = if airborne_bird && matches!(animal.mind, Mind::Homing | Mind::Flee) {
+        let close = match animal.bound_for {
+            Some((tx, tz)) => ((tx - animal.at().0).hypot(tz - animal.at().2) / WEAVE_FADES_AT).min(1.0),
+            None => 1.0,
+        };
+        let turns = animal.air_phase / AIR_CYCLE * WEAVES_PER_CYCLE * std::f32::consts::TAU;
+        animal.wants_yaw + WEAVE * close * turns.sin()
+    } else {
+        animal.wants_yaw
+    };
     if airborne_bird {
         let speed = animal.velocity.0.hypot(animal.velocity.2);
         let rate_cap = (AIR_TURN_ACCEL / speed.max(MIN_AIRSPEED)).min(AIR_TURN_MOST);
-        let delta = (animal.wants_yaw - animal.yaw).rem_euclid(std::f32::consts::TAU);
+        let delta = (aim - animal.yaw).rem_euclid(std::f32::consts::TAU);
         let delta = if delta > std::f32::consts::PI { delta - std::f32::consts::TAU } else { delta };
         let desired = (delta * AIR_TURN_GAIN).clamp(-rate_cap, rate_cap);
         let roll = AIR_ROLL * dt;
@@ -9124,6 +9271,14 @@ fn walk(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
     // that in one line, without a second physics mode to keep in step
     // with the walking one. Everything else about it -- the collision,
     // the turning, the speed -- is the same code every animal uses.
+    // **A bird on its feet is not half way through a glide.** The cycle
+    // clock is reset while it is standing, so the next take-off begins at
+    // the bottom of a climb rather than wherever the last flight left off --
+    // a gull that leapt off the sand already sinking is a gull that falls
+    // back onto it. See `Animal::air_phase`.
+    if animal.on_ground {
+        animal.air_phase = 0.0;
+    }
     let ground_below = animal.species.flies().then(|| {
         // The ground under it and, while it is travelling, the ground it is
         // about to be over: see `flight_floor` for the canopy this stops it
@@ -9137,7 +9292,7 @@ fn walk(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
         // loaded. A cruise under where it is holds a flight level and lets a
         // bird with nowhere to be glide down.
         let cruise = if animal.species.soars() { SOAR_HEIGHT } else { FLIGHT_HEIGHT };
-        flight_floor(world, animal).unwrap_or(animal.at().1 - cruise)
+        flight_floor(world, animal).unwrap_or((animal.at().1 - cruise, 0.0))
     });
     // Airborne while it is frightened, and **still flying while it comes
     // down**: the target drops to the ground when the fright passes and
@@ -9146,8 +9301,8 @@ fn walk(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
     // half blocks of fall on three points of health -- which is a bird
     // that dies of having been startled.
     let aloft = matches!(animal.mind, Mind::Flee | Mind::Homing | Mind::Soar);
-    let flying = ground_below.is_some_and(|ground| aloft || animal.at().1 > ground + 0.2);
-    if let (true, Some(ground)) = (flying, ground_below) {
+    let flying = ground_below.is_some_and(|(ground, _)| aloft || animal.at().1 > ground + 0.2);
+    if let (true, Some((ground, slope))) = (flying, ground_below) {
         // A journey is flown over the higher of what is under the bird
         // and what it is going to land on -- see `Animal::flight_ceiling`
         // for the bird that arrived under its own tree every time. A
@@ -9169,10 +9324,26 @@ fn walk(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
             }
             _ => f32::INFINITY,
         };
+        // **The climb and the glide, and what the hill gives.** See
+        // `AIR_CYCLE`: the height a bird holds breathes about its cruise, so
+        // it is always either going up or coming down, and it is handed the
+        // rise in the ground ahead for nothing. The clock runs only while it
+        // is up here, which is what makes a take-off the start of a climb.
+        //
+        // The cycle is kept off a bird that is coming in to land -- `glide`
+        // is finite only then -- because a landing approach that bobbed
+        // would be a bird that could not find the branch.
+        animal.air_phase = (animal.air_phase + dt).rem_euclid(AIR_CYCLE);
+        let ride = SLOPE_LIFT * slope
+            + if glide.is_finite() {
+                0.0
+            } else {
+                CYCLE_LIFT * (animal.air_phase / AIR_CYCLE * std::f32::consts::TAU).sin()
+            };
         let (wanted, landing_on) = if diving {
             (floor + DIVE_SKIM, floor)
         } else if aloft {
-            (floor + cruise.min(glide), floor)
+            (floor + cruise.min(glide) + ride, floor)
         } else {
             (ground, ground)
         };
@@ -9195,7 +9366,14 @@ fn walk(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
         // which on a landing is nothing.
         if airborne_bird {
             let speed = animal.velocity.0.hypot(animal.velocity.2);
-            let target = if height > FLARE_HEIGHT { wanted_speed.max(MIN_AIRSPEED) } else { wanted_speed };
+            // **Height is speed, and it is traded both ways**: see
+            // `SPEED_PER_SINK`. A sinking bird is going faster than its mind
+            // asked for and a climbing one slower, which is why the same
+            // bird crossing the same bay is never at the same speed twice.
+            // Not through the flare, where what the wings are doing is
+            // stopping.
+            let traded = -animal.velocity.1 * SPEED_PER_SINK;
+            let target = if height > FLARE_HEIGHT { (wanted_speed + traded).max(MIN_AIRSPEED) } else { wanted_speed };
             let speed = (speed + (target - speed).clamp(-WING_ACCEL * dt, WING_ACCEL * dt)).max(0.0);
             let (sin, cos) = animal.yaw.sin_cos();
             // Toward that, by no more than a wing and a bank can pull in a
@@ -9216,7 +9394,11 @@ fn walk(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
             // **Lift comes from going.** A wing climbs in proportion to the
             // air going over it; a bird that rose at seven blocks a second
             // from a standstill went straight up like a lift.
-            let rise = rise.min(CLIMB_BASE + across * CLIMB_PER_SPEED);
+            // ...and the air going up a hillside is a climb the wings do not
+            // have to pay for, which is what tops a ridge with room. See
+            // `SLOPE_CLIMB`. Held under `FLIGHT_SPEED`, which is the fastest
+            // anything in this world goes up.
+            let rise = (rise.min(CLIMB_BASE + across * CLIMB_PER_SPEED) + slope * SLOPE_CLIMB).min(FLIGHT_SPEED);
             let sink = if height < FLARE_HEIGHT {
                 LANDING_SINK
             } else {
@@ -15994,6 +16176,153 @@ mod tests {
         let nobody = |_| (-30.0, 21.0, 60.0);
         let soared = check(&shore_world, &mut gulls, &[gull], &nobody, 2400);
         assert!(soared > 500, "the gull was only in the air for {soared} ticks");
+    }
+
+    #[test]
+    fn no_bird_ends_up_inside_a_block_over_five_simulated_minutes() {
+        // **The promise everything above is allowed to move within.** The
+        // climb-and-glide, the slope's lift, the traded speed and the weave
+        // all push a bird off the line it used to fly, and every one of them
+        // is a new way to end up inside a crown or under the sand. Five
+        // minutes of each, at every tick, for the two species that fly --
+        // and with the ground deliberately made of the things they fly into:
+        // a wood for the covey, a cliff and a sea stack for the gull.
+        let check = |world: &TestWorld, animals: &mut Animals, ids: &[EntityId], walker: &dyn Fn(usize) -> (f32, f32, f32)| {
+            let mut aloft = 0;
+            for tick in 0..6000 {
+                animals.step(world, &player(walker(tick)), 0.05, NOON);
+                for &id in ids {
+                    let Some(bird) = animals.find(id) else { continue };
+                    assert!(
+                        fits(world, primitive_shared::geometry::wide(bird.at()), bird.species),
+                        "tick {tick}: a {} is inside a block at {:?}",
+                        bird.species.name(),
+                        bird.at()
+                    );
+                    if !bird.on_ground {
+                        aloft += 1;
+                    }
+                }
+            }
+            aloft
+        };
+
+        let wood = wood(40);
+        let mut animals = Animals::seeded(91);
+        let covey: Vec<EntityId> = (0..3)
+            .map(|i| animals.spawn(Species::Fowl, (i as f32 * 1.5, 21.0, 0.5)).expect("bird"))
+            .collect();
+        // Walked round and through, so the covey is flushed again and again
+        // and spends the five minutes crossing the trees rather than sitting.
+        let walker = |tick: usize| {
+            let t = tick as f32 * 0.05;
+            let radius = if (t as usize / 8).is_multiple_of(2) { 12.0 } else { 3.0 };
+            (radius * (t * 0.36).cos(), 21.0, radius * (t * 0.36).sin())
+        };
+        let flown = check(&wood, &mut animals, &covey, &walker);
+        assert!(flown > 300, "the covey was only off the ground for {flown} bird-ticks");
+
+        let shore = shore(40);
+        for z in -40..=40 {
+            for x in -12..=-10 {
+                for y in 21..33 {
+                    shore.put(x, y, z, BLOCK_STONE);
+                }
+            }
+        }
+        for x in 6..9 {
+            for z in -2..2 {
+                for y in 15..34 {
+                    shore.put(x, y, z, BLOCK_STONE);
+                }
+            }
+        }
+        let mut gulls = Animals::seeded(92);
+        let flock: Vec<EntityId> = (0..3)
+            .map(|i| gulls.spawn(Species::Gull, (-3.5 + i as f32, 21.0, 0.5)).expect("a gull"))
+            .collect();
+        for &id in &flock {
+            gulls.find_mut_for_test(id).expect("gull").home = Some((0.0, 0.0));
+        }
+        let nobody = |_: usize| (-30.0, 21.0, 60.0);
+        let soared = check(&shore, &mut gulls, &flock, &nobody);
+        assert!(soared > 3000, "the flock was only off the ground for {soared} bird-ticks");
+    }
+
+    #[test]
+    fn a_flock_of_gulls_keeps_a_loose_formation() {
+        // **Together, and not in a line.** Two failures are being held off at
+        // once and they pull opposite ways: a flock whose birds each keep
+        // their own circle over their own patch drifts apart until it is six
+        // gulls who happen to share a beach, and a flock that all aims at one
+        // point is a heap of boxes in the same cubic metre. What is wanted is
+        // the middle -- they share a centre (`seabird`) and no two of them
+        // share a line, because each flies its own radius and its own hand
+        // (`circling`).
+        let world = shore(40);
+        let mut animals = Animals::seeded(93);
+        let flock: Vec<EntityId> = (0..5)
+            .map(|i| animals.spawn(Species::Gull, (-4.5 + i as f32 * 1.5, 21.0, 0.5)).expect("a gull"))
+            .collect();
+        for &id in &flock {
+            let gull = animals.find_mut_for_test(id).expect("gull");
+            gull.home = Some((0.0, 0.0));
+            gull.mind = Mind::Soar;
+            gull.bound_for = Some((0.0, 0.0));
+        }
+        let nobody = player((-30.0, 21.0, 60.0));
+        let (mut widest, mut closest) = (0.0f32, f32::MAX);
+        // The mean gap over the first minute and over the last, which is the
+        // question "is it still a flock": a flock that is quietly dispersing
+        // passes every instant and fails this.
+        let (mut early, mut early_n, mut late, mut late_n) = (0.0f32, 0u32, 0.0f32, 0u32);
+        let mut headings_spread = 0.0f32;
+        for tick in 0..3600 {
+            animals.step(&world, &nobody, 0.05, NOON);
+            if tick % 20 != 0 {
+                continue;
+            }
+            let birds: Vec<(f32, f32, f32)> = flock
+                .iter()
+                .filter_map(|&id| animals.find(id))
+                .map(|gull| (gull.at().0, gull.at().2, gull.yaw))
+                .collect();
+            assert_eq!(birds.len(), flock.len(), "tick {tick}: the flock lost a bird");
+            for (i, a) in birds.iter().enumerate() {
+                for b in &birds[i + 1..] {
+                    let gap = (a.0 - b.0).hypot(a.1 - b.1);
+                    widest = widest.max(gap);
+                    closest = closest.min(gap);
+                    if tick < 1200 {
+                        early += gap;
+                        early_n += 1;
+                    } else if tick >= 2400 {
+                        late += gap;
+                        late_n += 1;
+                    }
+                }
+            }
+            // How spread the headings are: the length of the mean facing is
+            // one when every bird points the same way and nought when they
+            // are all round the compass.
+            let (sx, sz) = birds.iter().fold((0.0, 0.0), |(sx, sz), b| (sx + b.2.cos(), sz + b.2.sin()));
+            headings_spread = headings_spread.max(1.0 - (sx / 5.0f32).hypot(sz / 5.0));
+        }
+        let (early, late) = (early / early_n as f32, late / late_n as f32);
+        println!(
+            "flock of five: widest {widest:.1}, closest {closest:.2}, mean gap {early:.1} -> {late:.1}, heading spread {headings_spread:.2}"
+        );
+        // **Together**: a gull's whole range is `GULL_RANGE` of its shore and
+        // the circles are laid over one another, so the average pair is a
+        // circle's width apart and not a coast's.
+        assert!(late < GULL_RANGE, "the flock averaged {late:.1} blocks apart -- that is a coastline, not a flock");
+        // ...and it is not quietly coming undone: the last minute is no
+        // wider than the first, give or take a circle.
+        assert!(late < early + SOAR_RADIUS, "the flock spread from {early:.1} to {late:.1} blocks apart");
+        // **Loose**: several blocks between them on average, never all on one
+        // heading, and never stacked in one cell.
+        assert!(late > 3.0, "the flock flew as one bird: a mean gap of {late:.1} blocks");
+        assert!(headings_spread > 0.3, "every gull in the flock flew the same heading");
     }
 
     /// What `a_bird_in_flight_never_jerks_pivots_or_falls` keeps of a tick.

@@ -17369,13 +17369,13 @@ pub(crate) mod offscreen_repro {
             (false, 4..=5) if (18..20).contains(&x) && (26..29).contains(&z) => BLOCK_STONE,
             _ => BLOCK_AIR,
         });
-        let mut gull = |feet: Vec3, yaw: f32, speed: f32, walked: f32| {
+        let mut gull = |feet: Vec3, yaw: f32, speed: f32, beat: f32| {
             let (mut v, mut i) = (Vec::new(), Vec::new());
             crate::logic::animal_model::build(
                 Species::Gull,
                 feet + Vec3::new(0.0, Species::Gull.height() * 0.5, 0.0),
                 yaw,
-                crate::logic::animal_model::Motion { walked, speed, ..Default::default() },
+                crate::logic::animal_model::Motion { walked: beat, speed, beat, ..Default::default() },
                 &layers,
                 (15, 0),
                 &mut v,
@@ -17385,9 +17385,9 @@ pub(crate) mod offscreen_repro {
             beach.extend(v);
             beach_indices.extend(i.iter().map(|index| index + base));
         };
-        // Six tenths of a beat to the block (`animal_model::WINGBEATS_PER_BLOCK`):
-        // a quarter of a beat in is the top of it, three quarters the bottom.
-        let (top_of_beat, bottom_of_beat) = (0.25 / 0.6, 0.75 / 0.6);
+        // The phase is in whole beats now (`animal_model::Motion::beat`), so
+        // a quarter is the top of one and three quarters the bottom.
+        let (top_of_beat, bottom_of_beat) = (0.25, 0.75);
         gull(Vec3::new(14.5, 4.0, 20.5), 0.4, 0.0, 0.0);
         gull(Vec3::new(16.2, 4.0, 22.4), 2.2, 0.0, 0.0);
         gull(Vec3::new(12.8, 4.0, 23.0), -0.8, 1.2, 0.6);
@@ -17470,6 +17470,198 @@ pub(crate) mod offscreen_repro {
             println!("{name}: {alive} critters");
         }
         println!("gull and small-life pictures in {dir}");
+    }
+
+    /// **The four moments of a flight**, through the real shaders: a bird
+    /// pushing off and beating hard, one banked round a circle, one gliding
+    /// down on held wings, and one flaring onto a branch with its tail fanned
+    /// and its feet out.
+    ///
+    /// ```text
+    /// GPU_REPRO_DIR=C:/abs/shots/birds cargo test -p primitive_client --lib \
+    ///     what_a_bird_in_flight_looks_like -- --ignored --nocapture
+    /// ```
+    ///
+    /// **Posed from the numbers the client would have measured**, not from
+    /// hand-picked angles: each row is a speed across, a rise and a turn, and
+    /// everything the model does with them -- the bank, the pitch, the beat,
+    /// the tail, the legs -- is worked out by `animal_model::build` exactly
+    /// as it is for an animal arriving on a snapshot. A picture drawn from
+    /// angles chosen here would prove that the boxes can be put in those
+    /// positions, which was never in doubt; this proves the flight puts them
+    /// there.
+    #[test]
+    #[ignore = "a tool: needs a GPU; writes pictures of birds in flight to GPU_REPRO_DIR"]
+    fn what_a_bird_in_flight_looks_like() {
+        let Some((device, queue)) = gpu() else {
+            println!("no GPU adapter on this machine; skipping");
+            return;
+        };
+        let Ok(dir) = std::env::var("GPU_REPRO_DIR") else {
+            println!("set GPU_REPRO_DIR to keep the pictures");
+            return;
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
+        let textures = TextureManager::load(device, queue, assets, 16).expect("textures load");
+        let layers = textures.face_layers();
+        use primitive_shared::animals::Species;
+        use primitive_shared::types::{
+            BlockId, Chunk, ChunkPos, BLOCK_AIR, BLOCK_GRASS, BLOCK_LEAVES, BLOCK_LOG, BLOCK_SAND,
+            BLOCK_STONE, BLOCK_WATER, CHUNK_SIZE_X, CHUNK_SIZE_Z, CHUNK_VOLUME,
+        };
+        use primitive_shared::lighting::LightMap;
+        use crate::logic::chunk_manager::ChunkManager;
+
+        // Sand to x = 24, the sea past it, and a lone tree on the dune for
+        // something to land on.
+        let cell = |x: i32, y: usize, z: i32| -> BlockId {
+            let trunk = x == 12 && z == 20;
+            let crown = (10..=14).contains(&x) && (18..=22).contains(&z);
+            match (x >= 24, y) {
+                (_, 0) => BLOCK_STONE,
+                (false, 1..=3) => BLOCK_SAND,
+                (true, 1) => BLOCK_SAND,
+                (true, 2..=3) => BLOCK_WATER,
+                (false, 4) if !crown => BLOCK_GRASS,
+                (false, 4..=7) if trunk => BLOCK_LOG,
+                (false, 8..=10) if crown => BLOCK_LEAVES,
+                _ => BLOCK_AIR,
+            }
+        };
+        let mut chunks = ChunkManager::new(4);
+        for cx in 0..3 {
+            for cz in 0..3 {
+                let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        for y in 0..12 {
+                            blocks[Chunk::index(lx, y, lz)] = cell(
+                                cx * CHUNK_SIZE_X as i32 + lx as i32,
+                                y,
+                                cz * CHUNK_SIZE_Z as i32 + lz as i32,
+                            );
+                        }
+                    }
+                }
+                chunks.insert(Chunk { pos: ChunkPos::new(cx, cz), blocks });
+            }
+        }
+        let mut light = LightMap::new();
+        for cx in 0..3 {
+            for cz in 0..3 {
+                light.load_chunk(&chunks, ChunkPos::new(cx, cz));
+            }
+        }
+        let (mut terrain, mut terrain_indices) = (Vec::new(), Vec::new());
+        for cx in 0..3 {
+            for cz in 0..3 {
+                let pos = ChunkPos::new(cx, cz);
+                let mut cache = crate::engine::mesh::Neighbourhood::default();
+                cache.fill(pos, &chunks, &light);
+                let mut mesh = crate::engine::mesh::MeshBuffers::default();
+                crate::engine::mesh::build_mesh(pos, &cache, &layers, &primitive_shared::worldgen::WorldGen::new(0), &mut mesh);
+                let base = terrain.len() as u32;
+                for mut vertex in mesh.vertices.iter().copied() {
+                    vertex.position[0] += (cx * CHUNK_SIZE_X as i32) as f32;
+                    vertex.position[2] += (cz * CHUNK_SIZE_Z as i32) as f32;
+                    terrain.push(vertex);
+                }
+                terrain_indices.extend(mesh.indices.iter().map(|i| i + base));
+            }
+        }
+        let sky = wgpu::Color { r: 0.62, g: 0.74, b: 0.9, a: 1.0 };
+
+        // species, centre, yaw, speed across, rise, turn, beat
+        let bird = |species: Species, at: Vec3, yaw: f32, speed: f32, rise: f32, turning: f32, beat: f32| {
+            let (mut v, mut i) = (Vec::new(), Vec::new());
+            crate::logic::animal_model::build(
+                species,
+                at,
+                yaw,
+                crate::logic::animal_model::Motion {
+                    walked: beat,
+                    speed,
+                    rise,
+                    beat,
+                    turning,
+                    ..Default::default()
+                },
+                &layers,
+                (15, 0),
+                &mut v,
+                &mut i,
+            );
+            (v, i)
+        };
+        // Each picture is the terrain plus one or two birds, so nothing in it
+        // hides the pose being looked at.
+        /// A bird in a scene: what it is, where, its facing, its speed
+        /// across, its rise, how fast it is turning, and where it is in its
+        /// beat. Named so the table below reads as rows rather than as a
+        /// tuple nobody can count the fields of.
+        type Flier = (Species, Vec3, f32, f32, f32, f32, f32);
+        let scenes: [(&str, Vec<Flier>, Vec3, Vec3); 5] = [
+            // Off the sand and climbing: nose up, wings at the top of a hard
+            // beat, legs just drawn in.
+            (
+                "take_off",
+                vec![(Species::Gull, Vec3::new(18.0, 6.6, 20.0), 0.6, 4.5, 3.2, 0.0, 0.26)],
+                Vec3::new(15.6, 6.9, 17.6),
+                Vec3::new(18.0, 6.7, 20.0),
+            ),
+            // Circling: three gulls on one wheel, each banked into its own
+            // turn, which is the shot that says "bank" and not "lean".
+            (
+                "circling",
+                vec![
+                    (Species::Gull, Vec3::new(20.0, 11.0, 18.0), 1.2, 6.0, 0.9, 1.5, 0.4),
+                    (Species::Gull, Vec3::new(26.0, 12.4, 23.0), 2.6, 6.4, -0.6, 1.1, 4.7),
+                    (Species::Gull, Vec3::new(23.0, 10.2, 27.0), 4.1, 5.6, 0.4, -1.3, 8.2),
+                ],
+                Vec3::new(17.0, 10.0, 15.0),
+                Vec3::new(23.0, 11.3, 22.5),
+            ),
+            // Gliding down: wings held out and still, nose down, legs up.
+            (
+                "gliding",
+                vec![(Species::Gull, Vec3::new(28.0, 9.0, 20.0), 3.3, 6.2, -2.4, 0.2, 6.0)],
+                Vec3::new(25.6, 9.6, 17.6),
+                Vec3::new(28.0, 9.0, 20.0),
+            ),
+            // The flare onto the crown of the tree: reared, tail fanned, feet
+            // out in front. The one a player sees closest.
+            (
+                "landing",
+                vec![(Species::Fowl, Vec3::new(15.4, 12.2, 20.0), 3.1, 3.0, -0.9, -0.3, 2.2)],
+                Vec3::new(17.8, 12.6, 17.8),
+                Vec3::new(15.4, 12.1, 20.0),
+            ),
+            // ...and the four of them together, from where a player stands.
+            (
+                "from_the_beach",
+                vec![
+                    (Species::Gull, Vec3::new(18.0, 6.6, 20.0), 0.6, 4.5, 3.2, 0.0, 0.26),
+                    (Species::Gull, Vec3::new(26.0, 12.4, 23.0), 2.6, 6.4, -0.6, 1.1, 4.7),
+                    (Species::Gull, Vec3::new(28.0, 9.0, 20.0), 3.3, 6.2, -2.4, 0.2, 6.0),
+                    (Species::Fowl, Vec3::new(15.4, 12.2, 20.0), 3.1, 3.0, -0.9, -0.3, 2.2),
+                ],
+                Vec3::new(11.0, 7.5, 27.0),
+                Vec3::new(22.0, 10.0, 21.0),
+            ),
+        ];
+        for (name, birds, eye, at) in scenes {
+            let (mut v, mut i) = (terrain.clone(), terrain_indices.clone());
+            for (species, centre, yaw, speed, rise, turning, beat) in birds {
+                let (bv, bi) = bird(species, centre, yaw, speed, rise, turning, beat);
+                let base = v.len() as u32;
+                v.extend(bv);
+                i.extend(bi.iter().map(|index| index + base));
+            }
+            let picture = draw_with_particles(device, queue, &textures, &v, &i, &[], &[], eye, at, sky, None);
+            let _ = picture.save(format!("{dir}/{name}.png"));
+        }
+        println!("bird-flight pictures in {dir}");
     }
 
     /// `draw_terrain_lit`'s scene with the particle pass over it, drawn the
