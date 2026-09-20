@@ -555,6 +555,12 @@ fn run(
         settings.vsync,
         settings.anisotropy,
         settings.msaa,
+        // A constructor argument rather than a setter, unlike the sky
+        // and the interface below: it decides how big the swapchain is
+        // made, and setting it afterwards would build one swapchain and
+        // every size-derived target twice on the slowest few seconds
+        // the game has.
+        settings.resolution_scale,
         settings.lighting,
     ))
     .map_err(|e| anyhow::anyhow!("graphics could not start: {e}"))?;
@@ -594,12 +600,24 @@ fn run(
     // on -- this device is 2712x1220, which is more pixels than 1080p.
     // A frame time without it beside it cannot be compared with
     // anything.
+    //
+    // Both sizes, because on a phone they differ and the difference is
+    // the first question a frame time raises: the window is what the
+    // screen has, the frame is what was drawn, and the scale between
+    // them may have been chosen by the game rather than by the player
+    // (see `ClientSettings::resolution_scale`). A phone cannot be
+    // driven and cannot be asked, so the line in `adb logcat` is the
+    // only place the choice is visible at all.
     let size = graphics.size;
+    let drawn = graphics.render_size();
     println!(
-        "surface: {}x{} ({:.1} Mpx)",
+        "surface: window {}x{}, drawn {}x{} ({:.1} Mpx) at {:.0}% resolution",
         size.width,
         size.height,
-        (size.width as f32 * size.height as f32) / 1.0e6,
+        drawn.width,
+        drawn.height,
+        (drawn.width as f32 * drawn.height as f32) / 1.0e6,
+        graphics.resolution_scale() * 100.0,
     );
 
     // Sound. After the graphics rather than before, so the two startup
@@ -5804,7 +5822,12 @@ fn run(
                         chunk_bytes: counted_bytes.0,
                         light_bytes: counted_bytes.1,
                         arena_bytes: graphics.arena_usage(),
-                        surface: (graphics.size.width, graphics.size.height),
+                        // The size the frame is *drawn* at, not the
+                        // window: every millisecond on this line is a
+                        // millisecond per those pixels, and on a phone
+                        // drawing at seven tenths the two differ by
+                        // half the area.
+                        surface: (graphics.render_size().width, graphics.render_size().height),
                         anisotropy: settings.anisotropy,
                         // What the pass is drawn at, not the setting:
                         // an adapter without the asked-for count runs
@@ -11090,6 +11113,10 @@ fn apply_settings(
     camera.fov_y_radians = settings.fov_degrees.to_radians();
     graphics.set_vsync(settings.vsync);
     graphics.set_anisotropy(settings.anisotropy);
+    // Before the sky, which is sized as a fraction of the frame: this
+    // one changes what the frame *is*, and applying it second would
+    // build the sky target for the old size and then again for the new.
+    graphics.set_resolution_scale(settings.resolution_scale);
     graphics.set_sky_scale(settings.sky_scale);
     graphics.set_ui_scale(settings.ui_scale);
     // Before the shadows: a step change rebuilds a shadow map that is

@@ -994,7 +994,45 @@ pub struct GraphicsState {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    /// The window, in the pixels the platform hands out: where a touch
+    /// lands, what a thumb's 44 dp is measured against, and what the
+    /// interface's aspect ratio comes from.
+    ///
+    /// **Not the size of the frame**, which is `config` and may be
+    /// smaller -- see `resolution_scale`. Keeping the two apart is the
+    /// whole of the reason a scaled frame does not move every button
+    /// away from the finger aiming at it: the interface is laid out and
+    /// hit-tested in this one, and only the pixels are drawn in the
+    /// other.
     pub size: crate::platform::Size,
+    /// What share of `size` the frame is drawn at, as the *setting*
+    /// says it -- `None` being "decide from the screen".
+    ///
+    /// **Kept as the setting rather than as the number it works out
+    /// to**, and that is an Android bug that was written and then
+    /// found. Android does not know how big the window is when the
+    /// game starts: the activity hands a surface over later, and the
+    /// size at construction is a placeholder. Resolving the automatic
+    /// choice once, there, froze it at the placeholder's answer -- full
+    /// resolution -- and the setting then did nothing at all on the one
+    /// platform it exists for. Resolved on demand, every `resize` and
+    /// every `recreate_surface` asks again with a size that is by then
+    /// real. See `ClientSettings::resolution_scale` for the
+    /// measurement.
+    resolution_setting: Option<f32>,
+    /// The texture the whole frame is drawn into when it is drawn
+    /// smaller than the window, and the bind group that reads it back
+    /// out -- `None` at full size, where every pass draws straight into
+    /// the swapchain exactly as it always did.
+    ///
+    /// **`None` is not an optimisation, it is the guarantee**: a
+    /// desktop at 100% takes byte for byte the code path it took before
+    /// this existed, so the setting cannot cost anything to a player
+    /// who never touches it.
+    scene: Option<(wgpu::TextureView, wgpu::BindGroup)>,
+    /// Stretches `scene` back over the window. See `surface_config` for
+    /// why the frame is copied rather than the swapchain shrunk.
+    scene_blit_pipeline: wgpu::RenderPipeline,
 
     chunk_pipeline: wgpu::RenderPipeline,
     /// Leaves: the only geometry whose shader may `discard`.
@@ -1746,11 +1784,18 @@ impl GraphicsState {
         vsync: bool,
         anisotropy: u16,
         msaa: u32,
+        // `None` is the automatic choice, and it is resolved here
+        // rather than by the caller because here is the first place
+        // that knows how big the window turned out to be -- on Android
+        // nobody knows that until the activity hands one over.
+        resolution_scale: Option<f32>,
         // Compiled in from the start rather than switched to after, so a
         // desktop that opens on Balanced compiles its shaders once.
         lighting: crate::engine::lighting::Quality,
     ) -> anyhow::Result<Self> {
         let size = size.non_zero();
+        let resolution_setting = resolution_scale;
+        let drawn = render_size(size, scale_for(resolution_setting, size));
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             // Everything the machine has. On Android that is Vulkan on
@@ -1834,8 +1879,15 @@ impl GraphicsState {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::COPY_SRC,
             format: surface_format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            // **The size the game draws at, which is not the size the
+            // swapchain is.** Everything sized off this config -- the
+            // depth buffer, the multisample target, the sky, the
+            // viewport -- is sized off the frame, and the swapchain
+            // alone is configured to the window (`configure_surface`).
+            // See `GraphicsState::scene` for the measurement that
+            // forced the two apart.
+            width: drawn.width.max(1),
+            height: drawn.height.max(1),
             // FIX: the `vsync` setting used to be parsed and then ignored.
             present_mode: choose_present_mode(vsync, &surface_caps.present_modes),
             alpha_mode: surface_caps.alpha_modes[0],
@@ -1849,7 +1901,7 @@ impl GraphicsState {
             // the other half of the same fix.
             desired_maximum_frame_latency: 1,
         };
-        surface.configure(&device, &config);
+        surface.configure(&device, &surface_config(&config, size));
 
         // Asked of the adapter, not assumed: the counts a card offers
         // differ by format, and a pipeline built for a count the depth
@@ -2117,6 +2169,50 @@ impl GraphicsState {
             multiview: None,
         });
 
+        // The frame itself, stretched over the window -- the same three
+        // vertices and the same shader as the sky's, and everything a
+        // finished frame does not need taken off: no depth attachment
+        // (it is the last thing drawn and it covers everything), and
+        // one sample (the swapchain never multisamples; the resolve
+        // already happened into the scene texture).
+        //
+        // Built whether or not the resolution is scaled, because a
+        // pipeline is a compile and a player who turns the row down
+        // mid-game should not pay for one at the moment they do it.
+        let scene_blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene blit pipeline"),
+            layout: Some(&sky_blit_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &sky_blit_shader,
+                entry_point: "vs_blit",
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &sky_blit_shader,
+                entry_point: "fs_blit",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        // Built here rather than in the struct literal, where `device`
+        // has already been moved into it.
+        let scene = create_scene_target(&device, &config, size, &sky_blit_layout, &sky_blit_sampler);
+
         // The skin rides at group 1, in the *same* layout the chunk pass
         // uses for the block array -- one texture, one sampler, both
         // arrayed. Reusing the layout rather than declaring a second
@@ -2320,8 +2416,11 @@ impl GraphicsState {
             ui_scale: 1.0,
             device,
             queue,
+            scene,
+            scene_blit_pipeline,
             config,
             size,
+            resolution_setting,
             chunk_pipeline,
             cutout_pipeline,
             item_pipeline,
@@ -2799,8 +2898,51 @@ impl ShadowPass<'_> {
 }
 
 impl GraphicsState {
+    /// The shape of the window, which is the shape the interface is laid
+    /// out in and hit-tested against.
+    ///
+    /// **The window's, not the swapchain's.** They are the same number
+    /// until `resolution_scale` is turned down, and then they differ by
+    /// the rounding in `render_size` -- less than a pixel in a thousand,
+    /// but the interface must be hit-tested in the exact space it is
+    /// drawn in (see `widgets::Layout`), and the space a finger arrives
+    /// in is the window's.
     pub fn aspect(&self) -> f32 {
-        self.config.width.max(1) as f32 / self.config.height.max(1) as f32
+        self.size.width.max(1) as f32 / self.size.height.max(1) as f32
+    }
+
+    /// How big the frame is really drawn -- the number every fill-rate
+    /// figure in the F3 line is *per*.
+    pub fn render_size(&self) -> crate::platform::Size {
+        crate::platform::Size::new(self.config.width, self.config.height)
+    }
+
+    /// The share of the window's pixels in force, which is not the
+    /// setting when the setting is the automatic choice.
+    pub fn resolution_scale(&self) -> f32 {
+        scale_for(self.resolution_setting, self.size)
+    }
+
+    /// Draw the frame at `scale` of the window from now on.
+    ///
+    /// `None` asks for the automatic choice, which is made from the
+    /// size of the window this game actually woke up in -- on Android
+    /// that is not known until the activity hands over a surface, which
+    /// is well after the settings file has been read.
+    pub fn set_resolution_scale(&mut self, scale: Option<f32>) {
+        // Bit-exact rather than a tolerance, and on what the frame
+        // would come out as rather than on the setting: this runs every
+        // time the settings are applied, a reconfigure is a swapchain
+        // rebuild, and a visible hitch is a lot to pay for a change of
+        // nothing. Stepping from AUTO to the share AUTO had chosen is
+        // exactly that change of nothing.
+        if scale_for(scale, self.size).to_bits() == self.resolution_scale().to_bits() {
+            self.resolution_setting = scale;
+            return;
+        }
+        self.resolution_setting = scale;
+        let window = self.size;
+        self.resize(window);
     }
 
     /// How long the GPU spent on the last measured render pass, in
@@ -2839,7 +2981,13 @@ impl GraphicsState {
             return;
         }
         self.config.present_mode = wanted;
-        self.surface.configure(&self.device, &self.config);
+        // The window's size, not the frame's: `self.config` carries
+        // what the game draws at, and the swapchain is always the
+        // window. Handing the config straight over here is the bug that
+        // would show up only for a player who changes vsync while the
+        // resolution row is turned down -- see `surface_config`.
+        self.surface
+            .configure(&self.device, &surface_config(&self.config, self.size));
     }
 
     /// How much bigger the interface is drawn than it is authored.
@@ -2900,9 +3048,18 @@ impl GraphicsState {
         let size = size.non_zero();
         self.surface = self.instance.create_surface(target)?;
         self.size = size;
-        self.config.width = size.width;
-        self.config.height = size.height;
-        self.surface.configure(&self.device, &self.config);
+        let drawn = render_size(size, scale_for(self.resolution_setting, size));
+        self.config.width = drawn.width;
+        self.config.height = drawn.height;
+        self.surface
+            .configure(&self.device, &surface_config(&self.config, size));
+        self.scene = create_scene_target(
+            &self.device,
+            &self.config,
+            size,
+            &self.sky_blit_layout,
+            &self.sky_blit_sampler,
+        );
         // The depth buffer and the sky target are sized off the config,
         // and the new window need not be the size the old one was --
         // a phone that was rotated while the game was in the background
@@ -2920,14 +3077,25 @@ impl GraphicsState {
         Ok(())
     }
 
+    /// A new window size, in the platform's pixels. What the frame is
+    /// drawn at is that through `render_size`.
     pub fn resize(&mut self, new_size: crate::platform::Size) {
         if new_size.width == 0 || new_size.height == 0 {
             return;
         }
         self.size = new_size;
-        self.config.width = new_size.width;
-        self.config.height = new_size.height;
-        self.surface.configure(&self.device, &self.config);
+        let drawn = render_size(new_size, scale_for(self.resolution_setting, new_size));
+        self.config.width = drawn.width;
+        self.config.height = drawn.height;
+        self.surface
+            .configure(&self.device, &surface_config(&self.config, new_size));
+        self.scene = create_scene_target(
+            &self.device,
+            &self.config,
+            new_size,
+            &self.sky_blit_layout,
+            &self.sky_blit_sampler,
+        );
         self.depth_view = create_depth_view(&self.device, &self.config, self.sample_count);
         self.msaa_view = create_msaa_view(&self.device, &self.config, self.sample_count);
         self.sky_target = create_sky_target(
@@ -3450,9 +3618,17 @@ impl GraphicsState {
             .write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
 
         let output = frame.0;
-        let view = output
+        let surface_view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        // Where the frame is drawn: the scene texture when the
+        // resolution is scaled down, and the swapchain itself when it
+        // is not. Everything below this line is written once and does
+        // not know which of the two it is drawing into.
+        let view = match &self.scene {
+            Some((scene_view, _)) => scene_view,
+            None => &surface_view,
+        };
 
         let mut encoder = self
             .device
@@ -3570,14 +3746,14 @@ impl GraphicsState {
             let color_attachment = match &self.msaa_view {
                 Some(samples) => wgpu::RenderPassColorAttachment {
                     view: samples,
-                    resolve_target: Some(&view),
+                    resolve_target: Some(view),
                     ops: wgpu::Operations {
                         load: clear,
                         store: wgpu::StoreOp::Discard,
                     },
                 },
                 None => wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: clear,
@@ -4278,6 +4454,42 @@ impl GraphicsState {
             timing.resolve(&mut encoder, self.sky_target.is_some(), shadow_drawn);
         }
 
+        // The frame, stretched over the window. Last of everything,
+        // because it copies the finished picture -- interface, hand and
+        // all -- and because the swapchain is not touched by any pass
+        // before it.
+        //
+        // **One pass, three vertices, no depth**: the cost is a read of
+        // the scene texture and a write of the window, which is the
+        // price of the pixels that were never shaded. Measured on a GTX
+        // 1050 Ti, a 1600x900 window at 70%: the same frame drawn in a
+        // real 1120x630 window costs 0.407 ms of GPU time and drawn
+        // here costs 0.429, so the blit is **0.022 ms** -- against the
+        // 0.243 ms that not drawing the other half of the pixels saved.
+        if let Some((_, bind_group)) = &self.scene {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("scene blit"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Not `Clear`: the triangle covers every pixel
+                        // of the window, so clearing first is a whole
+                        // screen written twice for nothing.
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.scene_blit_pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.draw(0..3, 0..1);
+            draw_calls += 1;
+        }
+
         self.draw_calls_last_frame = draw_calls;
         self.solid_indices_last_frame = solid_indices_sent;
         self.solid_indices_in_view_last_frame = solid_indices_in_view;
@@ -4301,8 +4513,13 @@ impl GraphicsState {
                 &self.queue,
                 &output.texture,
                 self.config.format,
-                self.config.width,
-                self.config.height,
+                // The *window*, because what is read back here is the
+                // swapchain: at a scaled resolution the frame has
+                // already been stretched into it, and asking for the
+                // frame's own size would copy the top-left corner of
+                // the window and call it a screenshot.
+                self.size.width,
+                self.size.height,
                 &path,
             ) {
                 Ok(()) => println!("wrote {}", path.display()),
@@ -4591,6 +4808,77 @@ fn create_sky_target(
     Some((view, bind_group))
 }
 
+/// Whether a frame of `frame` pixels shown in a window of `window`
+/// needs a texture of its own to be drawn into.
+///
+/// Only when it is actually smaller. **The equal case is the one that
+/// matters**: it is every desktop, and answering it `true` would add a
+/// full-screen read and write to a frame that had nothing to gain from
+/// one, in the name of a setting the player left alone.
+fn scene_target_needed(frame: crate::platform::Size, window: crate::platform::Size) -> bool {
+    let window = window.non_zero();
+    frame.width < window.width || frame.height < window.height
+}
+
+/// The texture the frame is drawn into when it is smaller than the
+/// window, and the bind group the blit reads it through.
+///
+/// `None` when the frame is the window, which is every desktop at the
+/// default: then the passes draw into the swapchain directly and there
+/// is no copy at all.
+///
+/// `COPY_SRC` as well as the two it obviously needs, because
+/// `PRIMITIVE_SHOT` reads the frame back -- and on a phone, where this
+/// is the path that runs, a screenshot is the only way to see anything
+/// at all.
+fn create_scene_target(
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+    window: crate::platform::Size,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+) -> Option<(wgpu::TextureView, wgpu::BindGroup)> {
+    let frame = crate::platform::Size::new(config.width, config.height);
+    if !scene_target_needed(frame, window) {
+        return None;
+    }
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("scene target"),
+        size: wgpu::Extent3d {
+            width: config.width.max(1),
+            height: config.height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        // One. When the main pass multisamples it resolves *into* this
+        // texture, exactly as it resolves into the swapchain at full
+        // size -- see the `resolve_target` in `render`.
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: config.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("scene blit bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    });
+    Some((view, bind_group))
+}
+
 /// The sample count the main pass will actually use.
 ///
 /// `requested` is the setting; the two flag sets are what the adapter
@@ -4660,6 +4948,89 @@ fn create_msaa_view(
         view_formats: &[],
     });
     Some(texture.create_view(&wgpu::TextureViewDescriptor::default()))
+}
+
+/// The frame's configuration as the *swapchain* wants it: everything
+/// the frame is drawn with, at the size of the window.
+///
+/// **The swapchain is always the window, whatever the game draws at**,
+/// and that was not the first attempt. Configuring the swapchain itself
+/// smaller and letting the display stretch it is the trick that costs
+/// nothing when it works -- no extra pass, no extra texture, the
+/// compositor was going to scale something anyway. It was measured, in
+/// a 1600x900 window on a GTX 1050 Ti, against the same scene drawn at
+/// a real 1120x630 window:
+///
+/// ```text
+///                              gpu     solid  cutout  sky     fps
+/// 1120x630 window              0.407   0.159  0.169   0.037  1187
+/// 1120x630 swapchain in a
+///   1600x900 window            1.939   0.704  0.884   0.204   102
+/// ```
+///
+/// Three times *worse* than drawing every pixel, and the giveaway is
+/// that every pass inflated by the same factor, sky and interface
+/// included: the mismatched swapchain takes a present path that stalls
+/// about seven milliseconds a frame, the card idles, it clocks down,
+/// and everything it does afterwards is slow. Whether a phone's
+/// compositor would do better is exactly the kind of thing that cannot
+/// be checked without a phone on the desk, so it is not what ships.
+fn surface_config(
+    config: &wgpu::SurfaceConfiguration,
+    window: crate::platform::Size,
+) -> wgpu::SurfaceConfiguration {
+    let window = window.non_zero();
+    wgpu::SurfaceConfiguration {
+        width: window.width,
+        height: window.height,
+        ..config.clone()
+    }
+}
+
+/// The share of a window's pixels to draw, for a setting and the window
+/// it is being applied to.
+///
+/// `None` -- the automatic choice -- is answered here rather than
+/// remembered, so that a window which changes size (a phone rotated, or
+/// an activity handing over a real surface after starting with a
+/// placeholder) gets an answer about the window it actually has.
+fn scale_for(setting: Option<f32>, window: crate::platform::Size) -> f32 {
+    let window = window.non_zero();
+    setting.unwrap_or_else(|| {
+        crate::settings::auto_resolution_scale(window.width.saturating_mul(window.height))
+    })
+}
+
+/// How big the frame is actually drawn, for a window of `window` and a
+/// resolution scale of `scale`.
+///
+/// **Each axis rounded to the nearest whole pixel, and nothing else.**
+/// The first version of this rounded both axes down to an even number,
+/// on the theory that even extents divide nicely and scale cleanly; the
+/// test below measured what that theory cost and it was the wrong
+/// trade. 1220x2712 at 0.75 came out 914x2034 -- an aspect of 0.44936
+/// against the window's 0.44985, out by more than a pixel in a thousand
+/// -- and the divisibility it was buying was imaginary, because the sky
+/// is drawn at a *third* of the frame (`sky_scale`) and an even number
+/// is not divisible by three either.
+///
+/// Rounding to nearest leaves the aspect out by at most half a pixel
+/// on one axis. The camera and the interface are laid out against the
+/// *window's* aspect (`GraphicsState::aspect`), so what is left of that
+/// shift stretches the finished frame by a fraction of a pixel on its
+/// way to the glass, and what it does not do is move a button away from
+/// the thumb aiming at where it is drawn.
+pub(crate) fn render_size(window: crate::platform::Size, scale: f32) -> crate::platform::Size {
+    let window = window.non_zero();
+    // A scale that is not a number at all cannot reach here through the
+    // settings (see `ClientSettings::clamp`), and this is the line that
+    // would configure a swapchain with the result if one ever did.
+    if !scale.is_finite() || scale >= 1.0 {
+        return window;
+    }
+    let scale = scale.max(0.1);
+    let side = |value: u32| ((value as f32 * scale).round() as u32).max(1);
+    crate::platform::Size::new(side(window.width), side(window.height))
 }
 
 /// The main pass's depth buffer, at the pass's sample count: a
@@ -22235,6 +22606,135 @@ mod leaf_distance_repro;
 /// Water where the generator put it -- the sea, the shallows, a river, a
 /// cave lake -- from above and from under the lid. A child for the reason
 /// `lod_repro` is.
+/// What a resolution scale does to the size of the frame, and what it
+/// is not allowed to do to anything else.
+#[cfg(test)]
+mod resolution_scale {
+    use super::*;
+    use crate::platform::Size;
+    use crate::settings::RESOLUTION_SCALES;
+
+    /// The phone this was written for, in the orientation it is held in.
+    const PHONE: Size = Size {
+        width: 1220,
+        height: 2712,
+    };
+
+    #[test]
+    fn a_frame_drawn_at_seven_tenths_of_a_phone_has_about_half_the_pixels() {
+        let drawn = render_size(PHONE, 0.7);
+        let window = PHONE.width as f32 * PHONE.height as f32;
+        let frame = drawn.width as f32 * drawn.height as f32;
+        // 0.7 each way is 0.49 of the area: this is the whole reason
+        // the setting exists, and the arithmetic is worth pinning
+        // because "seven tenths" reads like seven tenths of the cost.
+        assert!(
+            (frame / window - 0.49).abs() < 0.01,
+            "{}x{} is {:.3} of the window's pixels",
+            drawn.width,
+            drawn.height,
+            frame / window,
+        );
+    }
+
+    #[test]
+    fn a_scaled_frame_keeps_the_shape_of_the_window_to_within_a_pixel_in_a_thousand() {
+        // The interface is hit-tested against the window's aspect and
+        // drawn into this one. They are not the same number -- an
+        // integer size cannot be -- and the distance between them is
+        // the distance between where a button is drawn and where it is
+        // pressed.
+        for scale in crate::settings::RESOLUTION_SCALES {
+            for window in [PHONE, Size::new(2712, 1220), Size::new(1920, 1080), Size::new(1080, 2400)] {
+                let drawn = render_size(window, scale);
+                let want = window.width as f64 / window.height as f64;
+                let got = drawn.width as f64 / drawn.height as f64;
+                assert!(
+                    (got / want - 1.0).abs() < 0.001,
+                    "{}x{} at {scale} came out {}x{}: aspect {got:.5} against {want:.5}",
+                    window.width,
+                    window.height,
+                    drawn.width,
+                    drawn.height,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_full_scale_frame_is_the_window_itself_and_not_a_rounding_of_it() {
+        // Every desktop runs this path, and an odd-sized window rounded
+        // down to an even one would be a desktop quietly losing a row
+        // of pixels to a setting it never turned on.
+        for window in [Size::new(1921, 1081), Size::new(1280, 720), Size::new(3, 7)] {
+            assert_eq!(render_size(window, 1.0), window.non_zero());
+        }
+    }
+
+    #[test]
+    fn a_window_dragged_to_nothing_still_asks_for_a_frame_the_gpu_will_accept() {
+        // A zero-sized swapchain is a validation error on every
+        // backend, and a window being dragged shut reports zeroes.
+        for scale in [0.6, 0.75, 1.0] {
+            for window in [Size::new(0, 0), Size::new(1, 1), Size::new(2, 1)] {
+                let drawn = render_size(window, scale);
+                assert!(drawn.width >= 1 && drawn.height >= 1, "{drawn:?} at {scale}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_phone_that_starts_before_it_has_a_window_still_scales_the_window_it_gets() {
+        // Android hands the surface over after the game has started,
+        // so the size at construction is a placeholder -- one pixel,
+        // or the last orientation's. Resolving AUTO once, at that
+        // moment, answered it for the placeholder and never asked
+        // again: the frame stayed at full resolution on the one
+        // platform the setting exists for, and nothing said so.
+        assert_eq!(scale_for(None, Size::new(1, 1)), 1.0, "a placeholder asks for everything");
+        assert_eq!(scale_for(None, PHONE), 0.7, "the window it actually got");
+        // Rotated, it is still 3.3 Mpx and still 0.7.
+        assert_eq!(scale_for(None, Size::new(2712, 1220)), 0.7);
+        // A player who chose a share keeps it through all of that.
+        for window in [Size::new(1, 1), PHONE, Size::new(1280, 720)] {
+            assert_eq!(scale_for(Some(0.85), window), 0.85);
+        }
+    }
+
+    #[test]
+    fn a_frame_drawn_at_full_size_is_never_copied_through_a_texture_of_its_own() {
+        // The desktop's path, and the promise the setting makes to a
+        // player who never opens the row: at 100% the frame is drawn
+        // into the swapchain and nothing else happens to it.
+        for window in [PHONE, Size::new(1920, 1080), Size::new(1280, 720), Size::new(0, 0)] {
+            let frame = render_size(window, 1.0);
+            assert!(
+                !scene_target_needed(frame, window),
+                "{window:?} at full size asked for a copy",
+            );
+        }
+        // ...and every step below it does need one, or the scaling
+        // would silently do nothing.
+        for scale in RESOLUTION_SCALES.iter().filter(|scale| **scale < 1.0) {
+            assert!(scene_target_needed(render_size(PHONE, *scale), PHONE), "at {scale}");
+        }
+    }
+
+    #[test]
+    fn a_scaled_frame_is_never_larger_than_the_window_it_is_shown_in() {
+        // Upwards is a different feature (supersampling), and arriving
+        // at it by accident on a phone would be the opposite of what
+        // this setting is for.
+        for scale in crate::settings::RESOLUTION_SCALES {
+            let drawn = render_size(PHONE, scale);
+            assert!(
+                drawn.width <= PHONE.width && drawn.height <= PHONE.height,
+                "{drawn:?} at {scale} is bigger than the window",
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "water_repro.rs"]
 mod water_repro;

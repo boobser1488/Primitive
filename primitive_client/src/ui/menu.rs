@@ -478,6 +478,14 @@ pub enum Setting {
     MasterVolume,
     MusicVolume,
     Vsync,
+    /// What share of the screen's pixels the game is drawn at.
+    ///
+    /// Directly under vsync and above every other picture row, because
+    /// it is the one that moves the frame rate most and the one a
+    /// player on a slow device should find first: everything below it
+    /// trades a *part* of the frame, and this trades all of it. See
+    /// `ClientSettings::resolution_scale`.
+    Resolution,
     Fog,
     AmbientOcclusion,
     Anisotropy,
@@ -538,7 +546,7 @@ pub enum Setting {
 
 impl Setting {
     /// Every setting on the screen, top to bottom.
-    pub const ALL: [Setting; 25] = [
+    pub const ALL: [Setting; 26] = [
         Setting::Language,
         Setting::Username,
         Setting::RenderDistance,
@@ -548,6 +556,7 @@ impl Setting {
         Setting::MasterVolume,
         Setting::MusicVolume,
         Setting::Vsync,
+        Setting::Resolution,
         Setting::Fog,
         Setting::AmbientOcclusion,
         Setting::Anisotropy,
@@ -584,6 +593,7 @@ impl Setting {
             Setting::MasterVolume => Msg::Volume,
             Setting::MusicVolume => Msg::Music,
             Setting::Vsync => Msg::Vsync,
+            Setting::Resolution => Msg::Resolution,
             Setting::Fog => Msg::Fog,
             Setting::AmbientOcclusion => Msg::AmbientOcclusion,
             Setting::Anisotropy => Msg::Anisotropy,
@@ -638,6 +648,15 @@ impl Setting {
             Setting::MasterVolume => percent_or_off(settings.master_volume, language),
             Setting::MusicVolume => percent_or_off(settings.music_volume, language),
             Setting::Vsync => on_off(settings.vsync, language),
+            // A percentage, and the word rather than a number when the
+            // game is choosing: "AUTO" is the honest label for a row
+            // whose value depends on a screen the settings file has
+            // never seen. What it came out as is in the F3 line and in
+            // the startup log, which is where a number belongs.
+            Setting::Resolution => match settings.resolution_scale {
+                Some(scale) => format!("{:.0}%", scale * 100.0),
+                None => language.text(Msg::Auto).to_string(),
+            },
             Setting::Fog => on_off(settings.fog_enabled, language),
             Setting::AmbientOcclusion => format!("{:.0}%", settings.ambient_occlusion * 100.0),
             Setting::Anisotropy => {
@@ -808,6 +827,34 @@ impl Setting {
             Setting::MasterVolume => settings.master_volume += 0.05 * d,
             Setting::MusicVolume => settings.music_volume += 0.05 * d,
             Setting::Vsync => settings.vsync = !settings.vsync,
+            // AUTO sits below the lowest share, so that stepping *left*
+            // off the bottom of the row arrives at the choice the game
+            // makes for itself rather than stopping at 60%. A player
+            // who has been trying steps by hand and wants to stop
+            // deciding can reach it the same way they reached
+            // everything else.
+            Setting::Resolution => {
+                let stops = crate::settings::RESOLUTION_SCALES;
+                // The step the row is standing on: the nearest one,
+                // because a hand-edited 0.73 must still step to a
+                // neighbour rather than jump to an end.
+                let current = settings.resolution_scale.map(|scale| {
+                    stops
+                        .iter()
+                        .enumerate()
+                        .min_by(|(_, a), (_, b)| {
+                            (*a - scale).abs().total_cmp(&(*b - scale).abs())
+                        })
+                        .map_or(stops.len() - 1, |(index, _)| index) as i32
+                });
+                // AUTO is index -1 on this row and nothing in the file.
+                let next = current.unwrap_or(-1) + delta;
+                settings.resolution_scale = if next < 0 {
+                    None
+                } else {
+                    Some(stops[(next as usize).min(stops.len() - 1)])
+                };
+            }
             Setting::Fog => settings.fog_enabled = !settings.fog_enabled,
             Setting::AmbientOcclusion => settings.ambient_occlusion += 0.05 * d,
             Setting::Anisotropy => {
@@ -6984,6 +7031,48 @@ mod tests {
         menu.apply(Action::Back);
         menu.apply(Action::OpenSettings);
         assert_eq!(menu.settings_scroll, 0);
+    }
+
+    #[test]
+    fn the_resolution_row_walks_from_automatic_up_to_every_pixel_and_back() {
+        let mut settings = ClientSettings::default();
+        // Wherever the platform starts it, held left it arrives at the
+        // game's own choice and stays there: AUTO is the bottom of the
+        // row, not a state you can only leave.
+        for _ in 0..50 {
+            Setting::Resolution.step(&mut settings, -1);
+        }
+        assert_eq!(settings.resolution_scale, None);
+        assert_eq!(
+            Setting::Resolution.value(&settings),
+            settings.language.text(Msg::Auto),
+        );
+
+        // One step right off AUTO is the lowest share, not a jump back
+        // to full size -- a player stepping away from the automatic
+        // choice is looking for the neighbouring step.
+        Setting::Resolution.step(&mut settings, 1);
+        assert_eq!(settings.resolution_scale, Some(0.6));
+
+        for _ in 0..50 {
+            Setting::Resolution.step(&mut settings, 1);
+        }
+        assert_eq!(settings.resolution_scale, Some(1.0));
+        assert_eq!(Setting::Resolution.value(&settings), "100%");
+    }
+
+    #[test]
+    fn a_hand_edited_resolution_steps_to_the_share_beside_it_rather_than_to_an_end() {
+        // A file saying 0.73 is between two steps. The row has to treat
+        // it as the nearer one, or a single press throws away a value
+        // the player typed on purpose.
+        let mut settings = ClientSettings::default();
+        settings.resolution_scale = Some(0.73);
+        Setting::Resolution.step(&mut settings, 1);
+        assert_eq!(settings.resolution_scale, Some(0.8));
+        settings.resolution_scale = Some(0.73);
+        Setting::Resolution.step(&mut settings, -1);
+        assert_eq!(settings.resolution_scale, Some(0.7));
     }
 
     #[test]
