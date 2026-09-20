@@ -422,7 +422,7 @@ const SWING: f32 = 0.8;
 /// `player_model::Pose` is one: `walked` and `speed` are both floats, the
 /// difference between them is invisible at a call site, and getting them the
 /// wrong way round is an animal that skates.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct Motion {
     /// How far this animal has gone in total, in blocks: the gait's clock,
     /// measured by the client from the snapshots it is already interpolating
@@ -444,13 +444,24 @@ pub struct Motion {
     /// place on the client that keeps anything between two frames -- this
     /// function is handed the result.
     pub head: f32,
-    /// How fast it is turning, in radians a second, positive to its left.
+    /// How fast it is turning, in radians a second, **positive to its
+    /// right** -- the way a growing yaw turns everything else in this game
+    /// (`Camera::right_horizontal`).
     ///
     /// **Measured on this client from the two facings it is easing between**
-    /// (`Entity::turning`), not sent: the server already turns the animal at
-    /// a rate the client can see, and a number that can be derived from two
-    /// that are already on the wire has no business being a third.
+    /// (`Entity::turning`) and eased there (`Entity::banked`), not sent: the
+    /// server already turns the animal at a rate the client can see, and a
+    /// number that can be derived from two that are already on the wire has
+    /// no business being a third.
     pub turning: f32,
+    /// Which way a blow throws the body: `+1` to the animal's right, `-1` to
+    /// its left. See `STAGGER_ROLL`, and `Entity::flinch_side` for where the
+    /// side comes from when the wire does not carry one.
+    ///
+    /// One by default, which is what every caller that does not care builds
+    /// -- and what the flinch did for every animal, every time, before there
+    /// was a side at all.
+    pub flinch_side: f32,
     /// Seconds this animal has been on screen.
     ///
     /// **The only thing here driven by a clock, and it has to be**, for the
@@ -480,6 +491,29 @@ pub struct Motion {
     /// snapshot (`EntityKind::Animal::tack`). Nought on every other animal and
     /// on a wild horse, which is what `Motion::default()` draws. See `tack`.
     pub tack: u8,
+}
+
+impl Default for Motion {
+    /// A full-grown animal standing still, unhurt and square to the world.
+    ///
+    /// Written out rather than derived for one field: a `flinch_side` of
+    /// nought would be a blow that threw the body nowhere, and every test
+    /// and tool that builds a struck animal from `..Default::default()`
+    /// would quietly stop testing the flinch.
+    fn default() -> Self {
+        Motion {
+            walked: 0.0,
+            speed: 0.0,
+            hurt: None,
+            head: 0.0,
+            turning: 0.0,
+            flinch_side: 1.0,
+            age: 0.0,
+            youth: 0.0,
+            fallen: 0.0,
+            tack: 0,
+        }
+    }
 }
 
 /// How long the client takes to roll a dying animal over, in seconds: a
@@ -536,7 +570,15 @@ pub const HEAD_RATE: f32 = 2.5;
 /// of that a box model can show. Scaled by how fast it is going as well as by
 /// how hard it is turning, because an animal turning on the spot is not
 /// leaning anywhere: it is pivoting.
-const LEAN_PER_TURN: f32 = 0.16;
+///
+/// **Negative, and that is the fix and not a tidy-up.** A roll takes the top
+/// of the model toward local `-x` (see `posed_local`), which is the animal's
+/// *left*; `Motion::turning` is positive when the yaw grows, which is a turn
+/// to its *right*. Multiplying the two together leant every animal in the
+/// world out of every corner it took -- a deer banking away from its turn
+/// like a car body -- which is what a player saw as "наклоняются в одну
+/// сторону": whichever way they went, the lean went the other.
+const LEAN_PER_TURN: f32 = -0.16;
 
 /// ...and how far it is allowed to go, in radians. A fifth is enough to read
 /// from thirty blocks and little enough that four feet stay on the ground.
@@ -554,6 +596,12 @@ const LEAN_MOST: f32 = 0.2;
 /// Away from the blow would need to know which side it came from, which is not
 /// on the wire. Sideways is what is left, and it is enough: what an eye reads
 /// is that the animal was moved by something, not which way.
+///
+/// **Which sideways is `Motion::flinch_side`.** It used to be the same side
+/// every time, on every animal, for every blow -- so a herd being driven all
+/// tipped one way together, and a player hitting the same deer twice watched
+/// it lean the same way twice. The side is now drawn per blow on the client
+/// that sees it (`Entity::flinch_side`); nothing new crosses the wire.
 const STAGGER_ROLL: f32 = 0.26;
 const STAGGER_SHOVE: f32 = 0.09;
 
@@ -594,6 +642,11 @@ const STANDING: f32 = 0.6;
 /// something walking without anybody choosing a second number.
 const STRIDE: f32 = 2.0;
 
+/// How much faster than `STANDING` an animal has to be going before its legs
+/// swing their full amount, in blocks a second: the shoulder on the dead
+/// zone. See the `pace` it is used in.
+const STANDING_BAND: f32 = 0.5;
+
 /// The whole model, appended to a terrain mesh.
 ///
 /// `walked` is how far this animal has gone in total and `speed` is how
@@ -630,7 +683,7 @@ pub(crate) fn build_parts(
     vertices: &mut Vec<crate::engine::mesh::Vertex>,
     indices: &mut Vec<u32>,
 ) {
-    let Motion { walked, speed, hurt, head, turning, age, youth, fallen, tack } = motion;
+    let Motion { walked, speed, hurt, head, turning, flinch_side, age, youth, fallen, tack } = motion;
     // A sheep's coat off (`horse::TACK_SHORN`), read before the byte is
     // narrowed to the horse's: it is the one bit that means something on a
     // sheep.
@@ -654,10 +707,22 @@ pub(crate) fn build_parts(
     // actually going. And the third is not here at all -- it is the
     // server refusing to let a stopped animal keep creeping, which is
     // what put it in the dead zone in the first place.
+    //
+    // **The dead zone has a shoulder on it**, and that was the second half
+    // of the twitch. A hard edge at `STANDING` meant the legs went from a
+    // third of a stride to nothing between two frames every time an animal
+    // set off or pulled up -- a snap, on the one part of the model a player
+    // is watching. Over the sixteenth of a block a second above the floor,
+    // the swing is faded in instead. Nothing creeps through: the server
+    // stops a standing animal dead (`walk`'s "an animal that has decided to
+    // stand still stands still"), so the band is crossed by something that
+    // really is setting off.
     let pace = if speed < STANDING {
         0.0
     } else {
-        (speed / 4.0).clamp(0.35, 1.0)
+        let eased = ((speed - STANDING) / STANDING_BAND).clamp(0.0, 1.0);
+        let eased = eased * eased * (3.0 - 2.0 * eased);
+        (speed / 4.0).clamp(0.35, 1.0) * eased
     };
     let swing = SWING * pace;
     let phase = walked * STRIDE;
@@ -671,12 +736,16 @@ pub(crate) fn build_parts(
     // **The flinch.** See `STAGGER_ROLL`: the number was already on the wire
     // for the red tint, and this is the body moving with the blow.
     let flash = hurt.unwrap_or(0.0);
+    // Which way this blow threw it -- see `Motion::flinch_side`. Taken as a
+    // sign rather than trusted as a number, so nothing off the wire can roll
+    // an animal further than a blow is allowed to.
+    let side = if flinch_side < 0.0 { -1.0 } else { 1.0 };
     let standing = Pose {
-        roll: lean + STAGGER_ROLL * flash,
+        roll: lean + STAGGER_ROLL * flash * side,
         // Sideways along the flinch, so the body is shoved rather than
         // pivoted on the spot. Negative because `Pose::shift` is taken *off*
         // every local point -- see its own note.
-        shift: Vec3::new(-STAGGER_SHOVE * flash, 0.0, 0.0),
+        shift: Vec3::new(-STAGGER_SHOVE * flash * side, 0.0, 0.0),
         scale: primitive_shared::youth::size(1.0 - youth),
     };
     // **Going down: from the standing pose to the carcass's**, roll and shift
@@ -2297,6 +2366,156 @@ fn placed_corners(part: &Part, swing: f32, pose: Pose) -> [Vec3; 8] {
 
 #[cfg(test)]
 mod tests {
+    /// **Every leg swings from its hip.** A box swings about its own top
+    /// unless the file names a joint (`Part::pivot`), and a leg whose joint
+    /// was left at the bottom of it -- or on the lower box of a two-part leg
+    /// -- would scuff its foot along the ground and wave its shoulder, which
+    /// is the one thing that makes a walk read as a puppet. Measured on the
+    /// drawn geometry, face against face: through a stride the sole of a leg
+    /// has to travel further than its top does.
+    #[test]
+    fn every_leg_swings_from_its_hip_and_not_from_its_foot() {
+        use crate::engine::mesh::Vertex;
+        // A box is 24 vertices in table order and its faces go +Y, -Y first
+        // (see `append_part_posed`), so face 0 is the top and face 1 the
+        // sole -- the same reading `every_paw_stays_on_the_foot_of_its_leg`
+        // takes.
+        let face_middle = |boxed: &[Vertex], face: usize| {
+            boxed[face * 4..face * 4 + 4].iter().map(|v| Vec3::from_array(v.position)).sum::<Vec3>() / 4.0
+        };
+        let mut legs = 0;
+        for &species in Species::ALL {
+            let model = parts(species);
+            // A quarter of a stride in, where the swing is at its widest,
+            // and at a walk rather than a run -- a bird past
+            // `AIRBORNE_SPEED` tucks its legs up and swings nothing.
+            let standing = mesh(species, 0.0, 0.0, 0.0);
+            let striding = mesh(species, 0.0, 2.0, std::f32::consts::FRAC_PI_2 / STRIDE);
+            // Vertices are in the order the parts were *drawn*, and a
+            // folded wing or a spread one is left out of it.
+            let mut index = 0;
+            for part in model {
+                if !part.gait.shown(false) {
+                    continue;
+                }
+                let drawn = index;
+                index += 1;
+                if !matches!(part.gait, Gait::LegFront | Gait::LegBack) {
+                    continue;
+                }
+                legs += 1;
+                let index = drawn;
+                let (a, b) = (&standing[index * 24..index * 24 + 24], &striding[index * 24..index * 24 + 24]);
+                let sole = (face_middle(b, 1) - face_middle(a, 1)).length();
+                let top = (face_middle(b, 0) - face_middle(a, 0)).length();
+                assert!(
+                    sole > top + 1e-4,
+                    "{}: {} moved its top {top:.4} and its sole {sole:.4} through a stride,                      which is a leg swinging about the wrong end",
+                    species.name(),
+                    part.name
+                );
+            }
+        }
+        assert!(legs >= 60, "only {legs} legs in the whole bestiary");
+    }
+
+    /// **A blow throws the body both ways.** The side a hit came from is not
+    /// on the wire, so the flinch used to roll every animal the same way,
+    /// every time: `Motion::flinch_side` is what the client draws instead,
+    /// and the two sides have to be mirror images or the "side" is a fudge.
+    #[test]
+    fn a_blow_from_either_side_throws_the_body_the_other_way() {
+        let struck = |side: f32| {
+            let mut vertices = Vec::new();
+            let mut indices = Vec::new();
+            build(
+                Species::Boar,
+                TEST_CENTRE,
+                // Facing +X, so the animal's own left and right are -Z and
+                // +Z (`Camera::right_horizontal`).
+                0.0,
+                Motion { hurt: Some(1.0), flinch_side: side, ..Default::default() },
+                &FaceLayers::empty_for_test(),
+                (15, 0),
+                &mut vertices,
+                &mut indices,
+            );
+            vertices
+        };
+        let right = struck(1.0);
+        let left = struck(-1.0);
+        let whole = {
+            let mut vertices = Vec::new();
+            let mut indices = Vec::new();
+            build(
+                Species::Boar,
+                TEST_CENTRE,
+                0.0,
+                Motion::default(),
+                &FaceLayers::empty_for_test(),
+                (15, 0),
+                &mut vertices,
+                &mut indices,
+            );
+            vertices
+        };
+        let across = |v: &[crate::engine::mesh::Vertex]| {
+            v.iter().map(|p| p.position[2]).sum::<f32>() / v.len() as f32
+        };
+        let (middle, thrown_right, thrown_left) = (across(&whole), across(&right), across(&left));
+        assert!(
+            thrown_right > middle + 0.01,
+            "a blow that throws a boar to its right left it at {thrown_right:.3} against {middle:.3}"
+        );
+        assert!(
+            (thrown_left - middle) + (thrown_right - middle) < 1e-3,
+            "the two sides of the flinch are not mirror images: {thrown_left:.3} and {thrown_right:.3} about {middle:.3}"
+        );
+    }
+
+    /// **The legs fade in rather than snapping on.** The dead zone that
+    /// stops a drifting animal from performing a walk on the spot used to be
+    /// a cliff: at a hair under `STANDING` the legs were still, at a hair
+    /// over they were a third of the way through their swing, and every
+    /// animal setting off or pulling up jerked once. See `STANDING_BAND`.
+    #[test]
+    fn legs_come_up_to_speed_rather_than_snapping_into_a_stride() {
+        // One foreleg, a quarter stride in, where the swing is widest: how
+        // far along the animal the leg has reached is the amplitude, and the
+        // body around it would drown the measurement.
+        let leg = parts(Species::Deer)
+            .iter()
+            .position(|part| part.gait == Gait::LegFront)
+            .expect("a deer has forelegs");
+        let reach = |speed: f32| {
+            let v = mesh(Species::Deer, 0.0, speed, std::f32::consts::FRAC_PI_2 / STRIDE);
+            // Along the animal, which at a yaw of nought is the world's x:
+            // the model faces -Z in its own frame and a yaw of nought puts
+            // that on +X (see `push_posed_box`).
+            let (lo, hi) = range_of(&v[leg * 24..leg * 24 + 24], 0);
+            hi - lo
+        };
+        let still = reach(0.0);
+        let mut previous = still;
+        // Every hundredth of a block a second from a stop to a walk.
+        for step in 0..=120 {
+            let speed = step as f32 * 0.01;
+            let now = reach(speed);
+            assert!(
+                (now - previous).abs() < 0.01,
+                "the deer's leg jumped {:.3} blocks between {:.2} and {:.2} blocks a second",
+                now - previous,
+                speed - 0.01,
+                speed
+            );
+            previous = now;
+        }
+        assert!(
+            previous > still + 0.05,
+            "a deer walking reaches {previous:.2} against {still:.2} standing: nothing swings at all"
+        );
+    }
+
 
     use super::*;
 

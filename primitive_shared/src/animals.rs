@@ -773,7 +773,11 @@ impl Species {
             // head lands in.
             Species::Zebra => (0.28, 0.95, 1.14),
             Species::Antelope => (0.17, 0.74, 0.75),
-            Species::Lion => (0.31, 0.55, 1.03),
+            // ...and the lion's reach along it is its muzzle now, not its
+            // tail: the tail used to stand straight out behind like a broom
+            // handle and now hangs off the rump, so the longest thing about
+            // a lion is the end that bites.
+            Species::Lion => (0.31, 0.55, 0.97),
             // Measured off `animal_model::{FISH, COD}`: across is the
             // pectoral fins, up is the dorsal fin, along is the mouth.
             Species::Fish => (0.15, 0.175, 0.375),
