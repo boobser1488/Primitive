@@ -75,6 +75,11 @@ struct Globals {
     // floor under open sky is scaled by, less one (nought by day). See
     // `Sky::moon_uniform`. Appended, for the reason `anim` gives.
     moon: vec4<f32>,
+    // x: how much of the weather's rain has reached the ground, 0..1 --
+    // what `WET_DARKEN` below is scaled by. Appended, for the reason `anim`
+    // gives; the other shaders that declare this block declare a prefix of
+    // it and are untouched by a field on the end.
+    weather: vec4<f32>,
 };
 
 // **Which lighting step this module was compiled for**: 0 Simple, 1
@@ -493,6 +498,106 @@ fn glow_over(base: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
 const KNEE: f32 = 0.9;
 const SHOULDER_ROOM: f32 = 0.15;
 
+// ---- four ways a surface stops being a painted one ----
+//
+// **What "пластиково" names is not one fault.** The light in this file is
+// already a warm key against a cool sky fill, with occlusion, a moonlit
+// floor and a sunset in the fog. What was left is that *every material in
+// the world behaved identically*: a perfect diffuser, returning the same
+// colour in every direction, dry in a downpour, opaque from behind. Four
+// small terms, each of them something one real material does and no other --
+// water mirrors, wet ground darkens, a leaf passes light, and a thing that
+// is not the world takes its ambient from the sky above it.
+//
+// **Every one is zero-able**, and `look_repro` compiles a copy with all four
+// at nought to photograph the same seat before and after. They are constants
+// and not settings on purpose: a player asked for the game not to look like
+// plastic, not for a menu about it.
+
+// **How much of the sky a water surface mirrors**, over Fresnel.
+//
+// Water is the one material in this game whose look the eye knows without
+// being told, and it was a perfectly matte blue sheet -- which is a painted
+// floor, exactly. Looked into from above water is a window and keeps its
+// bed; looked along it is a mirror, and the Fresnel curve below carries the
+// whole of that shape.
+//
+// **A ceiling, not a strength, and it is there because a sea has waves.**
+// Schlick over a flat surface goes to one at the horizon, and a mirror of a
+// noon sky is white: photographed on the beach of seed 32 at midday, the far
+// half of the sea came out the colour of the haze over it and the water
+// stopped being water. A real sea is rough at every scale, and the roughness
+// is what stops the grazing reflection ever getting there -- every facet
+// points somewhere else. Five and a half tenths leaves the sea its own blue
+// at any angle, and it is still most of the picture where it matters.
+const WATER_SHEEN: f32 = 0.55;
+// What water gives back at normal incidence -- the real number, and it
+// matters: at nought a pond looked straight down into goes dead, and this is
+// the faint sheen a still puddle has from directly above.
+const WATER_F0: f32 = 0.02;
+// **The sun's own glitter on it**, in a tight lobe round the mirror
+// direction. Bright, because a specular highlight is brighter than the
+// surface it sits on, and narrow -- the forty-eighth power -- so a low sun
+// lays a path across a lake rather than a flare over half of it. At the
+// twenty-fourth, which is where this started, the path was a soft white
+// patch a third of the frame wide and read as a bloom rather than as the
+// sun on water.
+const WATER_GLITTER: f32 = 0.75;
+
+// **What rain leaves on what it falls on**, as a multiplier over the albedo.
+//
+// A wet surface is much darker than the same surface dry: the film on it
+// lets light in and gives less of it back. Three tenths is the order of it
+// for soil and stone, and it is the answer a storm needs -- the light going
+// grey while the ground does not change at all is the moment a world reads
+// as painted rather than lit.
+const WET_DARKEN: f32 = 0.70;
+
+// **How brightly a leaf lit from behind glows.**
+//
+// A blade of grass and a birch leaf are thin enough that the sun goes
+// through them, and the far side comes out the leaf's own colour at several
+// times the brightness of the same leaf lit from the front. It is the
+// loudest thing a real canopy does; without it a tree against a low sun is a
+// green cut-out. Scaled by how green the texel already is, so this happens
+// to foliage and costs stone a multiply by nought.
+const LEAF_GLOW: f32 = 0.55;
+
+// **How much of a model's ambient comes from the sky rather than from every
+// direction at once.** See `model_openness`.
+const MODEL_SKY_FILL: f32 = 0.7;
+
+// **How much colour the air between the eye and a surface takes out of it**,
+// at the far end of that curve.
+//
+// Photographed at noon over the forest at spawn, the trees a hundred blocks
+// away were exactly as saturated and exactly as contrasty as the trunk an arm
+// from the camera -- so the whole picture sat on one plane and read as a
+// printed backdrop. That is the largest single thing the word "пластиково"
+// was pointing at in the frame it was reported from, and it is not a
+// lighting fault: the light was fine and the *air* was missing.
+//
+// **This is not the fog, and it must not become it.** The fog begins at three
+// quarters of the render distance and finishes on the sky's exact colour, so
+// the edge of the loaded world dissolves; that number is the player's and two
+// other things agree with it. What air does is different and continuous: it
+// scatters its own light in over the whole distance, and what the eye reads
+// from it is that far things are *less saturated*, not that they are hidden.
+// So this takes saturation only -- toward the sky's own hue at the surface's
+// own brightness -- and it saturates at a third, which is depth rather than
+// haze. A surface a hundred blocks off keeps three quarters of its colour and
+// the fog, when it arrives, still finds the same picture it used to.
+//
+// **In blocks, not in a share of the render distance.** Air does not know how
+// far a machine can draw, and a player who turns the distance up would
+// otherwise find the middle of their world going flat again.
+const AIR_DEPTH: f32 = 0.34;
+// Where half of it has happened. Fifty-five blocks is about where a real
+// hillside starts visibly losing its green, and it is inside the render
+// distance of every machine this runs on -- a curve whose knee is past the
+// far plane is a constant.
+const AIR_HALF: f32 = 55.0;
+
 fn shoulder(c: vec3<f32>) -> vec3<f32> {
     let peak = max(max(c.r, c.g), c.b);
     if (peak <= KNEE) {
@@ -584,6 +689,32 @@ fn block_hash(cell: vec3<i32>) -> f32 {
 const TRANSLUCENT_BIT: u32 = 8192u;
 // Must match `mesh::MOTTLED_BIT`.
 const MOTTLED_BIT: u32 = 16384u;
+// **This face looks up**, worked out in the vertex stage from the normal it
+// already builds and carried in the spare bottom of the `mottled` slot.
+//
+// Not from mesh.rs: that word arrives holding `MOTTLED_BIT` and nothing below
+// it, and a flag the fragment stage wants and the vertex stage can answer for
+// free has no business costing a bit in the vertex format. What wants it is
+// the water sheen, which is a property of a horizontal surface and would be
+// nonsense on the cut side of a column.
+//
+// **Why not the depth byte, which was tried.** Only the top face carries a
+// depth past one, so `water_depth > 1.0` looked like a test for "is the lid"
+// -- and it is the wrong way round: a *side* also carries one, and so does
+// the lid of every pond and every flooded footprint a block deep. On the
+// beach of seed 32 that condition put the sheen on the open sea and left it
+// off every inch of the shore, which is the water a player is actually
+// standing in.
+const UPWARD_BIT: u32 = 1u;
+// **This fragment is foliage**, set beside it and for the same reason: the
+// leaf glow needs to know, and greenness alone does not say so.
+//
+// A skin, a garment and a dropped stack all come through `shade_lit` with a
+// white tint and a `shade_cell` of nought -- the models have no cell, they
+// never needed one -- so a green shirt would have been lit from behind by a
+// ray computed from the origin of the frame. Which is a lamp nobody can see,
+// and the last time this game had one of those it was a bug report.
+const FOLIAGE_BIT: u32 = 2u;
 // Must match `mesh::CHIPPED_BIT`: the cut face of a part-dug block. Only
 // ever set beside `FINE_UV_BIT`, and handed to the fragment in the
 // `mottled` slot beside `MOTTLED_BIT` -- see `chip_shade`.
@@ -1028,6 +1159,32 @@ fn half_lambert(normal: vec3<f32>) -> f32 {
     return mix(lit, LAMBERT_FLOOR, smoothstep(0.0, NIGHT_FLAT_BY, globals.sun.y));
 }
 
+// **How much of the ambient a point on a model gets, by the way it faces.**
+//
+// A chunk's vertices carry occlusion the mesher counted from the blocks
+// round each corner. A model's carry three -- fully open -- on every vertex
+// of every box, because there are no blocks to count: so an animal is a set
+// of cuboids every face of which takes the same fill, its belly as bright as
+// its back, and that is precisely what the word "пластиково" names. A toy,
+// moulded in one colour, with the light painted on.
+//
+// What is missing is not detail, it is the *sky*. Ambient light comes from
+// above: a surface turned up sees the whole of it, one turned down sees the
+// ground and sees much less. That is one component of the normal the vertex
+// already carries, and it rounds a box without bevelling it.
+//
+// **Handed through the occlusion slot** rather than added as a term of its
+// own, because it is the same quantity -- how much of the ambient reaches
+// here -- and the fragment already squares it, clamps it and scales it by
+// the player's own ambient-occlusion setting. No interpolant, no uniform,
+// and it follows a limb as it swings, because the normal does.
+//
+// Multiplied into whatever occlusion the caller had, so anything that ever
+// learns to count its own keeps it.
+fn model_openness(normal_y: f32, ao: f32) -> f32 {
+    return ao * (1.0 - MODEL_SKY_FILL * (0.5 - 0.5 * normal_y));
+}
+
 fn face_normal(face: u32) -> vec3<f32> {
     if (face == 0u) { return vec3<f32>(0.0, 1.0, 0.0); }
     if (face == 1u) { return vec3<f32>(0.0, -1.0, 0.0); }
@@ -1086,6 +1243,10 @@ fn terrain_vertex(in: VertexInput) -> VertexOutput {
         out.tint = foliage_tint(code);
         out.water_depth = 0.0;
     }
+    // Nought is "not foliage", which is most of the world; a surface tint
+    // (soot, ash) is a code of its own and comes back negative. See
+    // `foliage_tint`.
+    let foliage = out.translucent == 0u && code != 0u && out.tint.x > 0.0;
 
     // See `half_lambert` for what a face's share of the sun is, and for
     // why it has no direction at night.
@@ -1110,7 +1271,9 @@ fn terrain_vertex(in: VertexInput) -> VertexOutput {
     // would come out in stripes. Handed on relative to the frame's
     // origin; `mottled_shade` puts the origin back. See `shade_cell`.
     out.shade_cell = world - normal * 0.5;
-    out.mottled = in.packed & MOTTLED_BIT;
+    out.mottled = (in.packed & MOTTLED_BIT)
+        | select(0u, UPWARD_BIT, normal.y > 0.5)
+        | select(0u, FOLIAGE_BIT, foliage);
     // ...and whether it is the face a pick has just opened, in the same flat
     // slot: the word it rides in is the `uv` word, and only a fine
     // coordinate carries it. See `mesh::CHIPPED_BIT`.
@@ -1213,10 +1376,16 @@ fn item_vertex(in: ItemVertexInput) -> VertexOutput {
     let sky = f32(light & 15u) / 15.0;
     let block = f32((light >> 4u) & 15u) / 15.0;
     let ao = f32((light >> 8u) & 3u) / 3.0;
-    out.light_terms = vec3<f32>(sky, block, ao);
+    // The underside of a barrel lying in the grass sees no sky and the lid
+    // of it sees all of it. See `model_openness`.
+    out.light_terms = vec3<f32>(sky, block, model_openness(normal.y, ao));
     // A dropped stack is one object rather than one of a hundred
-    // identical ones, so there is nothing here for the mottling to fix.
-    out.shade_cell = vec3<f32>(0.0);
+    // identical ones, so there is nothing here for the mottling to fix --
+    // but where it *is* still has to be right: the fog's glow and the air
+    // between it and the eye are both taken from this, and a barrel eighty
+    // blocks off with a `shade_cell` of nought was hazed as if it lay at the
+    // frame's origin, which is under the player's feet.
+    out.shade_cell = in.position;
     out.mottled = 0u;
     return out;
 }
@@ -1375,7 +1544,12 @@ fn vs_held(in: HeldVertexInput) -> ModelVertexOutput {
     v.light_terms = vec3<f32>(
         f32(light & 15u) / 15.0,
         f32((light >> 4u) & 15u) / 15.0,
-        f32((light >> 8u) & 3u) / 3.0,
+        // **In view space, with the key.** The hand's light is fixed
+        // relative to the viewer for the reason `KEY_LIGHT` gives, and the
+        // sky its ambient comes from has to be the same one -- an ambient
+        // in world space would turn the shading over inside a held barrel
+        // every time the player looked down. See `model_openness`.
+        model_openness(normal.y, f32((light >> 8u) & 3u) / 3.0),
     );
     v.shade_cell = vec3<f32>(0.0);
     v.mottled = 0u;
@@ -1455,7 +1629,9 @@ fn vs_actor(in: ActorVertexInput) -> ModelVertexOutput {
     v.light_terms = vec3<f32>(
         f32(light & 15u) / 15.0,
         f32((light >> 4u) & 15u) / 15.0,
-        f32((light >> 8u) & 3u) / 3.0,
+        // The sky is over a deer as it is over the grass it stands on. See
+        // `model_openness`.
+        model_openness(in.normal.y, f32((light >> 8u) & 3u) / 3.0),
     );
     // Only the fog's glow reads this, for which way the fragment lies.
     v.shade_cell = in.position;
@@ -1948,7 +2124,42 @@ fn shade_lit_sky(in: VertexOutput, sampled: vec4<f32>, lambert: f32, sun_sky: f3
     // above on what a branch here was measured to cost.
     let surface = in.tint.x < 0.0;
     let tinted = select(mix(vec3<f32>(1.0), in.tint, greenness), -in.tint, surface);
-    var color = sampled.rgb * tinted * light;
+    // **Rain darkens what it falls on**, and nothing in this world got wet.
+    //
+    // Scaled by the sky the face can see, so a floor under a roof and the
+    // whole of a cave stay dry, and by how much of the shower has actually
+    // reached the ground (`Sky::rain_arrived`) rather than by how overcast
+    // it is -- the cloud closes a good minute before the first drop, and a
+    // meadow soaked by a sky that is merely grey is the same lie the other
+    // way round. See `WET_DARKEN`.
+    let wet = globals.weather.x * sky_level;
+    var color = sampled.rgb * tinted * light * mix(1.0, WET_DARKEN, wet);
+
+    // **A leaf lit from behind glows**, and nothing in this world did.
+    //
+    // Free of a normal, which this fragment has not got: foliage glows when
+    // the *eye* is down-sun of it -- the beam travelling along `sun.xyz` and
+    // the view ray pointing the same way -- and in proportion to how little
+    // of that beam the face itself catches, which is what a `lambert` at its
+    // floor means. Both numbers are already here, and `sun_sky` is already
+    // nought in the shadow of the trunk, so a leaf the sun cannot reach does
+    // not light up.
+    //
+    // **Greenness and not a flag.** A leaf, a blade of grass and the turf on
+    // top of a dirt block are the things this happens to and they have no bit
+    // in common -- but the picture knows, the same way the foliage tint knows
+    // (see the note above it). Stone's greenness is nought and it pays a
+    // multiply. See `LEAF_GLOW`.
+    if ((in.mottled & FOLIAGE_BIT) != 0u && greenness > 0.0) {
+        let ray = in.shade_cell - globals.camera_pos.xyz;
+        let through = max(dot(ray, globals.sun.xyz), 0.0) * inverseSqrt(dot(ray, ray) + 1e-8);
+        let t2 = through * through;
+        let t4 = t2 * t2;
+        // How far this face is from facing the sun, 0 lit and 1 turned away.
+        let turned = clamp((1.0 - lambert) / (1.0 - LAMBERT_FLOOR), 0.0, 1.0);
+        let glow = LEAF_GLOW * greenness * t4 * t4 * turned * sun_sky * globals.sun.w;
+        color = color + sampled.rgb * tinted * globals.sun_color.rgb * glow;
+    }
     // Before the water and the fog, so it shapes the lit surface and
     // never the colour the world fades into: the fog's end has to be the
     // sky's colour exactly, and a shoulder over it would not be.
@@ -1978,6 +2189,95 @@ fn shade_lit_sky(in: VertexOutput, sampled: vec4<f32>, lambert: f32, sun_sky: f3
         // bed standing out of the water in bands (see `fog::UNDERWATER`).
         let murk = clamp(depth / 26.0, 0.0, 0.85);
         color = mix(color, globals.fog_color.rgb, murk);
+    }
+
+    // **A sheet of water with no highlight on it is a sheet of plastic.**
+    //
+    // Every surface in this game was a perfect diffuser -- the same colour
+    // returned in every direction -- so a lake gave back exactly what a
+    // painted floor of the same blue would. Water is the one material whose
+    // look the eye knows without being told, and it is the loudest thing in
+    // a screenshot of a meadow.
+    //
+    // Two terms, both off the one cosine the alpha at the end of this
+    // function already needs:
+    //
+    // * **the sky, by Fresnel** -- a window looked into and a mirror looked
+    //   along, so the pond at the player's feet keeps its bed and the far
+    //   end of the lake goes the colour of the horizon, which is what the
+    //   fog colour *is*;
+    // * **the sun, as a glitter** -- a tight lobe round the mirror
+    //   direction, laid over the reflected sky.
+    //
+    // **Only the lid**, and only from above it. A water *side* is a cut
+    // through the column with no sky over it (a depth past one is the top --
+    // see the alpha below), and from under the surface this would be a
+    // reflection of a sky the swimmer is not on the same side of.
+    //
+    // Before the fog, so the far end of a lake still fades into the horizon
+    // rather than shining out of it, and after the shoulder, because a
+    // highlight is allowed to be the brightest thing in the frame.
+    if (in.translucent != 0u && (in.mottled & UPWARD_BIT) != 0u && globals.extra.z < 0.5) {
+        // `shade_cell` sits half a block under the face, as the alpha below
+        // has to put back for the same reason.
+        let ray = in.shade_cell + vec3<f32>(0.0, 0.5, 0.0) - globals.camera_pos.xyz;
+        let steep = clamp(abs(ray.y) / max(in.view_distance, 0.001), 0.0, 1.0);
+        // Schlick over water's own reflectance at normal incidence.
+        let grazing = 1.0 - steep;
+        let g2 = grazing * grazing;
+        let mirrored = vec3<f32>(ray.x, -ray.y, ray.z);
+        let sky_seen = glow_over(globals.fog_color.rgb, mirrored);
+        let fresnel = (WATER_F0 + (1.0 - WATER_F0) * g2 * g2 * grazing) * WATER_SHEEN;
+        color = mix(color, sky_seen, fresnel);
+        // ...and the sun itself, where the mirrored ray points at it. Two
+        // squarings and a cube rather than a `pow`, the way `glow_over`
+        // shapes its halo.
+        let facing = max(dot(mirrored, -globals.sun.xyz), 0.0) * inverseSqrt(dot(mirrored, mirrored) + 1e-8);
+        let f2 = facing * facing;
+        let f8 = f2 * f2 * f2 * f2;
+        let f24 = f8 * f8 * f8;
+        // **Through the same Fresnel as the sky.** The sun is part of what
+        // the surface reflects, so it obeys the same rule: two per cent of
+        // it straight down and nearly all of it along. Added on its own it
+        // was a white disc on the water under the sun whatever the angle,
+        // which reads as a lens artefact rather than as a sun path -- and a
+        // pond looked straight into had a lamp in it.
+        color = color + globals.sun_color.rgb * (globals.sun.w * WATER_GLITTER * fresnel * f24 * f24);
+    }
+
+    // **The air between here and the eye**, which used to be nothing at all
+    // until the fog began. See `AIR_DEPTH`.
+    //
+    // Under water this is left out: `absorb` and `murk` above are the same
+    // idea in the medium that is actually there, measured, and running both
+    // would take the colour out of a reef twice.
+    //
+    // Luminance is kept exactly -- the mix is between a colour and a grey of
+    // its own weight, tinted by the sky's hue -- so this moves no exposure
+    // and nothing anybody argued over. `fill_color` is the sky at luminance
+    // one, already on the uniform for the shadow fill.
+    if (globals.extra.z < 0.5) {
+        // **The fragment's own distance, squared, and not the vertex's.**
+        //
+        // `view_distance` is a `length` taken per vertex and interpolated
+        // linearly, and linear interpolation of a distance sags in the
+        // middle of a big quad -- by nothing anybody could see, until a term
+        // that reads it applies to the near field. A merged rectangle
+        // fourteen blocks across then shaded a few levels differently from
+        // the same rectangle cut into its cells, which is precisely the
+        // fault `a_block_wears_its_own_shade_however_many_blocks_the_quad_covers`
+        // exists to catch, and it caught it.
+        //
+        // `shade_cell` is a *position*, interpolated perspective-correctly
+        // and therefore exact across a planar quad however it is cut. Kept
+        // squared so the curve needs no square root: the knee is still
+        // `AIR_HALF`, and what changes is that the first twenty blocks take
+        // less of the haze, which is what air does.
+        let ray = in.shade_cell - globals.camera_pos.xyz;
+        let far = dot(ray, ray);
+        let luma = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let air = AIR_DEPTH * far / (far + AIR_HALF * AIR_HALF);
+        color = mix(color, luma * globals.fill_color.rgb, air);
     }
 
     if (globals.extra.w > 0.5) {
