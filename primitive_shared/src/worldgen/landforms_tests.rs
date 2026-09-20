@@ -226,17 +226,23 @@ fn an_old_worlds_new_chunks_are_the_old_generators_to_the_block() {
 /// or a bush it is that thing's foot and not a lowered block, which
 /// `dig::whole` cannot read back -- and with that turned off, the rest of
 /// the chunk is still to the block what it was.
+/// **Read again with the beds of the deep rock in them** (`bedded_rock`)
+/// and with dripstone grown in columns out of the carbonates only. Both
+/// move the new world's ground on purpose: the deep rock was one grey block
+/// at every depth, and a cave wall now shows the bands it is cut through.
+/// The old scales' prints above did not move, which is what says the change
+/// belongs to the new generator alone.
 #[test]
 fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
     let held: [((i32, i32), u64); 8] = [
-        ((0, 0), 0xabe3_3f77_a5a6_190a),
-        ((5, -3), 0xdd18_0957_c840_0838),
-        ((-40, 90), 0x0a60_1d08_b823_9ba7),
-        ((313, -77), 0x8c37_0dc9_cf40_88bf),
-        ((-1875, -1875), 0x52a5_fa06_c321_cdb8),
-        ((-1868, -1872), 0x3093_679c_3f7c_b3e6),
-        ((-1864, -1864), 0x1972_aadd_5875_6711),
-        ((-1873, -1866), 0x09e4_0e3c_0fd6_0394),
+        ((0, 0), 0xc1b2_3ce7_5051_149c),
+        ((5, -3), 0x7d71_38ac_74ab_3526),
+        ((-40, 90), 0x3176_3451_5768_83a8),
+        ((313, -77), 0x7a5c_8bd0_2eb1_9d17),
+        ((-1875, -1875), 0x9573_c7e6_b509_916f),
+        ((-1868, -1872), 0x49ce_371a_7b0d_a380),
+        ((-1864, -1864), 0xecc0_5056_2316_7b9d),
+        ((-1873, -1866), 0x8bdf_bb14_3011_0902),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(true));
@@ -263,10 +269,13 @@ fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
 #[test]
 fn the_landforms_lay_the_same_lips_every_time() {
     let held: [((i32, i32), u64); 4] = [
-        ((0, 0), 0xb134_89aa_a937_2cd6),
-        ((5, -3), 0x99cc_53d3_c8a2_ed7c),
-        ((-1875, -1875), 0x2154_9ae7_825f_abea),
-        ((-1868, -1872), 0xfa3f_2bc6_901f_df17),
+        // Taken again on the merge of the lips under the trees with the beds
+        // of the deep rock: both move this ground on purpose, and the old
+        // scales' prints above did not move.
+        ((0, 0), 0x9187_d283_ea52_b9b8),
+        ((5, -3), 0x05f4_c29d_70d4_d892),
+        ((-1875, -1875), 0xdb00_7841_5a15_f039),
+        ((-1868, -1872), 0x8653_33f3_497c_c219),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     for ((x, z), print) in held {
@@ -282,7 +291,20 @@ fn print_fingerprints() {
         let prints: Vec<u64> = OLD_CHUNKS.iter().map(|&(x, z)| fingerprint(&gen, ChunkPos::new(x, z))).collect();
         println!("{scale:?}: {prints:#x?}");
     }
+    // ...and the landforms' own two sets, which a change that means to move
+    // the new world's ground has to write down again.
+    let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
+    for (x, z) in LANDFORM_CHUNKS {
+        println!("((({x}, {z})), {:#018x}),", fingerprint_as(&gen, ChunkPos::new(x, z), crate::dig::whole));
+    }
+    for (x, z) in LANDFORM_CHUNKS.iter().take(2).chain(LANDFORM_CHUNKS[4..6].iter()) {
+        println!("lips (({x}, {z})), {:#018x},", fingerprint(&gen, ChunkPos::new(*x, *z)));
+    }
 }
+
+/// The eight chunks the landforms' golden prints are taken over.
+const LANDFORM_CHUNKS: [(i32, i32); 8] =
+    [(0, 0), (5, -3), (-40, 90), (313, -77), (-1875, -1875), (-1868, -1872), (-1864, -1864), (-1873, -1866)];
 
 /// The relief round a column: the range of the ground over a square
 /// `2 * reach` across, and the tallest step to a neighbour at each sample,

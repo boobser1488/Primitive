@@ -56,7 +56,9 @@
 //!
 //! What "unsupported" means is `Looseness`. How far a collapse may
 //! spread from the cell that was dug is `MAX_COLLAPSE_REACH`. What a
-//! block does to whoever is standing under it is `strikes`.
+//! block does to whoever is standing under it is `strikes`. And what a
+//! player carries into a mine to stop all of it is a pit prop, whose
+//! reach up the column it stands in is `PROP_REACH`.
 
 use std::collections::VecDeque;
 
@@ -594,7 +596,25 @@ impl FallingBlocks {
     /// cell holds a torch, so it is no hole.
     pub fn on_block_changed(&mut self, gx: i32, gy: i32, gz: i32) {
         self.push(gx, gy, gz);
-        self.push(gx, gy + 1, gz);
+        // **Every cell a prop in this one could have been holding**, not
+        // only the one directly over it (`PROP_REACH`). A prop broken out
+        // of a gallery has to drop the sand two cells over its head in the
+        // same breath, and the cell that sand is in is not adjacent to
+        // anything that changed. Two extra cells on the queue per edit,
+        // each answered by one lookup and `is_affected_by_gravity` saying
+        // no -- which is the whole of what it costs.
+        //
+        // **Cells and not holes.** A hole pushed up the column would ask
+        // the *rock* roof three cells over any dug cell whether it is still
+        // supported, and a natural chamber's roof is wider than anything
+        // holds itself up over: digging the floor of a cave you had walked
+        // through would bring its ceiling down on you. Only a block that
+        // falls of its own accord -- sand, gravel, a spadeful of earth --
+        // is let go this way, and that is a block that was already
+        // unsupported the moment the post went.
+        for step in 1..=PROP_REACH {
+            self.push(gx, gy + step, gz);
+        }
         self.push_hole(gx, gy, gz, 0);
     }
 
@@ -751,13 +771,22 @@ impl FallingBlocks {
             if !can_be_displaced_by_falling(below) {
                 continue; // supported
             }
-            // **A pit prop holds what is over it** (`types::BLOCK_PROP`): a
-            // post of timber under a ceiling of sand is the whole reason to
-            // carry boards into a mine. Asked here rather than in
-            // `can_be_displaced_by_falling`, because a prop is not a floor to
-            // anything else -- water runs past it and a layer will not lie on
-            // it.
-            if primitive_shared::types::is_prop(below) {
+            // **A pit prop holds what is over it**, and it holds it from
+            // the floor of the gallery rather than from the cell directly
+            // under the roof (`propped_from_below`, `PROP_REACH`).
+            //
+            // This used to read `is_prop(below)` and it never once fired: a
+            // prop is a whole cube by its row (`blocks`), so
+            // `can_be_displaced_by_falling` had already answered "supported"
+            // a line above and the roof of a one-cell gallery was held by
+            // the ordinary floor rule. What was actually broken is the
+            // gallery a player can *walk down*: two cells high, the prop on
+            // the floor, the sand two cells over its head -- and nothing
+            // between them, so the sand came down on the post as if it were
+            // not there. A pit prop is a post cut to the height of the
+            // gallery; here it is one cell of block and its reach is what
+            // says how tall a gallery it was cut for.
+            if propped_from_below(world, gx, gy, gz) {
                 continue;
             }
 
@@ -1087,6 +1116,37 @@ impl FallingBlocks {
     }
 }
 
+/// How far over a pit prop the thing it holds may be, in cells.
+///
+/// **Three: a gallery a player walks down with a pack on, and its roof.**
+/// A prop is one cell of block and a real pit prop is a post cut to the
+/// height of the working, so the reach is what says how tall a working one
+/// post was cut for. Two would hold nothing but a crawl; four and a
+/// chamber a player can jump in is held up by a stick on the floor, which
+/// is the point at which a post stops being a decision. Past three the
+/// answer is a pillar -- props stack, and a stack of them is a pillar
+/// (`types::BLOCK_PROP`).
+pub const PROP_REACH: i32 = 3;
+
+/// Is `(gx, gy, gz)` standing over a pit prop, with nothing but air
+/// between them?
+///
+/// Air and only air: anything else in the column is either holding the
+/// cell up by itself or is a roof of its own, and in both cases the post
+/// under it is not what the question is about. Unloaded stops the walk for
+/// the reason everything in this file stops at unloaded -- the other guess
+/// drops rock on the strength of a chunk nobody can see.
+fn propped_from_below<W: BlockWorld + ?Sized>(world: &W, gx: i32, gy: i32, gz: i32) -> bool {
+    for step in 1..=PROP_REACH {
+        match world.block(gx, gy - step, gz) {
+            Some(block) if primitive_shared::types::is_prop(block) => return true,
+            Some(block) if is_air(block) => {}
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Whether a roof cell -- rock at `(gx, gy, gz)` with a hole under it
 /// -- has lost what was holding it up.
 ///
@@ -1106,6 +1166,14 @@ fn is_unsupported<W: BlockWorld + ?Sized>(
     gz: i32,
     looseness: Looseness,
 ) -> bool {
+    // **A post under it holds it, whatever its neighbours are doing.** The
+    // span test below would agree -- a propped run is one cell wide -- but
+    // the neighbour test would not: a single cell of roof over a post at
+    // the end of a working has no neighbours at all, and it is the one
+    // cell most obviously being held up.
+    if propped_from_below(world, gx, gy, gz) {
+        return false;
+    }
     let neighbours = [(1, 0), (-1, 0), (0, 1), (0, -1)]
         .into_iter()
         .filter(|&(dx, dz)| {
@@ -1158,9 +1226,12 @@ fn span_under<W: BlockWorld + ?Sized>(
     for sign in [1, -1] {
         for step in 1..=far_enough {
             let (x, z) = (gx + dx * step * sign, gz + dz * step * sign);
-            let open = world
-                .block(x, gy - 1, z)
-                .is_some_and(can_be_displaced_by_falling);
+            // ...and a run cell with a post standing under it is not
+            // open: the prop ends the span exactly as a pillar of stone
+            // does, from wherever in the gallery it was set
+            // (`propped_from_below`).
+            let open = world.block(x, gy - 1, z).is_some_and(can_be_displaced_by_falling)
+                && !propped_from_below(world, x, gy, z);
             // Unloaded counts as bearing, as everywhere in this file.
             let bearing_above = world
                 .block(x, gy, z)
@@ -1312,6 +1383,129 @@ pub(crate) mod tests {
             assert_eq!(world.get(0, y, 0), BLOCK_SAND, "sand missing at y={y}");
         }
         assert_eq!(world.get(0, 6, 0), BLOCK_AIR, "the column should have dropped");
+    }
+
+    /// A post on the floor of a gallery a player can walk down, with the
+    /// sand two cells over its head: the case the whole mechanic exists
+    /// for, and the case it used to fail. See `PROP_REACH`.
+    #[test]
+    fn a_post_on_the_floor_of_a_gallery_holds_the_sand_over_a_players_head() {
+        let prop = primitive_shared::types::placed(primitive_shared::types::BLOCK_PROP, 0.0, (0, 1, 0));
+        let world = TestWorld::default();
+        world.put(0, 4, 0, BLOCK_STONE); // the floor of the working
+        world.put(0, 5, 0, prop); // the post, where a player can set it
+        world.put(0, 7, 0, BLOCK_SAND); // the roof, two cells over it
+
+        let mut sim = FallingBlocks::new();
+        sim.on_block_changed(0, 5, 0);
+        settle(&mut sim, &world, 200);
+
+        assert_eq!(world.get(0, 7, 0), BLOCK_SAND, "the sand came down on the post as if it were not there");
+        assert_eq!(world.get(0, 5, 0), prop, "the post itself moved");
+    }
+
+    #[test]
+    fn the_same_gallery_with_no_post_in_it_caves_in() {
+        let world = TestWorld::default();
+        world.put(0, 4, 0, BLOCK_STONE);
+        world.put(0, 7, 0, BLOCK_SAND);
+
+        let mut sim = FallingBlocks::new();
+        sim.on_block_changed(0, 5, 0);
+        settle(&mut sim, &world, 200);
+
+        assert_eq!(world.get(0, 7, 0), BLOCK_AIR, "the sand hung in the air over an open gallery");
+        assert_eq!(world.get(0, 5, 0), BLOCK_SAND, "the sand did not land on the floor");
+    }
+
+    /// **Cut the post and the roof comes down in the same breath**, and
+    /// not the next time somebody digs nearby: the cells a prop could have
+    /// been holding are queued by every edit (`on_block_changed`).
+    #[test]
+    fn breaking_the_post_drops_what_it_was_holding_at_once() {
+        let prop = primitive_shared::types::placed(primitive_shared::types::BLOCK_PROP, 0.0, (0, 1, 0));
+        let world = TestWorld::default();
+        world.put(0, 4, 0, BLOCK_STONE);
+        world.put(0, 5, 0, prop);
+        world.put(0, 7, 0, BLOCK_SAND);
+
+        let mut sim = FallingBlocks::new();
+        sim.on_block_changed(0, 5, 0);
+        settle(&mut sim, &world, 200);
+        assert_eq!(world.get(0, 7, 0), BLOCK_SAND, "the post did not hold in the first place");
+
+        world.set(0, 5, 0, BLOCK_AIR); // a player breaks it, or a fire takes it
+        sim.on_block_changed(0, 5, 0);
+        settle(&mut sim, &world, 200);
+
+        assert_eq!(world.get(0, 7, 0), BLOCK_AIR, "the roof stayed up with nothing under it");
+        assert_eq!(world.get(0, 5, 0), BLOCK_SAND, "the sand did not come down to the floor");
+    }
+
+    /// A chamber taller than the reach wants a pillar, and a stack of
+    /// props is one. See `PROP_REACH` for why the reach is finite.
+    #[test]
+    fn a_roof_further_over_the_post_than_a_gallery_is_tall_is_not_held() {
+        let prop = primitive_shared::types::placed(primitive_shared::types::BLOCK_PROP, 0.0, (0, 1, 0));
+        let world = TestWorld::default();
+        world.put(0, 4, 0, BLOCK_STONE);
+        world.put(0, 5, 0, prop);
+        world.put(0, 9, 0, BLOCK_SAND); // four cells over the post
+
+        let mut sim = FallingBlocks::new();
+        // The roof's own cell: it is further over the post than the post
+        // reaches, which is exactly why the edit under it does not queue it.
+        sim.on_block_changed(0, 9, 0);
+        settle(&mut sim, &world, 200);
+        assert_eq!(world.get(0, 9, 0), BLOCK_AIR, "a stick on the floor held up a chamber");
+
+        // ...and a second prop on the first one does hold it.
+        world.set(0, 6, 0, prop);
+        world.set(0, 9, 0, BLOCK_SAND);
+        sim.on_block_changed(0, 9, 0);
+        settle(&mut sim, &world, 200);
+        assert_eq!(world.get(0, 9, 0), BLOCK_SAND, "a pillar of props does not hold what one prop nearly did");
+    }
+
+    /// **A post ends the span of a rock roof too**, from the floor of the
+    /// gallery it is set in: the other half of what propping is for, and
+    /// the half that matters in a hall dug wider than rock arches over.
+    #[test]
+    fn a_post_ends_the_span_of_a_rock_roof_from_the_floor_it_stands_on() {
+        let prop = primitive_shared::types::placed(primitive_shared::types::BLOCK_PROP, 0.0, (0, 1, 0));
+        let build = |with_post: bool| {
+            let world = TestWorld::default();
+            // A hall eleven cells across and two high, roofed in stone.
+            for x in -5..=5 {
+                for z in -5..=5 {
+                    world.put(x, 4, z, BLOCK_STONE);
+                    world.put(x, 7, z, BLOCK_STONE);
+                }
+            }
+            // **A row of posts every third cell across the hall**, on the
+            // floor -- not a floor of them. That is what a player
+            // actually does, and it is what says the span is ended from
+            // where the post stands rather than that a solid storey is
+            // holding the roof up. Across and not in a grid, because the
+            // span is measured the short way (`Looseness::max_span`): a
+            // grid of posts leaves the lanes between them as long as the
+            // hall, and it is the short measure that has to come out
+            // under the bound.
+            if with_post {
+                for x in (-5..=5).step_by(3) {
+                    for z in -5..=5 {
+                        world.put(x, 5, z, prop);
+                    }
+                }
+            }
+            let mut sim = FallingBlocks::new();
+            sim.on_block_changed(0, 5, 0);
+            sim.on_block_changed(0, 6, 0);
+            settle(&mut sim, &world, 400);
+            world.get(0, 7, 0)
+        };
+        assert_eq!(build(false), BLOCK_AIR, "a hall eleven cells across roofed in stone stood up by itself");
+        assert_eq!(build(true), BLOCK_STONE, "the posts did not hold the roof of the hall");
     }
 
     #[test]

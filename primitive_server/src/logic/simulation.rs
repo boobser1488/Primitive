@@ -272,9 +272,10 @@ mod tests {
         let mut mechanics = Mechanics::new();
         mechanics.register(Box::new(FallingBlocks::new()));
         mechanics.on_block_changed(0, 6, 0);
-        // The cell, the cell above it, and the cell again as a possible
-        // hole with rock over it -- see `FallingBlocks::on_block_changed`.
-        assert_eq!(mechanics.pending(), vec![("falling blocks", 3)]);
+        // The cell, the cells a pit prop in it could have been holding
+        // (`falling::PROP_REACH`), and the cell again as a possible hole
+        // with rock over it -- see `FallingBlocks::on_block_changed`.
+        assert_eq!(mechanics.pending(), vec![("falling blocks", 2 + crate::logic::falling::PROP_REACH as usize)]);
 
         for _ in 0..200 {
             mechanics.step(&world, 1.0 / 20.0);
