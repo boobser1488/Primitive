@@ -8345,8 +8345,22 @@ pub(crate) fn carcass_cell(
     use primitive_shared::blocks::{definition, Shape};
     use primitive_shared::types::{has_full_top, is_air};
 
+    // **Water counts as free, and that is the whole of the fix for a body
+    // in the shallows.** A cell of water is not air, so a deer shot while
+    // wading found no cell at all and went straight to the heap: the player
+    // saw a carcass turn into meat and guts the instant it touched the water
+    // ("в воде туши сразу падают в мясо и потраха"), with the hide, the
+    // sinew and the bone lost with it. On a bed it can be reached and cut up
+    // like any other, and the water closes over it again when it is gone.
+    //
+    // Deep water still gives the heap: a body with nothing under it within
+    // three cells has nothing to lie on, and a carcass floating in open sea
+    // would need a body that floats, which is `logic::rafts`' machinery and
+    // not a block.
     let free = |block: primitive_shared::types::BlockId| {
-        is_air(block) || matches!(definition(block).shape, Shape::Cross | Shape::Flat)
+        is_air(block)
+            || primitive_shared::types::is_liquid(block)
+            || matches!(definition(block).shape, Shape::Cross | Shape::Flat)
     };
     let (x, z) = (at.0.floor() as i32, at.2.floor() as i32);
     // A hair up, so an animal resting exactly on a block boundary --
@@ -19586,6 +19600,25 @@ mod butchering_tests {
             carcass_cell((0.5, FLOOR as f32 + 1.0, 0.5), column),
             Some((0, FLOOR + 1, 0))
         );
+    }
+
+    #[test]
+    fn a_deer_shot_in_the_shallows_lies_on_the_bed_and_one_in_deep_water_leaves_a_heap() {
+        // The player watched a body turn into meat and guts the moment it
+        // touched water, hide and bone and all: the shallows now hold it.
+        let ford = |_x: i32, y: i32, _z: i32| {
+            Some(match y {
+                y if y <= FLOOR => BLOCK_STONE,
+                y if y <= FLOOR + 2 => primitive_shared::types::BLOCK_WATER,
+                _ => BLOCK_AIR,
+            })
+        };
+        assert_eq!(carcass_cell((0.5, FLOOR as f32 + 1.0, 0.5), ford), Some((0, FLOOR + 1, 0)));
+        // ...and the open sea does not: nothing to lie on within reach.
+        let deep = |_x: i32, y: i32, _z: i32| {
+            Some(if y > FLOOR + 40 { BLOCK_AIR } else { primitive_shared::types::BLOCK_WATER })
+        };
+        assert_eq!(carcass_cell((0.5, FLOOR as f32 + 20.0, 0.5), deep), None);
     }
 
     #[test]
