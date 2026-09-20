@@ -98,7 +98,12 @@ fn lawn() -> Vec<Chunk> {
     chunks
 }
 
-fn meshes(chunks: &[Chunk], layers: &FaceLayers, generator: &WorldGen) -> Vec<(ChunkPos, MeshBuffers)> {
+fn meshes_at(
+    chunks: &[Chunk],
+    layers: &FaceLayers,
+    generator: &WorldGen,
+    detail: crate::engine::lod::StoneDetail,
+) -> Vec<(ChunkPos, MeshBuffers)> {
     let mut manager = ChunkManager::new(128);
     for chunk in chunks {
         manager.insert(Chunk { pos: chunk.pos, blocks: chunk.blocks.clone() });
@@ -112,11 +117,18 @@ fn meshes(chunks: &[Chunk], layers: &FaceLayers, generator: &WorldGen) -> Vec<(C
         .map(|chunk| {
             let mut cache = Box::<Neighbourhood>::default();
             cache.fill(chunk.pos, &manager, &light);
+            cache.lay_stones(detail);
             let mut out = MeshBuffers::default();
             build_mesh(chunk.pos, &cache, layers, generator, &mut out);
             (chunk.pos, out)
         })
         .collect()
+}
+
+/// The same at full thickness, which is what every picture but the far-band
+/// comparison below wants.
+fn meshes(chunks: &[Chunk], layers: &FaceLayers, generator: &WorldGen) -> Vec<(ChunkPos, MeshBuffers)> {
+    meshes_at(chunks, layers, generator, crate::engine::lod::StoneDetail::Full)
 }
 
 /// The middle of `image`, `factor` times, nearest neighbour.
@@ -398,5 +410,88 @@ fn where_the_seams_on_a_stone_come_from() {
                 println!("{view} {name} {samples}x: {through} pixels of ground with stone either side");
             }
         }
+    }
+}
+
+/// **What a stone gives up past the default relief line, pixel by pixel.**
+///
+/// ```text
+/// GPU_REPRO_DIR=C:/absolute/dir cargo test --release -p primitive_client --lib \
+///     what_a_stone_gives_up_past_the_default_line -- --ignored --nocapture
+/// ```
+///
+/// The same lawn, the same eye, the same shader, twice in one process: once
+/// meshed at [`lod::StoneDetail::Full`] and once at `Slab`
+/// (`lod::stones_at`). Offscreen, because the game's own frame is not
+/// reproducible to the pixel -- two shots of `night` from the same spot with
+/// the *same* binary differ in 3.7% of their pixels, since the wind moves the
+/// grass and the animals walk -- and a difference smaller than that cannot be
+/// read off a screenshot at all.
+///
+/// Printed at three ranges. The one that decides is four chunks: that is
+/// where the slab takes over, and no nearer.
+#[test]
+#[ignore = "a tool: needs a GPU; measures what the far band of stones gives up"]
+fn what_a_stone_gives_up_past_the_default_line() {
+    let Some((device, queue)) = crate::engine::test_gpu() else {
+        println!("no GPU adapter on this machine; skipping");
+        return;
+    };
+    let out = std::env::var("GPU_REPRO_DIR").unwrap_or_else(|_| ".".to_string());
+    std::fs::create_dir_all(&out).expect("output directory");
+    let settings = players_settings();
+    let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
+    let textures = TextureManager::load(device, queue, assets, settings.anisotropy).expect("textures load");
+    let layers = textures.face_layers();
+    let shader = include_str!("shader.wgsl").replace("\r\n", "\n");
+    let generator = WorldGen::new(1337);
+    let lawn = lawn();
+    let full = meshes_at(&lawn, &layers, &generator, crate::engine::lod::StoneDetail::Full);
+    let slab = meshes_at(&lawn, &layers, &generator, crate::engine::lod::StoneDetail::Slab);
+    let triangles = |m: &[(ChunkPos, MeshBuffers)]| m.iter().map(|(_, b)| b.indices.len() / 3).sum::<usize>();
+    println!("lawn: {} triangles at both tiers, {} at one", triangles(&full), triangles(&slab));
+
+    let draw = |meshes: &[(ChunkPos, MeshBuffers)], eye: Vec3, pitch: f32| {
+        let mut camera = Camera::new(eye.as_dvec3(), SIZE.0 as f32 / SIZE.1 as f32);
+        camera.yaw = (-90.0f32).to_radians();
+        camera.pitch = pitch.to_radians();
+        camera.fov_y_radians = settings.fov_degrees.to_radians();
+        let sky = Sky::new(0.36, 900.0);
+        super::offscreen_repro::draw_scene(
+            device, queue, &textures, &settings, &camera, &sky, meshes, SIZE, &shader, None, None, false, settings.msaa,
+        )
+    };
+
+    // Three blocks back (what the near band looks like, and what the far band
+    // would look like if the line were wrong), one chunk, and four chunks --
+    // where `lod::RELIEF_CHUNKS` hands the row to the slab.
+    for (name, back, pitch) in [("three blocks", 3.0f32, -28.0), ("one chunk", 16.0, -6.0), ("four chunks", 64.0, -1.6)] {
+        let eye = Vec3::new(8.0, LYING as f32 + 1.62, 8.5 + back);
+        let (was, now) = (draw(&full, eye, pitch), draw(&slab, eye, pitch));
+        let mut differ = 0usize;
+        let mut over_sixteen = 0usize;
+        let mut worst = 0u8;
+        for (a, b) in was.pixels().zip(now.pixels()) {
+            let d = (0..3).map(|c| a.0[c].abs_diff(b.0[c])).max().unwrap_or(0);
+            if d > 0 {
+                differ += 1;
+                worst = worst.max(d);
+                if d > 16 {
+                    over_sixteen += 1;
+                }
+            }
+        }
+        let stem = format!("{out}/slab_{}", name.replace(' ', "_"));
+        was.save(format!("{stem}_full.png")).expect("write png");
+        now.save(format!("{stem}_slab.png")).expect("write png");
+        side_by_side(&loupe(&was, (SIZE.0 / 2, SIZE.1 / 2), (240, 135), 4), &loupe(&now, (SIZE.0 / 2, SIZE.1 / 2), (240, 135), 4))
+            .save(format!("{stem}_loupe.png"))
+            .expect("write png");
+        let total = (SIZE.0 * SIZE.1) as f64;
+        println!(
+            "{name}: {differ} of {} pixels differ ({:.3}%), {over_sixteen} by more than 16 levels, worst {worst}",
+            SIZE.0 * SIZE.1,
+            100.0 * differ as f64 / total
+        );
     }
 }

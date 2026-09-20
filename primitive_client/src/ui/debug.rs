@@ -194,6 +194,10 @@ pub struct FrameInfo {
     /// ...and how many were in view before the groups looking away
     /// from the camera were left out.
     pub solid_indices_in_view: u32,
+    /// Indices the cut-out pass sent: leaves, grass and the loose stones'
+    /// thickness. Printed beside the solid count because it is not part of
+    /// it and was, when it was first counted, the larger of the two.
+    pub cutout_indices: u32,
     pub chunks_culled: usize,
     /// What the loaded world keeps on the heap for blocks and for light,
     /// in bytes, and the terrain arena's `(used, allocated)` on the card.
@@ -474,7 +478,7 @@ impl DebugStats {
             "[F3] fps={:.0} frame(avg/p95/p99)={:.1}/{:.1}/{:.1}ms still={:.0}% | chunks loaded={} pending={} \
              mesh_queue={} arrivals={} lighting={} | meshed/s={} mesh_time/s={:.1}ms | \
              integrated/s={} chunk_time/s={:.1}ms upload/s={:.1}ms | \
-             players={} entities={} draws={} tris={}k/{}k culled={} | \
+             players={} entities={} draws={} tris={}k/{}k cut={}k culled={} | \
              net in/out per s={}/{} | corrections={} stale_meshes={} |              frame sim/encode/wait/present={:.3}/{:.3}/{:.3}/{:.3}ms gpu={} aniso={}x msaa={}x sky/{} present={} |              gpu stages: {} | {}x{} ({:.1} Mpx) | time={} {} sun={:.0}% |              mem blocks={:.1}MB light={:.1}MB arena={:.1}/{:.1}MB",
             self.fps(),
             self.frame_times.iter().sum::<Duration>().as_secs_f32() * 1000.0
@@ -497,6 +501,7 @@ impl DebugStats {
             info.draw_calls,
             info.solid_indices / 3000,
             info.solid_indices_in_view / 3000,
+            info.cutout_indices / 3000,
             info.chunks_culled,
             self.network_messages_in_this_second,
             self.network_messages_out_this_second,
@@ -769,6 +774,7 @@ mod tests {
             draw_calls: 90,
             solid_indices: 0,
             solid_indices_in_view: 0,
+            cutout_indices: 0,
             chunks_culled: 30,
             chunk_bytes: 0,
             light_bytes: 0,

@@ -85,6 +85,22 @@
 //! only inside the player's relief distance (`ClientSettings::relief_chunks`,
 //! four chunks by default); past it a stone is the flat quad either way.
 //!
+//! ## What it turned out to cost, and the tier the far band gives up
+//!
+//! **That bill was the largest in the frame and nobody had added it up.**
+//! With the player's line at its furthest stop -- eight chunks -- the loose
+//! stones were 0.86 ms of a 3.06 ms GPU frame on a GTX 1050 Ti: 48% of the
+//! whole cut-out pass, more than the leaves (0.58) and all the grass past
+//! forty blocks (0.20) together. The pass is neither fragment- nor fill-bound
+//! -- it is triangles, and these are the only things in the world that cost a
+//! hundred of them each. `lod::StoneDetail` carries the ablation.
+//!
+//! So past `lod::RELIEF_CHUNKS` -- four chunks, the default, and the line at
+//! which a rim was measured to be under a pixel and a half -- a stone keeps
+//! its silhouette and gives up its crown: [`Relief::slab`], one tier, 47%
+//! fewer triangles. Under that line nothing changed, so a player on the
+//! default settings is looking at the same pixels as before.
+//!
 //! The breaking cracks were the reason `Relief::exact` existed -- a crack is
 //! multiplied onto whatever is behind it and discards nothing -- and now it
 //! is also what is drawn, so the two fields hold one surface. They are kept
@@ -153,6 +169,11 @@ pub struct Relief {
     /// The same surface without relying on it: tops only over opaque
     /// texels, sides only along edges. For the cracks.
     pub exact: Vec<Facet>,
+    /// The same silhouette in **one** tier: every opaque texel a slab a
+    /// texel tall, no crown and no step up to it. For the chunks past
+    /// `lod::RELIEF_CHUNKS` that the player's `relief_chunks` still
+    /// reaches. See `Relief::surface`.
+    pub slab: Vec<Facet>,
 }
 
 /// A height map: 0 empty, 1 the rim, 2 the crown.
@@ -173,7 +194,43 @@ impl Relief {
         }
 
         let exact = exact_surface(&heights);
-        Self { drawn: exact.clone(), exact }
+        // **The crown is the half of the model the far band gives up.**
+        //
+        // Flattening every texel to the rim is not a different shape: the
+        // silhouette, the inset, the turn and every side's picture are the
+        // same, and what goes is the second texel of height and the step up
+        // to it. On the shipped pictures that is a little over half the
+        // quads -- pebble 68 -> 40, flint 108 -> 60, shell 59 -> 26,
+        // 775 -> 413 over the ten loose things, 47% fewer triangles --
+        // because a crown pays for its own tops *and* a ring of one-texel
+        // sides around them, and the rim's tops merge into far larger
+        // rectangles once nothing is cut out of the middle of them.
+        //
+        // What it costs is a texel of height at four chunks and beyond,
+        // where a whole stone is 0.74 of a block: at sixty-four blocks that
+        // texel is a quarter of a pixel at 720p. The line it is given up at
+        // is the default of the setting itself (`lod::RELIEF_CHUNKS`, four
+        // chunks, "a stone's rim is under a pixel and a half at forty
+        // blocks") -- so a player on the default sees exactly what they saw,
+        // and the two stops past it buy the silhouette further out rather
+        // than a thickness nobody can resolve.
+        //
+        // Measured, world `night` at noon, 1280x720, render distance 13,
+        // MSAA 4 on a GTX 1050 Ti, with `relief_chunks = 8`: the stones were
+        // 0.86 ms of a 3.06 ms frame -- 48% of the whole cut-out pass, more
+        // than the leaves and the grass together. See the note over
+        // `lod::StoneDetail` for the ablation that found them.
+        let slab = exact_surface(&heights.map(|line| line.map(|h| h.min(1))));
+        Self { drawn: exact.clone(), exact, slab }
+    }
+
+    /// The surface to draw at this distance's detail. `Flat` has none: the
+    /// mesher draws `mesh::flat_block`'s quad instead and never asks.
+    pub fn surface(&self, detail: crate::engine::lod::StoneDetail) -> &[Facet] {
+        match detail {
+            crate::engine::lod::StoneDetail::Full => &self.drawn,
+            _ => &self.slab,
+        }
     }
 
     /// This model as it shipped before the seams: the rim topped by the whole
@@ -217,7 +274,7 @@ impl Relief {
                 }
             }
         }
-        Self { drawn, exact: self.exact.clone() }
+        Self { drawn, exact: self.exact.clone(), slab: self.slab.clone() }
     }
 
     /// How many triangles the mesher spends on one of these.
@@ -280,12 +337,13 @@ impl Relief {
         inset: f32,
         layer: u32,
         light: u8,
+        detail: crate::engine::lod::StoneDetail,
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
     ) {
         let (sky, block_light) = (light & 0x0F, (light >> 4) & 0x0F);
         let turn = Self::turn_of(cell);
-        for facet in &self.drawn {
+        for facet in self.surface(detail) {
             let (corners, face) = Self::placed(facet, at, inset, turn);
             // Unoccluded, as the flat quad was: the sides are a texel or
             // two tall, and the corner sampling that darkens a wall's foot
@@ -739,6 +797,68 @@ mod tests {
         Relief::from_mask(&solid)
     }
 
+    /// The texels a surface's tops cover, and the height they cover them at.
+    fn footprint(facets: &[Facet]) -> [[u8; GRID]; GRID] {
+        let mut covered = [[0u8; GRID]; GRID];
+        for facet in facets.iter().filter(|f| f.face == 0) {
+            let (x0, z0) = (facet.corners[0][0] as usize, facet.corners[0][2] as usize);
+            let (x1, z1) = (facet.corners[2][0] as usize, facet.corners[2][2] as usize);
+            for line in covered.iter_mut().take(z1).skip(z0) {
+                for texel in line.iter_mut().take(x1).skip(x0) {
+                    *texel = facet.corners[0][1] as u8;
+                }
+            }
+        }
+        covered
+    }
+
+    /// **The far band gives up the crown and nothing else.** A slab that
+    /// covered a different set of texels would be a different stone seen
+    /// from above, and the line it takes over at is four chunks away --
+    /// near enough that a stone is still a shape rather than a dot.
+    #[test]
+    fn a_stone_past_the_default_line_keeps_its_outline_and_loses_its_crown() {
+        for (name, relief) in every_model() {
+            let whole = footprint(&relief.drawn);
+            let slab = footprint(&relief.slab);
+            for (z, (line, flat)) in whole.iter().zip(slab.iter()).enumerate() {
+                for (x, (&tall, &low)) in line.iter().zip(flat.iter()).enumerate() {
+                    assert_eq!(
+                        tall > 0,
+                        low > 0,
+                        "{name}: texel {x},{z} is in one silhouette and not the other"
+                    );
+                    assert!(low <= 1, "{name}: texel {x},{z} kept a crown in the slab");
+                }
+            }
+            assert!(
+                relief.slab.len() < relief.drawn.len(),
+                "{name}: the slab is {} quads against {} -- no band is worth a remesh for that",
+                relief.slab.len(),
+                relief.drawn.len()
+            );
+            assert!(relief.slab.iter().all(|f| f.corners.iter().all(|c| c[1] <= 1.0)));
+        }
+    }
+
+    /// **What the far band is worth, over the things a player walks past.**
+    /// A stick is a stroke two texels wide and has almost no core to lose
+    /// (46 quads against 58); a pebble, a flake and a shell are half or
+    /// better. The number that matters is the sum, because it is what the
+    /// chunks out there actually send.
+    #[test]
+    fn one_tier_is_about_half_the_triangles_of_two() {
+        let (mut whole, mut flat) = (0, 0);
+        for (_, relief) in every_model() {
+            whole += relief.drawn.len();
+            flat += relief.slab.len();
+        }
+        assert!(
+            flat * 10 <= whole * 6,
+            "the slab band saves too little to be worth its remesh: {flat} quads against {whole}"
+        );
+    }
+
     fn every_model() -> Vec<(String, Relief)> {
         let layers = FaceLayers::empty_for_test();
         let mut models: Vec<(String, Relief)> = STONES
@@ -831,7 +951,7 @@ mod tests {
                 let cell = [cell_x, 7, 3];
                 let turn = Relief::turn_of(cell);
                 let (mut vertices, mut indices) = (Vec::new(), Vec::new());
-                relief.append(cell, [0.0; 3], INSET, 5, 0xFF, &mut vertices, &mut indices);
+                relief.append(cell, [0.0; 3], INSET, 5, 0xFF, crate::engine::lod::StoneDetail::Full, &mut vertices, &mut indices);
                 assert_eq!(vertices.len(), relief.drawn.len() * 4, "{name}");
                 assert_eq!(indices.len(), relief.drawn.len() * 6, "{name}");
                 for quad in vertices.chunks_exact(4) {
@@ -1282,7 +1402,10 @@ mod cost {
         // and why there is a line), and solid inside `lod::RELIEF_CHUNKS` as
         // the game meshes it.
         let everywhere = |_: f32| true;
-        let ring = |d: f32| crate::engine::lod::relief_at(d, crate::engine::lod::RELIEF_CHUNKS, true);
+        let ring = |d: f32| {
+            crate::engine::lod::stones_at(d, crate::engine::lod::RELIEF_CHUNKS, crate::engine::lod::StoneDetail::Full)
+                != crate::engine::lod::StoneDetail::Flat
+        };
         let variants: [Variant; 3] =
             [("flat", &before, &everywhere), ("solid everywhere", &after, &everywhere), ("solid near", &after, &ring)];
         for (label, layers, near) in variants {
@@ -1295,7 +1418,7 @@ mod cost {
                 let start = crate::engine::lod::band_start(settings.lod_distance_chunks, cache.ceiling());
                 let level = crate::engine::lod::level_at(distance(pos), start, 0);
                 crate::engine::lod::coarsen(&mut cache, level, settings.lod_quality);
-                cache.lay_stones_flat(!near(distance(pos)));
+                cache.lay_stones(if near(distance(pos)) { crate::engine::lod::StoneDetail::Full } else { crate::engine::lod::StoneDetail::Flat });
                 out.clear();
                 let started = std::time::Instant::now();
                 build_mesh(*pos, &cache, layers, &generator, &mut out);

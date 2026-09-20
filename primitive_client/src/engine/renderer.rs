@@ -1170,6 +1170,14 @@ pub struct GraphicsState {
     pub solid_indices_last_frame: u32,
     /// The same count before `solid_ranges_facing` had its say.
     pub solid_indices_in_view_last_frame: u32,
+    /// Indices the cut-out pass sent last frame: the leaves, the grass and
+    /// the loose stones' thickness.
+    ///
+    /// **Counted because the F3 line's `tris=` never included them and the
+    /// pass they are in was the largest in the frame.** Finding that out
+    /// took an evening of turning settings off one at a time
+    /// (`lod::StoneDetail`); it should take one line of the console now.
+    pub cutout_indices_last_frame: u32,
     pub chunks_culled_last_frame: usize,
     /// How long the last frame spent recording draws, and how long it
     /// then spent handing them over. Split because they answer different
@@ -1961,6 +1969,17 @@ impl GraphicsState {
         // than by anyone drawing the leaves. The discard works under
         // multisampling as it is: a discarded fragment covers none of
         // its samples.
+        //
+        // **And it would buy almost nothing, which is now measured rather
+        // than argued.** Coverage-to-alpha is a trade against the samples,
+        // and the cut-out pass barely notices them: world `night` at noon,
+        // 1280x720, render distance 13 on a GTX 1050 Ti, the pass takes
+        // 1.79 ms at four samples and 1.44 at one. All of the samples in
+        // the frame are worth 0.35 ms, and a fragment shader with an alpha
+        // test runs once a pixel either way. The pass is bound by
+        // triangles -- see `lod::StoneDetail` for the ablation that found
+        // what they are -- so the picture would change for a slice of a
+        // third of a millisecond. Not for sale.
         let multisample = wgpu::MultisampleState {
             count: sample_count,
             mask: !0,
@@ -2386,6 +2405,7 @@ impl GraphicsState {
             draw_calls_last_frame: 0,
             solid_indices_last_frame: 0,
             solid_indices_in_view_last_frame: 0,
+            cutout_indices_last_frame: 0,
             chunks_culled_last_frame: 0,
             encode_time_last_frame: std::time::Duration::ZERO,
             present_time_last_frame: std::time::Duration::ZERO,
@@ -3474,6 +3494,10 @@ impl GraphicsState {
         // ...and how many were in view before the groups looking away
         // were left out, so the two can be read off side by side.
         let mut solid_indices_in_view = 0u32;
+        // ...and what the cut-out pass sent, which used to be nowhere on
+        // the F3 line and is most of the frame. See
+        // `GraphicsState::cutout_indices_last_frame`.
+        let mut cutout_indices_sent = 0u32;
 
         // Taken out of `self` for the length of both passes: the marks
         // borrow the query set while the passes borrow the pipelines,
@@ -3798,6 +3822,7 @@ impl GraphicsState {
                         *distance <= sprite_limit,
                     );
                     if !range.is_empty() {
+                        cutout_indices_sent += range.end - range.start;
                         let range = mesh.indices(range.start, range.end);
                         self.indirect_scratch.push(IndirectDraw {
                             index_count: range.end - range.start,
@@ -3922,6 +3947,18 @@ impl GraphicsState {
             // world, and much the least worth drawing at range, where each
             // one is a couple of pixels the fog is already washing out.
             // Loose stones ride in the same range for the same reason.
+            // **A depth prepass for this pass would be a loss, and the
+            // reason is the same measurement.** The classic cure for
+            // alpha-tested foliage is to lay the depth down first with a
+            // cheap shader so the colour pass shades each pixel once. That
+            // buys pixels, and pixels are not what this pass is spending:
+            // drawing the same scene at a quarter of the pixels took it from
+            // 1.79 ms to 1.36, and replacing the whole fragment shader with a
+            // flat colour (`FrameParams::speck_hunt`) took it to 1.56. What
+            // is left is triangles and their setup -- and a prepass sends
+            // every one of them a second time. The order is already right:
+            // the solid terrain has written its depth above, and the cut-out
+            // sub-draws are listed near to far.
             let mut bound_cutout = false;
             if cutout_draws > 0 {
                 pass.set_pipeline(cutout_pipeline);
@@ -3952,6 +3989,7 @@ impl GraphicsState {
                     }
                     bound_cutout = true;
                 }
+                cutout_indices_sent += range.end - range.start;
                 pass.draw_indexed(mesh.indices(range.start, range.end), mesh.base_vertex(), instance(slot));
                 draw_calls += 1;
             }
@@ -4281,6 +4319,7 @@ impl GraphicsState {
         self.draw_calls_last_frame = draw_calls;
         self.solid_indices_last_frame = solid_indices_sent;
         self.solid_indices_in_view_last_frame = solid_indices_in_view;
+        self.cutout_indices_last_frame = cutout_indices_sent;
         // Everything since `render` began. This subtracted the acquire time,
         // from when the wait for the swapchain was inside `render`; since
         // `acquire` moved out to the top of the frame the subtraction took a

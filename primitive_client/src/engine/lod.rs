@@ -213,10 +213,84 @@ fn inside_line(distance_chunks: f32, line_chunks: i32, current: bool) -> bool {
     }
 }
 
-/// Whether a chunk `distance_chunks` away should be meshed with its stones'
-/// thickness, given the setting and whether it is now.
-pub fn relief_at(distance_chunks: f32, relief_chunks: i32, current: bool) -> bool {
-    inside_line(distance_chunks, relief_chunks, current)
+/// How much of a stone's thickness a chunk gets.
+///
+/// **The stones were the most expensive thing in the frame, and nobody
+/// knew.** World `night` at noon, 1280x720, render distance 13, MSAA 4 on a
+/// GTX 1050 Ti, with the player's own `relief_chunks = 8`: the whole cut-out
+/// pass took 1.79 ms of a 3.06 ms GPU frame, and drawing the loose stones as
+/// flat quads (`relief_chunks = 0`) took it to 0.93 -- **0.86 ms, 48% of the
+/// pass and 28% of the frame, for pebbles**. The leaves were 0.58 of it and
+/// all the grass past forty blocks 0.20. Measured by ablation because the
+/// pass is not fragment-bound and not fill-bound either: the speck hunt,
+/// which replaces the whole fragment shader with a flat colour, takes it
+/// only to 1.56, and a quarter of the pixels only to 1.36. It is triangles,
+/// and a stone is 116 to 216 of them (`engine::relief`).
+///
+/// The cost is all in the stops past the default: 0.14 ms at four chunks,
+/// 0.48 at six, 0.86 at eight. Which is the shape of the thing -- area grows
+/// with the square of the line -- and also the shape of the argument, since
+/// a stone at six chunks is four pixels across and its crown is a quarter of
+/// one.
+///
+/// So the line the setting moves stays where the player put it, and what it
+/// carries out there is the silhouette in one tier rather than two
+/// (`Relief::slab`, 47% fewer triangles). Full relief ends at
+/// [`RELIEF_CHUNKS`] -- the default, and the distance that was measured as
+/// the last at which a rim is more than a pixel.
+///
+/// Rejected, and why:
+///
+/// * **Dropping the stops past four.** Honest about the cost and a loss to
+///   the player: at eight chunks a slab still reads as a stone lying in the
+///   grass where a flat quad reads as a stain, which is the whole complaint
+///   the relief was written for.
+/// * **Back-face culling the relief, or filing its facets under the six
+///   face directions the way the terrain is** (`renderer::solid_ranges_facing`).
+///   Both take away triangles the rasteriser was going to reject anyway, and
+///   this repository has already measured that as worth nothing: the facing
+///   rule cut 15% of the solid pass's triangles for 0.005 ms.
+/// * **The model as it shipped before the seams** -- one quad for the rim's
+///   whole top, sides carried across a line. Counted on the real pictures it
+///   is 97 quads to the exact surface's 68 for a pebble at the second tier:
+///   the saving was the top, and the tops are not where the quads are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StoneDetail {
+    /// The flat quad the game drew before stones had a thickness.
+    #[default]
+    Flat,
+    /// The silhouette one texel thick: `Relief::slab`.
+    Slab,
+    /// The two-tier surface: `Relief::drawn`.
+    Full,
+}
+
+/// How much thickness a chunk `distance_chunks` away should be meshed with,
+/// given the player's line and what it was meshed with before.
+///
+/// Two lines, each with `inside_line`'s hysteresis, so neither can flicker
+/// as a player walks the boundary. A setting nearer than [`RELIEF_CHUNKS`]
+/// is the whole of the answer -- there is no band left for the slab, and a
+/// player who moved the line in asked for less, not for a cheaper more.
+///
+/// **What the second line costs is a second ring of remeshes**, and that is
+/// written down rather than dressed up: a player who has moved the setting
+/// out now crosses two boundaries instead of one, so the ring at four chunks
+/// rebuilds where it used to sit still. It goes through the ordinary dirty
+/// queue on the mesher's own budget, like the ring at the player's line that
+/// was always there, and it is the chunks at four chunks rather than at
+/// eight -- a quarter of the ring, since a ring's length grows with its
+/// radius.
+pub fn stones_at(distance_chunks: f32, relief_chunks: i32, current: StoneDetail) -> StoneDetail {
+    if !inside_line(distance_chunks, relief_chunks, current != StoneDetail::Flat) {
+        return StoneDetail::Flat;
+    }
+    let full_line = relief_chunks.min(RELIEF_CHUNKS);
+    if inside_line(distance_chunks, full_line, current == StoneDetail::Full) {
+        StoneDetail::Full
+    } else {
+        StoneDetail::Slab
+    }
 }
 
 /// The setting's value for "see-through at any distance": further than any
@@ -1317,16 +1391,17 @@ mod tests {
     #[test]
     fn a_stone_keeps_its_thickness_near_and_does_not_flicker_on_the_line() {
         let line = RELIEF_CHUNKS;
+        let thick = |distance: f32, current| stones_at(distance, line, current) != StoneDetail::Flat;
         // Near: solid, whatever it was.
-        assert!(relief_at(0.0, line, false) && relief_at(0.0, line, true));
+        assert!(thick(0.0, StoneDetail::Flat) && thick(0.0, StoneDetail::Full));
         // On the line it stays what it was built as...
-        assert!(relief_at(line as f32, line, true));
-        assert!(!relief_at(line as f32, line, false));
+        assert!(thick(line as f32, StoneDetail::Full));
+        assert!(!thick(line as f32, StoneDetail::Flat));
         // ...and it takes a chunk past the line either way to change.
-        assert!(!relief_at(line as f32 + HYSTERESIS, line, true));
-        assert!(relief_at(line as f32 - HYSTERESIS - 0.1, line, false));
+        assert!(!thick(line as f32 + HYSTERESIS, StoneDetail::Full));
+        assert!(thick(line as f32 - HYSTERESIS - 0.1, StoneDetail::Flat));
         // Far: flat.
-        assert!(!relief_at(24.0, line, true) && !relief_at(24.0, line, false));
+        assert!(!thick(24.0, StoneDetail::Full) && !thick(24.0, StoneDetail::Flat));
     }
 
     #[test]
@@ -1334,8 +1409,12 @@ mod tests {
         // Zero is the setting's "off": the flat quads the game drew before
         // stones had a thickness, under the player's own feet included.
         for distance in [0.0, 1.0, 3.0, 50.0] {
-            assert!(!relief_at(distance, 0, true), "a stone {distance} chunks off kept its thickness at zero");
-            assert!(!relief_at(distance, 0, false));
+            assert_eq!(
+                stones_at(distance, 0, StoneDetail::Full),
+                StoneDetail::Flat,
+                "a stone {distance} chunks off kept its thickness at zero"
+            );
+            assert_eq!(stones_at(distance, 0, StoneDetail::Flat), StoneDetail::Flat);
         }
     }
 
@@ -1364,6 +1443,52 @@ mod tests {
         for distance in [5.1, 6.0, 6.9, 6.0, 5.1] {
             assert!(leaves_see_through_at(distance, line, true));
             assert!(!leaves_see_through_at(distance, line, false));
+        }
+    }
+
+    #[test]
+    fn a_stone_keeps_both_tiers_to_the_default_line_and_one_past_it() {
+        // The player's row at its furthest stop: full detail to the default
+        // line, the silhouette alone from there to eight chunks, the flat
+        // quad past it.
+        let line = 8;
+        assert_eq!(stones_at(0.5, line, StoneDetail::Full), StoneDetail::Full);
+        assert_eq!(stones_at(RELIEF_CHUNKS as f32 - 1.0, line, StoneDetail::Full), StoneDetail::Full);
+        assert_eq!(stones_at(RELIEF_CHUNKS as f32 + 1.0, line, StoneDetail::Full), StoneDetail::Slab);
+        assert_eq!(stones_at(line as f32 + 1.0, line, StoneDetail::Slab), StoneDetail::Flat);
+    }
+
+    #[test]
+    fn a_line_at_or_inside_the_default_has_no_band_of_slabs_in_it() {
+        // A player who moved the line *in* asked for less thickness, not for
+        // a cheaper kind of it: every chunk that has any has both tiers.
+        for line in 1..=RELIEF_CHUNKS {
+            for distance in [0.0, 0.5, 1.5, 2.5, 3.5, 7.5] {
+                assert_ne!(
+                    stones_at(distance, line, StoneDetail::Full),
+                    StoneDetail::Slab,
+                    "a line at {line} chunks grew a slab band at {distance}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn neither_stone_line_flickers_for_a_player_walking_across_it() {
+        // Both lines carry `inside_line`'s hysteresis, so a chunk standing
+        // exactly on one keeps what it was built with.
+        let line = 8;
+        assert_eq!(stones_at(line as f32, line, StoneDetail::Slab), StoneDetail::Slab);
+        assert_eq!(stones_at(line as f32, line, StoneDetail::Flat), StoneDetail::Flat);
+        let full = RELIEF_CHUNKS as f32;
+        assert_eq!(stones_at(full, line, StoneDetail::Full), StoneDetail::Full);
+        assert_eq!(stones_at(full, line, StoneDetail::Slab), StoneDetail::Slab);
+    }
+
+    #[test]
+    fn the_stones_go_flat_at_zero_whatever_they_were() {
+        for current in [StoneDetail::Flat, StoneDetail::Slab, StoneDetail::Full] {
+            assert_eq!(stones_at(0.0, 0, current), StoneDetail::Flat);
         }
     }
 

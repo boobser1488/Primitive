@@ -5866,6 +5866,7 @@ fn run(
                         draw_calls: graphics.draw_calls_last_frame,
                         solid_indices: graphics.solid_indices_last_frame,
                         solid_indices_in_view: graphics.solid_indices_in_view_last_frame,
+                        cutout_indices: graphics.cutout_indices_last_frame,
                         chunks_culled: graphics.chunks_culled_last_frame,
                         underwater,
                         health,
@@ -9707,10 +9708,10 @@ fn mark_urgent(
 struct Detail {
     level: u8,
     skyline: i32,
-    /// Whether its stones were given their thickness (`lod::relief_at`).
-    /// A line of its own rather than a level: it does not coarsen anything,
-    /// and it is much nearer than the first band.
-    relief: bool,
+    /// How much thickness its stones were given (`lod::stones_at`). A line
+    /// of its own rather than a level -- two lines now -- because it
+    /// coarsens nothing, and both are much nearer than the first band.
+    relief: crate::engine::lod::StoneDetail,
     /// Whether its canopy was built see-through, with the insides of its
     /// crowns (`lod::leaves_see_through_at`). Another line of its own, for
     /// `relief`'s reason, and recorded for coarse chunks too so a chunk
@@ -9789,7 +9790,7 @@ fn restripe_detail_levels(
         // ...and the nearer line where stones lose their thickness
         // (`lod::RELIEF_CHUNKS`), which moves no level and still changes
         // the mesh.
-        let relief_moved = crate::engine::lod::relief_at(distance, relief_chunks, built.relief) != built.relief;
+        let relief_moved = crate::engine::lod::stones_at(distance, relief_chunks, built.relief) != built.relief;
         // ...and the see-through canopy's line. **Only for a chunk at full
         // detail**: a coarse chunk's crowns are shells whichever side of it
         // the chunk is, and rebuilding one for a flag its mesh ignores is a
@@ -9907,12 +9908,12 @@ fn dispatch_meshing(
         // Near enough for a stone's thickness to be a pixel, or laid flat. A
         // chunk nobody has meshed yet counts as having it, for the reason a
         // level starts at full detail.
-        let relief = crate::engine::lod::relief_at(
+        let relief = crate::engine::lod::stones_at(
             chunk_distance(pos, player_chunk),
             relief_chunks,
-            chunk_lod.get(&pos).is_none_or(|built| built.relief),
+            chunk_lod.get(&pos).map_or(crate::engine::lod::StoneDetail::Full, |built| built.relief),
         );
-        cache.lay_stones_flat(!relief);
+        cache.lay_stones(relief);
         // See-through near, a shell past the player's line; a chunk nobody
         // has meshed counts as see-through, for the stones' reason.
         let see_through = crate::engine::lod::leaves_see_through_at(
@@ -10443,7 +10444,11 @@ mod meshing_priority_tests {
                     Detail {
                         level: crate::engine::lod::level_at(chunk_distance(pos, player), lod, 0),
                         skyline: 0,
-                        relief: crate::engine::lod::relief_at(chunk_distance(pos, player), crate::engine::lod::RELIEF_CHUNKS, true),
+                        relief: crate::engine::lod::stones_at(
+                            chunk_distance(pos, player),
+                            crate::engine::lod::RELIEF_CHUNKS,
+                            crate::engine::lod::StoneDetail::Full,
+                        ),
                         see_through: true,
                     },
                 );
@@ -10773,15 +10778,19 @@ mod meshing_priority_tests {
     #[test]
     fn a_relief_distance_of_zero_meshes_the_chunk_under_the_player_with_flat_stones() {
         // "0 = flat quads everywhere", asked of the dispatch rather than
-        // of `lod::relief_at` alone: the chunk the player stands in is the
+        // of `lod::stones_at` alone: the chunk the player stands in is the
         // one a nearest-first rule would most want to give a thickness.
         let (_, built) = mesh_one_chunk_at(0, crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE);
-        assert!(!built.relief, "the chunk under the player kept its stones' thickness at zero");
+        assert_eq!(
+            built.relief,
+            crate::engine::lod::StoneDetail::Flat,
+            "the chunk under the player kept its stones' thickness at zero"
+        );
         let (_, built) = mesh_one_chunk_at(
             crate::engine::lod::RELIEF_CHUNKS,
             crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE,
         );
-        assert!(built.relief);
+        assert_eq!(built.relief, crate::engine::lod::StoneDetail::Full);
     }
 
     #[test]

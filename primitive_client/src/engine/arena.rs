@@ -1118,7 +1118,7 @@ mod world_cost {
             // the census counts stones in relief nine chunks out that the
             // game lays flat past four.
             let distance = (((pos.x - centre.x).pow(2) + (pos.z - centre.z).pow(2)) as f32).sqrt();
-            cache.lay_stones_flat(!crate::engine::lod::relief_at(distance, 4, true));
+            cache.lay_stones(crate::engine::lod::stones_at(distance, 4, crate::engine::lod::StoneDetail::Full));
             cache.draw_leaves_solid(!crate::engine::lod::leaves_see_through_at(distance, 6, true));
             out.clear();
             let started = std::time::Instant::now();
@@ -1143,7 +1143,7 @@ mod world_cost {
                 for pos in &inner {
                     cache.fill(*pos, &chunks, &light);
                     let distance = (((pos.x - centre.x).pow(2) + (pos.z - centre.z).pow(2)) as f32).sqrt();
-                    cache.lay_stones_flat(!crate::engine::lod::relief_at(distance, 4, true));
+                    cache.lay_stones(crate::engine::lod::stones_at(distance, 4, crate::engine::lod::StoneDetail::Full));
                     cache.draw_leaves_solid(!crate::engine::lod::leaves_see_through_at(distance, 6, true));
                     let started = std::time::Instant::now();
                     build_mesh(*pos, &cache, &layers, &generator, &mut out);
