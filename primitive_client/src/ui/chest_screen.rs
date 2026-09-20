@@ -1773,14 +1773,14 @@ impl ChestScreen {
             format!(
                 "{used}/{squares} {}   {stored} {}   {:.0} {}",
                 language.text(Msg::SlotsWord),
-                language.text(Msg::ItemsWord),
+                crate::ui::lang::counted(language, stored as u64, Msg::ItemsWord),
                 self.contents.total_weight(),
                 language.text(Msg::Kg),
             )
         } else {
             format!(
                 "{stored} {}   {:.0} {}",
-                language.text(Msg::ItemsWord),
+                crate::ui::lang::counted(language, stored as u64, Msg::ItemsWord),
                 self.contents.total_weight(),
                 language.text(Msg::Kg),
             )

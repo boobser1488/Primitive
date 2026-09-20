@@ -619,10 +619,12 @@ impl Setting {
             Setting::RenderDistance => format!(
                 "{} {}",
                 settings.render_distance_chunks,
-                language.text(Msg::Chunks)
+                crate::ui::lang::counted(language, settings.render_distance_chunks as u64, Msg::Chunks)
             ),
             Setting::Fov => {
-                format!("{:.0} {}", settings.fov_degrees, language.text(Msg::Degrees))
+                // No space before the sign: "72°", the way a number of
+                // degrees is written in all four languages.
+                format!("{:.0}{}", settings.fov_degrees, language.text(Msg::Degrees))
             }
             // Shown scaled up: the stored value is around 0.0025, and a
             // row reading "0.003" tells the player nothing about whether
@@ -666,7 +668,7 @@ impl Setting {
                 chunks if chunks >= crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE => {
                     language.text(Msg::Everywhere).to_string()
                 }
-                chunks => format!("{} {}", chunks, language.text(Msg::Chunks)),
+                chunks => format!("{} {}", chunks, crate::ui::lang::counted(language, chunks as u64, Msg::Chunks)),
             },
             // The words every graphics menu uses, not the step's name in
             // the code. "Balanced" is a word about the implementation --
@@ -688,7 +690,11 @@ impl Setting {
                 .to_string(),
             Setting::ShadowDistance => {
                 if settings.shadows.is_on() {
-                    format!("{:.0} {}", settings.shadow_distance, language.text(Msg::Blocks))
+                    format!(
+                        "{:.0} {}",
+                        settings.shadow_distance,
+                        crate::ui::lang::counted(language, settings.shadow_distance as u64, Msg::Blocks)
+                    )
                 } else {
                     language.text(Msg::Off).to_string()
                 }
@@ -709,7 +715,11 @@ impl Setting {
                 if settings.relief_chunks <= 0 {
                     language.text(Msg::Off).to_string()
                 } else {
-                    format!("{} {}", settings.relief_chunks, language.text(Msg::Chunks))
+                    format!(
+                        "{} {}",
+                        settings.relief_chunks,
+                        crate::ui::lang::counted(language, settings.relief_chunks as u64, Msg::Chunks)
+                    )
                 }
             }
             // Off reads as off. "0 chunks" would be a distance, and
@@ -722,7 +732,7 @@ impl Setting {
                     format!(
                         "{} {}",
                         settings.lod_distance_chunks,
-                        language.text(Msg::Chunks)
+                        crate::ui::lang::counted(language, settings.lod_distance_chunks as u64, Msg::Chunks)
                     )
                 }
             }
@@ -5905,7 +5915,13 @@ mod tests {
         // ...and which plants cast (`Setting::PlantShadows`), twenty-five:
         // the same count and colours, and the thumb shorter again. The row
         // is under the shadow distance, below the first panel's worth.
-        ("settings", 2472, 12951836992774434452, 12889776691169261987),
+        // ...and twelve vertices fewer, because the field-of-view row
+        // reads "70°" where it read "70 deg": three glyphs instead of
+        // six, and a glyph is four vertices. The sign is the same in all
+        // four languages, which is the point of it -- the word was a stub
+        // in English, wrong after 1, 2, 3 and 4 in Polish, and also the
+        // Russian for hail.
+        ("settings", 2460, 8718775434595690742, 12674453874554467043),
         // More actions to bind than when this was taken, so more rows.
         // The last of them is GIVE (`keybinds::Action::Give`), which is
         // ninety more vertices -- a row's well, its word and its key --
@@ -7164,14 +7180,27 @@ mod tests {
 
     #[test]
     fn every_setting_shows_a_value_a_person_can_read() {
-        let settings = ClientSettings::default();
-        for setting in Setting::ALL {
-            let value = setting.value(&settings);
-            assert!(!value.is_empty(), "{setting:?} shows nothing");
-            assert!(
-                value.chars().all(|c| c.is_ascii_graphic() || c == ' '),
-                "{setting:?} shows {value:?}, which the font cannot draw"
-            );
+        // **Every language, and the font's own list.** This asked
+        // `is_ascii_graphic`, which was the right question while the font
+        // was ASCII and has been the wrong one ever since it learned
+        // Cyrillic, Polish and the punctuation a Russian keyboard types
+        // (`font::ORDER`) -- it would have called `ДАЛЬНОСТЬ` undrawable
+        // and it did call the degree sign undrawable, which the font has
+        // had for as long as the chat has been able to print `№`. And it
+        // only ever looked at the default settings, which are English:
+        // the rows whose reading is a word are exactly the rows a
+        // translation can break.
+        let mut settings = ClientSettings::default();
+        for language in Language::ALL.iter().copied() {
+            settings.language = language;
+            for setting in Setting::ALL {
+                let value = setting.value(&settings);
+                assert!(!value.is_empty(), "{setting:?} shows nothing in {language:?}");
+                assert!(
+                    value.chars().all(|c| crate::engine::texture::GLYPHS.contains(c)),
+                    "{setting:?} shows {value:?} in {language:?}, which the font cannot draw"
+                );
+            }
         }
     }
 

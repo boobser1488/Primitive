@@ -7163,12 +7163,15 @@ fn drink_from_barrel(
 /// words, because a river and a barrel of the same pond are the same
 /// mistake and saying it two ways would make them sound like two.
 fn warn_about_water(handle: &Arc<players::PlayerHandle>, kind: primitive_shared::body::Water) {
-    let words = match kind {
+    // A code, not the sentence: the words are `ui::lang`'s, in the
+    // language the player chose. They used to be written out here in
+    // English and printed in the banner over a Russian interface.
+    let what = match kind {
         primitive_shared::body::Water::Fresh => return,
-        primitive_shared::body::Water::Salt => "the sea is salt, and you are thirstier for it",
-        primitive_shared::body::Water::Standing => "the water is stale, and it sits badly",
+        primitive_shared::body::Water::Salt => primitive_shared::notice::Notice::SeaWaterIsSalt,
+        primitive_shared::body::Water::Standing => primitive_shared::notice::Notice::StaleWater,
     };
-    handle.send(ServerMessage::Error(words.to_string()));
+    handle.send(ServerMessage::Notice { what });
 }
 
 /// Swaps one `gave` in the selected slot for one `got`, if the pack has
@@ -11832,7 +11835,7 @@ pub(crate) fn tend_snare(
         BLOCK_SNARE_CAUGHT => primitive_shared::animals::carcass_at_stage(primitive_shared::animals::Species::Hare, 0),
         BLOCK_SNARE_SPRUNG => BLOCK_SNARE,
         _ => {
-            handle.send(ServerMessage::Error("nothing has come to the snare yet".to_string()));
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::SnareEmpty });
             return;
         }
     };
@@ -11878,11 +11881,11 @@ pub(crate) fn tend_pan(
                 (state.selected_slot, state.inventory.block_in(state.selected_slot))
             };
             let Some(jug) = held.filter(|&b| block_kind(b) == BLOCK_JUG_WATER) else {
-                handle.send(ServerMessage::Error("a salt pan is filled from a jug of the sea".to_string()));
+                handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PanWantsSea });
                 return;
             };
             if vessel_water(jug) != primitive_shared::body::Water::Salt {
-                handle.send(ServerMessage::Error("that is fresh water: it dries to nothing".to_string()));
+                handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PanFreshWater });
                 return;
             }
             let brine = primitive_shared::saltpan::brine(0);
@@ -11921,7 +11924,7 @@ pub(crate) fn tend_pan(
             refresh_carried_weight(handle);
         }
         _ => {
-            handle.send(ServerMessage::Error("the pan is still drying".to_string()));
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PanDrying });
         }
     }
 }
