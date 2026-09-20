@@ -1777,6 +1777,17 @@ impl GraphicsState {
     /// every backend has one. `size` comes in beside it because a raw
     /// handle cannot be asked how big it is; the platform knows, and
     /// says.
+    ///
+    /// The graphics settings arrive one by one rather than as a
+    /// `ClientSettings`, and deliberately: this takes the four that
+    /// have to be known *while the device and the pipelines are being
+    /// built* -- a sample count is baked into every pipeline, a
+    /// lighting step is compiled into the shader, and the resolution
+    /// decides how big the first swapchain is. Everything else the
+    /// player can change is applied afterwards through a setter, and
+    /// taking the whole settings struct here would hide which of the
+    /// two kinds a new setting is.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         target: impl Into<wgpu::SurfaceTarget<'static>>,
         size: crate::platform::Size,

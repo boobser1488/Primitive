@@ -5952,7 +5952,16 @@ mod tests {
         // ...and which plants cast (`Setting::PlantShadows`), twenty-five:
         // the same count and colours, and the thumb shorter again. The row
         // is under the shadow distance, below the first panel's worth.
-        ("settings", 2472, 12951836992774434452, 12889776691169261987),
+        // ...and RESOLUTION (`Setting::Resolution`), twenty-six -- the
+        // first row added to this screen that is *not* below the fold.
+        // It sits under vsync, tenth of twenty-six, and the panel holds
+        // twelve: so it arrives inside the panel and pushes AMBIENT
+        // OCCLUSION out of the bottom of it. "RESOLUTION 100%" is
+        // fourteen letters where "AMBIENT OCCLUSION 45%" was nineteen,
+        // and a letter is a quad, which is the whole of the thirty
+        // vertices that went. Every row under vsync moved down one, so
+        // the shape and the colour hashes moved with them.
+        ("settings", 2442, 16797667408077809527, 4768121542761306467),
         // More actions to bind than when this was taken, so more rows.
         // The last of them is GIVE (`keybinds::Action::Give`), which is
         // ninety more vertices -- a row's well, its word and its key --
@@ -7066,11 +7075,14 @@ mod tests {
         // A file saying 0.73 is between two steps. The row has to treat
         // it as the nearer one, or a single press throws away a value
         // the player typed on purpose.
-        let mut settings = ClientSettings::default();
-        settings.resolution_scale = Some(0.73);
+        let hand_edited = || ClientSettings {
+            resolution_scale: Some(0.73),
+            ..ClientSettings::default()
+        };
+        let mut settings = hand_edited();
         Setting::Resolution.step(&mut settings, 1);
         assert_eq!(settings.resolution_scale, Some(0.8));
-        settings.resolution_scale = Some(0.73);
+        let mut settings = hand_edited();
         Setting::Resolution.step(&mut settings, -1);
         assert_eq!(settings.resolution_scale, Some(0.7));
     }
