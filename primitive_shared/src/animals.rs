@@ -360,6 +360,44 @@ pub enum Species {
     /// in every skeleton (`types::bones_of`) -- the eighteenth, which the
     /// third bones block still has room for.
     Horse,
+    /// **The troop in the palms, and the first animal in this world that
+    /// takes something off a player rather than giving something up.**
+    ///
+    /// A rat eats out of a chest at night, in a house, while nobody is
+    /// looking (`Species::Rat`). A monkey does it in daylight, in front of
+    /// you, and then sits six blocks up a trunk with it. That is the same
+    /// larder problem asked where the player can answer it, and the answer
+    /// is a decision rather than a chore: stay with the camp and lose the
+    /// afternoon, build the stores where a monkey cannot reach, or feed the
+    /// troop the fruit it came for and get on.
+    ///
+    /// **It climbs rather than flies** (`climbs`). The bird's altitude is a
+    /// place in the air; a monkey's is a place on a tree, so it goes up what
+    /// is there and comes down when there is a reason -- fruit on the
+    /// ground, or the rest of the troop gone somewhere. A stone thrown at
+    /// one scatters the lot of them, chattering, and **the chatter is the
+    /// mechanic** as much as the theft is: a troop that goes off in the
+    /// canopy behind you is something in the wood that is not you, which is
+    /// the only warning a player gets in a country with no wolves in it.
+    ///
+    /// Appended, for `Species::Zebra`'s reason -- the index is on the wire
+    /// and in the bones -- the nineteenth, which the fourth bones block has
+    /// room for (`types::SKELETON_ROOM`).
+    Monkey,
+    /// **The beach at night.** Sideways, quick over the sand, and under a
+    /// stone before you have got to it.
+    ///
+    /// It is the smallest decision in the game and it is a real one: a crab
+    /// is a meal you can have on the first night with nothing but your
+    /// hands and a fire, and the cost of reaching for one is that it takes a
+    /// claw to your fingers (`damage`) -- the only animal here that hurts a
+    /// player without being a fight. A boar is a choice to fight or leave; a
+    /// crab is a choice to be quick or to be bitten, at a hundredth of the
+    /// stake, which is the shape a coast's first evening should have.
+    ///
+    /// **Out in numbers after dark** (`spawn_weight_in`), so a beach walked
+    /// at noon and the same beach walked at midnight are two places.
+    Crab,
 }
 
 /// How much commoner a wolf (by day) and a bear are in a wood than
@@ -421,6 +459,10 @@ impl Species {
         Species::Rat,
         // ...and the plains' horse, the eighteenth: one line, as promised.
         Species::Horse,
+        // ...and the shore's two, the nineteenth and the twentieth. One line
+        // apiece, still, and twelve of the fourth bones block's room left.
+        Species::Monkey,
+        Species::Crab,
     ];
 
     /// What to call it. Not translated, for the same reason block names
@@ -446,6 +488,8 @@ impl Species {
             Species::Herring => "herring",
             Species::Rat => "rat",
             Species::Horse => "horse",
+            Species::Monkey => "monkey",
+            Species::Crab => "crab",
         }
     }
 
@@ -488,7 +532,16 @@ impl Species {
             // A horse never comes at anybody; what it does to a person on
             // its back is the server's (`BREAKING_THROW`), and that death is
             // a fall rather than an animal's.
-            | Species::Horse => "was killed by an animal",
+            | Species::Horse
+            // A monkey takes and runs. It has no blow at all (`damage`), and
+            // the one thing it could be said to cost a player is a meal.
+            | Species::Monkey => "was killed by an animal",
+            // **The smallest death in the game, and it needs a sentence of
+            // its own** -- not because anybody will read it often, but
+            // because `of_death_cause` finds a species by its words, and a
+            // crab sharing the catch-all would make every animal death in
+            // the world a crab's.
+            Species::Crab => "was nipped by a crab",
         }
     }
 
@@ -561,6 +614,15 @@ impl Species {
             // horse is for on a plain. Taller than the zebra, its wild cousin
             // on the savanna, by a hand and a half.
             Species::Horse => 1.6,
+            // Knee-high on all fours, which is what a monkey on the ground
+            // is -- it is upright only when it is sitting in a tree with
+            // both hands full of somebody's dinner.
+            Species::Monkey => 0.72,
+            // Ankle-high, and most of that is shell -- the last third is the
+            // eyes on their stalks, which is the part of a crab a person
+            // actually sees over the sand. See `width`: a crab is the one
+            // animal here that is wider than it is long.
+            Species::Crab => 0.34,
         }
     }
 
@@ -597,6 +659,12 @@ impl Species {
             // Under a block, like everything else that walks: a horse that
             // could not be led through a one-block gate could not be stabled.
             Species::Horse => 0.8,
+            Species::Monkey => 0.35,
+            // **Wider than it is long, and that is the animal.** Everything
+            // else in this world is a body with a head at one end; a crab is
+            // a shell with the legs down the sides, and it goes the way it
+            // is wide (`sidles`).
+            Species::Crab => 0.58,
         }
     }
 
@@ -640,6 +708,11 @@ impl Species {
             // Nose to tail, with the head carried forward: the longest thing
             // that walks here, which is also why a horse turns wide.
             Species::Horse => 2.3,
+            // Body and head. The tail is longer than both and is not counted
+            // here for the rat's reason -- `length` is the body the animal
+            // is walked as, and the hit box is what the tail is in.
+            Species::Monkey => 0.7,
+            Species::Crab => 0.35,
         }
     }
 
@@ -724,6 +797,16 @@ impl Species {
             // tail is because the middle is where the saddle is, behind the
             // withers (`model_notes`, the horse).
             Species::Horse => (0.3, 1.09, 1.44),
+            // Measured off `animals/monkey.bbmodel`: across is the elbows,
+            // up is the crown of the head, and **along is the tail**, which
+            // is half again the body and reaches further behind the middle
+            // than the muzzle does in front of it. A tail you can see and
+            // cannot hit is what this test exists for.
+            Species::Monkey => (0.1688, 0.3563, 0.55),
+            // Measured off `animals/crab.bbmodel`: across is the claws held
+            // out, which is the whole silhouette of a crab and therefore the
+            // whole of what a hand comes down on.
+            Species::Crab => (0.2875, 0.1688, 0.1688),
         }
     }
 
@@ -776,6 +859,12 @@ impl Species {
             // grazing herd is something a person can walk up to -- which is
             // where taming one starts.
             Species::Horse => 2.4,
+            // Busy, like the fowl's: a troop on the ground is foraging, and
+            // foraging is short runs between things worth turning over.
+            Species::Monkey => 1.9,
+            // A crab on the sand is not going anywhere in particular, and it
+            // is the slowest walk in the world.
+            Species::Crab => 0.9,
         }
     }
 
@@ -913,6 +1002,17 @@ impl Species {
             // `stamina_seconds`, and `horse::GALLOP`, which is the same animal
             // with somebody on it and carrying them.
             Species::Horse => 7.8,
+            // **Under a sprinting player** (`NOMINAL_SPRINT_SPEED`), and
+            // that is deliberate: a monkey that outran you on the flat would
+            // be a thief with no answer. It is caught on open sand and it is
+            // never caught in the palms, because what saves it is the trunk
+            // and not its legs (`climbs`).
+            Species::Monkey => 5.3,
+            // **Quick for a hand and hopeless for a chase.** A crab crosses
+            // the yard of sand between you and the nearest stone faster than
+            // you can reach down, and it has about two seconds of it in
+            // (`stamina_seconds`).
+            Species::Crab => 3.6,
         }
     }
 
@@ -1007,6 +1107,10 @@ impl Species {
             // closed before the herd looked up has lost it. Under the bear's,
             // which keeps its promise.
             Species::Horse => 18.0,
+            Species::Monkey => 7.0,
+            // The shortest wind of anything alive. A crab's escape is the
+            // rock, not the distance.
+            Species::Crab => 2.0,
         }
     }
 
@@ -1075,6 +1179,8 @@ impl Species {
             // A zebra and a bit: a big animal, and what a wolf pack pulls down
             // is a horse left standing, not a horse that can run.
             Species::Horse => 16.0,
+            Species::Monkey => 6.0,
+            Species::Crab => 3.0,
         }
     }
 
@@ -1107,7 +1213,18 @@ impl Species {
             // A horse runs. The one way it hurts anybody is by throwing
             // them, and that is the breaking's (`husbandry::Breaking`), not
             // a blow it chooses to land.
-            | Species::Horse => 0.0,
+            | Species::Horse
+            // **A monkey does not fight, it takes.** Something that bit back
+            // would turn the troop into a swarm to be killed, and killing
+            // the troop is the answer this mechanic must not have -- see
+            // `Species::Monkey`. What it costs you is the stores.
+            | Species::Monkey => 0.0,
+            // **Half a point, which is the smallest blow in the game.** A
+            // crab cannot beat anybody: what it can do is make reaching into
+            // the dark for one a thing you decide to do. See `Species::Crab`
+            // -- and `death_cause`, which has to name it because a blow this
+            // small can still be the last one somebody takes.
+            Species::Crab => 0.5,
             Species::Boar => 4.0,
             // **Between a boar and a bear.** Four bites is a dead player,
             // which makes a lion something you do not stand and trade blows
@@ -1127,9 +1244,25 @@ impl Species {
     }
 
     /// Does it come at you rather than away?
+    ///
+    /// **Read off `provoke_range` and not off `damage`**, and the crab is why
+    /// the two had to be told apart. This used to be `damage() > 0.0`, which
+    /// was the same list for as long as the only things that could hurt
+    /// anybody were the four that hunt -- and then the shore got an animal
+    /// that lands a blow and never walks toward anybody in its life
+    /// (`Species::Crab`, whose blow is the server's `pinch`, a defence
+    /// against the hand that closes on it). Under the old definition a crab
+    /// was hostile, which is four wrong answers in four different files: the
+    /// client warned about one, a bird was flushed by one, and the server
+    /// gave it a predator's recovery.
+    ///
+    /// So: `damage` is what a blow is worth when it lands, and this is
+    /// whether the animal will come and land one. A hostile animal is one
+    /// with a distance at which it takes offence, which is exactly what
+    /// `provoke_range` is.
     #[inline]
     pub fn is_hostile(self) -> bool {
-        self.damage() > 0.0
+        self.provoke_range() > 0.0
     }
 
     /// Does this species hunt that one?
@@ -1228,7 +1361,14 @@ impl Species {
             | Species::Pike
             | Species::Herring
             | Species::Gull
-            | Species::Rat => 0.0,
+            | Species::Rat
+            | Species::Monkey
+            // **A shell, and it stops nothing.** It is armour against a gull
+            // and a wave; a boot goes through it. Armour on an animal worth
+            // one mouthful would be a chore with a right answer written on
+            // it, which is what `hide_armour`'s own table is careful not to
+            // be.
+            | Species::Crab => 0.0,
             // A deer's coat turns a graze and no more.
             Species::Deer | Species::Sheep | Species::Zebra | Species::Horse => 0.4,
             // A mane and a thick hide over the shoulders, under a boar's
@@ -1330,7 +1470,14 @@ impl Species {
     /// which a biome test would not be.
     #[inline]
     pub fn needs_trees(self) -> bool {
-        matches!(self, Species::Bear)
+        // ...and the monkey, which is the same question asked for a
+        // different reason: a bear wants a wood to be *in*, and a monkey
+        // wants something to go *up* (`climbs`). Both are answered by the
+        // timber round the spot rather than by the biome, which is also what
+        // makes a grove a player planted on a warm shore fill with monkeys
+        // -- and that is the right answer, where a planted acacia filling
+        // with lions was not (`lives_in`). A grove is a grove.
+        matches!(self, Species::Bear | Species::Monkey)
     }
 
     /// Does this species live in that biome? The spawner's question, asked
@@ -1366,6 +1513,24 @@ impl Species {
             // zebra's country. Not the woods: a horse in a forest is a horse
             // somebody rode there.
             Species::Horse => matches!(biome, Biome::Plains | Biome::Savanna),
+            // **The palm coast, which is this world's tropics.** There is no
+            // jungle biome and one is not being added for a troop of
+            // monkeys: a biome is a climate, a soil, a tree and a place on
+            // the map, and inventing a continent to hang one animal off is
+            // the tail wagging the world. What a monkey wants is fruit over
+            // its head and something to climb, and the hot beach already has
+            // both -- the palms and their coconuts
+            // (`types::BLOCK_PALM_COCONUTS`).
+            //
+            // The beach *and* the trees: `needs_trees` is true of it too, so
+            // a cold shingle strand with nothing growing on it gets none.
+            // The two together are "a grove on a warm shore", said in the two
+            // ways the spawner can ask -- the generator for the country and
+            // the blocks for the timber.
+            Species::Monkey => biome == Biome::Beach,
+            // The sand and the shallows off it. A crab is found where the
+            // water meets the land, which is these two biomes and no other.
+            Species::Crab => matches!(biome, Biome::Beach | Biome::Ocean),
             Species::Deer | Species::Boar | Species::Wolf | Species::Sheep | Species::Bear => {
                 biome != Biome::Savanna
             }
@@ -1451,6 +1616,85 @@ impl Species {
             self,
             Species::Fish | Species::Cod | Species::Trout | Species::Pike | Species::Herring
         )
+    }
+
+    /// Does it go up a tree rather than round it?
+    ///
+    /// **The monkey's, and it is not a second flight.** A bird is given a
+    /// target altitude and pulled toward it through open air (the server's
+    /// `FLIGHT_HEIGHT`); a climber has no altitude of its own at all -- it
+    /// is held against whatever timber it is touching and walks up it, and
+    /// the moment there is no trunk under its hands it falls like everything
+    /// else. So the wood decides how high a monkey gets, which is what makes
+    /// a grove of palms a place a troop lives in rather than a backdrop they
+    /// hover over.
+    ///
+    /// Rejected: *making it `flies()` with a low ceiling.* Three lines and
+    /// wrong in every one of them -- it would have wingbeat on the model, a
+    /// glide path, a landing flare, and a monkey able to cross open ground
+    /// at head height with nothing under it.
+    #[inline]
+    pub fn climbs(self) -> bool {
+        matches!(self, Species::Monkey)
+    }
+
+    /// Does it take food that is not its own -- out of a hand, off the
+    /// ground of a camp, out of what is stored there?
+    ///
+    /// **Two species do, and they do it in opposite places**: the rat in a
+    /// house at night out of a chest (`vermin::gnaw`, which is its own pass
+    /// and stays its own), and the monkey in daylight out of what a player
+    /// is carrying. A predicate rather than `== Monkey` because the thing
+    /// the server hangs off it -- a mind that goes for the player's stores
+    /// instead of away from the player -- is the interesting half, and the
+    /// day something else learns it, it is one name here.
+    #[inline]
+    pub fn pilfers(self) -> bool {
+        matches!(self, Species::Monkey)
+    }
+
+    /// Will it be found standing on bare sand, shingle or rock rather than
+    /// on grass?
+    ///
+    /// **The spawner's second ground, and until the shore there was only
+    /// one.** The land spawner puts an animal down where a tuft of grass
+    /// would grow (the server's `is_pasture`), and for eighteen species that
+    /// was the same question as "will it be standing here": every one of
+    /// them either grazed or hunted something that did. A crab and a troop of
+    /// monkeys do neither -- what they live on is the sand under the palms --
+    /// and under the pasture test alone neither of them would ever have
+    /// appeared in a world at all.
+    ///
+    /// A predicate rather than "the beach's animals", because the question is
+    /// about the *floor* and not about the country: the day something is
+    /// wanted on a scree or a dune, it is one name here.
+    #[inline]
+    pub fn walks_on_sand(self) -> bool {
+        matches!(self, Species::Monkey | Species::Crab)
+    }
+
+    /// Does it go sideways -- its body across its heading?
+    ///
+    /// The crab's, and **nothing draws anything differently for it**: the
+    /// model is simply built wide (`animals/crab.bbmodel` is 0.58 across and
+    /// 0.31 along), so an animal walked forwards by the ordinary code goes
+    /// the way it is wide, which is what sidling is. A quarter turn between
+    /// where it points and where it is drawn was the first idea and it is
+    /// the wrong one: it makes the body and the heading disagree, and then
+    /// every rule about a flank, a hit box and a blind spot has to be told
+    /// about the lie.
+    ///
+    /// What the predicate is for is the three places that would otherwise
+    /// have to know the crab by name: the hit box, which lies the same way
+    /// (`every_animal_has_a_long_way_and_a_short_way_and_the_crab_is_the_one_turned_sideways`);
+    /// the drawn model, which is checked against it
+    /// (`animal_model::an_animal_has_a_long_way_and_a_short_way_and_the_crab_lies_across_its_own`);
+    /// and the server's `nimbleness`, which lets a sidler change heading as
+    /// fast as it likes instead of as fast as a body its width could swing
+    /// round -- because a crab does not have to turn to go.
+    #[inline]
+    pub fn sidles(self) -> bool {
+        matches!(self, Species::Crab)
     }
 
     /// Does it swerve as it runs?
@@ -1561,7 +1805,14 @@ impl Species {
     pub fn provoke_range(self) -> f32 {
         match self {
             Species::Hare | Species::Deer | Species::Zebra | Species::Antelope
-            | Species::Rat | Species::Horse => 0.0,
+            | Species::Rat | Species::Horse
+            // A monkey coming at you is coming at what you are holding, and
+            // that is a mind (`pilfers`) rather than an offence taken.
+            | Species::Monkey
+            // ...and a crab never comes at anybody at all. Its blow lands on
+            // the hand that closes on it (the server's `pinch`), which is a
+            // defence and not a charge.
+            | Species::Crab => 0.0,
             Species::Boar => 3.0,
             // Between the bear's four and a half and the wolf's six, and
             // unlike the wolf's it means what it says: a lion does not wait
@@ -1609,7 +1860,14 @@ impl Species {
             // when it comes back it is because the store is still there,
             // not because it remembers you.
             | Species::Rat
-            | Species::Horse => 0.0,
+            | Species::Horse
+            | Species::Crab => 0.0,
+            // **A troop remembers, and it is the one thing here that holds a
+            // grudge without ever fighting.** Two minutes is long enough
+            // that a stone thrown at a monkey buys a quiet afternoon, and
+            // short enough that it does not buy the week: what keeps the
+            // stores is where they are built, not what was thrown.
+            Species::Monkey => 120.0,
             Species::Boar => 12.0,
             // Under the wolf's twenty. A lion that has been hurt comes for
             // you, and then it has a zebra to think about.
@@ -1706,6 +1964,17 @@ impl Species {
             // kept is every trip to the hills for as long as it is fed. Both
             // are answers, which is why the number is this high.
             Species::Horse => &[(BLOCK_RAW_MEAT, 5), (BLOCK_HIDE, 2)],
+            // **One haunch and nothing else, and the meagreness is the
+            // point.** A monkey is a nuisance you *can* kill, and the world
+            // should not pay well for killing the nuisance: a troop hunted
+            // out for a haunch apiece is an afternoon spent on one dinner,
+            // where the same afternoon spent putting the stores out of reach
+            // keeps the dinners already had. No hide -- nothing here tans
+            // one -- and no sinew, for the hare's reason.
+            Species::Monkey => &[(BLOCK_RAW_MEAT, 1)],
+            // The claws and the body of one crab: a mouthful, and one that
+            // has to see a fire (`food::sickness_seconds`).
+            Species::Crab => &[(crate::types::BLOCK_CRAB_MEAT, 1)],
         }
     }
 
@@ -1733,7 +2002,11 @@ impl Species {
             Species::Antelope => BLOCK_CARCASS_ANTELOPE,
             Species::Lion => BLOCK_CARCASS_LION,
             Species::Horse => crate::types::BLOCK_CARCASS_HORSE,
-            Species::Fish | Species::Cod | Species::Trout | Species::Pike | Species::Herring
+            // **Neither of the shore's two leaves a body**, for the gull's
+            // reason: a carcass is a thing you kneel at with a knife and
+            // there is nothing on a monkey or a crab worth the kneeling.
+            Species::Monkey | Species::Crab
+            | Species::Fish | Species::Cod | Species::Trout | Species::Pike | Species::Herring
             // Nothing to butcher. A rat drops what it drops where it
             // falls, like a gull, because a carcass is a thing you kneel
             // at with a knife and there is nothing on one worth the
@@ -1862,7 +2135,7 @@ impl Species {
             ],
             // No carcass, so no cuts: see `carcass`.
             Species::Fish | Species::Cod | Species::Trout | Species::Pike | Species::Herring | Species::Gull
-            | Species::Rat => &[],
+            | Species::Rat | Species::Monkey | Species::Crab => &[],
         }
     }
 
@@ -1967,6 +2240,15 @@ impl Species {
             // sees you across the grass, which is why taming starts with a
             // creep and not a walk (`husbandry::horse_lets_you_near`).
             Species::Horse => 14.0,
+            // **The sharpest eyes in the world, and they are what the troop
+            // is for.** A monkey sees you before anything on the ground
+            // does, and then it says so (the server's `chatter`) -- which is
+            // how a player who has learned the sound knows that something is
+            // coming along the beach before they can see it.
+            Species::Monkey => 20.0,
+            // Stalked eyes: they see all round (`view_cone`) and not far. A
+            // crab is watching the yard of sand it can reach a stone from.
+            Species::Crab => 6.0,
         }
     }
 
@@ -2042,6 +2324,11 @@ impl Species {
             // Over the noise of the surf.
             Species::Gull => 7.0,
             Species::Horse => 11.0,
+            Species::Monkey => 14.0,
+            // It feels a footfall through the sand rather than hearing it,
+            // which comes to the same number and is why a crab is under a
+            // stone before you are in reach of it.
+            Species::Crab => 7.0,
         }
     }
 
@@ -2096,8 +2383,13 @@ impl Species {
             Species::Horse => 12.0,
             Species::Antelope => 10.0,
             Species::Lion => 12.0,
+            // A monkey lives by fruit and finds it the way a bear finds
+            // honey, at a fraction of the distance.
+            Species::Monkey => 10.0,
             // Birds and fish go by their eyes.
-            Species::Fowl
+            // ...and a crab by the water on its gills.
+            Species::Crab
+            | Species::Fowl
             | Species::Gull
             | Species::Fish
             | Species::Cod
@@ -2124,7 +2416,20 @@ impl Species {
             // A pig's eyes are halfway round.
             Species::Boar => -0.3,
             Species::Wolf | Species::Bear | Species::Lion => 0.0,
-            Species::Fish | Species::Cod | Species::Trout | Species::Pike | Species::Herring => -1.0,
+            Species::Fish | Species::Cod | Species::Trout | Species::Pike | Species::Herring
+            // **All round, and it is the only land animal that can say
+            // that.** A crab's eyes are on stalks over the shell: there is
+            // no behind it, which is why creeping up on one does not work
+            // and reaching quickly does.
+            | Species::Crab => -1.0,
+            // A monkey's eyes face forward -- it is judging the gap to the
+            // next branch -- but its head is never still, and what a player
+            // can use is the same as for every other prey animal: it has a
+            // blind wedge dead behind it and nowhere else. The thing that
+            // makes a troop hard to creep up on is not the cone, it is the
+            // twenty blocks of `awareness` and the fact that there are four
+            // of them looking different ways.
+            Species::Monkey => -0.8,
         }
     }
 
@@ -2133,7 +2438,17 @@ impl Species {
         match self {
             Species::Deer | Species::Sheep | Species::Zebra | Species::Antelope | Species::Horse => Grouping::Herd,
             Species::Wolf | Species::Lion => Grouping::Pack,
-            Species::Hare | Species::Fowl | Species::Boar | Species::Gull | Species::Rat => Grouping::Loose,
+            // **A troop is a herd that argues.** Nothing in `Grouping` says
+            // anything a monkey does not do -- it keeps together, it has an
+            // alarm the whole group answers, and it moves as one -- so it is
+            // the herd's row, and the difference is in the mind rather than
+            // in the shape of the group (the server's `chatter` and `raid`).
+            Species::Monkey => Grouping::Herd,
+            // Loose, and it is the loosest of the lot: crabs on a beach are
+            // a lot of crabs in one place rather than a group of them, which
+            // is exactly what `Loose` means.
+            Species::Hare | Species::Fowl | Species::Boar | Species::Gull | Species::Rat
+            | Species::Crab => Grouping::Loose,
             Species::Bear => Grouping::Alone,
             Species::Fish | Species::Cod | Species::Trout | Species::Herring => Grouping::School,
             // **The one swimmer that is not a school.** A cod is alone too
@@ -2154,7 +2469,22 @@ impl Species {
     /// sending it into a thicket put it exactly where a lion would want it.
     /// The sheep is the same animal, slower.
     pub fn hides_in_cover(self) -> bool {
-        matches!(self, Species::Hare | Species::Deer | Species::Fowl)
+        // ...and the crab, whose cover is a *stone* rather than a thicket --
+        // which is the same rule reading the same table, because `is_cover`
+        // now names the boulders as well as the trees. A crab has no
+        // distance in it at all (`run_speed`, `stamina_seconds`): the rock
+        // is the whole of its escape, and without this it would be an animal
+        // that runs three blocks along an open beach and stops.
+        // ...and the monkey, for whom "cover" means the thing it goes *up*:
+        // `is_cover` is the standing timber, `bolt` steers a frightened
+        // animal toward the nearest of it, and the server's `climbing` does
+        // the rest once a hand is on a trunk. Without this line a monkey
+        // that had been swung at ran along the beach like a small slow deer,
+        // which is every part of the animal except the one that matters.
+        matches!(
+            self,
+            Species::Hare | Species::Deer | Species::Fowl | Species::Crab | Species::Monkey
+        )
     }
 
     /// Does it keep a patch of ground it will not let you walk through?
@@ -2312,6 +2642,17 @@ impl Species {
             // rather than arriving. See `spawn_weight_in` for the savanna.
             (Species::Horse, false) => 3,
             (Species::Horse, true) => 2,
+            // **A troop is a thing you meet, not a thing the grove is made
+            // of.** Three by day against the hare's and the fowl's, and one
+            // by night, when the troop is up in the crowns asleep and the
+            // beach is the crab's.
+            (Species::Monkey, false) => 3,
+            (Species::Monkey, true) => 1,
+            // ...and the crab is the other way about, which is the whole
+            // sentence: a beach at noon has a crab on it and a beach at
+            // midnight is crawling.
+            (Species::Crab, false) => 2,
+            (Species::Crab, true) => 8,
         }
     }
 }
@@ -2451,6 +2792,18 @@ pub const fn group_size(species: Species) -> (u32, u32) {
         // server's `stallion`). Two would be a pair, not a herd, and nothing
         // for a stallion to keep.
         Species::Horse => (3, 5),
+        // **Three to five, and never one.** A lone monkey has nobody to call
+        // to, and the alarm is half of what the animal is for -- see
+        // `Species::Monkey`. It is the horse's herd for the horse's reason
+        // and for one more: a troop robbing a camp has to be more than a
+        // player can keep an eye on at once, or guarding is just watching.
+        Species::Monkey => (3, 5),
+        // One to four. A crab is not a group; what makes a beach crawl at
+        // night is the spawn weight (`spawn_weight`), not the party size,
+        // and those are deliberately separate numbers -- a party of eight
+        // would arrive in a ring like a herd rather than being found one at
+        // a time under different stones.
+        Species::Crab => (1, 4),
     }
 }
 
@@ -2595,6 +2948,25 @@ pub fn is_cover(block: BlockId) -> bool {
                 | BLOCK_LOG
                 | BLOCK_BIRCH_LOG
                 | BLOCK_TALL_GRASS
+                // **...and the boulders, which are cobble and granite.** The
+                // boulder's own note in `worldgen` has said since the day it
+                // was written that what a boulder is *for* is that "a
+                // hillside with a few of them has cover in a way a smooth one
+                // does not" -- and until the crab arrived nothing read it
+                // that way, because every animal that hid hid in a wood. A
+                // crab on a beach has no wood and no distance
+                // (`hides_in_cover`): the stone *is* its escape.
+                //
+                // **`BLOCK_STONE` is deliberately not here**, and the
+                // difference is not pedantry: cobble and granite are what the
+                // generator lays loose on a slope and on the sea floor, and
+                // plain stone is the face of the ground itself. A deer that
+                // made for the nearest rock face would be a deer that runs
+                // into corners, which
+                // `a_wood_is_cover_and_a_wall_of_leaves_hides_a_deer_but_grass_hides_only_a_hare`
+                // has said since long before this.
+                | crate::types::BLOCK_COBBLESTONE
+                | crate::types::BLOCK_GRANITE
         )
 }
 
@@ -3359,11 +3731,18 @@ mod tests {
         // woken up and is holding a torch. A rat that had to be *chased*
         // would turn a nuisance into a game of tag round the furniture,
         // which is the chore this mechanic is most at risk of becoming.
+        //
+        // Three now, and the crab is the third: it cannot outwalk anybody
+        // and it is not meant to. What a crab escapes into is a *stone*
+        // (the server's `scuttle`), which is two blocks away and not two
+        // hundred -- so the property this test states is really "nothing
+        // escapes by distance unless it can", and the crab escapes by
+        // arriving somewhere a hand cannot follow.
         const NOMINAL_WALK: f32 = NOMINAL_SPRINT_SPEED / 1.6;
         for &species in Species::ALL {
             assert_eq!(
                 species.run_speed() > NOMINAL_WALK,
-                !matches!(species, Species::Sheep | Species::Rat),
+                !matches!(species, Species::Sheep | Species::Rat | Species::Crab),
                 "{} runs at {:.1} against a walk of {NOMINAL_WALK:.1}",
                 species.name(),
                 species.run_speed(),
@@ -3453,11 +3832,17 @@ mod tests {
         // nowhere to run *to* but the gap in the wall, and it is never
         // more than a few blocks from one. Wind is what an animal needs
         // to cross a field, and a rat never crosses one.
-        for burst in [Species::Hare, Species::Fowl, Species::Pike, Species::Rat] {
+        // ...and the crab is the fifth, and the shortest-winded thing
+        // alive: two seconds, which is the width of a beach between one
+        // stone and the next.
+        for burst in [Species::Hare, Species::Fowl, Species::Pike, Species::Rat, Species::Crab] {
             assert!(
                 Species::ALL
                     .iter()
-                    .filter(|s| !matches!(s, Species::Hare | Species::Fowl | Species::Pike | Species::Rat))
+                    .filter(|s| !matches!(
+                        s,
+                        Species::Hare | Species::Fowl | Species::Pike | Species::Rat | Species::Crab
+                    ))
                     .all(|s| s.stamina_seconds() > burst.stamina_seconds()),
                 "a {} has as much wind as something that has to be run down",
                 burst.name()
@@ -3497,9 +3882,18 @@ mod tests {
             // would also be a fourth way to leather that costs nothing
             // to get, which is the one thing `drops` is most careful
             // about (see the rat's own row).
+            // ...and the shore's two. A crab has a shell and no skin at
+            // all. A monkey has a skin and nothing in this world tans one,
+            // and that is a *decision* rather than an omission: a troop that
+            // paid out leather would make the palm grove the cheapest
+            // tannery on the map -- three to five animals that come to you,
+            // in the open, worth two hits apiece -- and the leather chain is
+            // the one price in this game that must stay a walk into the
+            // country. See the rat's row for the same argument at the other
+            // end of the scale.
             let expected = !(species.flies()
                 || species.swims()
-                || matches!(species, Species::Sheep | Species::Rat));
+                || matches!(species, Species::Sheep | Species::Rat | Species::Monkey | Species::Crab));
             assert_eq!(
                 skin,
                 expected,
@@ -3631,6 +4025,83 @@ mod tests {
     }
 
     #[test]
+    fn a_beach_at_midnight_is_a_different_place_from_the_same_beach_at_noon() {
+        // **The crab's whole mechanic, as one number against another.** A
+        // player who walks the tideline in daylight meets the odd crab; the
+        // same walk after dark is what the first hungry night on a coast is
+        // for. If these two ever come level, the beach has stopped having an
+        // hour worth choosing.
+        let (day, night) = (Species::Crab.spawn_weight(false), Species::Crab.spawn_weight(true));
+        assert!(night >= day * 4, "a beach at night draws {night} crabs against {day} by day");
+        // ...and it is the only land animal here that is commoner after
+        // dark. The hunters are out more at night too, but a wolf is not
+        // *four times* the wolf it was, and a player who has learned that the
+        // sand crawls at midnight has learned something about the crab and
+        // not about the dark.
+        for &species in Species::ALL {
+            // The rat is not drawn by the biome spawner at all -- both its
+            // weights are nought (`spawn_weight`) -- and "nought is not four
+            // times nought" is arithmetic rather than a fact about rats.
+            if species == Species::Crab || species.swims() || species == Species::Rat {
+                continue;
+            }
+            assert!(
+                species.spawn_weight(true) < species.spawn_weight(false) * 4,
+                "{} is as much a night animal as the crab",
+                species.name()
+            );
+        }
+    }
+
+    #[test]
+    fn a_monkey_is_caught_on_the_sand_and_never_in_the_palms() {
+        // **The two halves of the troop, and they have to disagree.** On the
+        // ground a monkey is slower than a sprinting player, so a thief that
+        // took your dinner and ran along the beach is a thief you catch. Up
+        // a trunk it is out of reach of everything this world has -- there is
+        // no bow -- so the answer to a troop is never "kill the troop", it is
+        // where you put the stores (`Species::Monkey`).
+        assert!(
+            Species::Monkey.run_speed() < NOMINAL_SPRINT_SPEED,
+            "a monkey outruns a sprinting player at {:.1}",
+            Species::Monkey.run_speed()
+        );
+        assert!(Species::Monkey.climbs(), "a monkey that cannot climb is a small slow deer");
+        // Nothing else climbs, and nothing that climbs flies: a climber with
+        // wings would be a bird with a second altitude rule (`Species::climbs`).
+        for &species in Species::ALL {
+            assert!(!(species.climbs() && species.flies()), "{} both climbs and flies", species.name());
+        }
+        // A troop, never a lone one: the alarm is half of what the animal is
+        // for, and one monkey has nobody to call to.
+        assert!(group_size(Species::Monkey).0 >= 3, "a troop of two is a pair");
+    }
+
+    #[test]
+    fn nothing_that_lands_a_blow_without_walking_toward_you_counts_as_hostile() {
+        // **The line the crab drew between `damage` and `is_hostile`.** Four
+        // animals come at a person; the crab lands a blow and comes at
+        // nobody. Before the crab the two were one list, and the day they
+        // parted is the day this test was written -- see `Species::is_hostile`
+        // for the four wrong answers the old definition gave.
+        assert!(Species::Crab.damage() > 0.0, "a crab that does not pinch is a slow stone");
+        assert!(!Species::Crab.is_hostile(), "a crab is coming for you");
+        let hostile: Vec<&str> = Species::ALL.iter().filter(|s| s.is_hostile()).map(|s| s.name()).collect();
+        assert_eq!(hostile, ["boar", "wolf", "bear", "lion"]);
+        // ...and every one of *them* names its own death, because a player
+        // killed by an animal has to be told which. The crab names one too,
+        // and it is the only harmless-looking thing in the world that has to.
+        for &species in Species::ALL.iter().filter(|s| s.damage() > 0.0) {
+            assert_eq!(
+                Species::of_death_cause(species.death_cause()),
+                Some(species),
+                "{} shares its death with somebody else",
+                species.name()
+            );
+        }
+    }
+
+    #[test]
     fn the_savanna_keeps_its_own_animals_and_the_woods_keep_theirs() {
         // What a player walking from a meadow into dry grass should see
         // change: the deer, the boar, the wolf, the sheep and the bear stay
@@ -3648,6 +4119,20 @@ mod tests {
         // `lives_in` row, and `spawn_weight_in` for how rarely).
         assert_eq!(living_in(Biome::Savanna), ["hare", "fowl", "zebra", "antelope", "lion", "horse"]);
         assert_eq!(living_in(Biome::Plains), ["hare", "deer", "boar", "wolf", "sheep", "bear", "fowl", "horse"]);
+        // ...and the shore has two animals that are nowhere else at all. The
+        // beach is not a *closed* country the way the savanna is -- a deer
+        // walks down to the sand and a wolf follows it -- but nothing walks
+        // inland and finds a crab.
+        for inland in Biome::ALL.iter().copied().filter(|&b| !matches!(b, Biome::Beach | Biome::Ocean)) {
+            for shore in [Species::Monkey, Species::Crab] {
+                assert!(!shore.lives_in(inland), "a {} in the {inland:?}", shore.name());
+            }
+        }
+        assert!(Species::Monkey.lives_in(Biome::Beach) && Species::Crab.lives_in(Biome::Beach));
+        // What puts a monkey in a grove rather than on a bare dune is not
+        // the biome at all: it is the timber round the spot, which the
+        // spawner reads off the blocks (see its `lives_in` row).
+        assert!(Species::Monkey.needs_trees(), "a monkey spawns on bare sand");
         // Every species lives somewhere -- except the one whose country
         // is a kitchen. A rat is not put into the world by biome at all
         // (see its `lives_in` row and `vermin::may_appear`), and giving
@@ -3752,19 +4237,40 @@ mod tests {
     }
 
     #[test]
-    fn every_animal_is_longer_than_it_is_wide() {
-        // Not a fussy detail: it is why the hit box is oriented at all.
-        // A creature as wide as it is long could be tested with a
-        // sphere, and none of these is.
+    fn every_animal_has_a_long_way_and_a_short_way_and_the_crab_is_the_one_turned_sideways() {
+        // Not a fussy detail: it is why the hit box is oriented at all. A
+        // creature as wide as it is long could be tested with a sphere, and
+        // none of these is.
+        //
+        // **This test was called `every_animal_is_longer_than_it_is_wide`,
+        // and the crab is why it is not.** A crab's long axis runs *across*
+        // its heading -- that is the whole animal, and `Species::sidles` is
+        // what the rest of the game reads it as. The property actually being
+        // defended is that a body has a long way and a short way and the box
+        // knows which is which; it survives the crab intact, with the sign
+        // turned round.
         for &species in Species::ALL {
-            assert!(
-                species.length() > species.width(),
-                "{} is as wide as it is long",
+            assert_ne!(
+                species.length(),
+                species.width(),
+                "{} is as wide as it is long and could be a sphere",
                 species.name()
             );
             let (x, y, z) = species.half_extents();
             assert!(x > 0.0 && y > 0.0 && z > 0.0);
-            assert!(z > x, "{}: the hit box is wider than it is long", species.name());
+            let sideways = species.sidles();
+            assert_eq!(
+                z > x,
+                !sideways,
+                "{}: the hit box lies the wrong way for what this animal is",
+                species.name()
+            );
+            assert_eq!(
+                species.length() > species.width(),
+                !sideways,
+                "{}: the body lies the wrong way for what this animal is",
+                species.name()
+            );
         }
     }
 
@@ -3834,6 +4340,11 @@ mod tests {
         // What a fleeing animal makes for: trunks, canopies, tall grass.
         for block in [BLOCK_LEAVES, BLOCK_BIRCH_LEAVES, BLOCK_LOG, BLOCK_TALL_GRASS] {
             assert!(is_cover(block), "{block} is not cover");
+        }
+        // ...and a boulder, which is the cover a shore has instead of a
+        // wood -- the whole of a crab's escape (`Species::hides_in_cover`).
+        for block in [crate::types::BLOCK_COBBLESTONE, crate::types::BLOCK_GRANITE] {
+            assert!(is_cover(block), "a boulder of {block} is not cover");
         }
         // ...and not the ground it is running over, or the wall it is
         // running from, or a pond -- a deer that made for the nearest

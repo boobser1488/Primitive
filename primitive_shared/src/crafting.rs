@@ -4157,6 +4157,31 @@ pub const RECIPES: &[Recipe] = &[
         returns: &[],
         failure: 0.0,
     },
+    // **The shore's two, and both are a fire and nothing else.** No
+    // workbench, no pot, no station but heat: a mussel opens on the embers
+    // and a crab goes on them whole, which is what makes a coast the place a
+    // player with nothing can eat on their first evening -- as soon as they
+    // have a fire. See `food::sickness_seconds` for the other half of that
+    // sentence, which is what happens if they do not wait for one.
+    //
+    // A *handful* at a time rather than a stack, deliberately: cooking three
+    // handfuls is three goes at the fire, the way three haunches are.
+    Recipe {
+        name: "cook mussels",
+        inputs: &[(crate::types::BLOCK_MUSSELS, 1)],
+        output: (crate::types::BLOCK_COOKED_MUSSELS, 1),
+        station: Station::Heat,
+        returns: &[],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "cook crab",
+        inputs: &[(crate::types::BLOCK_CRAB_MEAT, 1)],
+        output: (crate::types::BLOCK_COOKED_CRAB, 1),
+        station: Station::Heat,
+        returns: &[],
+        failure: 0.0,
+    },
 ];
 
 /// Why a craft cannot happen, or that it can.

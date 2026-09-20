@@ -517,6 +517,20 @@ fn ripening_seconds(block: BlockId) -> Option<f32> {
         // shoot: the world's own growth, on the world's clock, counted in
         // warm air (`fruit_sets_above_c`).
         BLOCK_BILBERRY_BARE | BLOCK_STRAWBERRY_BARE => REGROW_SECONDS,
+        // **A mussel is the slowest thing that comes back here**, and it is
+        // the bush's clock multiplied rather than a number of its own, so
+        // that the property which has to hold -- a mussel comes back slower
+        // than a berry -- is written as a multiple instead of being two
+        // constants that happen to be in the right order. See
+        // `shore::REGROW_STEPS` for what the multiple buys.
+        // **Both ids**, and the bare one is the one that matters: a rock
+        // somebody has stripped is exactly the thing that must not come
+        // back at a berry's pace. Named rather than left to the default
+        // arm, which is the crop's clock -- a quarter of an hour, and a
+        // headland worked out this morning full again by lunchtime.
+        primitive_shared::types::BLOCK_MUSSEL_BED | primitive_shared::types::BLOCK_MUSSEL_ROCK => {
+            REGROW_SECONDS * primitive_shared::shore::REGROW_STEPS as f32
+        }
         BLOCK_FIREWEED | BLOCK_CATTAIL | BLOCK_NETTLE | BLOCK_BRACKEN => REGROW_SECONDS,
         primitive_shared::types::BLOCK_ARUNDO => REGROW_SECONDS,
         // **Millet ripens in six tenths of wheat's time**, which is the
@@ -632,6 +646,18 @@ fn look(world: &dyn BlockWorld, soil: &dyn Soil, at: Cell) -> Look {
             .air_c(at.0, at.1, at.2)
             .is_some_and(|air| air.is_finite() && air >= needs);
         return Look::Growing(if warm { 1.0 } else { 0.0 });
+    }
+    // **A mussel bed asks the sea bed round it and nothing else.** No air
+    // temperature, no soil, no frost -- it is under water, and the one thing
+    // that decides whether it fills is whether a starfish is working it
+    // (`shore::starfish_stall`). Asked before the crop's questions for the
+    // canopy's reason: so that nobody adds a warmth row for it in the crop
+    // table and has a frost kill a rock.
+    if primitive_shared::shore::is_bed(here) {
+        let stalled = primitive_shared::shore::starfish_stall(|dx, dy, dz| {
+            world.block(at.0 + dx, at.1 + dy, at.2 + dz)
+        });
+        return Look::Growing(if stalled { 0.0 } else { 1.0 });
     }
     let Some(needs) = min_growing_c(here) else {
         return Look::Growing(1.0);
@@ -1001,7 +1027,19 @@ impl Growth {
         // A picked apple tree is *looked at* like a crop, because its pace
         // is the air's (`look`), and *planted* like a bush, because the
         // ground under a canopy does not hurry it -- see the soil below.
-        let looked_after = crop || fruit_sets_above_c(block).is_some();
+        // **...and a mussel bed, which is looked after for the canopy's
+        // reason and not the crop's.** What decides a bed's pace is whether a
+        // starfish is lying on the rock beside it (`look`), and that changes
+        // *while it grows*: somebody drops one there, or knocks one off. A
+        // thing whose pace is set once at the start and never asked again is
+        // a bed that goes on filling with a starfish sitting on it -- which
+        // is what happened, and what
+        // `a_stripped_mussel_bed_fills_a_mussel_at_a_time_and_a_starfish_beside_it_stops_it_dead`
+        // is red about. `look_in` is `INFINITY` for anything not on this
+        // list, which is the whole of the trap: the pace is a constant and
+        // nothing ever contradicts it.
+        let looked_after =
+            crop || fruit_sets_above_c(block).is_some() || primitive_shared::shore::is_bed(block);
         // **The ground the thing is standing in.** A crop takes two
         // thirds of the time on river silt and half again as long on
         // thin dry ground -- see `worldgen::Fertility`. Applied when
@@ -1721,6 +1759,20 @@ mod tests {
             if ripens_into(id).is_none() || is_crop(id) {
                 continue;
             }
+            // **The mussel bed is the one thing slower than the bush**, and
+            // it is named here rather than let through, because "slower than
+            // the bush" is the whole of what a shore is worth
+            // (`shore::REGROW_STEPS`): if it ever falls back to the default
+            // arm, a stripped headland fills in half an hour and a coast
+            // stops being a place to walk.
+            if primitive_shared::shore::is_bed(id) {
+                assert_eq!(
+                    ripening_seconds(id),
+                    Some(REGROW_SECONDS * primitive_shared::shore::REGROW_STEPS as f32),
+                    "a mussel came back at a berry's pace"
+                );
+                continue;
+            }
             assert_eq!(
                 ripening_seconds(id),
                 Some(REGROW_SECONDS),
@@ -1728,6 +1780,52 @@ mod tests {
                 primitive_shared::types::block_name(id)
             );
         }
+    }
+
+    /// A stripped mussel bed on the floor of the shallows with water over it,
+    /// and whatever `beside` is in the cell a block away.
+    fn a_bare_bed_with(beside: BlockId) -> TestWorld {
+        let world = TestWorld::default();
+        for dz in -4..=4 {
+            for dx in -4..=4 {
+                world.put(AT.0 + dx, AT.1, AT.2 + dz, BLOCK_STONE);
+                world.put(AT.0 + dx, AT.1 + 1, AT.2 + dz, BLOCK_WATER);
+            }
+        }
+        world.put(AT.0, AT.1, AT.2, primitive_shared::shore::bed_holding(0));
+        world.put(AT.0 + 2, AT.1 + 1, AT.2, beside);
+        world
+    }
+
+    #[test]
+    fn a_stripped_mussel_bed_fills_a_mussel_at_a_time_and_a_starfish_beside_it_stops_it_dead() {
+        // **The other half of the mechanic**, and the half no unit test of
+        // `shore` can reach: whether the growth pass looks at a bed at all,
+        // what clock it puts it on, and whether it reads the sea bed round it
+        // before it lets one fill. See `look`.
+        let step_a_day = |world: &TestWorld| {
+            let mut growth = Growth::seeded(3);
+            growth.on_block_changed(AT.0, AT.1, AT.2);
+            growth.step(world, &EvenSoil, 0.0, 64);
+            // Twice the wait for one mussel, jitter and all.
+            let wait = REGROW_SECONDS * primitive_shared::shore::REGROW_STEPS as f32;
+            for _ in 0..8 {
+                growth.step(world, &EvenSoil, wait * 0.3, 64);
+            }
+            primitive_shared::shore::mussels_in(world.get(AT.0, AT.1, AT.2))
+        };
+        let quiet = a_bare_bed_with(BLOCK_WATER);
+        let grown = step_a_day(&quiet);
+        assert!(grown > 0, "a bare bed left alone for days grew nothing");
+        // ...and one at a time: a rock that came back full in one step would
+        // make the walk along the headland pointless.
+        assert!(
+            grown < primitive_shared::shore::BED_FULL || primitive_shared::shore::BED_FULL == 1,
+            "a bed refilled all at once"
+        );
+
+        let worked = a_bare_bed_with(primitive_shared::types::BLOCK_STARFISH);
+        assert_eq!(step_a_day(&worked), 0, "a starfish two blocks off did not stop the bed");
     }
 
     /// A sapling the generator would have planted at `AT`, on a lawn with

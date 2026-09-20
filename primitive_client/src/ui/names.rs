@@ -305,6 +305,8 @@ const ANIMALS: &[Name] = &[
     Name { id: "herring", en: "herring", simple: "small sea fish", ru: "сельдь", pl: "śledź" },
     Name { id: "rat", en: "rat", simple: "rat", ru: "крыса", pl: "szczur" },
     Name { id: "horse", en: "horse", simple: "horse", ru: "лошадь", pl: "koń" },
+    Name { id: "monkey", en: "monkey", simple: "monkey", ru: "обезьяна", pl: "małpa" },
+    Name { id: "crab", en: "crab", simple: "crab", ru: "краб", pl: "krab" },
     // The young. See `youth::young_name`.
     Name { id: "fawn", en: "fawn", simple: "young deer", ru: "оленёнок", pl: "jelonek" },
     Name { id: "lamb", en: "lamb", simple: "young sheep", ru: "ягнёнок", pl: "jagnię" },
@@ -324,6 +326,11 @@ const DEATHS: &[Name] = &[
     Name { id: "wolf", en: "was pulled down by a wolf", simple: "a wolf killed you", ru: "загрызен волком", pl: "rozszarpany przez wilka" },
     Name { id: "bear", en: "was mauled by a bear", simple: "a bear killed you", ru: "задран медведем", pl: "poturbowany przez niedźwiedzia" },
     Name { id: "lion", en: "was brought down by a lion", simple: "a lion killed you", ru: "растерзан львом", pl: "powalony przez lwa" },
+    // **The one death in this table nobody will believe**, and it is not a
+    // joke: half a point kills a player who was already on half a point, and
+    // a player who died of a crab has to be told that is what happened
+    // rather than "killed by an animal". See `Species::Crab`.
+    Name { id: "crab", en: "was nipped by a crab", simple: "a crab pinched you and you died", ru: "укушен крабом", pl: "uszczypnięty przez kraba" },
 ];
 
 /// Conditions, keyed by the English the rules print.
@@ -451,6 +458,13 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "hide_frame", en: "Hide frame", simple: "Skin frame", ru: "Рама для шкуры", pl: "Rama na skórę" },
     Name { id: "cairn", en: "Cairn", simple: "Stone pile marker", ru: "Тур из камней", pl: "Kopiec z kamieni" },
     Name { id: "lodestone", en: "Lodestone", simple: "Magnet stone", ru: "Магнитный камень", pl: "Magnetyt" },
+    Name { id: "mussel_bed", en: "Mussel bed", simple: "Rock covered in mussels", ru: "Мидиевая банка", pl: "Ławica omułków" },
+    Name { id: "mussel_rock", en: "Bare rock", simple: "Rock the mussels were taken off", ru: "Голый камень", pl: "Goła skała" },
+    Name { id: "starfish", en: "Starfish", simple: "Starfish", ru: "Морская звезда", pl: "Rozgwiazda" },
+    Name { id: "mussels", en: "Mussels", simple: "Raw mussels - cook them", ru: "Мидии", pl: "Omułki" },
+    Name { id: "cooked_mussels", en: "Cooked mussels", simple: "Mussels opened on the fire", ru: "Печёные мидии", pl: "Pieczone omułki" },
+    Name { id: "crab_meat", en: "Crab", simple: "Raw crab - cook it", ru: "Краб", pl: "Krab" },
+    Name { id: "cooked_crab", en: "Cooked crab", simple: "Crab off the embers", ru: "Печёный краб", pl: "Pieczony krab" },
     Name { id: "water_compass", en: "Water compass", simple: "Compass bowl", ru: "Водяной компас", pl: "Kompas wodny" },
     Name { id: "handful_earth", en: "Handful of earth", simple: "Some dirt", ru: "Горсть земли", pl: "Garść ziemi" },
     Name { id: "handful_sand", en: "Handful of sand", simple: "Some sand", ru: "Горсть песка", pl: "Garść piasku" },
@@ -928,6 +942,8 @@ pub const RECIPES: &[Name] = &[
     Name { id: "cook wolf", en: "Cooked wolf", simple: "Cooked wolf meat", ru: "Жареная волчатина", pl: "Pieczona wilczyna" },
     Name { id: "roast flesh", en: "Roast flesh", simple: "Cooked human meat", ru: "Жареная человечина", pl: "Pieczone ludzkie mięso" },
     Name { id: "cook fish", en: "Cooked fish", simple: "Cooked fish", ru: "Жареная рыба", pl: "Pieczona ryba" },
+    Name { id: "cook mussels", en: "Cooked mussels", simple: "Cooked mussels", ru: "Печёные мидии", pl: "Pieczone omułki" },
+    Name { id: "cook crab", en: "Cooked crab", simple: "Cooked crab", ru: "Печёный краб", pl: "Pieczony krab" },
     Name { id: "planter", en: "Planter", simple: "Pot of earth", ru: "Горшок с землёй", pl: "Donica" },
     Name { id: "pit prop", en: "Pit prop", simple: "Roof post", ru: "Подпорка", pl: "Stempel" },
     Name { id: "stakes", en: "Stakes", simple: "Sharpened poles", ru: "Колья", pl: "Kołki" },

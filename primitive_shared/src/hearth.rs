@@ -501,6 +501,9 @@ pub fn needs_degrees(recipe: &Recipe) -> Option<f32> {
     use crate::types::*;
     Some(match block_kind(recipe.output.0) {
         BLOCK_COOKED_MEAT | BLOCK_ROASTED_RIBS | BLOCK_BREAD | BLOCK_ROASTED_ROOT | BLOCK_COOKED_FISH
+        // ...and the shore's two, on the same embers as the fish.
+        | BLOCK_COOKED_MUSSELS
+        | BLOCK_COOKED_CRAB
         | BLOCK_ROAST_HUMAN_FLESH
         | BLOCK_MILLET_PORRIDGE
         | BLOCK_STEW

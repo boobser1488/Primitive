@@ -907,6 +907,15 @@ const KELP_TALLEST: i32 = 20;
 /// Seagrass wants light and warmth: the shallows, anywhere not cold.
 const SEAGRASS_COLDEST: f64 = FREEZING + 0.2;
 const SEAGRASS_DEPTHS: std::ops::RangeInclusive<i32> = 2..=6;
+/// **How deep the tidal shallows go**: one to three blocks of water, which is
+/// the band a standing player's head is out of.
+///
+/// That is the whole reason the number is three and not six. A mussel bed is
+/// the one larder in this game that can be worked *without swimming* -- wade
+/// out, pull the mussels off the rock, wade back -- and the moment the water
+/// is over a player's head it is a dive, with a breath to watch, which is
+/// what the cod and the kelp are for. See `crate::shore`.
+const MUSSEL_DEPTHS: std::ops::RangeInclusive<i32> = 1..=3;
 /// One boulder in the cell of this many blocks a side, at most -- see
 /// `WorldGen::sea_boulder`.
 const SEA_BOULDER_GRID: i32 = 9;
@@ -7784,6 +7793,57 @@ fn broken_course(hash: u32) -> i32 {
                     continue;
                 }
 
+                // **The tidal shallows: the mussel beds, and the starfish
+                // that keep them down.** See `crate::shore` for the whole
+                // mechanic; what is decided here is only *where*.
+                //
+                // **Two fields rather than one roll**, because a mussel bed
+                // that came up one column at a time would be scattered
+                // mussels and not a bed: what a player has to be able to see
+                // from the dune is a patch of rock that is worth wading to,
+                // and a patch is a slow field. The starfish have a field of
+                // their own, at a different offset and a shorter wavelength,
+                // and **it is subtracted from the mussels'** -- so the
+                // sentence "a shore with starfish on it yields fewer
+                // mussels" is true of the world as it is generated and not
+                // only of how fast a picked bed comes back
+                // (`shore::starfish_stall`). A player who has noticed that
+                // has learned which headland to walk to.
+                if MUSSEL_DEPTHS.contains(&depth) {
+                    let stars = fbm(&self.deposit_noise, gx as f64 - 6101.0, gz as f64 + 3313.0, 0.075, 2);
+                    if stars > 0.22 && roll % 9 == 3 {
+                        blocks[at(floor + 1)] = crate::types::BLOCK_STARFISH;
+                        continue;
+                    }
+                    let bed = fbm(&self.strata_noise, gx as f64 + 5147.0, gz as f64 - 919.0, 0.05, 2);
+                    if bed > 0.10 + 0.5 * stars.max(0.0) && roll % 100 < 55 {
+                        // **The floor cell itself, not the water over it.** A
+                        // bed *is* the rock (`types::BLOCK_MUSSEL_BED`), so
+                        // what goes down is the sea bed with a different top
+                        // and the water above it is left alone. The floor of
+                        // a shallow bay is mostly sand, and this is what
+                        // makes the rocky patches: a bed is a stone in the
+                        // shingle with mussels on it, and the sand a yard
+                        // away has none -- which is how walking the headland
+                        // looking for them became the way a player finds
+                        // mussels at all.
+                        //
+                        // Three on some rocks and four on others, off a bit
+                        // of the same hash: a coast where every bed held
+                        // exactly four would read as a tiling.
+                        let on = crate::shore::BED_FULL - ((roll >> 16) % 2) as u8;
+                        blocks[at(floor)] = crate::shore::bed_holding(on);
+                        continue;
+                    }
+                }
+                // ...and a starfish is on the sea floor as well as in the
+                // shallows -- rarer out there, and there is no bed for it to
+                // be doing anything to. It is the thing that makes a swimmer
+                // look down.
+                if matches!(ground, BLOCK_SAND | BLOCK_GRAVEL) && depth <= 12 && roll % 149 == 17 {
+                    blocks[at(floor + 1)] = crate::types::BLOCK_STARFISH;
+                    continue;
+                }
                 if matches!(ground, BLOCK_SAND | BLOCK_GRAVEL) && depth <= 10 && roll % 37 == 5 {
                     blocks[at(floor + 1)] = BLOCK_SHELL;
                 }
@@ -17281,6 +17341,7 @@ mod relief_tests {
             let mut bands: [std::collections::HashMap<&str, usize>; 3] = Default::default();
             let mut totals = [0usize; 3];
             let (mut sea, mut kelp, mut reef, mut grass, mut shells, mut boulders) = (0, 0, 0, 0, 0, 0);
+            let (mut beds, mut mussels, mut stars) = (0usize, 0usize, 0usize);
             for pos in sea_chunks(&gen, 1..=40, 24) {
                 let chunk = gen.generate_chunk(pos);
                 for lz in 0..CHUNK_SIZE_Z {
@@ -17296,11 +17357,21 @@ mod relief_tests {
                         totals[band] += 1;
                         *bands[band].entry(block_name(chunk.get(lx, floor as usize, lz))).or_default() += 1;
                         let over = block_kind(chunk.get(lx, floor as usize + 1, lz));
+                        // **The bed is the floor cell**, not the one over it
+                        // (`types::BLOCK_MUSSEL_BED`), so it is counted off
+                        // `ground` where everything else here is counted off
+                        // `over`.
+                        let ground = chunk.get(lx, floor as usize, lz);
+                        if crate::types::block_kind(ground) == crate::types::BLOCK_MUSSEL_BED {
+                            beds += 1;
+                            mussels += usize::from(crate::shore::mussels_in(ground));
+                        }
                         match over {
                             BLOCK_KELP | BLOCK_KELP_TOP => kelp += 1,
                             BLOCK_BRAIN_CORAL | BLOCK_FIRE_CORAL | BLOCK_SEA_FAN | BLOCK_STAGHORN_CORAL => reef += 1,
                             BLOCK_SEAGRASS => grass += 1,
                             BLOCK_SHELL => shells += 1,
+                            crate::types::BLOCK_STARFISH => stars += 1,
                             BLOCK_COBBLESTONE | BLOCK_GRANITE => boulders += 1,
                             _ => {}
                         }
@@ -17316,6 +17387,7 @@ mod relief_tests {
                 pct(shells),
                 pct(boulders)
             );
+            println!("    mussel beds {beds} ({mussels} mussels, {:.2}% of sea), starfish {stars} ({:.2}%)", pct(beds), pct(stars));
             for (name, (band, total)) in ["surf", "shelf", "deep"].iter().zip(bands.iter().zip(totals)) {
                 let mut shares: Vec<(usize, &str)> = band.iter().map(|(&b, &n)| (n * 100 / total.max(1), b)).collect();
                 shares.sort_unstable_by(|a, b| b.cmp(a));

@@ -208,6 +208,15 @@ pub fn group(block: BlockId) -> Option<Group> {
         // to fill that group. Kelp is a plant for the same honest reason,
         // and it is what the far north's shore has instead of berries.
         crate::types::BLOCK_RAW_FISH | crate::types::BLOCK_COOKED_FISH => Some(Group::Meat),
+        // **Shellfish is meat**, for the fish's reason and the egg's: an
+        // animal's protein taken without a hunt. It is the whole of the
+        // argument for a mussel bed being worth walking to -- a coast with
+        // no deer on it can still feed somebody a balanced meal
+        // (`diet_groups`), and what it costs is the tide and a fire.
+        crate::types::BLOCK_MUSSELS
+        | crate::types::BLOCK_COOKED_MUSSELS
+        | crate::types::BLOCK_CRAB_MEAT
+        | crate::types::BLOCK_COOKED_CRAB => Some(Group::Meat),
         // A stew is the meat it was made to stretch; the root in it is what
         // stretched it, and one group a mouthful is the rule.
         crate::types::BLOCK_STEW => Some(Group::Meat),
@@ -378,6 +387,21 @@ pub fn nutrition(block: BlockId) -> Option<f32> {
         // is its own price.
         crate::types::BLOCK_RAW_FISH => Some(2.0),
         crate::types::BLOCK_COOKED_FISH => Some(8.0),
+        // **A handful of mussels is half a fish, and the bed holds four of
+        // them.** So a full bed is two fish, on a rock a player can wade to
+        // -- which is a great deal for one evening and nothing at all for
+        // the week, because the rock then takes days to fill again
+        // (`shore::REGROW_STEPS`). The whole of the mussel's balance is that
+        // split: generous per trip, poor per day.
+        //
+        // Raw is one, and the one is not the reason to eat them raw: see
+        // `sickness_seconds`, where the real number is.
+        crate::types::BLOCK_MUSSELS => Some(1.0),
+        crate::types::BLOCK_COOKED_MUSSELS => Some(4.0),
+        // A crab is a mussel's worth of work for a fish's worth of meat,
+        // and the difference is that the mussel does not nip.
+        crate::types::BLOCK_CRAB_MEAT => Some(1.5),
+        crate::types::BLOCK_COOKED_CRAB => Some(6.0),
         // **Salt keeps, it does not cook.** A salted haunch eaten as it is
         // is a little better than raw -- the cure has begun -- and nowhere
         // near the fire's: what the salt buys is days, not a meal, and a
@@ -537,7 +561,16 @@ pub fn rot_per_step(block: BlockId) -> u8 {
         | crate::types::BLOCK_HUMAN_FLESH
         // Fish at the meat rate, and it has always been the thing that
         // goes off first -- a catch is eaten or smoked the day it comes out.
-        | crate::types::BLOCK_RAW_FISH => 2,
+        | crate::types::BLOCK_RAW_FISH
+        // **Raw shellfish at the meat rate, and it is a rule of the mechanic
+        // rather than realism for its own sake**: a stripped bed that could
+        // be carried home and kept would be a week of dinners in a chest,
+        // which is exactly the stockpile the bed's slow regrowth
+        // (`shore::REGROW_STEPS`) exists to prevent. What a shore gives is
+        // tonight's supper, and the way to keep it is the rack and the salt
+        // barrel like everything else.
+        | crate::types::BLOCK_MUSSELS
+        | crate::types::BLOCK_CRAB_MEAT => 2,
         BLOCK_ROASTED_RIBS | crate::types::BLOCK_ROAST_HUMAN_FLESH => 1,
         BLOCK_COOKED_MEAT
         | BLOCK_ROASTED_ROOT
@@ -560,6 +593,10 @@ pub fn rot_per_step(block: BlockId) -> u8 {
         // fruit does. Dried kelp is not here: the rack is the preservation,
         // exactly as it is for the meat.
         | crate::types::BLOCK_COOKED_FISH
+        // ...and cooked shellfish the same. See the raw pair above for why
+        // the raw one is on the meat's clock.
+        | crate::types::BLOCK_COOKED_MUSSELS
+        | crate::types::BLOCK_COOKED_CRAB
         | crate::types::BLOCK_KELP_FROND
         // Bread, a stage every second step: see `rot_every`.
         | BLOCK_BREAD => 1,
@@ -798,6 +835,23 @@ pub fn sickness_seconds(block: BlockId) -> f32 {
         // Raw flesh, of anything.
         BLOCK_RAW_MEAT | BLOCK_HARE_MEAT | BLOCK_WOLF_MEAT | BLOCK_BEAR_MEAT
         | BLOCK_FOWL_MEAT | BLOCK_RIBS | BLOCK_EGG | BLOCK_RAW_FISH => 45.0,
+        // **Raw shellfish, and it is the worst raw thing here that is not a
+        // poison.** Two minutes against raw flesh's three quarters of one,
+        // and the reason is the shape of the temptation rather than the
+        // biology: a haunch raw is a mistake made once, in the dark, with
+        // nothing else; a *bed of mussels* is four helpings in reach of a
+        // hungry player who has not built a fire yet, and at forty-five
+        // seconds apiece the arithmetic says eat all four.
+        //
+        // At a hundred and twenty it says build the fire. That is the whole
+        // decision the mussel carries -- the shore feeds you the moment you
+        // can make fire on it, and not before -- and it is stated as a
+        // number here rather than as a refusal, because a food the game will
+        // not let you eat is a food you cannot get wrong (`is_food`).
+        crate::types::BLOCK_MUSSELS => 120.0,
+        // A crab is the same flesh and the same answer. Slightly less: there
+        // is one of it, so the temptation is one mouthful rather than four.
+        crate::types::BLOCK_CRAB_MEAT => 90.0,
         _ => 0.0,
     }
 }

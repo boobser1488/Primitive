@@ -1508,7 +1508,18 @@ fn idle_chance(species: Species, night: bool) -> f32 {
                 0.0
             }
         }
-        Species::Hare
+        // **The loudest calm animal in the world, and the point of it.** A
+        // troop in the crowns chatters at each other all day about nothing,
+        // and a player who has learned the sound knows there is a grove over
+        // the dune before they can see one. What it *also* means -- because
+        // the same voice is the alarm (`cry_of`) -- is that a troop going
+        // off all at once is something under the trees that is not you, and
+        // there is no other warning of that on a coast with no wolves.
+        Species::Monkey => 0.6,
+        // A crab says nothing, ever. It has no voice at all, and what a
+        // beach at night sounds like is the surf.
+        Species::Crab
+        | Species::Hare
         | Species::Fish
         | Species::Cod
         | Species::Trout

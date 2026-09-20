@@ -254,6 +254,18 @@ pub const ANIMAL_SHEETS: &[&str] = &[
     // is the one thing a rat's face has that a hare's does not.
     "animals/rat.png",
     "animals/horse.png",
+    // The shore's two, appended with the species. The monkey is the hare's
+    // sheet tile by tile through an olive-grey ramp with the muzzle, ears and
+    // face through a bare-skin one -- the rat's recipe, for the rat's reason:
+    // what makes an animal here look like it belongs is the *grain*. The crab
+    // is the same sheet with the contrast pulled almost flat (a shell is not
+    // fur) over an orange-red, its claws in the tusk slot and its legs in the
+    // hoof slot -- and the one tile on either sheet that is drawn rather than
+    // ramped is the crab's eye, because a crab's eye is not a feature on a
+    // head, it *is* the whole stalk, and there is nothing in the hare's sheet
+    // that is that.
+    "animals/monkey.png",
+    "animals/crab.png",
 ];
 
 /// Which sheet a species wears, as a row of `ANIMAL_SHEETS`.
@@ -287,6 +299,8 @@ pub fn sheet_index(species: primitive_shared::animals::Species) -> usize {
         Species::Herring => 15,
         Species::Rat => 16,
         Species::Horse => 17,
+        Species::Monkey => 18,
+        Species::Crab => 19,
     }
 }
 

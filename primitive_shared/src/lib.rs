@@ -90,6 +90,7 @@ pub mod raft;
 pub mod saltpan;
 pub mod season;
 pub mod shelter;
+pub mod shore;
 pub mod stall;
 pub mod showcase;
 pub mod snare;
