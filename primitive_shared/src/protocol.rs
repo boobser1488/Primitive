@@ -2700,6 +2700,26 @@ pub enum ServerMessage {
     Notice {
         what: crate::notice::Notice,
     },
+    /// **A bolt of lightning came down there.**
+    ///
+    /// Sent to everyone within earshot (`lightning::HEARD_WITHIN`) the
+    /// tick it lands, and what the client does with it is the flash and,
+    /// a second or three later, the crack -- the delay worked out from
+    /// the distance to `at` on both sides, because the speed of sound is
+    /// a constant and a *timestamp* would need the two clocks to agree
+    /// to a tenth of a second.
+    ///
+    /// **An event rather than a block change.** What the bolt did to the
+    /// world -- the fire it started, the turf it burnt off -- arrives as
+    /// ordinary block changes on the same tick, from the same code path
+    /// every other edit goes through. This message carries only the
+    /// thing that has no block behind it: the light and the noise. A
+    /// client that missed it misses a flash and stays right about the
+    /// world, which is the property every cosmetic message here has.
+    /// Appended, so it rides fifty-seven's bump.
+    Lightning {
+        at: (f64, f64, f64),
+    },
 }
 
 /// Trims/sanitises a username before it's shown to other players or

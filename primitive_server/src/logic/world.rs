@@ -540,7 +540,14 @@ impl World {
     /// different questions and only the first of them always has an
     /// answer. A player over a hole should be dropped into it rather
     /// than refused a spawn.
-    fn standing_height(&self, gx: i32, gz: i32) -> f32 {
+    /// **Public because the spawn is no longer the only place somebody
+    /// is put down on the ground**: `/biometp` lands a player a kilometre
+    /// away in country nobody has loaded, and it has to answer the same
+    /// question this does. Answering it with "the generator's height,
+    /// plus one" put them inside the turf -- the generator's height is
+    /// the *ground*, and what is standing on it (a tuft, a lip of snow,
+    /// a fallen log) is exactly what these two passes are for.
+    pub fn standing_height(&self, gx: i32, gz: i32) -> f32 {
         // The column, read once. A respawn is not a hot path, but it
         // does happen while the tick loop is holding things, and the
         // difference between one chunk lookup and thirty is free.
@@ -1032,6 +1039,12 @@ impl crate::logic::falling::BlockWorld for World {
     /// attempt -- see `BlockWorld::biome`.
     fn biome(&self, gx: i32, gz: i32) -> Option<primitive_shared::worldgen::Biome> {
         Some(self.biome_at(gx, gz))
+    }
+
+    /// The same, for the two numbers the biome is made of. See
+    /// `BlockWorld::climate` for why the wildfire asks this at all.
+    fn climate(&self, gx: i32, gy: i32, gz: i32) -> Option<(f32, f32)> {
+        Some(self.climate_at(gx, gy, gz))
     }
 }
 

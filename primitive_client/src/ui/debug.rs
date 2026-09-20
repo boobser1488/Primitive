@@ -220,6 +220,13 @@ pub struct FrameInfo {
     /// precision -- "is this close enough" is exactly the question a
     /// player asks when a recipe is greyed out.
     pub weather: &'static str,
+    /// ...and what that sky is actually dropping *here*
+    /// (`weather::Precipitation`), which is not the same thing: the storm
+    /// over a desert arrives as dust and puts no fire out. Beside the
+    /// sky's own name rather than instead of it, because the pair is the
+    /// answer -- "storm, dust" says both that the world is under weather
+    /// and that this corner of it is getting none of the water.
+    pub falling: primitive_shared::weather::Precipitation,
     pub heat: primitive_shared::crafting::Heat,
     /// How many of the selected block the player is carrying.
     pub held: u32,
@@ -430,9 +437,13 @@ impl DebugStats {
             ),
             format!("audio  {}", info.audio),
             format!(
-                "fed {:.0}%   sky {}{}",
+                "fed {:.0}%   sky {}{}{}",
                 info.nourishment * 100.0,
                 info.weather,
+                match info.falling {
+                    primitive_shared::weather::Precipitation::None => String::new(),
+                    falling => format!(", {}", falling.name()),
+                },
                 match (info.heat.bloomery, info.heat.kiln, info.heat.fire) {
                     (true, _, _) => "   at a bloomery",
                     (_, true, _) => "   at a kiln",
@@ -751,6 +762,7 @@ mod tests {
             latitude: Some(45.0),
             nourishment: 1.0,
             weather: "clear",
+            falling: primitive_shared::weather::Precipitation::None,
             audio: String::new(),
             heat: primitive_shared::crafting::Heat::NONE,
             selected_block: "stone",

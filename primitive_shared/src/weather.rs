@@ -158,6 +158,157 @@ pub fn falls_as_snow(temperature: f32) -> bool {
 /// written to avoid. See `snow_falls_on_everything_the_generator_paints_white`.
 pub const SNOW_TEMPERATURE: f32 = crate::worldgen::CLIMATE_FREEZING;
 
+/// What is actually coming down *here*.
+///
+/// ## Why the sky's three states are not enough
+///
+/// `Weather` is what the world's sky is doing; this is what a player
+/// standing in one column sees fall out of it. They are different
+/// questions and the gap between them is where "it rained in the desert"
+/// lived: one storm over a world whose generator had spent four noise
+/// fields deciding that this corner of it is sand.
+///
+/// The rule is the *generator's own*, asked in the generator's order
+/// (`land_biome`): cold first, so a cold desert -- which is tundra, and
+/// which the generator paints white -- gets snow like every other cold
+/// place; then hot and dry, which is the one country where a storm
+/// brings no water; then rain everywhere else. Nothing new is sampled
+/// for it. The temperature and the humidity are the two numbers the
+/// world already carries for every column, and the client has had them
+/// since it drew its first tinted leaf.
+///
+/// ## Why dust and not "nothing"
+///
+/// A desert under a storm that simply had no weather in it would be a
+/// desert where the sky does nothing and the word "storm" is a lie the
+/// chat line tells. A dust storm is the same front arriving with what
+/// that country has to give: it darkens, it blows, it is unpleasant to
+/// be out in -- and it does not put a fire out, which is the whole of
+/// why a fire in a desert is a different decision from a fire in a wood.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Precipitation {
+    /// A dry sky, or a sky whose weather has not reached this column.
+    #[default]
+    None,
+    Rain,
+    Snow,
+    /// Sand and grit, in hot dry country. Wets nothing and quenches
+    /// nothing.
+    Dust,
+}
+
+impl Precipitation {
+    /// What falls on a column of this climate under this sky.
+    ///
+    /// `snowing` is the season's answer rather than a temperature
+    /// compared here, because the snow line moves with the year
+    /// (`season::falls_as_snow_with_swing`) and with the latitude, and a
+    /// second copy of that arithmetic is how the sky and the ground come
+    /// to disagree about where the snow lies -- which is the mistake
+    /// `SNOW_TEMPERATURE` is a monument to.
+    pub fn of(weather: Weather, snowing: bool, temperature: f32, humidity: f32) -> Precipitation {
+        if !weather.is_wet() {
+            return Precipitation::None;
+        }
+        if snowing {
+            return Precipitation::Snow;
+        }
+        if temperature >= crate::worldgen::CLIMATE_HOT && humidity < crate::worldgen::CLIMATE_DRY {
+            return Precipitation::Dust;
+        }
+        Precipitation::Rain
+    }
+
+    /// Does this wet what it lands on -- the ground, a fire, a board left
+    /// out?
+    ///
+    /// The one question the rest of the server asks. Dust does not, which
+    /// is why a lightning fire in a desert burns until it runs out of
+    /// fuel while the same fire in a marsh is out in a minute.
+    #[inline]
+    pub fn wets(self) -> bool {
+        matches!(self, Precipitation::Rain | Precipitation::Snow)
+    }
+
+    /// Short name, for the debug panel and the chat line. Not translated,
+    /// for `Weather::name`'s reason.
+    pub fn name(self) -> &'static str {
+        match self {
+            Precipitation::None => "none",
+            Precipitation::Rain => "rain",
+            Precipitation::Snow => "snow",
+            Precipitation::Dust => "dust",
+        }
+    }
+}
+
+/// How hard it comes down in country of this humidity, 0..1.
+///
+/// **The monsoon, in one multiply.** The wettest country there is --
+/// marsh, bog, closed forest -- takes a quarter more than the enum says,
+/// and the driest takes little better than half; between the generator's
+/// two lines it is a straight run. So walking from a steppe into a
+/// rainforest in one spell of rain is a change a player can see and
+/// hear, and neither end of it needed a weather system of its own.
+///
+/// Rejected: a humidity term folded into `Weather::intensity`. That
+/// figure is the *sky's*, and the fires, the sound bed and the darkening
+/// all read it; making it local would mean a storm that is darker in a
+/// marsh than over the sand dunes half a kilometre away, which is one
+/// sky too many.
+pub fn local_intensity(weather: Weather, humidity: f32) -> f32 {
+    let dry = crate::worldgen::CLIMATE_DRY;
+    let wet = crate::worldgen::CLIMATE_WET;
+    let t = ((humidity - dry) / (wet - dry)).clamp(0.0, 1.0);
+    weather.intensity() * (DRIZZLE_SHARE + (MONSOON_SHARE - DRIZZLE_SHARE) * t)
+}
+
+/// What the driest country takes of a shower.
+pub const DRIZZLE_SHARE: f32 = 0.55;
+/// ...and what the wettest takes.
+pub const MONSOON_SHARE: f32 = 1.25;
+
+/// How thick the dawn mist over sodden ground is, 0..1.
+///
+/// **A bog at first light, and nowhere else.** Mist is the one weather
+/// that belongs to a *place* rather than to the sky: it wants still air,
+/// ground with water in it and the hour the ground is colder than the
+/// air, which is the hour before and after sunrise. So it is a function
+/// of the humidity and the clock and takes nothing from `Weather` at all
+/// -- a mist in a downpour would be a second sky over the first.
+///
+/// It draws rather than decides: the client tightens its fog with it.
+/// Nothing mechanical hangs off mist, deliberately -- a fog that halved
+/// what a player could see *and* did something to them would be a
+/// punishment for logging in at the wrong hour.
+pub fn dawn_mist(humidity: f32, time_of_day: f32) -> f32 {
+    if humidity < crate::worldgen::CLIMATE_WET {
+        return 0.0;
+    }
+    // How far into the wet end of the scale: a marsh is thicker than a
+    // damp wood, and the far end of the scale is a bog.
+    let wetness = ((humidity - crate::worldgen::CLIMATE_WET) / (1.0 - crate::worldgen::CLIMATE_WET)).clamp(0.0, 1.0);
+    // Sunrise is 0.25 of the day (`commands::parse_time`). Round the
+    // clock rather than along it, so a world whose hour wrapped past
+    // midnight does not get an hour of mist at dusk.
+    let from_dawn = (time_of_day - DAWN).abs().min(1.0 - (time_of_day - DAWN).abs());
+    if from_dawn >= MIST_HOURS {
+        return 0.0;
+    }
+    let t = 1.0 - from_dawn / MIST_HOURS;
+    wetness * t * t * (3.0 - 2.0 * t)
+}
+
+/// When the sun comes up, as a fraction of the day. The same figure
+/// `/time dawn` sets.
+pub const DAWN: f32 = 0.25;
+
+/// How much of a day either side of dawn the mist lies over, as a
+/// fraction of it: a little over an hour and a half of a twenty-four
+/// hour day, which is a thing a player who sleeps through the night
+/// meets when they step outside and a thing they miss if they lie in.
+pub const MIST_HOURS: f32 = 0.07;
+
 /// How long a spell of weather lasts, in seconds, before the server
 /// rolls again.
 ///
@@ -243,6 +394,140 @@ mod tests {
         assert!(falls_as_snow(SNOW_TEMPERATURE - 0.01));
         assert!(!falls_as_snow(SNOW_TEMPERATURE));
         assert!(!falls_as_snow(1.0));
+    }
+
+    /// A desert column, as the generator would report it: hot and dry.
+    const DESERT: (f32, f32) = (0.9, 0.2);
+    /// A marsh: warm and as wet as country gets.
+    const MARSH: (f32, f32) = (0.6, 0.9);
+    /// A meadow, in the middle of everything.
+    const MEADOW: (f32, f32) = (0.5, 0.5);
+
+    #[test]
+    fn it_does_not_rain_in_the_desert() {
+        // The whole of the complaint. One storm over a world whose
+        // generator spent four noise fields deciding this corner of it
+        // is sand.
+        assert_eq!(
+            Precipitation::of(Weather::Storm, false, DESERT.0, DESERT.1),
+            Precipitation::Dust
+        );
+        assert_eq!(
+            Precipitation::of(Weather::Rain, false, DESERT.0, DESERT.1),
+            Precipitation::Dust
+        );
+        assert!(!Precipitation::Dust.wets(), "a dust storm put a fire out");
+    }
+
+    #[test]
+    fn a_cold_desert_is_tundra_and_gets_snow_like_everywhere_else_cold() {
+        // The order the questions are asked in, stated as the thing it
+        // is for: dry and cold is not desert, it is tundra, and the
+        // generator paints it white. Asking "is it dry" first would put
+        // a dust storm on a snowfield.
+        assert_eq!(
+            Precipitation::of(Weather::Storm, true, 0.05, 0.2),
+            Precipitation::Snow
+        );
+    }
+
+    #[test]
+    fn rain_falls_where_the_country_is_neither_hot_nor_dry() {
+        for (t, h) in [MEADOW, MARSH, (0.9, 0.9)] {
+            assert_eq!(Precipitation::of(Weather::Rain, false, t, h), Precipitation::Rain);
+        }
+        // ...and a clear sky drops nothing anywhere.
+        assert_eq!(Precipitation::of(Weather::Clear, false, MARSH.0, MARSH.1), Precipitation::None);
+        assert_eq!(Precipitation::of(Weather::Clear, true, 0.0, 0.0), Precipitation::None);
+    }
+
+    #[test]
+    fn dust_falls_on_the_sand_the_generator_drew_and_rain_on_the_woods() {
+        // **Swept over a real world**, the way `SNOW_TEMPERATURE` was --
+        // and for the lesson it records. The thresholds here are derived
+        // from the classifier's own, so the two cannot drift; this is
+        // the test that says they have not, because a column's *biome*
+        // is decided by the surface temperature and what falls on it by
+        // `climate_at`, which is the same field with the lapse rate
+        // applied, and "near enough" is not a thing a test can assume.
+        use crate::worldgen::{Biome, WorldGen, Zone};
+        let (mut desert, mut dusty) = (0, 0);
+        let (mut wood, mut wet) = (0, 0);
+        // **Two worlds, because one has no desert in it.** A world is
+        // laid at a latitude (`Zone`), and the temperate one the game
+        // opens in has no sand anywhere: sweeping it for deserts finds
+        // what sweeping England finds. So the dust is checked where the
+        // dust is -- a world in the dry belt -- and the rain where the
+        // rain is.
+        for (zone, seed) in [(Zone::DryBelt, 4242), (Zone::Temperate, 4242)] {
+            let gen = WorldGen::with_zone(seed, crate::worldgen::Preset::Normal, zone);
+            for x in (-2400..2400).step_by(29) {
+                for z in (-2400..2400).step_by(29) {
+                    let biome = gen.biome_at(x, z);
+                    let y = gen.height_at(x, z);
+                    let (temperature, humidity) = gen.climate_at(x, y, z);
+                    let falling = Precipitation::of(Weather::Storm, false, temperature, humidity);
+                    match biome {
+                        Biome::Desert => {
+                            desert += 1;
+                            dusty += usize::from(falling == Precipitation::Dust);
+                        }
+                        Biome::Forest | Biome::BirchForest | Biome::Swamp => {
+                            wood += 1;
+                            wet += usize::from(falling == Precipitation::Rain);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(desert > 20 && wood > 20, "the sweep found {desert} desert and {wood} wooded columns");
+        // **Nearly every column rather than every one**, and the gap is
+        // the honest part of this test. The classifier reads the climate
+        // at the *surface* and this reads `climate_at` at the ground
+        // under it, with the lapse rate applied; along the edge where a
+        // wood gives way to open country the two disagree by a
+        // hundredth, and a hundredth is a column either way. What
+        // matters is that the middle of a desert is never rained on and
+        // the middle of a wood is never dusted, which is what these two
+        // shares say.
+        assert!(
+            dusty * 10 >= desert * 9,
+            "{dusty} of {desert} desert columns got dust; the rest were rained on"
+        );
+        assert!(
+            wet * 100 >= wood * 97,
+            "only {wet} of {wood} wooded columns were rained on"
+        );
+    }
+
+    #[test]
+    fn the_wettest_country_takes_the_heaviest_rain_out_of_one_storm() {
+        let marsh = local_intensity(Weather::Rain, MARSH.1);
+        let meadow = local_intensity(Weather::Rain, MEADOW.1);
+        let dry = local_intensity(Weather::Rain, DESERT.1);
+        assert!(marsh > meadow && meadow > dry, "{marsh} {meadow} {dry}");
+        // Never to nothing and never past a storm's own weight: the
+        // figure feeds a particle count and a sound bed.
+        assert!(dry > 0.0);
+        assert!(local_intensity(Weather::Storm, 1.0) <= Weather::Storm.intensity() * MONSOON_SHARE);
+        assert_eq!(local_intensity(Weather::Clear, 1.0), 0.0);
+    }
+
+    #[test]
+    fn the_mist_lies_on_a_bog_at_dawn_and_nowhere_else() {
+        let bog = dawn_mist(0.95, DAWN);
+        assert!(bog > 0.0, "a bog at first light had no mist");
+        // Thicker on wetter ground...
+        assert!(bog > dawn_mist(0.6, DAWN));
+        // ...gone on dry ground, and gone by the middle of the day.
+        assert_eq!(dawn_mist(0.3, DAWN), 0.0);
+        assert_eq!(dawn_mist(0.95, 0.5), 0.0);
+        assert_eq!(dawn_mist(0.95, 0.9), 0.0);
+        // It eases in and out rather than switching on: a wall of fog
+        // appearing between two frames is a bug a player reports.
+        assert!(dawn_mist(0.95, DAWN - MIST_HOURS * 0.5) < bog);
+        assert!(dawn_mist(0.95, DAWN - MIST_HOURS * 0.5) > 0.0);
     }
 
     #[test]

@@ -34,10 +34,11 @@ use serde::{Deserialize, Serialize};
 
 use primitive_shared::protocol::BlockChange;
 use primitive_shared::types::{block_kind, BlockId, BLOCK_STANDING_TORCH_LIT, BLOCK_STANDING_TORCH_OUT};
-use primitive_shared::weather::Weather;
+use primitive_shared::weather::{Precipitation, Weather};
 use primitive_shared::wildfire::{
-    self as rules, alight, burn_seconds_of, catch_threshold, ceiling_over, charred, draught, fuel, is_blazing,
-    licked, licks_as_a_hearth, smoke_room, smoke_target, soot, with_soot, Fuel, Room, BLAZE_HEAT,
+    self as rules, alight, burn_seconds_of, catch_threshold, ceiling_over, charred, damp_factor, draught, fuel,
+    is_blazing, leaves_ash, licked, licks_as_a_hearth, seasoning, smoke_room, smoke_target, soot, with_soot, Fuel,
+    Room, BLAZE_HEAT,
     COOLING_PER_SECOND, FLASH_SECONDS, HEARTH_HEAT, MAX_BURNING, MAX_CATCHES_PER_STEP, MAX_WARM_CELLS,
     NEAR_PLAYER, SMOKE_CLEAR_PER_SECOND, SMOKE_RISE_PER_SECOND, SMOKE_STEP_SECONDS, SOOT_STAGES,
     SMOULDER_SMOKE, SOOT_STAGE_SECONDS, STEP_SECONDS, TORCH_SECONDS,
@@ -111,6 +112,12 @@ pub struct Wildfire {
     dirty: bool,
     /// Hearths burning green or wet fuel. See `set_smouldering`.
     smouldering: HashSet<Cell>,
+    /// The world's age in days, for the season's dryness
+    /// (`wildfire::seasoning`). Zero until the tick loop says otherwise,
+    /// which is the spring a world opens in -- so a `Wildfire` nobody has
+    /// told the date to behaves like one in that spring rather than one
+    /// in no season at all.
+    world_days: f32,
 }
 
 /// Is `at` within reach of anybody? See `wildfire::NEAR_PLAYER`.
@@ -123,12 +130,26 @@ fn near_anyone(at: Cell, players: &[(f32, f32, f32)]) -> bool {
 }
 
 /// Can the rain reach this cell? The fire map's own test: nothing solid
-/// between it and the top of the world.
+/// between it and the top of the world -- and **something wet falling**,
+/// which is not the same question as "is the sky wet".
+///
+/// A storm over hot dry country arrives as dust (`weather::Precipitation`)
+/// and dust puts nothing out. That is the whole of why a fire in the
+/// desert is a different decision from a fire in a wood: there is no sky
+/// to wait for. The snow line is not asked, deliberately -- snow and rain
+/// both wet what they land on, so the only branch that can change the
+/// answer here is the dust, and asking the season for the rest would be a
+/// second copy of the snow line to keep in step with `season`.
 fn rained_on(world: &dyn BlockWorld, weather: Weather, at: Cell) -> bool {
-    weather.is_wet()
+    let (temperature, humidity) = world.climate(at.0, at.1, at.2).unwrap_or(TEMPERATE);
+    Precipitation::of(weather, false, temperature, humidity).wets()
         && ((at.1 + 1)..primitive_shared::types::CHUNK_SIZE_Y as i32)
             .all(|y| !world.block(at.0, y, at.2).is_some_and(primitive_shared::types::is_collidable))
 }
+
+/// What a world that cannot say its climate counts as: the middle of the
+/// scale, which is a meadow. See `BlockWorld::climate`.
+const TEMPERATE: (f32, f32) = (0.5, 0.5);
 
 fn change((x, y, z): Cell, block: BlockId) -> BlockChange {
     BlockChange {
@@ -157,6 +178,18 @@ impl Wildfire {
     pub fn set_weather(&mut self, weather: Weather, wind: (f32, f32)) {
         self.weather = weather;
         self.wind = wind;
+    }
+
+    /// What day of the world it is, once a tick, from the same clock the
+    /// animals grow by (`Animals::calendar`).
+    ///
+    /// The season is the whole of how dry the country is here
+    /// (`wildfire::seasoning`): a campfire in a meadow is a hazard in
+    /// August and a warm place to sit in March, and that is the one thing
+    /// about a fire that a player can plan around without being told a
+    /// number.
+    pub fn set_calendar(&mut self, world_days: f32) {
+        self.world_days = world_days;
     }
 
     /// The hearths burning green or wet fuel, once a tick, from the fire map
@@ -386,13 +419,23 @@ impl Wildfire {
         self.warned.retain(|cell| warm.contains_key(cell));
 
         // Catches: the hottest first, within the bounds.
+        //
+        // **The threshold is the rules' one, moved by the year and by how
+        // wet the fuel itself is** (`seasoning`, `damp_factor`). Both are
+        // multiplies on one number rather than terms scattered through
+        // the heat it gathers, so "how close is this to catching" stays a
+        // single share a test can state: a green log in March needs six
+        // times what a dry one in August does, and that is the whole of
+        // the difference between a fire that gets loose and one that does
+        // not.
+        let dryness = seasoning(self.world_days);
         let mut ready: Vec<(Cell, Fuel, f32)> = self
             .warm
             .iter()
             .filter_map(|(&cell, &heat)| {
                 let block = world.block(cell.0, cell.1, cell.2)?;
                 let kind = fuel(block)?;
-                Some((cell, kind, heat / catch_threshold(kind, cell)))
+                Some((cell, kind, heat / (catch_threshold(kind, cell) * dryness * damp_factor(block))))
             })
             .collect();
         ready.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
@@ -412,9 +455,22 @@ impl Wildfire {
             let Some(block) = world.block(cell.0, cell.1, cell.2) else {
                 continue;
             };
-            let Some(now) = alight(block) else {
+            let Some(mut now) = alight(block) else {
                 continue;
             };
+            // **A burnt tuft leaves its ash where it stood** (`leaves_ash`)
+            // -- on the ground and nowhere else, because ash is a cover
+            // and one in mid-air would be a grey square hanging in a tree.
+            // The cell stays hot either way (`flashes`), so the fire runs
+            // on across the meadow and what it leaves behind it is the
+            // grey the player follows home.
+            if leaves_ash(kind)
+                && world
+                    .block(cell.0, cell.1 - 1, cell.2)
+                    .is_some_and(primitive_shared::types::is_collidable)
+            {
+                now = primitive_shared::types::BLOCK_ASH;
+            }
             world.set(cell.0, cell.1, cell.2, now);
             out.changes.push(change(cell, now));
             self.warm.remove(&cell);
@@ -656,6 +712,77 @@ mod tests {
         run(&mut wildfire, &world, &[FIRE], &PLAYER, rules::BOARDS_BURN_SECONDS + 2.0);
         assert_eq!(world.get(boards.0, boards.1, boards.2), BLOCK_CHARRED_PLANKS, "the boards did not burn to char");
         assert_eq!(wildfire.burning(), 0);
+    }
+
+    #[test]
+    fn a_fire_in_dry_grass_runs_downwind_and_leaves_ash_behind_it() {
+        use primitive_shared::types::{BLOCK_ASH, BLOCK_DRY_GRASS};
+        // A meadow round a campfire, in a wind out of the west.
+        let world = camp();
+        for x in -4..=4 {
+            for z in -4..=4 {
+                if (x, z) != (0, 0) {
+                    world.put(x, 10, z, BLOCK_DRY_GRASS);
+                }
+            }
+        }
+        let mut wildfire = Wildfire::new();
+        wildfire.set_weather(primitive_shared::weather::Weather::Clear, (1.0, 0.0));
+        // High summer: the season the fire is a hazard in.
+        wildfire.set_calendar(primitive_shared::season::MIDSUMMER_WORLD_TIME);
+        run(&mut wildfire, &world, &[FIRE], &PLAYER, 8.0);
+
+        // Seconds, not minutes: a tuft beside a fire in August is the
+        // fastest thing in the fuel table, and what it leaves is ash.
+        assert_eq!(world.get(1, 10, 0), BLOCK_ASH, "the tuft beside the fire did not burn");
+        let burnt = |ahead: bool| {
+            (1..=4)
+                .filter(|&d| {
+                    let x = if ahead { d } else { -d };
+                    world.get(x, 10, 0) == BLOCK_ASH
+                })
+                .count()
+        };
+        assert!(
+            burnt(true) > burnt(false),
+            "the fire ran upwind as fast as down: {} ahead, {} behind",
+            burnt(true),
+            burnt(false)
+        );
+
+        // ...and it keeps going: left alone, the meadow burns out to the
+        // edge of what the fire can reach, which is what makes a grass
+        // fire a thing a player runs from rather than stamps on.
+        run(&mut wildfire, &world, &[FIRE], &PLAYER, 60.0);
+        let left = (-4..=4)
+            .flat_map(|x| (-4..=4).map(move |z| (x, z)))
+            .filter(|&(x, z)| world.get(x, 10, z) == BLOCK_DRY_GRASS)
+            .count();
+        assert!(left < 40, "{left} tufts of eighty survived the fire");
+        assert_eq!(world.get(4, 10, 0), BLOCK_ASH, "the fire did not cross the meadow downwind");
+    }
+
+    #[test]
+    fn a_storm_over_the_desert_does_not_put_the_fire_out() {
+        use primitive_shared::weather::Weather;
+        // The same burning roof, twice, under the same storm: once in a
+        // meadow, where the rain reaches it, and once in hot dry country,
+        // where the storm is a dust storm and there is no sky to wait
+        // for. See `rained_on`.
+        let quenched = |climate: Option<(f32, f32)>| {
+            let world = camp();
+            let open = (0, 12, 0);
+            world.put(open.0, open.1, open.2, BLOCK_BURNING_PLANKS);
+            world.set_climate(climate);
+            let mut wildfire = Wildfire::new();
+            wildfire.on_block_changed(open.0, open.1, open.2);
+            wildfire.set_weather(Weather::Storm, (0.0, 0.0));
+            run(&mut wildfire, &world, &[], &PLAYER, 3.0);
+            world.get(open.0, open.1, open.2) == BLOCK_CHARRED_PLANKS
+        };
+        assert!(quenched(None), "the rain did not put out a fire in a world with no climate");
+        assert!(quenched(Some((0.5, 0.8))), "the rain did not reach a fire in a marsh");
+        assert!(!quenched(Some((0.95, 0.1))), "a dust storm put a fire out in the desert");
     }
 
     #[test]

@@ -49,7 +49,8 @@ pub mod settings;
 pub use logic::{
     animals, anticheat, carrion, chunkgen, climate, commands, containers, drying, falling, felling,
     fire, growth, peat, walls,
-    items, plugins, profiles, rafts, horses, rng, simulation, smelting, stalls, survival, water, weather, world,
+    items, lightning, plugins, profiles, rafts, horses, rng, simulation, smelting, stalls, survival, water, weather,
+    world,
 };
 #[cfg(feature = "mods")]
 pub use logic::mods;
@@ -247,6 +248,11 @@ pub struct Context {
     pub rafts: std::sync::Mutex<rafts::Rafts>,
     /// The weather, for the whole world. See `logic::weather`.
     pub sky: std::sync::Mutex<weather::Sky>,
+    /// The clock on the next bolt. Its own field beside the sky rather
+    /// than a member of it, because the sky is a state and this is an
+    /// event: `Sky` is asked its weather by a dozen passes a tick and
+    /// this is stepped by one of them. See `logic::lightning`.
+    pub storm: std::sync::Mutex<lightning::Storm>,
     /// What is inside the chests **and the hearths**. One store: a
     /// hearth is a container, and everything written for chests --
     /// opening, moving, spilling on break, saving -- applies to it
@@ -914,6 +920,15 @@ impl Server {
 
     /// How wet the player called `name` is, 0..1, as the server has it --
     /// the number the health page is sent on a gate, read without the gate.
+    /// Which biome a column is in, as the generator says.
+    ///
+    /// For the scenario that asks to be put in one (`/biometp`) and then
+    /// has to check it arrived. Straight to the generator, like every
+    /// other reader of it: noise, no lock, no chunk.
+    pub fn biome_at(&self, x: i32, z: i32) -> primitive_shared::worldgen::Biome {
+        self.ctx.world.biome_at(x, z)
+    }
+
     pub fn wetness_of(&self, name: &str) -> Option<f32> {
         self.named(name).map(|handle| handle.state.lock().unwrap_or_else(|e| e.into_inner()).vitals.wetness())
     }
@@ -1611,6 +1626,7 @@ fn build_context(settings: ServerSettings, options: RunOptions) -> anyhow::Resul
         animals: std::sync::Mutex::new(herd),
         rafts: std::sync::Mutex::new(rafts),
         sky: std::sync::Mutex::new(weather::Sky::new()),
+        storm: std::sync::Mutex::new(lightning::Storm::new()),
         chests: std::sync::Mutex::new(chests),
         stalls: std::sync::Mutex::new(stall_owners),
         drying: std::sync::Mutex::new(racks),
@@ -2504,6 +2520,13 @@ async fn tick_loop(ctx: Arc<Context>) {
             // room with and the soot they lay on its ceiling. See
             // `step_wildfire`.
             step_wildfire(&ctx, &where_everyone_is, dt);
+
+            // ...and, in a storm, the bolt that starts one. After the
+            // wildfire rather than before it, so a tree lit this tick is
+            // adopted by a clock that has already run: the fire starts
+            // burning next tick rather than being stepped a tick before
+            // it existed. See `step_lightning`.
+            step_lightning(&ctx, &where_everyone_is, dt);
 
             // ...and what the lit ones are cooking. After the fires
             // rather than with them: a hearth that has just gone out
@@ -4830,6 +4853,122 @@ pub fn run_command(
             }
             None => vec!["you are not online".to_string()],
         },
+
+        // **A bolt, now**, because a bolt cannot be waited for: see
+        // `Command::Lightning`. The column form strikes the top of that
+        // column whatever the sky is doing; the bare form asks the storm
+        // where it would have put one near the caller, which is the same
+        // draw a real bolt goes through, metal and all.
+        Response::Lightning { at } => {
+            let where_it_went = match at {
+                Some((gx, gz)) => {
+                    let top = (0..primitive_shared::types::CHUNK_SIZE_Y as i32)
+                        .rev()
+                        .find(|&y| {
+                            ctx.world
+                                .cached_block(gx, y, gz)
+                                .is_some_and(|block| !primitive_shared::types::is_air(block))
+                        })
+                        .map(|y| (gx, y, gz));
+                    top.or_else(|| {
+                        // Nothing loaded there: strike the generator's
+                        // own surface rather than refusing, so a
+                        // scenario can aim at a column it has only just
+                        // written.
+                        Some((gx, ctx.world.height_at(gx, gz), gz))
+                    })
+                }
+                None => {
+                    let Some(handle) = caller.and_then(|id| ctx.registry.get(id)) else {
+                        return vec!["you are not online".to_string()];
+                    };
+                    let (feet, metal) = {
+                        let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+                        let held = state.inventory.block_in(state.selected_slot);
+                        (
+                            (state.position.0 as f32, state.position.1 as f32, state.position.2 as f32),
+                            matches!(
+                                primitive_shared::types::tool_tier(held),
+                                primitive_shared::blocks::Tier::Copper
+                                    | primitive_shared::blocks::Tier::Bronze
+                                    | primitive_shared::blocks::Tier::Iron
+                            ),
+                        )
+                    };
+                    let mut storm = ctx.storm.lock().unwrap_or_else(|e| e.into_inner());
+                    storm.draw(&*ctx.world, feet, metal)
+                }
+            };
+            let Some(at) = where_it_went else {
+                return vec!["nothing near you for a bolt to hit".to_string()];
+            };
+            strike(ctx, at);
+            vec![format!("lightning struck ({}, {}, {})", at.0, at.1, at.2)]
+        }
+
+        // **The nearest chunk of a named biome, and the ground in it.**
+        //
+        // Three things can go wrong and each is answered with what the
+        // caller needs next rather than with "usage": a name nobody
+        // recognises comes back with the list of names, a biome that is
+        // not within the search comes back with how far it looked (so
+        // the answer reads as "not near here" rather than "no such
+        // place"), and a chunk with no room in its middle column is
+        // handled by `safe_position`, which is the same function a
+        // player's own saved position goes through on joining.
+        Response::TeleportSelfToBiome { biome } => {
+            let Some(handle) = caller.and_then(|id| ctx.registry.get(id)) else {
+                return vec!["you are not online".to_string()];
+            };
+            let Some(wanted) = primitive_shared::worldgen::Biome::parse(&biome) else {
+                let names: Vec<&str> = primitive_shared::worldgen::Biome::ALL
+                    .iter()
+                    .map(|b| b.name())
+                    .collect();
+                return vec![
+                    format!("no biome called '{biome}'"),
+                    format!("try one of: {}", names.join(", ")),
+                ];
+            };
+            let side = primitive_shared::types::CHUNK_SIZE_X as i32;
+            let from = handle.player_state();
+            let from_chunk = (
+                (from.x.floor() as i32).div_euclid(side),
+                (from.z.floor() as i32).div_euclid(side),
+            );
+            // The middle column of a chunk, which is what the search
+            // itself tests. Asking the generator rather than the loaded
+            // world: `biome_at` is noise and a pure function of the
+            // seed, so looking a kilometre away generates nothing.
+            let found = commands::nearest_biome(from_chunk, wanted, |cx, cz| {
+                ctx.world.biome_at(cx * side + side / 2, cz * side + side / 2)
+            });
+            let Some((chunk, rings)) = found else {
+                return vec![format!(
+                    "no {} within {} chunks ({} blocks) of here",
+                    wanted.name(),
+                    commands::BIOME_SEARCH_CHUNKS,
+                    commands::BIOME_SEARCH_CHUNKS * side
+                )];
+            };
+            let (gx, gz) = (chunk.0 * side + side / 2, chunk.1 * side + side / 2);
+            // **Where a player would stand in that column**, which is the
+            // question the spawn point asks and not the generator's
+            // height plus one: the generator's height is the ground, and
+            // a tuft, a lip of snow or a fallen log is standing on it.
+            // Plus one put them inside the turf, stuck.
+            let (x, y, z) = (
+                f64::from(gx) + 0.5,
+                f64::from(ctx.world.standing_height(gx, gz)),
+                f64::from(gz) + 0.5,
+            );
+            teleport(&handle, x as f32, y as f32, z as f32, "teleported");
+            vec![format!(
+                "teleported to {} at ({x:.0}, {y:.0}, {z:.0}), {} chunks away",
+                wanted.name(),
+                rings
+            )]
+        }
 
         Response::Give { block, count } => {
             let Some(handle) = caller.and_then(|id| ctx.registry.get(id)) else {
@@ -11078,6 +11217,9 @@ pub(crate) fn step_wildfire(ctx: &Arc<Context>, players: &[(PlayerId, (f32, f32,
     let stepped = {
         let mut wildfire = ctx.wildfire.lock().unwrap_or_else(|e| e.into_inner());
         wildfire.set_weather(weather, wind);
+        // ...and the day of the year, which is how dry the country is
+        // (`wildfire::seasoning`). The same clock the animals grow by.
+        wildfire.set_calendar(ctx.clock.world_days());
         wildfire.set_smouldering(smouldering);
         wildfire.step(&*ctx.world, &hearths, &feet, dt, simulation::DEFAULT_TICK_BUDGET)
     };
@@ -11109,6 +11251,168 @@ pub(crate) fn step_wildfire(ctx: &Arc<Context>, players: &[(PlayerId, (f32, f32,
         }
     }
 }
+
+/// One tick of `logic::lightning`: a bolt, when the storm has one due.
+///
+/// **Once a minute at the most, and nothing at all when the sky is not a
+/// storm** -- the first line of `Storm::step` is the weather. What it
+/// costs when a bolt *is* due is a few hundred block reads (see
+/// `Storm::draw`) and one message to everybody in earshot.
+///
+/// The storm's lock is taken twice, briefly, and never while a player's
+/// is held: the metal a player is carrying is read between the two. Held
+/// across, it would be the one place in this file where the storm and a
+/// player state are locked together, and the rule here is that two locks
+/// are held in one order or not at all.
+pub(crate) fn step_lightning(ctx: &Arc<Context>, players: &[(PlayerId, (f32, f32, f32))], dt: f32) {
+    let weather = ctx.sky.lock().unwrap_or_else(|e| e.into_inner()).weather();
+    let due = {
+        let mut storm = ctx.storm.lock().unwrap_or_else(|e| e.into_inner());
+        storm.step(weather, dt)
+    };
+    if !due || players.is_empty() {
+        return;
+    }
+    // **What each player is holding**, which is the one thing about them
+    // the sky cares about: an iron axe in the open is worth six blocks of
+    // height (`lightning::METAL`). Read before the storm's lock is taken
+    // again, and only on the tick a bolt is due -- a lock per player once
+    // a minute.
+    let metal: Vec<bool> = players
+        .iter()
+        .map(|&(id, _)| {
+            let Some(handle) = ctx.registry.get(id) else {
+                return false;
+            };
+            let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+            let held = state.inventory.block_in(state.selected_slot);
+            matches!(
+                primitive_shared::types::tool_tier(held),
+                primitive_shared::blocks::Tier::Copper
+                    | primitive_shared::blocks::Tier::Bronze
+                    | primitive_shared::blocks::Tier::Iron
+            )
+        })
+        .collect();
+    let at = {
+        let mut storm = ctx.storm.lock().unwrap_or_else(|e| e.into_inner());
+        // One bolt near one player, chosen at random: a storm that threw
+        // one at everybody at once would be a storm whose danger scaled
+        // with how many people were logged in.
+        let who = storm.pick(players.len());
+        storm.draw(&*ctx.world, players[who].1, metal[who])
+    };
+    let Some(at) = at else {
+        return;
+    };
+    strike(ctx, at);
+}
+
+/// What a bolt does where it lands: fire, or a burnt patch of turf; a
+/// blow to anybody standing in it; and the flash and the crack, which is
+/// the one thing with no block behind it.
+fn strike(ctx: &Arc<Context>, at: (i32, i32, i32)) {
+    use primitive_shared::lightning as rules;
+    // **It lights what it hits, or the first thing under it that will
+    // hold a flame.** A crown of leaves flashes to nothing in four
+    // seconds (`wildfire::Fuel::Leaves`), so a bolt that only lit the
+    // crown would be a tree struck by lightning that did not burn --
+    // which is the one thing everybody knows lightning does. So the
+    // trunk under it is what takes the flame, and the wildfire spreads
+    // it back up into the leaves from there.
+    let mut lit = false;
+    for y in ((at.1 - CROWN_DEPTH).max(0)..=at.1).rev() {
+        let Some(block) = ctx.world.cached_block(at.0, y, at.2) else {
+            continue;
+        };
+        let Some(alight) = primitive_shared::wildfire::alight(block) else {
+            continue;
+        };
+        if !primitive_shared::wildfire::is_blazing(alight) {
+            continue;
+        }
+        if ctx.world.set_block(at.0, y, at.2, alight) {
+            ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+            // Through the same door every edit goes through, which is
+            // what hands the new fire to the wildfire's own clock: it
+            // adopts a burning block it has no clock for with a whole
+            // burn (`Wildfire::on_block_changed`).
+            notify_mechanics(ctx, at.0, y, at.2);
+            broadcast_block(ctx, (at.0, y, at.2), alight);
+            lit = true;
+        }
+        break;
+    }
+    // Nothing burned: the ground is scorched instead, and a burnt patch
+    // in a meadow is how a player finds out where the bolt went.
+    if !lit {
+        if let Some(block) = ctx.world.cached_block(at.0, at.1, at.2) {
+            if let Some(bare) = rules::scorched(block) {
+                if ctx.world.set_block(at.0, at.1, at.2, bare) {
+                    ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+                    notify_mechanics(ctx, at.0, at.1, at.2);
+                    broadcast_block(ctx, at, bare);
+                }
+            }
+            if !rules::is_left_alone(block) {
+                let above = (at.0, at.1 + 1, at.2);
+                if ctx
+                    .world
+                    .cached_block(above.0, above.1, above.2)
+                    .is_some_and(rules::may_leave_ash)
+                    && ctx.world.set_block(above.0, above.1, above.2, rules::ASH)
+                {
+                    ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+                    notify_mechanics(ctx, above.0, above.1, above.2);
+                    broadcast_block(ctx, above, rules::ASH);
+                }
+            }
+        }
+    }
+    // **Whoever was standing in it.** Through `strike_player`, like every
+    // other blow, so the armour, the mods' veto and the death screen all
+    // behave as they do for a boar. Metal armour making it worse was
+    // rejected: the decision the mechanic asks for is already carried by
+    // what a player *holds* (`lightning::METAL`), and a cuirass that
+    // attracted bolts would make the best armour in the game a thing you
+    // take off when it rains.
+    let centre = (at.0 as f64 + 0.5, at.1 as f64 + 0.5, at.2 as f64 + 0.5);
+    for handle in ctx.registry.handles() {
+        let feet = handle.state.lock().unwrap_or_else(|e| e.into_inner()).position;
+        let (dx, dy, dz) = (feet.0 - centre.0, feet.1 - centre.1, feet.2 - centre.2);
+        let damage = rules::hurt(((dx * dx + dy * dy + dz * dz).sqrt()) as f32);
+        if damage <= 0.0 {
+            continue;
+        }
+        let outcome = strike_player(
+            ctx,
+            &handle,
+            damage,
+            "was struck by lightning",
+            primitive_shared::injury::Blow::Blunt,
+        );
+        report_vitals(ctx, &handle, outcome);
+    }
+    // ...and the light and the noise, to everybody who could see or hear
+    // it. The client works the delay out from the distance itself: see
+    // `ServerMessage::Lightning`.
+    for handle in ctx.registry.handles() {
+        let feet = handle.state.lock().unwrap_or_else(|e| e.into_inner()).position;
+        let (dx, dz) = (feet.0 - centre.0, feet.2 - centre.2);
+        if dx * dx + dz * dz > (rules::HEARD_WITHIN as f64).powi(2) {
+            continue;
+        }
+        handle.send(ServerMessage::Lightning { at: centre });
+    }
+    if ctx.options.logging {
+        println!("[lightning] {} {} {}", at.0, at.1, at.2);
+    }
+}
+
+/// How far under the cell it struck a bolt looks for something that will
+/// hold a flame. A crown is four or five blocks deep; the trunk is under
+/// it. See `strike`.
+const CROWN_DEPTH: i32 = 5;
 
 /// The air at a cell of water, in degrees: what stands in for how cold the
 /// water is when fishing asks (`fishing::cold_factor`). The climate's number,

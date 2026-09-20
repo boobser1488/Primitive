@@ -208,6 +208,18 @@ pub struct Soundscape {
     rain_shelter: Shelter,
     wind_left: f32,
     thunder_left: f32,
+    /// Bolts that have flashed and not yet been heard: where each one
+    /// fell, and how long the noise still has to travel
+    /// (`lightning::thunder_delay`).
+    ///
+    /// **The crack is the distance**, and it is the only part of the
+    /// mechanic a player can measure. The flash is instant and the sound
+    /// is three seconds to the kilometre, so counting between the two is
+    /// how far off the storm is -- a fact nobody has to be told and
+    /// everybody already knows. A bolt played the moment the message
+    /// landed would throw that away and, worse, would make every strike
+    /// sound as though it were overhead.
+    cracks: Vec<(glam::DVec3, f32)>,
     /// Seconds until the next frog in the chorus calls.
     frog_left: f32,
     /// What every animal near the player is saying -- see [`Voices`].
@@ -308,6 +320,7 @@ impl Soundscape {
             rain_shelter: Shelter::Open,
             wind_left: 0.0,
             thunder_left: 0.0,
+            cracks: Vec::new(),
             frog_left: 0.0,
             voices: Voices::new(),
             brush: Brush::new(),
@@ -596,6 +609,35 @@ impl Soundscape {
                 audio.play_flat(kind, gain * 0.35, self.jitter(0.1));
             }
         }
+
+        // ---- the crack of a bolt that has already flashed ----
+        //
+        // **Above the dry-sky return**, and that is not tidiness: a
+        // bolt at the tail of a squall flashes while it is still
+        // raining and is heard three seconds later, which may be after
+        // the sky has cleared -- and an operator's `/lightning` happens
+        // under whatever sky there is. A crack that was dropped because
+        // the weather had moved on would be a flash with no thunder,
+        // which is the one thing a player would report as broken.
+        let ear = frame.camera.eye();
+        let jitter = self.jitter(0.05);
+        self.cracks.retain_mut(|(at, left)| {
+            *left -= frame.dt;
+            if *left > 0.0 {
+                return true;
+            }
+            let distance = (*at - ear).length() as f32;
+            // Where it fell, not flat: a bolt is the one weather sound
+            // that comes from somewhere, and a player who turns towards
+            // it is turning towards the fire it started.
+            audio.play_at(
+                Sfx::Thunder,
+                *at,
+                primitive_shared::lightning::thunder_gain(distance),
+                jitter,
+            );
+            false
+        });
 
         if !frame.weather.is_wet() {
             self.rain_left = 0.0;
@@ -1105,6 +1147,23 @@ impl Soundscape {
         } else {
             false
         }
+    }
+
+    /// **A bolt of lightning came down there.** The flash is the sky's
+    /// (`engine::sky::Sky::strike`); what is queued here is the noise,
+    /// to be played when it arrives -- see `cracks`.
+    ///
+    /// The delay is worked out from where the player is *now* rather
+    /// than where they will be when it lands, which is wrong by the
+    /// width of a few paces and right by the whole of what matters: a
+    /// player running from a storm is not outrunning its sound.
+    pub fn lightning(&mut self, at: glam::DVec3, ear: glam::DVec3) {
+        let distance = (at - ear).length() as f32;
+        if distance > primitive_shared::lightning::HEARD_WITHIN {
+            return;
+        }
+        self.cracks
+            .push((at, primitive_shared::lightning::thunder_delay(distance)));
     }
 
     /// A swing that landed on something alive.

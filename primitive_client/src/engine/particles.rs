@@ -183,6 +183,15 @@ pub enum Look {
     /// streak moving one way, which is the thing a player has to see before
     /// they decide not to swim there.
     Foam,
+    /// **What a storm brings to hot dry country**: grit, blown nearly
+    /// sideways (`weather::Precipitation::Dust`).
+    ///
+    /// The flake again, under the sand's own colour -- the same trade
+    /// blood, smoke and foam make, and the atlas has not got cheaper. A
+    /// pale brown blob with a soft edge, many of them, moving across
+    /// rather than down, is a dust storm; nothing about it wants a
+    /// picture of its own.
+    Dust,
 }
 
 impl Look {
@@ -193,7 +202,7 @@ impl Look {
             // The flake is a round blob with a soft edge, which is what
             // a drop of anything wants and what the rain's picture --
             // a straight streak seven texels tall -- is not.
-            Look::Snow | Look::Blood | Look::Smoke | Look::Stain | Look::Cloud | Look::Foam => {
+            Look::Snow | Look::Blood | Look::Smoke | Look::Stain | Look::Cloud | Look::Foam | Look::Dust => {
                 layers.extra(EXTRA_SNOW)
             }
             // **A spark is a dot of light, not a flame in miniature.** It
@@ -238,7 +247,7 @@ impl Look {
     fn light(self) -> Option<u32> {
         match self {
             Look::Ember => Some(pack_light(15, 15, 3, 0)),
-            Look::Rain | Look::Snow | Look::Splash => Some(pack_light(15, 0, 3, 0)),
+            Look::Rain | Look::Snow | Look::Splash | Look::Dust => Some(pack_light(15, 0, 3, 0)),
             _ => None,
         }
     }
@@ -316,6 +325,10 @@ impl Look {
             Look::Ember => [1.0, 0.55 + 0.45 * fade, 0.25 * fade, fade],
             // Water takes a little of the sky rather than being grey.
             Look::Rain | Look::Splash => [0.72, 0.82, 1.0, 0.55 + 0.45 * fade],
+            // Sand, and never solid: a grain you can see through is what
+            // makes a thousand of them read as a haze blowing past
+            // rather than as brown confetti.
+            Look::Dust => [0.78, 0.68, 0.48, DUST_ALPHA * fade.min(1.0)],
             _ => [1.0, 1.0, 1.0, fade.min(1.0)],
         }
     }
@@ -598,15 +611,24 @@ impl Particles {
     /// at a rate, fall on their own, and die where they land, so a roof
     /// keeps them off, wind blows them sideways, and what is under a
     /// tree is dry.
+    /// What is falling, drawn.
+    ///
+    /// **Three of them now, and which one is the column's own business**
+    /// (`weather::Precipitation`): the same storm is rain over the
+    /// valley, snow over the peak and a wall of grit over the sand
+    /// fifteen hundred blocks south, and a player who walks from one to
+    /// the other watches it change. It used to be a `bool` for snow,
+    /// which was two of the three.
     pub fn weather(
         &mut self,
         intensity: f32,
-        snowing: bool,
+        falling: primitive_shared::weather::Precipitation,
         at: Vec3,
         wind: Vec3,
         dt: f32,
     ) {
-        if intensity <= 0.0 {
+        use primitive_shared::weather::Precipitation;
+        if intensity <= 0.0 || falling == Precipitation::None {
             return;
         }
         let wanted = (RAIN_PER_SECOND * intensity * dt) as usize + 1;
@@ -615,21 +637,28 @@ impl Particles {
                 return;
             }
             let (rx, rz) = (self.between(-1.0, 1.0), self.between(-1.0, 1.0));
-            let (look, velocity, size, life) = if snowing {
-                (
+            let (look, velocity, size, life) = match falling {
+                Precipitation::Snow => (
                     Look::Snow,
                     Vec3::new(wind.x * 0.6, -SNOW_SPEED, wind.z * 0.6),
                     0.055,
                     CEILING / SNOW_SPEED,
-                )
-            } else {
-                (
+                ),
+                // Driven across rather than falling down: see `DUST_SPEED`.
+                Precipitation::Dust => (
+                    Look::Dust,
+                    Vec3::new(wind.x * DUST_DRIVE, -DUST_SPEED, wind.z * DUST_DRIVE),
+                    0.07,
+                    CEILING / DUST_SPEED * 0.5,
+                ),
+                Precipitation::Rain | Precipitation::None => (
                     Look::Rain,
                     Vec3::new(wind.x, -RAIN_SPEED, wind.z),
                     0.035,
                     CEILING / RAIN_SPEED * 1.4,
-                )
+                ),
             };
+            let snowing = falling == Precipitation::Snow;
             // Spawned in a ring above the player, high enough to be seen
             // falling and low enough that most of them land in sight -- and
             // **the ring is put upwind by half of what the wind will carry
@@ -1671,6 +1700,20 @@ const CEILING: f32 = 11.0;
 const RAIN_SPEED: f32 = 22.0;
 const SNOW_SPEED: f32 = 1.8;
 
+/// How fast grit falls, and how hard the wind drives it.
+///
+/// **Slower down than snow and far faster across**: what makes a dust
+/// storm read as one is that it goes past a player rather than down onto
+/// them, and the wind it goes past in is the world's own
+/// (`raft::wind`) -- the same wind that leans the smoke and fills the
+/// sail, multiplied, because sand is carried and rain merely leans.
+const DUST_SPEED: f32 = 1.2;
+/// See `DUST_SPEED`.
+const DUST_DRIVE: f32 = 3.5;
+/// The most opaque a grain is. Thin: a haze is a thousand grains you can
+/// see through, and one you cannot is brown confetti.
+const DUST_ALPHA: f32 = 0.5;
+
 /// How many chips a broken block throws.
 const CHIPS: usize = 12;
 
@@ -1915,6 +1958,7 @@ const SMOKE_GROWTH: f32 = 2.2;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use primitive_shared::weather::Precipitation;
     use primitive_shared::lighting::LightMap;
     use primitive_shared::types::{BLOCK_AIR, BLOCK_STONE};
 
@@ -2437,9 +2481,9 @@ mod tests {
     #[test]
     fn weather_stops_when_the_sky_clears() {
         let mut particles = Particles::new();
-        particles.weather(0.0, false, Vec3::ZERO, Vec3::ZERO, 0.1);
+        particles.weather(0.0, Precipitation::Rain, Vec3::ZERO, Vec3::ZERO, 0.1);
         assert!(particles.is_empty(), "it rained in clear weather");
-        particles.weather(1.0, false, Vec3::ZERO, Vec3::ZERO, 0.1);
+        particles.weather(1.0, Precipitation::Rain, Vec3::ZERO, Vec3::ZERO, 0.1);
         assert!(!particles.is_empty(), "a storm produced nothing");
     }
 
@@ -2845,7 +2889,9 @@ mod tests {
             Look::Chip(_) => 12.0 + 1.5,
             Look::Ember => 10.45 + 1.8 * 1.4 + 0.6 * 1.4 * 1.4 + 1.0,
             Look::Smoke => 11.06 + 0.16 + 1.2 * 3.6 + 0.225 * 3.6 * 3.6 + 1.0,
-            Look::Rain | Look::Snow | Look::Splash => at.y + CEILING + 1.0,
+            // Grit starts where the rain does and is blown sideways
+            // rather than upward, so it shares the ceiling.
+            Look::Rain | Look::Snow | Look::Splash | Look::Dust => at.y + CEILING + 1.0,
             // There is no water in this world; a cloud would be where a drop
             // went in, which is no higher than the drop.
             Look::Cloud => 11.3 + 1.0,
@@ -2858,7 +2904,13 @@ mod tests {
                 particles.blood(Vec3::new(4.5, 11.3, 6.5));
                 particles.block_broken((6, 10, 6), BLOCK_STONE);
             }
-            particles.weather(0.3, frame % 400 > 200, at, Vec3::new(2.5, 0.0, 0.0), dt);
+            particles.weather(
+                0.3,
+                if frame % 400 > 200 { Precipitation::Snow } else { Precipitation::Rain },
+                at,
+                Vec3::new(2.5, 0.0, 0.0),
+                dt,
+            );
             particles.fires(&chunks, at, dt);
             particles.update(&chunks, dt);
             for particle in &particles.live {
@@ -2950,8 +3002,8 @@ mod tests {
                 );
                 particles.ember(ahead);
                 particles.smoke_under(ahead - Vec3::Y * SMOKE_BIRTH_HEIGHT, f32::INFINITY);
-                particles.weather(1.0, false, ahead - Vec3::Y * CEILING, Vec3::ZERO, 0.1);
-                particles.weather(1.0, true, ahead - Vec3::Y * CEILING, Vec3::ZERO, 0.1);
+                particles.weather(1.0, Precipitation::Rain, ahead - Vec3::Y * CEILING, Vec3::ZERO, 0.1);
+                particles.weather(1.0, Precipitation::Snow, ahead - Vec3::Y * CEILING, Vec3::ZERO, 0.1);
                 for look in [Look::Splash, Look::Stain, Look::Cloud] {
                     particles.emit(Particle {
                         position: ahead.as_dvec3(),

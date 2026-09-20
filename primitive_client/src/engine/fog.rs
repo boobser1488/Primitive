@@ -164,6 +164,20 @@ const SMOKE: Vec3 = Vec3::new(0.30, 0.28, 0.26);
 /// patch -- which is the thing to find.
 const SMOKE_END: f32 = 4.0;
 
+/// The colour of a mist over sodden ground at first light: nearly white
+/// and a shade cold, because it is lit by a sun that is not up yet.
+const MIST: Vec3 = Vec3::new(0.80, 0.83, 0.86);
+
+/// How far a player can see through the thickest of it, in blocks.
+///
+/// **Thirty-two, which is a couple of chunks**: far enough to keep
+/// walking and near enough that the wood on the other side of a bog is
+/// gone. A mist that closed to the smoke's four blocks would be a room
+/// out of doors, and a player would stop rather than go on -- and a
+/// weather that makes the answer "wait an hour" is a chore rather than a
+/// decision.
+const MIST_END: f32 = 32.0;
+
 /// How far from the eye the ring of columns is asked about the sky, in
 /// blocks.
 ///
@@ -470,6 +484,34 @@ impl Fog {
         self.start = (self.start * (1.0 - thickness)).min(end - 1.0).max(0.0);
         // Off, the shader would not fade at all: smoke turns it on.
         self.enabled = true;
+    }
+
+    /// Lays the dawn mist of a bog over the view, 0..1
+    /// (`weather::dawn_mist`).
+    ///
+    /// **Smoke's machinery, at a tenth of its strength and in another
+    /// colour.** A room full of smoke takes the view to four blocks and
+    /// is a warning; a mist takes it to [`MIST_END`], which is far
+    /// enough to walk in and near enough that a bog at first light is a
+    /// place you can get lost in. Pale and slightly cold rather than
+    /// sooty, because what a mist is made of is the air itself.
+    ///
+    /// Like the smoke it only ever pulls the fade in, and it leaves the
+    /// water alone: a head under water is not in the mist either. Unlike
+    /// the smoke it does **not** force the fade on for a player who
+    /// turned distance haze off -- nothing hangs on a mist (see
+    /// `weather::dawn_mist` on why it draws and does not decide), so a
+    /// setting somebody chose is left alone.
+    pub fn lie_as_mist(&mut self, thickness: f32) {
+        if self.underwater || !self.enabled || !thickness.is_finite() || thickness <= 0.0 {
+            return;
+        }
+        let thickness = thickness.clamp(0.0, 1.0);
+        self.color = self.color.lerp(MIST, thickness);
+        self.glow.w *= 1.0 - 0.5 * thickness;
+        let end = self.end + (self.end.min(MIST_END) - self.end) * thickness;
+        self.end = end;
+        self.start = (self.start * (1.0 - thickness)).min(end - 1.0).max(0.0);
     }
 
     /// What distance is the colour of.
@@ -1051,5 +1093,35 @@ mod tests {
         let water = under;
         under.fill_with_smoke(1.0);
         assert_eq!(under, water, "smoke got under the water");
+    }
+
+    #[test]
+    fn the_dawn_mist_closes_the_view_without_closing_it_to_a_room() {
+        let settings = ClientSettings::default();
+        let sky = sky_at(12.0);
+        let clear = Fog::for_frame(&settings, &sky, 12, true, false);
+        let mut misty = clear;
+        misty.lie_as_mist(1.0);
+        assert!(misty.end < clear.end, "the mist did not close the view at all");
+        assert!(
+            misty.end > SMOKE_END * 4.0,
+            "the mist closed in like a smoky hut: {} blocks",
+            misty.end
+        );
+        // Half as thick is nearer than nothing and further than all of
+        // it: a mist that stepped on would be a wall between two frames.
+        let mut half = clear;
+        half.lie_as_mist(0.5);
+        assert!(half.end > misty.end && half.end < clear.end);
+        // Nothing hangs on a mist, so a player who turned the haze off
+        // keeps it off -- unlike the smoke, which is a warning.
+        let mut off = Fog::for_frame(&settings, &sky, 12, false, false);
+        let was = off;
+        off.lie_as_mist(1.0);
+        assert_eq!(off, was, "the mist turned the distance haze back on");
+        let mut under = Fog::for_frame(&settings, &sky, 12, true, true);
+        let water = under;
+        under.lie_as_mist(1.0);
+        assert_eq!(under, water, "the mist got under the water");
     }
 }
