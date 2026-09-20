@@ -18823,11 +18823,17 @@ mod butchering_tests {
     }
 
     #[test]
-    fn an_animal_that_dies_over_water_still_leaves_its_meat() {
+    fn an_animal_that_dies_in_a_pool_lies_on_its_bed_and_one_with_no_bed_leaves_its_meat() {
+        // **The rule this test held has moved, on purpose.** It used to say
+        // that water gives the heap, because a cell of water was not a cell
+        // a carcass could lie in -- and a deer shot while wading turned into
+        // meat and guts the moment it fell, hide and sinew and bone lost with
+        // it. Water is a place to lie now (`carcass_cell`), so a pool with a
+        // bed holds the body; the heap is what is left when there is no bed
+        // within the search, which is the open sea and a column nobody has
+        // loaded.
         let (ctx, handle, _rx) = a_hunter();
         hold(&handle, Some(Stack::new(BLOCK_FLINT_KNIFE, 1)));
-        // A pool four deep where the floor was, so there is no ground
-        // within three cells of the hare's feet.
         for y in (FLOOR - 3)..=(FLOOR + 1) {
             assert!(ctx.world.set_block(0, y, 0, BLOCK_WATER));
         }
@@ -18840,18 +18846,15 @@ mod butchering_tests {
 
         kill(&ctx, &handle, id);
 
-        for y in (FLOOR - 4)..=(FLOOR + 2) {
-            let block = ctx.world.cached_block(0, y, 0).expect("loaded");
-            assert!(
-                Species::of_carcass(block).is_none(),
-                "a carcass was laid in water at y={y}"
-            );
-        }
-        assert_eq!(
-            on_the_ground(&ctx),
-            Species::Hare.drops().to_vec(),
-            "the fallback heap is the old drop list"
+        let bed = (FLOOR - 8..=FLOOR + 2)
+            .filter_map(|y| ctx.world.cached_block(0, y, 0).map(|block| (y, block)))
+            .find(|(_, block)| Species::of_carcass(*block).is_some());
+        let (y, _) = bed.expect("the body sank and lay on nothing");
+        assert!(
+            ctx.world.cached_block(0, y - 1, 0).is_some_and(primitive_shared::types::has_full_top),
+            "the carcass at y={y} is lying on water rather than on the bed"
         );
+        assert!(on_the_ground(&ctx).is_empty(), "the body was laid *and* spilled as a heap");
     }
 
     #[test]

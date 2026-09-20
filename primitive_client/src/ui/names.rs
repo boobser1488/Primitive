@@ -964,7 +964,6 @@ pub const RECIPES: &[Name] = &[
     Name { id: "cook wolf", en: "Cooked wolf", simple: "Cooked wolf meat", ru: "Жареная волчатина", pl: "Pieczona wilczyna" },
     Name { id: "roast flesh", en: "Roast flesh", simple: "Cooked human meat", ru: "Жареная человечина", pl: "Pieczone ludzkie mięso" },
     Name { id: "cook fish", en: "Cooked fish", simple: "Cooked fish", ru: "Жареная рыба", pl: "Pieczona ryba" },
-    Name { id: "roast grubs", en: "Roast grubs", simple: "Cook bugs", ru: "Пожарить личинок", pl: "Upiec larwy" },
     Name { id: "cook mussels", en: "Cooked mussels", simple: "Cooked mussels", ru: "Печёные мидии", pl: "Pieczone omułki" },
     Name { id: "cook crab", en: "Cooked crab", simple: "Cooked crab", ru: "Печёный краб", pl: "Pieczony krab" },
     Name { id: "roast grubs", en: "Roast grubs", simple: "Cook the bugs", ru: "Пожарить личинок", pl: "Upiec larwy" },
