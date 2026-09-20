@@ -4,9 +4,12 @@
 //! ## What they are for
 //!
 //! A cave was rock, air, and what lies on the floor. Dripstone is the
-//! first thing in one that says *which* cave this is: they grow thick where
-//! the rock is limestone and water comes down through it, so a roof hung
-//! with them is a limestone country under a wet sky, and a bare one is not.
+//! first thing in one that says *which* cave this is: it grows only out of
+//! the rock water dissolves ([`forms_in`]) and only where the water comes
+//! down through it, so a roof hung with columns is limestone country under
+//! a wet sky -- and now that the deep rock is laid in beds
+//! (`worldgen::bedded_rock`), it is also a depth. A granite chamber is
+//! bare, and that is information a player can walk back to.
 //!
 //! **What they do is cut a falling body.** A drop onto the point of a
 //! stalagmite is a cut in the leg (`SPIKE_FROM_BLOCKS`, and the survival
@@ -41,15 +44,38 @@
 //! Which way it grows decides the support (`types::support_at`), the model's
 //! orientation and whether it cuts: rules that read the row. How big it is
 //! decides only the drawing and the box -- so the size is in the variant,
-//! three steps, and a stalagmite of every size is one row in every table.
+//! four steps, and a stalagmite of every size is one row in every table.
+//!
+//! ## A column is a stack of cells
+//!
+//! A spike is two to four cells now ([`column`]), rising from the floor
+//! under a dripping roof and hanging over it, and now and then the two meet
+//! into a pillar. Nothing in the drawing, the collider or the aim knows
+//! that: each cell is a piece of dripstone of its own size, and a column is
+//! the *arrangement* the generator lays them in and the support rule
+//! ([`stands_on`]) lets stand. That is what kept a four-cell spike from
+//! being a second block with a height in it -- a height would have had to be
+//! in the id, in the mesher, in the collider and in `spike_under`, and every
+//! one of them already works a cell at a time.
 
 use crate::types::{
-    block_kind, BlockId, BLOCK_BASALT, BLOCK_GRANITE, BLOCK_LIMESTONE, BLOCK_SANDSTONE, BLOCK_STALACTITE,
-    BLOCK_STALAGMITE, BLOCK_STONE, VARIANT_MASK, VARIANT_SHIFT,
+    block_kind, BlockId, BLOCK_BASALT, BLOCK_CHALK, BLOCK_DOLOMITE, BLOCK_GRANITE, BLOCK_LIMESTONE, BLOCK_MARBLE,
+    BLOCK_SANDSTONE, BLOCK_STALACTITE, BLOCK_STALAGMITE, BLOCK_STONE, VARIANT_MASK, VARIANT_SHIFT,
 };
 
-/// How many sizes a piece of dripstone comes in.
-pub const SIZES: u8 = 3;
+/// How many sizes a piece of dripstone comes in, the shaft included.
+///
+/// **Three tips and a shaft.** A spike taller than its cell is a stack of
+/// cells, and every cell of it below the last has to be the *same* post or
+/// the column reads as a row of little cones balanced on each other's
+/// points. So the fourth size is not bigger than the third: it is the
+/// straight length in the middle of a column, and [`SHAFT`] is what the
+/// generator stacks under a tip.
+pub const SIZES: u8 = 4;
+
+/// The size that is a straight post filling its cell -- the length of a
+/// column below its tip. See [`SIZES`] and [`column`].
+pub const SHAFT: u8 = 3;
 
 /// A stalagmite's tiers, by size, as (width, bottom, top) in sixteenths of
 /// a cell, standing on the floor. A stalactite is the same numbers hung
@@ -67,6 +93,12 @@ const TIERS: [&[(u8, u8, u8)]; SIZES as usize] = [
     &[(4, 0, 3), (2, 3, 6)],
     &[(6, 0, 4), (4, 4, 8), (2, 8, 11)],
     &[(8, 0, 5), (6, 5, 10), (4, 10, 14), (2, 14, 16)],
+    // The shaft: one box, as wide as the largest tip's foot and as tall as
+    // its cell, so a tip of that size set on top of it continues the same
+    // stone without a step. It is not a spike and is never laid on its own
+    // (`column`); the tests that say a piece of dripstone narrows toward
+    // its point ask it of the tips.
+    &[(8, 0, 16)],
 ];
 
 /// How wide the box a body meets is, by size, in sixteenths.
@@ -78,7 +110,7 @@ const TIERS: [&[(u8, u8, u8)]; SIZES as usize] = [
 /// width was the other choice, and it put a solid ledge in the air beside
 /// the tip that a player could stand on without touching anything drawn.
 /// The middle is what an eye takes a spike's thickness to be.
-const BODY_WIDTH: [u8; SIZES as usize] = [4, 4, 6];
+const BODY_WIDTH: [u8; SIZES as usize] = [4, 4, 6, 6];
 
 /// The shortest fall onto a point that cuts.
 ///
@@ -114,7 +146,8 @@ pub fn hangs(id: BlockId) -> bool {
     block_kind(id) == BLOCK_STALACTITE
 }
 
-/// Which of the [`SIZES`], 0 the smallest.
+/// Which of the [`SIZES`], 0 the smallest tip and [`SHAFT`] the straight
+/// post -- which is not a fourth tip and is not bigger than the third.
 #[inline]
 pub fn size(id: BlockId) -> u8 {
     (((id & VARIANT_MASK) >> VARIANT_SHIFT) as u8).min(SIZES - 1)
@@ -124,6 +157,79 @@ pub fn size(id: BlockId) -> u8 {
 #[inline]
 pub fn sized(kind: BlockId, size: u8) -> BlockId {
     block_kind(kind) | (BlockId::from(size.min(SIZES - 1)) << VARIANT_SHIFT)
+}
+
+/// The tallest and shortest column the water builds, in cells. See
+/// [`column`].
+///
+/// **Four, because that is as far as one reads as one spike.** A column of
+/// five is a pillar, and a pillar of dripstone in a chamber four high is a
+/// wall a player cannot see past; two is the shortest thing that is a
+/// column rather than a cone. Between them the height is the only thing a
+/// player reads off a chamber -- taller where the water came faster -- so
+/// the roll spends itself on height and not on a size a body away is not
+/// distinguishable.
+pub const TALLEST: u8 = 4;
+/// ...and the shortest. See [`TALLEST`].
+pub const SHORTEST: u8 = 2;
+const _: () = assert!(SHORTEST >= 2 && TALLEST > SHORTEST);
+
+/// The sizes of a column `height` cells long, **root first**: the shaft
+/// repeated, and `tip` at the far end.
+///
+/// A column is one spike, so only its last cell narrows. The alternative --
+/// stepping the size down cell by cell, 2, 1, 0 -- was drawn and thrown
+/// away: each size's *foot* is wider than the tip of the size below it
+/// (`TIERS`), so the steps read as a stack of mushrooms rather than as a
+/// spike, and the wider the column the worse it looked.
+pub fn column(height: u8, tip: u8) -> impl Iterator<Item = u8> {
+    let height = height.max(1);
+    // **A column's tip is the largest of the three whatever was asked
+    // for.** The shaft is one width, and the foot of a smaller tip is
+    // narrower than it (`TIERS`), so a thin cone on a thick post reads as a
+    // step in rather than as a taper -- the same fault the rejected
+    // size-by-size stepping had, one cell further up. What the caller asks
+    // for is what a *lone* cell gets, which is where a rolled size still
+    // says something.
+    let tip = if height > 1 { SIZES - 2 } else { tip.min(SIZES - 2) };
+    (0..height).map(move |i| if i + 1 == height { tip } else { SHAFT })
+}
+
+/// Which rock the water actually builds dripstone out of.
+///
+/// **The carbonates and nothing else.** Dripstone is the rock dissolved
+/// upstream and laid down again, and only a rock that dissolves in rainwater
+/// does that: limestone, the chalk and dolomite that are its kin, and the
+/// marble that is limestone cooked (`ground`'s pairings say the same). A
+/// spike of stone hanging out of a granite roof was the thing that said this
+/// cave was nowhere in particular.
+///
+/// **Not the same question as [`grows_from`]**, and they are deliberately
+/// two. This one is where a spike *forms*; that one is what will *hold* one
+/// that is already there, and it stayed as wide as it was because narrowing
+/// it would have taken down every stalactite in every world generated before
+/// this -- the support pass asks it of the rock over a spike the moment the
+/// chunk loads, and a granite roof would have rained its spikes onto the
+/// floor of a cave the player had walked through yesterday.
+#[inline]
+pub fn forms_in(ground: BlockId) -> bool {
+    matches!(block_kind(ground), BLOCK_LIMESTONE | BLOCK_CHALK | BLOCK_DOLOMITE | BLOCK_MARBLE)
+}
+
+/// Will `ground` hold `piece` -- the cell its root sits against?
+///
+/// The rock of [`grows_from`], **or more of the same spike**: a column is
+/// several cells and every cell above the first stands on the one below it.
+/// One direction only, because a stalagmite hanging from a stalactite is two
+/// spikes that happen to touch and not a cell held by the one over it.
+#[inline]
+pub fn stands_on(piece: BlockId, ground: BlockId) -> bool {
+    // The carbonates are here and not in [`grows_from`] on purpose:
+    // `grows_from` is the list the older generators *grew* by, and a rock
+    // added to it is a rock those worlds start hanging spikes off in every
+    // chunk nobody has walked into yet (`Scale`). What will *hold* one is a
+    // wider question and safe to widen.
+    grows_from(ground) || forms_in(ground) || block_kind(ground) == block_kind(piece)
 }
 
 /// Can a piece of dripstone grow from this?
@@ -256,11 +362,56 @@ mod tests {
                     assert!(from[axis] >= 0.0 && to[axis] <= 16.0 && from[axis] < to[axis], "{piece:#x} leaves its cell");
                 }
             }
-            // Thinner towards the tip, every step of the way.
+            // Thinner towards the tip, every step of the way. The shaft is
+            // one box and has no steps: it is the straight part of a column
+            // and not a spike (`SHAFT`).
             for pair in boxes.windows(2) {
                 assert!(pair[1].1[0] - pair[1].0[0] < pair[0].1[0] - pair[0].0[0], "{piece:#x} is not a spike");
             }
         }
+    }
+
+    #[test]
+    fn a_column_is_shaft_under_shaft_under_one_tip_and_the_tip_carries_on_the_shafts_own_stone() {
+        for height in SHORTEST..=TALLEST {
+            // Asked for the smallest tip there is: a column takes the
+            // largest anyway, or it has a step where the tip meets the
+            // shaft.
+            let sizes: Vec<u8> = column(height, 0).collect();
+            assert_eq!(sizes.len(), usize::from(height));
+            assert!(sizes[..sizes.len() - 1].iter().all(|&s| s == SHAFT), "a column of {height} is not one spike: {sizes:?}");
+            assert_eq!(*sizes.last().expect("a tip"), SIZES - 2, "the tip of a column of {height} does not carry on its shaft");
+            assert_eq!(column(1, 0).next(), Some(0), "a lone cell lost the size it was rolled");
+        }
+        // The shaft's width and the widest tip's foot are one number, or a
+        // column has a step in it where the two meet.
+        let shaft = tiers(sized(BLOCK_STALAGMITE, SHAFT)).next().expect("the shaft");
+        let foot = tiers(sized(BLOCK_STALAGMITE, SIZES - 2)).next().expect("the foot");
+        assert_eq!((shaft.0[0], shaft.1[0]), (foot.0[0], foot.1[0]));
+        // ...and the shaft fills its cell top to bottom, or a column has a
+        // gap of air in the middle of it.
+        assert_eq!((shaft.0[1], shaft.1[1]), (0.0, 16.0));
+    }
+
+    #[test]
+    fn a_spike_forms_in_the_rocks_that_dissolve_and_stands_on_more_of_itself() {
+        use crate::types::{BLOCK_CHALK, BLOCK_DOLOMITE, BLOCK_GRANITE, BLOCK_LIMESTONE, BLOCK_MARBLE, BLOCK_STONE};
+        let piece = sized(BLOCK_STALACTITE, 0);
+        for rock in [BLOCK_LIMESTONE, BLOCK_CHALK, BLOCK_DOLOMITE, BLOCK_MARBLE] {
+            assert!(forms_in(rock), "{} makes no dripstone", crate::types::block_name(rock));
+            assert!(stands_on(piece, rock), "{} will not hold one", crate::types::block_name(rock));
+        }
+        for rock in [BLOCK_STONE, BLOCK_GRANITE, BLOCK_SANDSTONE, BLOCK_BASALT] {
+            assert!(!forms_in(rock), "{} makes dripstone", crate::types::block_name(rock));
+            // ...and still holds what an older world grew on it.
+            assert!(stands_on(piece, rock), "{} drops the spikes already on it", crate::types::block_name(rock));
+        }
+        let standing = sized(BLOCK_STALAGMITE, SHAFT);
+        let hanging = sized(BLOCK_STALACTITE, SHAFT);
+        assert!(stands_on(standing, sized(BLOCK_STALAGMITE, 0)), "a column of two cannot stand");
+        assert!(stands_on(hanging, sized(BLOCK_STALACTITE, 2)), "a hanging column of two cannot hang");
+        assert!(!stands_on(standing, hanging), "a stalagmite is held up by a stalactite");
+        assert!(!stands_on(standing, BLOCK_AIR));
     }
 
     #[test]
@@ -280,11 +431,12 @@ mod tests {
     }
 
     #[test]
-    fn bigger_dripstone_is_longer() {
+    fn a_bigger_tip_is_longer_and_the_shaft_is_a_whole_cell() {
         for kind in [BLOCK_STALAGMITE, BLOCK_STALACTITE] {
-            for s in 1..SIZES {
+            for s in 1..SIZES - 1 {
                 assert!(length(sized(kind, s)) > length(sized(kind, s - 1)));
             }
+            assert_eq!(length(sized(kind, SHAFT)), 1.0);
         }
     }
 

@@ -754,6 +754,167 @@ fn a_prop_goes_against_a_wall_and_a_second_one_goes_beside_it() {
     no_corrections(&s);
 }
 
+/// **A gallery driven under sand needs a post in it**, which is the whole
+/// of what a pit prop is for (`types::BLOCK_PROP`, `falling::PROP_REACH`).
+/// A post set on the floor of a working holds the sand three cells over a
+/// player's head -- the height of a gallery you walk down -- and the cell
+/// beside it with no post under it comes down at once. Take the post away
+/// and what it was holding follows it.
+#[test]
+fn a_post_on_the_floor_of_a_gallery_holds_the_sand_over_it_and_the_cell_beside_it_caves_in() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let g = GROUND;
+    s.stand_at(feet_on(x0, z));
+
+    // The post, set the way a miner sets one: a click on the floor of the
+    // working, which stands it in the middle of its cell.
+    s.give(t::BLOCK_PROP, 4);
+    s.select(t::BLOCK_PROP);
+    let post = (x0 + 1, g + 1, z);
+    s.look_at_face((x0 + 1, g, z), (0, 1, 0));
+    s.use_aimed();
+    let stood = s.until(3.0, |s| s.block(post).is_some_and(t::is_prop));
+    assert!(stood, "the post never went up: {:?}", s.block(post).map(t::block_name));
+
+    // The roof of the working: sand three cells over the post, which is
+    // over a player's head and was exactly the case the prop used to fail.
+    let roof = (x0 + 1, g + 4, z);
+    let bare = (x0 + 3, g + 4, z);
+    s.server().place_block(roof.0, roof.1, roof.2, t::BLOCK_SAND);
+    s.server().place_block(bare.0, bare.1, bare.2, t::BLOCK_SAND);
+
+    // The cell with nothing under it caves in...
+    let fell = s.until(5.0, |s| s.block(bare) == Some(t::BLOCK_AIR));
+    assert!(fell, "sand hung in the air over an open gallery: {:?}", s.block(bare).map(t::block_name));
+    let landed = s.until(3.0, |s| (g..g + 4).any(|y| s.block((x0 + 3, y, z)).map(t::block_kind) == Some(t::BLOCK_SAND)));
+    assert!(landed, "the sand left the roof and never reached the floor");
+    // ...and the one over the post does not.
+    assert_eq!(s.block(roof).map(t::block_kind), Some(t::BLOCK_SAND), "the sand came down on the post as if it were not there");
+    // The picture: the post, the sand it is holding three cells over it,
+    // and the heap beside it where the same sand had nothing under it.
+    s.look_at(glam::DVec3::new(x0 as f64 + 3.0, g as f64 + 3.0, z as f64 + 0.5));
+    s.frames(4);
+    s.shot("caves/propped-gallery");
+
+    // Break the post out and the roof follows it in the same breath, rather
+    // than the next time somebody digs nearby.
+    // At the post itself and not at the face of its cell: a prop stands in
+    // the middle of its cell and a ray at the cell's face passes beside it.
+    s.look_at(glam::DVec3::new(post.0 as f64 + 0.5, post.1 as f64 + 0.5, post.2 as f64 + 0.5));
+    assert_eq!(s.aimed().map(|(c, _)| c), Some(post), "the crosshair is not on the post");
+    s.input.breaking = true;
+    let taken = s.until(20.0, |s| s.block(post) == Some(t::BLOCK_AIR));
+    s.input.breaking = false;
+    assert!(taken, "the post never came out: {:?}", s.block(post).map(t::block_name));
+    let buried = s.until(5.0, |s| s.block(roof) == Some(t::BLOCK_AIR));
+    assert!(buried, "the roof stayed up with nothing under it: {:?}", s.block(roof).map(t::block_name));
+    no_corrections(&s);
+}
+
+/// **A cave wall in bands, and a column of dripstone standing in it.** The
+/// beds are what `worldgen::bedded_rock` lays and the column what
+/// `dripstone::column` shapes; what this asks is that a player meets them
+/// as the shapes they are -- the column is walked into and aimed at over
+/// its whole height, and the tip of it is what the crosshair finds.
+#[test]
+fn a_cave_wall_reads_as_beds_of_rock_and_a_column_of_dripstone_stands_in_it() {
+    use primitive_shared::dripstone::{sized, SHAFT, SIZES};
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let g = GROUND;
+    // A chamber cut into a wall of rock, banded the way a shaft crosses
+    // the beds: granite at the foot, sandstone over it, limestone at the
+    // roof. Five cells high, so a column of four has room to stand.
+    let wall = x0 + 4;
+    s.stand_at(feet_on(x0, z));
+    // **What it was**, for the picture beside the one below: one grey rock
+    // from the roof to the floor of the world, and a spike of one cell
+    // hanging in it. See `worldgen::bedded_rock` and `dripstone::column`
+    // for what each of the two changes is.
+    s.fill((wall, g + 1, z - 3), (wall + 1, g + 6, z + 3), t::BLOCK_STONE);
+    s.fill((x0, g + 6, z - 3), (wall - 1, g + 6, z + 3), t::BLOCK_STONE);
+    s.build(&[
+        ((wall - 1, g + 5, z), sized(t::BLOCK_STALACTITE, SIZES - 2)),
+        ((wall - 1, g + 1, z), sized(t::BLOCK_STALAGMITE, 1)),
+    ]);
+    s.look_at(glam::DVec3::new(wall as f64 - 0.5, g as f64 + 3.5, z as f64 + 0.5));
+    s.frames(4);
+    s.shot("caves/wall-before");
+    // Left where they are rather than taken away: the column below covers
+    // both cells, and a cell of this roof emptied under it would be a hole
+    // with a shelf of stone over it, which is a collapse (`falling`) in the
+    // middle of a scenario about something else.
+
+    s.fill((wall, g + 1, z - 3), (wall + 1, g + 2, z + 3), t::BLOCK_GRANITE);
+    s.fill((wall, g + 3, z - 3), (wall + 1, g + 4, z + 3), t::BLOCK_SANDSTONE);
+    s.fill((wall, g + 5, z - 3), (wall + 1, g + 6, z + 3), t::BLOCK_LIMESTONE);
+    // ...and a roof of limestone over the floor the player stands on.
+    s.fill((x0, g + 6, z - 3), (wall - 1, g + 6, z + 3), t::BLOCK_LIMESTONE);
+
+    // A column of three rising from the floor and one hanging to meet it.
+    let column = (wall - 1, z);
+    s.build(&[
+        ((column.0, g + 1, column.1), sized(t::BLOCK_STALAGMITE, SHAFT)),
+        ((column.0, g + 2, column.1), sized(t::BLOCK_STALAGMITE, SHAFT)),
+        ((column.0, g + 3, column.1), sized(t::BLOCK_STALAGMITE, SIZES - 2)),
+        ((column.0, g + 5, column.1), sized(t::BLOCK_STALACTITE, SHAFT)),
+        ((column.0, g + 4, column.1), sized(t::BLOCK_STALACTITE, SIZES - 2)),
+    ]);
+    // The same wall from the same place, for the picture beside the one
+    // above: three beds and a column of three under one of two.
+    s.look_at(glam::DVec3::new(wall as f64 - 0.5, g as f64 + 3.5, z as f64 + 0.5));
+    s.frames(4);
+    s.shot("caves/wall-after");
+
+    // **Every cell of it is drawn where it stands**, foot to tip, and the
+    // whole column reads as one spike rather than as cones on cones: the
+    // shafts are all the same width and the tip is narrower.
+    let width = |y: i32| {
+        let cell = (column.0, y, column.1);
+        let (lo, hi) = s.drawn_bounds(cell, cell).unwrap_or_else(|| panic!("nothing drawn at {cell:?}"));
+        hi[0] - lo[0]
+    };
+    let (foot, middle, tip) = (width(g + 1), width(g + 2), width(g + 3));
+    assert!((foot - middle).abs() < 0.01, "the column steps between its shafts: {foot} then {middle}");
+    // The tip is as wide *at its foot* as the shaft under it -- that is
+    // what makes the column one spike -- so what says it comes to a point
+    // is that it is drawn in tiers where a shaft is one box.
+    assert!((tip - foot).abs() < 0.01, "the tip does not carry on the shaft's stone: {foot} then {tip}");
+    let boxes = |y: i32| triangles_in(&s, (column.0, y, column.1), (column.0, y, column.1)).len();
+    assert_eq!(boxes(g + 1), boxes(g + 2), "the two shafts of the column are not the same shape");
+    assert!(boxes(g + 3) > boxes(g + 2), "the tip is a box like the shaft: {} against {}", boxes(g + 3), boxes(g + 2));
+
+    // The crosshair finds the cell it is looking at, and not the rock
+    // behind it: a column a player cannot break is a column they cannot
+    // get past.
+    s.look_at_face((column.0, g + 2, column.1), (-1, 0, 0));
+    assert_eq!(s.aimed().map(|(c, _)| c), Some((column.0, g + 2, column.1)), "the shaft of the column is not aimed at");
+
+    // ...and walked into, which a spike drawn but not collided is not. A
+    // column is not a full cube to the rules that ask about cells (a
+    // stalactite's box is up in the air), so what says a body meets it is
+    // a body meeting it: the player walks at it and stops a hand's breadth
+    // into its cell, well short of the rock face two cells further on.
+    s.face(0.0);
+    s.hold(Action::Forward);
+    s.seconds(3.0);
+    s.release_all();
+    s.frames(4);
+    let stopped = s.player.position.x;
+    assert!(
+        stopped > column.0 as f64 - 0.5 && stopped < column.0 as f64 + 0.2,
+        "the player walked through the column and fetched up at {stopped}"
+    );
+
+    // The wall behind it is three rocks in bands, bottom to top.
+    let at = |y: i32| s.block((wall, y, z - 2)).map(t::block_kind);
+    assert_eq!(at(g + 1), Some(t::BLOCK_GRANITE));
+    assert_eq!(at(g + 3), Some(t::BLOCK_SANDSTONE));
+    assert_eq!(at(g + 5), Some(t::BLOCK_LIMESTONE));
+    no_corrections(&s);
+}
+
 #[test]
 fn peat_set_down_with_shift_lies_on_the_grass_and_dries_in_the_sun() {
     let mut s = Scenario::new();

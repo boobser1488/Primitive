@@ -1326,12 +1326,20 @@ fn mine(c: &mut Canvas, (x, z): (i32, i32)) {
     c.set(x + 2, MINE_FLOOR, z + 3, BLOCK_NATIVE_COPPER);
     c.set(x - 3, MINE_FLOOR, z + 4, BLOCK_MUSHROOM);
     c.set(x + 3, MINE_FLOOR, z + 4, BLOCK_MUSHROOM);
-    // ...and dripstone at the far end, every size standing and hanging, a
+    // ...and dripstone at the far end, every tip standing and hanging, a
     // spike under each drip the way the generator pairs them. The
     // stalactites hang in the top course, from the rock of the roof.
+    //
+    // The tips only: the fourth size is the *shaft* a column of two to
+    // four cells is made of (`dripstone::SHAFT`), which is never laid on
+    // its own and would read here as a post of stone rather than as a
+    // spike. A column of three stands beside them instead.
     for (i, dx) in [-2, 0, 2].into_iter().enumerate() {
         c.set(x + dx, MINE_FLOOR, z + 6, crate::dripstone::sized(crate::types::BLOCK_STALAGMITE, i as u8));
         c.set(x + dx, MINE_FLOOR + 2, z + 6, crate::dripstone::sized(crate::types::BLOCK_STALACTITE, i as u8));
+    }
+    for (step, piece) in crate::dripstone::column(3, crate::dripstone::SIZES - 2).enumerate() {
+        c.set(x + 4, MINE_FLOOR + step as i32, z + 6, crate::dripstone::sized(crate::types::BLOCK_STALAGMITE, piece));
     }
 }
 

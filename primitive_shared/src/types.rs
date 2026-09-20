@@ -803,9 +803,11 @@ pub const BLOCK_GRANITE: BlockId = 126;
 // and the three uses that were turned down.
 
 /// **A stalagmite: a spike of rock standing on a cave floor**, in three
-/// sizes (the variant, `dripstone::size`). Thick where the rock is
-/// limestone and water comes down through it (`worldgen`), and the thing a
-/// player drops onto at the cost of a cut (`dripstone::SPIKE_FROM_BLOCKS`).
+/// sizes and a shaft (the variant, `dripstone::size`) -- a column of two to
+/// four cells is shafts under one tip (`dripstone::column`). Grown where the
+/// rock is one the water dissolves and comes down through
+/// (`dripstone::forms_in`, `worldgen`), and the thing a player drops onto at
+/// the cost of a cut (`dripstone::SPIKE_FROM_BLOCKS`).
 pub const BLOCK_STALAGMITE: BlockId = 223;
 /// ...and a stalactite, the same spike hung from the roof over it. Held from
 /// above (`support_at`), so taking the rock it hangs from takes it down.
@@ -2496,10 +2498,24 @@ pub fn lattice_box(id: BlockId) -> ([f32; 3], [f32; 3]) {
 /// not, if a prop stands under it. A gallery driven under sand is a gallery
 /// that caves in, and a prop every few cells is what a miner does about it.
 ///
+/// **It holds the roof of the gallery it stands in, not the cell over it**
+/// (`falling::PROP_REACH`, three cells). A post set on the floor of a
+/// working two cells high used to hold nothing at all: the sand was over
+/// the player's head and the prop was under their feet, with a cell of air
+/// between, and the whole mechanic only ever worked in a crawl nobody can
+/// walk down. Underground that made props useless, which is what a player
+/// said about them.
+///
 /// Rejected: a prop that holds a whole span of roof, a few cells either
 /// side. It is the same rule with a search in it, and a player cannot see
-/// how far it reaches -- one cell, the one overhead, is a rule anybody can
-/// read off the wall of their own mine.
+/// how far it reaches -- one column, the one it stands in, is a rule
+/// anybody can read off the wall of their own mine.
+///
+/// **Props stack, and a stack is a pillar.** A chamber taller than the
+/// reach is held by setting one on another, and a prop on a prop is
+/// nothing special: it is a whole cube by its row, so it is a floor, a
+/// support and a stop to a span like any other. That is the decision a
+/// tall room asks for and the reason the reach is finite.
 pub const BLOCK_PROP: BlockId = 761;
 
 /// The bit that says a prop stands in the middle of its cell rather than
@@ -8304,7 +8320,11 @@ pub fn can_grow_on(plant: BlockId, ground: BlockId) -> bool {
         // under a stalagmite and the roof over a stalactite (`support_at`).
         // No `full_floor`: every rock is a whole cube, and the one question
         // worth asking is what it is made of -- see `dripstone::grows_from`.
-        BLOCK_STALAGMITE | BLOCK_STALACTITE => crate::dripstone::grows_from(ground),
+        // ...**or more of the same spike**, which is what makes a column of
+        // two to four cells stand up (`dripstone::stands_on`): without it
+        // the second cell of every column was a block held by nothing and
+        // the support pass took it off again the moment the chunk loaded.
+        BLOCK_STALAGMITE | BLOCK_STALACTITE => crate::dripstone::stands_on(plant, ground),
         // **Wild wheat wants the meadow, not the field.** Turf and bare
         // earth, like every other wild plant -- emphatically *not*
         // tilled earth, because a stand of wild cereal that could be
@@ -8789,8 +8809,9 @@ pub fn is_known_block(id: BlockId) -> bool {
                 _ => 4,
             };
     }
-    // ...and dripstone spends it on its size, three of them
-    // (`dripstone::SIZES`); the rest would read back as the largest.
+    // ...and dripstone spends it on its size, four of them -- three tips
+    // and the shaft a column is made of (`dripstone::SIZES`); the rest
+    // would read back as the largest.
     if crate::dripstone::is_dripstone(kind) {
         return (id & VARIANT_MASK) >> VARIANT_SHIFT < BlockId::from(crate::dripstone::SIZES);
     }

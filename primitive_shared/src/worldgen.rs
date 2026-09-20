@@ -397,6 +397,20 @@ const SCREE_DEPOSIT: f64 = -0.02;
 /// Solid rock nobody can fall through, and the floor caves may not reach.
 const BEDROCK_TOP: i32 = 2;
 
+/// The tops of the three beds under the grey stone, as heights above the
+/// bedrock. See `WorldGen::bedded_rock`.
+///
+/// **Fourteen layers apart**, and the spacing is the point: a bed thinner
+/// than a chamber is tall would be a stripe in one wall rather than a floor
+/// a player stands on, and one much thicker would put the whole of most
+/// caves in a single rock again. Fourteen is two or three chambers, so a
+/// gallery driven along one level stays in its rock and a shaft crosses them
+/// all.
+const BED_LIMESTONE: i32 = SEA_LEVEL - 14;
+const BED_SANDSTONE: i32 = SEA_LEVEL - 28;
+const BED_GRANITE: i32 = SEA_LEVEL - 42;
+const _: () = assert!(BED_GRANITE - 3 > BEDROCK_TOP);
+
 /// How many blocks make one degree of latitude: a block is a metre, and a
 /// degree along a meridian is a hundred and eleven kilometres.
 ///
@@ -4237,6 +4251,71 @@ impl WorldGen {
         }
     }
 
+    /// The deep rock at `y`, in a column whose granite line is
+    /// `granite_from`: which bed of the basement a cave wall cuts.
+    ///
+    /// ## Why the deep rock stopped being one grey block
+    ///
+    /// `stratum` lays a country's own rock in the dozen layers under the
+    /// soil and everything below that was `BLOCK_STONE` -- so a chamber
+    /// forty blocks down was the same wall whichever world, whichever
+    /// country and whichever depth it was in, and the rock the player had
+    /// learned to read on the surface said nothing at all about what was
+    /// under it. **Strata are horizontal and they are what a cave wall
+    /// shows**: limestone over sandstone over the granite basement, each
+    /// bed at its own depth, and a shaft driven straight down passes
+    /// through all of them in order.
+    ///
+    /// What it is *for*, beyond the picture: every bed is a rock with its
+    /// own hardness and its own tier (`ground`, `blocks`' rows), so how
+    /// deep you are is how hard the wall is. The granite basement is the
+    /// floor a flint pick will not bite -- which is exactly the depth the
+    /// iron is at (`ore_at`, `ROOTS`), so "iron is not rare, it is deep and
+    /// hard" is now true of the rock around it and not only of the ore.
+    /// And the limestone bed is where dripstone forms
+    /// (`dripstone::forms_in`), so a chamber hung with spikes is a chamber
+    /// at a depth a player can learn.
+    ///
+    /// ## Why it costs no noise
+    ///
+    /// **The beds dip with the granite line**, which the column has already
+    /// paid a sample for: one basin, one set of beds, and a player who has
+    /// learned that the granite comes lower here has learned that the
+    /// limestone does too -- which is what beds laid in one basin actually
+    /// do. Rejected: a field of its own per bed. Three more `fbm` reads a
+    /// column, in the hottest loop in the generator, to make beds wander
+    /// out of step with a line nobody can see from inside the same cave.
+    ///
+    /// Measured, against the Earth's generator on the same chunks in the
+    /// same binary (`what_the_landforms_cost_a_chunk`): 4.16 / 4.40 ms a
+    /// chunk for the Earth, 4.14 / 4.63 for the landforms with the beds and
+    /// the dripstone columns in them -- the same numbers the landforms ran
+    /// at before, which is what no new noise sample looks like.
+    ///
+    /// Rejected: **beds that follow the surface** rather than sea level.
+    /// A bed is a sheet laid down before the hill was worn into shape; one
+    /// that followed the ground would rise into every mountain and read as
+    /// a paint job on the terrain instead of as geology.
+    fn bedded_rock(y: i32, granite_from: i32) -> BlockId {
+        // The line wanders by `swing(6.0)` about `SEA_LEVEL + 55`
+        // (`stratum`); halved, so a bed dips by up to three layers and two
+        // beds never cross.
+        let dip = (granite_from - SEA_LEVEL - 55) / 2;
+        if y < BED_GRANITE + dip {
+            BLOCK_GRANITE
+        } else if y < BED_SANDSTONE + dip {
+            BLOCK_SANDSTONE
+        } else if y < BED_LIMESTONE + dip {
+            BLOCK_LIMESTONE
+        } else {
+            // The top of the deep rock is still the grey stone the game has
+            // always had. Deliberately: a player's first shaft has to reach
+            // something they recognise, and a world whose every layer was a
+            // named rock would have no plain rock left to name them against.
+            BLOCK_STONE
+        }
+    }
+
     /// Which biome a column belongs to.
     ///
     /// The order of the tests is the whole classifier. Height decides
@@ -5426,6 +5505,11 @@ impl WorldGen {
                 } else {
                     BLOCK_BASALT
                 }
+            } else if self.scale == Scale::Landforms {
+                // The beds of the basement, each at its own depth. See
+                // `bedded_rock` -- and `Scale` for why an older world's new
+                // chunks are still the grey stone they always were.
+                Self::bedded_rock(y, column.granite_from)
             } else {
                 BLOCK_STONE
             };
@@ -6232,7 +6316,7 @@ impl WorldGen {
     /// needs a roof of rock over it within `ROOF_REACH` for the same
     /// reason -- a spike under the open sky is a spike on the surface.
     fn grow_dripstone(&self, blocks: &mut [crate::types::BlockId], origin_x: i32, origin_z: i32, columns: &ColumnCache) {
-        use crate::dripstone::{grows_from, sized, SIZES};
+        use crate::dripstone::{forms_in, grows_from, sized, SHORTEST, SIZES, TALLEST};
         use crate::types::{block_kind, BLOCK_STALACTITE, BLOCK_STALAGMITE};
         /// One stalactite per this many roof cells of wet limestone...
         const WET_LIMESTONE: u32 = 5;
@@ -6252,6 +6336,17 @@ impl WorldGen {
         /// zero is about the coast, so this is the wetter half of the land.
         const WET_SKY: f64 = 0.15;
         let ceiling = SEA_LEVEL - 4;
+        // Columns of two to four cells, and only in the carbonates, are
+        // the new world's dripstone. An older world's new chunks have to
+        // come out of the generator that world was made with, or the cave
+        // a player walked yesterday grows spikes overnight -- see `Scale`.
+        let tall = self.scale == Scale::Landforms;
+        // **The rock a spike grows out of**: the carbonates in a new world
+        // (`dripstone::forms_in`), and in an older one the wider list its
+        // own generator grew by. Widening `grows_from` itself would have
+        // been the tidy change, and it hangs spikes off the chalk of every
+        // chunk an old world has not reached yet -- see `Scale`.
+        let holds = |rock: crate::types::BlockId| if tall { forms_in(rock) } else { grows_from(rock) };
         let at = |lx: i32, y: i32, lz: i32| Chunk::index(lx as usize, y as usize, lz as usize);
 
         for lz in 0..CHUNK_SIZE_Z as i32 {
@@ -6270,8 +6365,8 @@ impl WorldGen {
                     }
                     let above = blocks[at(lx, y + 1, lz)];
                     let below = blocks[at(lx, y - 1, lz)];
-                    let hanging = grows_from(above);
-                    let standing = grows_from(below);
+                    let hanging = holds(above);
+                    let standing = holds(below);
                     if !hanging && !standing {
                         continue;
                     }
@@ -6298,13 +6393,29 @@ impl WorldGen {
                         3 | 4 => 1,
                         _ => 2,
                     } + u8::from(wet);
-                    let size = size.min(SIZES - 1);
+                    let size = size.min(SIZES - 2);
+                    // **How many cells long**, which is the thing a player
+                    // reads off a chamber: taller where the water came
+                    // faster, and one cell longer in a wet cave -- which is
+                    // what the wetness used to buy a size instead. A size a
+                    // body away is not distinguishable; a spike as tall as
+                    // a player is. One is what the older generators laid,
+                    // and every world of theirs still gets it (`Scale`).
+                    let want = if tall {
+                        (SHORTEST + ((roll >> 16) % u32::from(TALLEST - SHORTEST + 1)) as u8 + u8::from(wet)).min(TALLEST)
+                    } else {
+                        1
+                    };
                     if hanging {
-                        blocks[at(lx, y, lz)] = sized(BLOCK_STALACTITE, size);
-                        // Follow the drip down to the floor it lands on.
-                        if (roll >> 20).is_multiple_of(3) {
-                            continue;
-                        }
+                        // Follow the drip down to the floor it lands on,
+                        // *before* the column is laid: how much air there
+                        // is under this roof is what decides how long the
+                        // spike may be. Grown first and measured after, a
+                        // four-cell stalactite filled a chamber three high
+                        // and there was nowhere left for the drip to land
+                        // -- which showed up as a cave of spikes hanging
+                        // over a bare floor.
+                        let wants_pair = !(roll >> 20).is_multiple_of(3);
                         let mut floor = y - 1;
                         while floor > BEDROCK_TOP && y - floor <= ROOF_REACH && blocks[at(lx, floor, lz)] == BLOCK_AIR {
                             floor -= 1;
@@ -6313,9 +6424,39 @@ impl WorldGen {
                         // goes in the air over it, and not into the cell the
                         // stalactite itself is in.
                         let spike = floor + 1;
-                        if spike < y && floor > BEDROCK_TOP && grows_from(blocks[at(lx, floor, lz)]) {
-                            let size = ((roll >> 24) % u32::from(SIZES)) as u8 + u8::from(wet);
-                            blocks[at(lx, spike, lz)] = sized(BLOCK_STALAGMITE, size.min(SIZES - 1));
+                        let room = (y - floor).clamp(1, i32::from(TALLEST) * 2) as u8;
+                        let lands = wants_pair && floor > BEDROCK_TOP && holds(blocks[at(lx, floor, lz)]);
+                        // **Half the chamber, rounded up, when a spike is
+                        // to rise to meet it.** The two share the height, so
+                        // a tall chamber gets a tall pair and a low one a
+                        // short pair that may well touch. Rounded *down*
+                        // first, and then a chamber three cells high -- the
+                        // commonest there is -- had a one-cell spike over a
+                        // one-cell spike with a gap between them, which is
+                        // the scatter this was meant to replace.
+                        let high = want.min(if lands { room.div_ceil(2).max(1) } else { room });
+                        for (step, piece) in crate::dripstone::column(high, size).enumerate() {
+                            blocks[at(lx, y - step as i32, lz)] = sized(BLOCK_STALACTITE, piece);
+                        }
+                        let tip = y - i32::from(high) + 1;
+                        if lands && spike < tip {
+                            let size = ((roll >> 24) % u32::from(SIZES - 1)) as u8 + u8::from(wet);
+                            // **Up to the tip and no further, and a column
+                            // that reaches it is a pillar** -- which is
+                            // what a cave that has been dripping long
+                            // enough actually has in it. Clamped rather
+                            // than refused: a stalagmite written over the
+                            // stalactite's own cells would grow the pair
+                            // downwards out of the roof.
+                            let want = if tall {
+                                (SHORTEST + ((roll >> 26) % u32::from(TALLEST - SHORTEST + 1)) as u8).min(TALLEST)
+                            } else {
+                                1
+                            };
+                            let high = want.min((tip - spike) as u8).max(1);
+                            for (step, piece) in crate::dripstone::column(high, size.min(SIZES - 2)).enumerate() {
+                                blocks[at(lx, spike + step as i32, lz)] = sized(BLOCK_STALAGMITE, piece);
+                            }
                         }
                     } else {
                         // A lone stalagmite needs a roof: rock, somewhere
@@ -6328,7 +6469,13 @@ impl WorldGen {
                             && y + ROOF_REACH >= up
                             && is_rock(block_kind(blocks[at(lx, up, lz)]));
                         if roofed {
-                            blocks[at(lx, y, lz)] = sized(BLOCK_STALAGMITE, size);
+                            // ...and it stops one cell under that roof: a
+                            // lone spike that touched it is a pillar
+                            // nobody's drip built.
+                            let high = want.min((up - y) as u8).max(1);
+                            for (step, piece) in crate::dripstone::column(high, size).enumerate() {
+                                blocks[at(lx, y + step as i32, lz)] = sized(BLOCK_STALAGMITE, piece);
+                            }
                         }
                     }
                 }
@@ -19531,6 +19678,85 @@ mod strata_tests {
     use super::tests::chunk_in;
     use super::*;
 
+    /// **A shaft driven down crosses the beds in order**: grey stone, then
+    /// limestone, then sandstone, then the granite basement, each a run of
+    /// its own and never interleaved. That is what a stratum *is*, and a
+    /// cave wall cut through them shows the same bands lying flat.
+    ///
+    /// Read off the world and not off `bedded_rock`, because what is being
+    /// asked is what the fill loop writes -- the basalt dykes, the ore and
+    /// the caves all cut the same column, and a bed the rest of the
+    /// generator wrote over would still pass a test of the arithmetic.
+    #[test]
+    fn a_shaft_driven_down_passes_stone_then_limestone_then_sandstone_then_granite() {
+        let gen = WorldGen::new(1337);
+        let chunks: Vec<Chunk> =
+            (-1..2).flat_map(|cx| (-1..2).map(move |cz| (cx, cz))).map(|(cx, cz)| gen.generate_chunk(ChunkPos::new(cx, cz))).collect();
+        // A level well inside each bed, and the rock that bed is made of.
+        // Not the boundaries: those dip (`bedded_rock`), which is the
+        // point of the next test.
+        for (y, wanted) in [(SEA_LEVEL - 8, BLOCK_STONE), (SEA_LEVEL - 20, BLOCK_LIMESTONE), (SEA_LEVEL - 34, BLOCK_SANDSTONE), (SEA_LEVEL - 48, BLOCK_GRANITE)] {
+            let (mut mine, mut rock) = (0usize, 0usize);
+            for chunk in &chunks {
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let id = block_kind(chunk.get(lx, y as usize, lz));
+                        if !is_rock(id) {
+                            continue; // a cave, a dyke, an ore body, the soil
+                        }
+                        rock += 1;
+                        mine += usize::from(id == wanted);
+                    }
+                }
+            }
+            assert!(rock > 500, "hardly any rock at {y} to ask about: {rock}");
+            assert!(
+                mine * 10 > rock * 8,
+                "only {mine} of {rock} rock cells at {y} are {}: the bed is not laid",
+                crate::types::block_name(wanted)
+            );
+        }
+    }
+
+    /// **The beds are the new generator's**, and an older world's new
+    /// chunks are grey stone under their own upper rock as they always
+    /// were. See `Scale` for why that is not a preference.
+    #[test]
+    fn an_older_worlds_deep_rock_is_still_the_stone_it_was() {
+        for scale in [Scale::Regional, Scale::Earth] {
+            let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, scale);
+            let chunk = gen.generate_chunk(ChunkPos::new(4, -7));
+            for y in (BEDROCK_TOP + 1) as usize..(SEA_LEVEL - 45) as usize {
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let id = block_kind(chunk.get(lx, y, lz));
+                        assert_ne!(id, BLOCK_LIMESTONE, "{scale:?} grew a bed of limestone at {y}");
+                        assert_ne!(id, BLOCK_SANDSTONE, "{scale:?} grew a bed of sandstone at {y}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// **A bed dips, it does not lie flat**: the boundary between two beds
+    /// is at a different height in different columns, or a cave wall is a
+    /// painted stripe. It dips with the granite line, which is the same
+    /// field -- see `bedded_rock` for why it costs no sample.
+    #[test]
+    fn a_bed_boundary_dips_rather_than_lying_flat() {
+        let gen = WorldGen::new(1337);
+        let mut heights = std::collections::BTreeSet::new();
+        for step in 0..48 {
+            let gx = step * 96;
+            let granite_from = gen.stratum(gx, 0, Biome::Plains, Biome::Plains.surface()).2;
+            let top = (BED_LIMESTONE - 4..=BED_LIMESTONE + 4)
+                .find(|&y| WorldGen::bedded_rock(y, granite_from) != BLOCK_LIMESTONE)
+                .expect("the top of the limestone bed");
+            heights.insert(top);
+        }
+        assert!(heights.len() > 2, "the limestone bed lies at {heights:?} everywhere: a sheet, not a bed");
+    }
+
     /// The first rock cell under the surface of every dry column of a
     /// chunk that is in `wanted`, with the column's coordinates. Columns
     /// a cave has opened before the rock is reached are skipped: what
@@ -19630,14 +19856,22 @@ mod strata_tests {
     }
 
     #[test]
-    fn the_upper_rock_is_a_skin_and_the_stone_under_it_is_still_stone() {
-        // The upper rock is a skin of at most fourteen layers, and
-        // everything under it is the stone it always was -- which is
-        // what keeps the iron and coal of the deep band in the rock
-        // the ore tests measured them in. Measured from each column's
-        // own rock top rather than from the bedrock, because a sea
-        // shelf or a river bed is low enough that its skin reaches the
-        // floor of the world, and that is the skin doing what it says.
+    fn the_upper_rock_is_a_skin_and_no_country_rock_reaches_under_it() {
+        // The upper rock is a skin of at most fourteen layers, and what
+        // lies under it belongs to the *beds* and not to the country
+        // overhead (`bedded_rock`): a desert's quartzite, a down's chalk
+        // and a dead forest's tuff stop where the skin stops. Measured
+        // from each column's own rock top rather than from the bedrock,
+        // because a sea shelf or a river bed is low enough that its skin
+        // reaches the floor of the world, and that is the skin doing what
+        // it says.
+        //
+        // **It used to say the deep rock was stone and nothing else**, and
+        // that was the whole of the deep rock before the beds. The bed
+        // rocks are now the expected answer down here and the ten country
+        // rocks are the ones that must never appear -- gabbro excepted,
+        // which is the root of a basalt dyke and not a skin at all
+        // (`GABBRO_BELOW`).
         let gen = WorldGen::new(4242);
         let (mut stone, mut other) = (0usize, 0usize);
         for cx in -3..3 {
@@ -19661,10 +19895,11 @@ mod strata_tests {
                         // about is that a *skin* of sandstone or
                         // limestone does not reach down here.
                         for y in (BEDROCK_TOP + 1)..(rock_top - 14).min(SEA_LEVEL + 20) {
-                            match block_kind(chunk.get(lx, y as usize, lz)) {
-                                BLOCK_STONE => stone += 1,
-                                BLOCK_SANDSTONE | BLOCK_LIMESTONE | BLOCK_GRANITE => other += 1,
-                                _ => {}
+                            let id = block_kind(chunk.get(lx, y as usize, lz));
+                            if matches!(id, BLOCK_STONE | BLOCK_SANDSTONE | BLOCK_LIMESTONE | BLOCK_GRANITE) {
+                                stone += 1;
+                            } else if crate::ground::NEW_ROCKS.contains(&id) && id != crate::types::BLOCK_GABBRO {
+                                other += 1;
                             }
                         }
                     }
@@ -19672,7 +19907,7 @@ mod strata_tests {
             }
         }
         assert!(stone > 1000, "hardly any rock deep enough to check: stone={stone}");
-        assert_eq!(other, 0, "{other} cells of upper rock fifteen layers or more under the rock top");
+        assert_eq!(other, 0, "{other} cells of a country's own rock fifteen layers or more under the rock top");
     }
 
     /// **The basalt is a wall to go round, not a floor to be stopped
@@ -20698,8 +20933,113 @@ mod dripstone_tests {
                             continue;
                         }
                         let root = if hangs(block) { chunk.get(lx, y + 1, lz) } else { chunk.get(lx, y - 1, lz) };
-                        assert!(grows_from(root), "{block:#x} at {lx},{y},{lz} of {:?} grows from {root:#x}", chunk.pos);
+                        // Rock, **or the cell of the same column under it**
+                        // (`dripstone::stands_on`): a spike is two to four
+                        // cells now and only its root touches the rock.
+                        assert!(
+                            crate::dripstone::stands_on(block, root),
+                            "{block:#x} at {lx},{y},{lz} of {:?} grows from {root:#x}",
+                            chunk.pos
+                        );
                         assert!(crate::types::can_grow_on(block, root), "the collapse pass would take {block:#x} down");
+                    }
+                }
+            }
+        }
+    }
+
+    /// **A spike is a column now, and it is drawn as one spike.** Two to
+    /// four cells (`dripstone::column`), shaft under shaft under a tip, and
+    /// now and then the hanging one and the standing one meet into a
+    /// pillar. The counts are the evidence that the generator lays columns
+    /// at all rather than one lone cell every time.
+    #[test]
+    fn a_cave_grows_columns_of_more_than_one_cell_and_now_and_then_a_pillar() {
+        use crate::dripstone::{size, SHAFT};
+        let (mut tall, mut lone, mut pillars) = (0, 0, 0);
+        for chunk in sample() {
+            for y in 1..CHUNK_SIZE_Y - 1 {
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let block = chunk.get(lx, y, lz);
+                        if !is_dripstone(block) {
+                            continue;
+                        }
+                        // The root of a column: the cell its rock is under.
+                        let root = if hangs(block) { chunk.get(lx, y + 1, lz) } else { chunk.get(lx, y - 1, lz) };
+                        if block_kind(root) == block_kind(block) {
+                            continue; // counted at the root
+                        }
+                        if size(block) == SHAFT {
+                            tall += 1;
+                        } else {
+                            lone += 1;
+                            if hangs(block) {
+                                // The air under it, down to the floor or to
+                                // whatever is already standing there.
+                                let mut air = 0;
+                                let mut under = y;
+                                while under > 1 && chunk.get(lx, under - 1, lz) == BLOCK_AIR {
+                                    air += 1;
+                                    under -= 1;
+                                }
+                                let met = block_kind(chunk.get(lx, under - 1, lz)) == BLOCK_STALAGMITE;
+                                assert!(
+                                    air < 2 || met,
+                                    "a one-cell stalactite at {lx},{y},{lz} of {:?} with {air} cells of room under it",
+                                    chunk.pos
+                                );
+                            }
+                        }
+                        // A pillar: a standing column whose tip touches a
+                        // hanging one.
+                        if block_kind(block) == BLOCK_STALAGMITE {
+                            let mut up = y;
+                            while up + 1 < CHUNK_SIZE_Y && block_kind(chunk.get(lx, up + 1, lz)) == BLOCK_STALAGMITE {
+                                up += 1;
+                            }
+                            if block_kind(chunk.get(lx, up + 1, lz)) == BLOCK_STALACTITE {
+                                pillars += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(tall > 0 && pillars > 0, "{tall} columns and {pillars} pillars: the water builds neither");
+        // **A single cell is what a passage with no room in it gets**, and
+        // nothing else: every lone stalactite here had either less than two
+        // cells of air under it or a spike already rising to meet it.
+        // Counted rather than asserted as a ratio, because most of the
+        // world's cave cells are in passages a spike cannot stand up in and
+        // a ratio would be measuring the caves instead of the dripstone.
+        assert!(
+            lone > 0,
+            "no single cells at all: a passage one cell high should still get its spike ({tall} columns)"
+        );
+    }
+
+    /// **Only the rock water dissolves** (`dripstone::forms_in`): no spike
+    /// grows out of granite, sandstone or plain stone in a new world. The
+    /// rock a spike is *held* by is a wider list on purpose -- see
+    /// `forms_in` for the world that would have rained its stalactites.
+    #[test]
+    fn dripstone_grows_out_of_the_carbonates_and_out_of_nothing_else() {
+        for chunk in sample() {
+            for y in 1..CHUNK_SIZE_Y - 1 {
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let block = chunk.get(lx, y, lz);
+                        if !is_dripstone(block) {
+                            continue;
+                        }
+                        let root = if hangs(block) { chunk.get(lx, y + 1, lz) } else { chunk.get(lx, y - 1, lz) };
+                        assert!(
+                            crate::dripstone::forms_in(root) || block_kind(root) == block_kind(block),
+                            "{block:#x} at {lx},{y},{lz} of {:?} grew out of {}",
+                            chunk.pos,
+                            crate::types::block_name(root)
+                        );
                     }
                 }
             }
