@@ -4528,6 +4528,49 @@ mod tests {
     /// A new block with a mouth drawn on one side and no `faces`, or a
     /// stone given a facing it cannot show, fails here by name.
     #[test]
+    fn every_rocks_rubble_is_its_own_picture_and_not_another_rocks() {
+        // "сделай для каждого вида камня, песка и булыжника свою текстуру".
+        // Fifteen rocks and four forms (`ground::ROCKS`); a `blocks.toml`
+        // entry that names a file another entry names costs no layer and
+        // shows no difference, which is exactly what this forbids -- a
+        // granite gravel that is the common gravel is a hillside that does
+        // not say it is granite. The pebbles are not here because they are
+        // not files: `pebble_art` makes each from that rock's own cobble, so
+        // distinct cobbles are distinct pebbles by construction.
+        //
+        // Sandstone's sand is the exception the table itself states: it *is*
+        // sand, and `ROCKS` gives it `BLOCK_SAND`, so there is one picture
+        // under one name rather than two that do not stack.
+        let config: BlocksToml = toml::from_str(crate::embedded::BLOCKS_TOML).expect("the shipped blocks.toml parses");
+        let name_of = |id: primitive_shared::types::BlockId| {
+            ALL_BLOCK_IDS.iter().find(|&&(other, _)| other == id).map(|&(_, name)| name).expect("every rock is named")
+        };
+        let mut seen: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+        let mut shared = Vec::new();
+        for rock in primitive_shared::ground::ROCKS {
+            for (form, id) in [
+                ("stone", rock.stone),
+                ("cobble", rock.cobble),
+                ("gravel", rock.gravel),
+                ("sand", rock.sand),
+            ] {
+                let name = name_of(id);
+                let Some(file) = config.textures.get(name).and_then(|spec| spec.for_face(FACE_TOP)) else {
+                    shared.push(format!("{name} ({form}) names no picture at all"));
+                    continue;
+                };
+                let who = format!("{name} ({form})");
+                if let Some(first) = seen.insert(file, who.clone()) {
+                    shared.push(format!("{who} wears {file}, which is already {first}'s"));
+                }
+            }
+        }
+        // The one picture two rows are allowed to share, for the reason above.
+        shared.retain(|line| !line.contains("sandstone_sand") && !line.starts_with("sand ("));
+        assert!(shared.is_empty(), "rocks sharing a picture: {shared:#?}");
+    }
+
+    #[test]
     fn a_block_turns_when_it_is_placed_exactly_when_turning_it_would_show() {
         use crate::engine::mesh::{drawn_as_model, what_a_quarter_turn_does, QuarterTurn};
         let config: BlocksToml = toml::from_str(crate::embedded::BLOCKS_TOML).expect("the shipped blocks.toml parses");

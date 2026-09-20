@@ -324,6 +324,84 @@ pub fn grows_on(grass: BlockId, ground: BlockId) -> bool {
     }
 }
 
+// ---- turf that wraps its sides ----
+
+/// A block whose top is grass and whose sides are soil with a fringe: the
+/// meadow's turf and the savanna's dry turf.
+#[inline]
+pub fn is_turf(id: BlockId) -> bool {
+    matches!(block_kind(id), BLOCK_GRASS | BLOCK_DRY_TURF)
+}
+
+/// **Whether this turf block's side is grass all the way down**, rather than
+/// soil with a fringe along its top: true when **the turf goes on past the
+/// face at that level** -- either the cell in that direction is the same turf
+/// standing lower in its cell (the next lip of a ramp), or that cell is open
+/// and the one *diagonally below* is the same turf (the next whole step down
+/// the hill).
+///
+/// "ÑÐ´ÐµÐ»Ð°Ð¹ ÑÐ°Ðº, ÑÑÐ¾Ð±Ñ Ð±Ð»Ð¾Ðº Ð·ÐµÐ¼Ð»Ð¸ Ñ Ð¿Ð¾Ð»Ð½Ð¾Ð¹ ÑÐµÐºÑÑÑÑÐ¾Ð¹ ÑÑÐ°Ð²Ñ Ð±ÑÐ» Ð¿Ð¾ Y, X, -X Ð¸
+/// Z, -Z". A slope of turf is a staircase of whole cells, and every riser of
+/// it showed a wall of soil: a green hill seen from its foot was brown bands
+/// with a green line on each, and that is not what a hillside looks like.
+///
+/// Three ways to give it grass sides were weighed:
+///
+/// * *A side is always grass.* Then a bank a player digs into is a wall of
+///   turf with grass growing on its underside, a cellar's ceiling edge is
+///   green, and the soil under the meadow -- which is the whole reason dirt
+///   is a block you can see -- is never visible. The picture that made the
+///   request is a slope, not a cut.
+/// * *A second block, "grassed on every side", that a player places.* That is
+///   an id, a recipe, an inventory slot and a rule about which one the
+///   generator lays, for a difference nobody can act on: a mechanic that
+///   creates a chore rather than a decision (see `CLAUDE.md`). And the
+///   generator would have to guess, at worldgen time, what the neighbours of
+///   a cell will be after every later pass has run.
+/// * **The turf decides per face, from what is on the other side of it
+///   (chosen).** Grass grows over a brow and down the slope behind it; it
+///   does not grow on the face of a cut. What is beyond the face is exactly
+///   that difference: on a slope the turf carries on a quarter or a whole
+///   block lower, at a cut or a cliff there is stone, air or bare soil. So a
+///   hillside is green from its foot and a dug bank still shows its earth,
+///   with no new block, no new picture and no new layer -- the side wears the
+///   top's own picture, which already carries the climate's tint.
+///
+/// **Both halves of the slope are needed**, and the first was found missing
+/// from a picture. A generated slope is a ramp of lips
+/// (`worldgen::lips`): four columns of one cell whose turf stands a quarter,
+/// a half, three quarters and a whole block up. Every riser there is a
+/// quarter-block strip between two turf *cells at the same height*, so the
+/// cell diagonally below is the soil under the ramp and the strip stayed
+/// brown -- a dark line along every terrace of what was otherwise a green
+/// hill. The cliff and the cut keep their soil because in both the
+/// neighbouring cell is open air **and** the cell under it is not turf: a
+/// cliff drops more than a block, and a dug face has earth behind it.
+///
+/// **The top has to be showing.** Under a skin of snow or a block laid on it,
+/// what the player sees along the hill is white or stone, and a green side
+/// under it would be a stripe of summer in a drift. `above` is the cell over
+/// this one; a coating (`types::is_covering_flat`) or anything opaque keeps
+/// the old soil side.
+///
+/// The item icon needs no thought for the same reason: a block in a hand has
+/// no cell diagonally below, so it is drawn with its soil sides, which is
+/// what one turf lifted out of a meadow actually looks like.
+#[inline]
+pub fn turf_wraps_the_side(here: BlockId, above: BlockId, beyond: BlockId, diagonal_below: BlockId) -> bool {
+    let same = |other: BlockId| block_kind(other) == block_kind(here);
+    turf_may_wrap(here, above) && (same(beyond) || same(diagonal_below))
+}
+
+/// The half of [`turf_wraps_the_side`] that is a question about the block
+/// rather than about one of its faces -- is this turf, and is its top the
+/// thing a player sees along the hill? A mesher asks this once per cell and
+/// pays for the diagonal read only where it can matter.
+#[inline]
+pub fn turf_may_wrap(here: BlockId, above: BlockId) -> bool {
+    is_turf(here) && !crate::types::is_covering_flat(above) && !crate::types::is_opaque(above)
+}
+
 // ---- moss ----
 
 /// The bit of the variant that says a stone or a trunk is **mossy**.
@@ -438,5 +516,36 @@ mod tests {
         let lying = crate::types::oriented(BLOCK_LOG, crate::types::Axis::X);
         assert_eq!(scraped(with_moss(lying)), Some(lying));
         assert_eq!(with_moss(BLOCK_SAND), BLOCK_SAND, "sand grew moss");
+    }
+
+    #[test]
+    fn a_turf_side_is_grass_down_a_slope_and_soil_at_a_cut() {
+        // "сделай так, чтобы блок земли с полной текстурой травы был по Y, X,
+        // -X и Z, -Z". The rule the mesher draws a side by
+        // (`turf_wraps_the_side`), stated as the situations a face is ever
+        // in. It went red once already: with only the diagonal-below half of
+        // it, a generated slope -- which is a ramp of lips inside one cell,
+        // not a stair of whole ones -- kept a brown line along every terrace.
+        use crate::types::{BLOCK_AIR, BLOCK_SNOW_COVER, BLOCK_STONE};
+        let lip = crate::dig::lowered(BLOCK_GRASS, 2);
+        // Down a ramp: the cell beyond is the same turf, standing lower.
+        assert!(turf_wraps_the_side(BLOCK_GRASS, BLOCK_AIR, lip, BLOCK_DIRT));
+        // Down a whole step: the cell beyond is open, the one under it turf.
+        assert!(turf_wraps_the_side(BLOCK_GRASS, BLOCK_AIR, BLOCK_AIR, BLOCK_GRASS));
+        // A cut: open beyond, earth under it.
+        assert!(!turf_wraps_the_side(BLOCK_GRASS, BLOCK_AIR, BLOCK_AIR, BLOCK_DIRT));
+        // A cliff: open beyond and open under it.
+        assert!(!turf_wraps_the_side(BLOCK_GRASS, BLOCK_AIR, BLOCK_AIR, BLOCK_AIR));
+        // Under snow the hillside is white, so the side stays soil.
+        assert!(!turf_wraps_the_side(BLOCK_GRASS, BLOCK_SNOW_COVER, BLOCK_AIR, BLOCK_GRASS));
+        // And under anything solid, where the top is not what is seen.
+        assert!(!turf_wraps_the_side(BLOCK_GRASS, BLOCK_STONE, BLOCK_AIR, BLOCK_GRASS));
+        // Two turfs are not one: the savanna's dry turf does not lend the
+        // meadow its picture, nor the meadow the savanna.
+        assert!(turf_wraps_the_side(BLOCK_DRY_TURF, BLOCK_AIR, BLOCK_AIR, BLOCK_DRY_TURF));
+        assert!(!turf_wraps_the_side(BLOCK_DRY_TURF, BLOCK_AIR, BLOCK_AIR, BLOCK_GRASS));
+        // Soil is not turf, whatever is beside it: a dirt block dug out of a
+        // meadow keeps its own picture.
+        assert!(!turf_wraps_the_side(BLOCK_DIRT, BLOCK_AIR, BLOCK_GRASS, BLOCK_GRASS));
     }
 }

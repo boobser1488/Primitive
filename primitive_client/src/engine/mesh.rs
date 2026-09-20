@@ -3944,6 +3944,15 @@ pub fn build_mesh(
                 // mossy stone is not a thing the world makes.
                 let mossy = tint == 0 && primitive_shared::ground::is_mossy(id);
                 let moss_on_top = mossy && !primitive_shared::wood::is_log(id);
+                // **A hillside of turf is green from its foot**
+                // (`ground::turf_wraps_the_side`): a side face whose cell
+                // diagonally below is the same turf wears the top's own
+                // picture instead of soil with a fringe. Asked per block
+                // first, because `is_turf` is a two-way match and this is the
+                // hottest loop in the client -- the four reads below are paid
+                // only on turf whose top is showing, which is the surface of
+                // a meadow and nothing else.
+                let turf_sides = primitive_shared::ground::turf_may_wrap(id, above);
 
                 #[cfg(test)]
                 let faces_started = std::time::Instant::now();
@@ -4000,7 +4009,21 @@ pub fn build_mesh(
                         continue;
                     }
 
-                    let layer = moss_layer.unwrap_or_else(|| textures.layer_for_face(pictured, face_index));
+                    // A wrapped turf side wears face 0 -- the top's own
+                    // picture -- and nothing else about the face changes: it
+                    // keeps its normal, its light, its climate tint and its
+                    // crop, because it is still the side of a block.
+                    let wrapped = turf_sides
+                        && face_index >= 2
+                        && primitive_shared::ground::turf_wraps_the_side(
+                            id,
+                            above,
+                            neighbor_id,
+                            cache.block_near(cell, y, n[0], -1, n[2]),
+                        );
+                    let layer = moss_layer.unwrap_or_else(|| {
+                        textures.layer_for_face(pictured, if wrapped { 0 } else { face_index })
+                    });
 
                     // Light comes from the *air* cell in front of the
                     // face, never from the block itself (which is solid

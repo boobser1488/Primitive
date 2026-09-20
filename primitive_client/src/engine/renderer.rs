@@ -20999,6 +20999,210 @@ mod lighting_tools {
         println!("pictures in {out}");
     }
 
+    /// **The shadows where a player actually stands: on turf and on the
+    /// things that do not fill their cell.**
+    ///
+    /// ```text
+    /// GPU_REPRO_DIR=C:/abs/shots/rock_grass TURF_TAG=before cargo test -p primitive_client --lib \
+    ///     what_the_shadows_on_turf_and_partial_blocks_look_like -- --ignored --nocapture
+    /// ```
+    ///
+    /// "исправь рендер теней на траве и не полных блоках". A meadow with a
+    /// bank of turf climbing it, the lips the generator lays along every
+    /// slope (`dig::lowered`, a quarter at a time), a course of slabs, a
+    /// flight of steps, a bitten block and tufts of grass, with a stone
+    /// pillar to the sun side of all of it so that there is a cast shadow
+    /// crossing every one of them. Shot from a player's eye, at the hour of
+    /// the report and at a low sun, with the shadows off and on.
+    ///
+    /// **The difference picture is the evidence**, as in
+    /// `what_the_shadows_look_like`: a shadow may only ever take light away,
+    /// so anything *lighter* is a bug, and acne -- a speckle of shade over
+    /// ground nothing stands on -- is invisible in the lit picture and plain
+    /// on black. The tool prints, per view and hour, how many pixels went
+    /// darker, the deepest drop, and how many went lighter.
+    #[test]
+    #[ignore = "a tool: needs a GPU; draws the shadows on turf, lips, slabs and steps"]
+    fn what_the_shadows_on_turf_and_partial_blocks_look_like() {
+        use primitive_shared::types::{
+            faced, Chunk, Facing, BLOCK_COBBLESTONE, BLOCK_COBBLESTONE_STAIRS, BLOCK_DIRT,
+            BLOCK_GRASS, BLOCK_STONE, BLOCK_TALL_GRASS, BLOCK_TILE_SLAB, CHUNK_VOLUME,
+        };
+        let Some((device, queue)) = crate::engine::test_gpu() else {
+            println!("no GPU adapter on this machine; skipping");
+            return;
+        };
+        let out = std::env::var("GPU_REPRO_DIR").unwrap_or_else(|_| ".".to_string());
+        let tag = std::env::var("TURF_TAG").unwrap_or_else(|_| "now".to_string());
+        std::fs::create_dir_all(&out).expect("output directory");
+        let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
+        // The reporting player's own settings, as `what_a_step_casts` reads
+        // them: fov 95 and anisotropy 16 are not the defaults.
+        let settings = {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../client_settings.toml");
+            let mut settings = std::fs::read_to_string(path)
+                .ok()
+                .map(|text| toml::from_str::<crate::settings::ClientSettings>(&text).expect("the player's settings parse"))
+                .unwrap_or_default();
+            settings.sanitize();
+            settings
+        };
+        let textures = TextureManager::load(device, queue, assets, settings.anisotropy).expect("textures load");
+        let (width, height) = (1280u32, 720u32);
+        let rig = Rig::with_ablations(device, queue, &textures, width, height, settings.msaa.max(1), false);
+        rig.knobs.fov_degrees.set(Some(settings.fov_degrees));
+        rig.knobs.ambient_occlusion.set(Some(settings.ambient_occlusion));
+
+        // A meadow at 63 with a bank of turf rising in +x, laid the way the
+        // generator lays one: each terrace four columns wide and climbed by a
+        // ramp of lips a quarter at a time (`worldgen::lips`), so that the
+        // risers in the pictures are the quarter-block strips a player
+        // actually walks up and not a stair nothing in the world builds.
+        // On the flat to the -z of it, the other things that do not fill a
+        // cell.
+        let generator = WorldGen::new(1337);
+        let bank = |x: i32| ((x - 30).max(0) / 4).min(4);
+        let within = |x: i32| if x < 30 { 3 } else { ((x - 30) % 4).min(3) };
+        let mut chunks = ChunkManager::new(64);
+        let mut positions = Vec::new();
+        for cz in 0..4 {
+            for cx in 0..4 {
+                let pos = ChunkPos::new(cx, cz);
+                let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+                for z in 0..CHUNK_SIZE_Z {
+                    for x in 0..CHUNK_SIZE_X {
+                        let (wx, wz) = (cx * CHUNK_SIZE_X as i32 + x as i32, cz * CHUNK_SIZE_Z as i32 + z as i32);
+                        let top = 63 + bank(wx);
+                        for y in 0..=top as usize {
+                            blocks[Chunk::index(x, y, z)] =
+                                if y as i32 == top { BLOCK_GRASS } else if y as i32 + 4 > top { BLOCK_DIRT } else { BLOCK_STONE };
+                        }
+                        // The ramp: the top block of each column but the last
+                        // of a terrace stands a quarter, a half or three
+                        // quarters up its cell.
+                        if wz >= 34 && within(wx) < 3 {
+                            blocks[Chunk::index(x, top as usize, z)] =
+                                primitive_shared::dig::lowered(BLOCK_GRASS, within(wx) as u8 + 1);
+                        }
+                        // Tufts on the flat turf, in patches rather than a
+                        // lawn: a tuft's own shadow is one of the things
+                        // being looked at.
+                        if wz >= 34 && (wx + wz * 3) % 7 == 0 && within(wx) == 3 {
+                            blocks[Chunk::index(x, top as usize + 1, z)] = BLOCK_TALL_GRASS;
+                        }
+                        // The partial blocks, on the flat at -z: a course of
+                        // slabs, a flight of steps, a bitten cobble and a
+                        // whole one beside each for the comparison.
+                        let flat = 63;
+                        let partial = match (wx, wz) {
+                            (24..=31, 26) => Some(BLOCK_TILE_SLAB),
+                            (24..=31, 28) => Some(faced(BLOCK_COBBLESTONE_STAIRS, Facing::East)),
+                            (24..=31, 30) => Some(primitive_shared::dig::lowered(BLOCK_COBBLESTONE, 2)),
+                            (24..=31, 32) => Some(BLOCK_COBBLESTONE),
+                            _ => None,
+                        };
+                        if let Some(block) = partial {
+                            if wx <= 31 {
+                                blocks[Chunk::index(x, flat as usize + 1, z)] = block;
+                            }
+                        }
+                        // **A pit dug in the meadow**, two blocks deep: the
+                        // control for the turf's grass sides
+                        // (`ground::turf_wraps_the_side`). A cut face has
+                        // earth behind it and must stay earth however green
+                        // the hill beside it is, and the only way to know
+                        // that is to photograph one.
+                        if (20..=25).contains(&wx) && (38..=43).contains(&wz) {
+                            for y in top - 1..=top {
+                                blocks[Chunk::index(x, y as usize, z)] = BLOCK_AIR;
+                            }
+                            blocks[Chunk::index(x, top as usize - 2, z)] = BLOCK_GRASS;
+                        }
+                        // The pillar: three blocks of stone on the sun's side
+                        // of everything above, so that every surface in the
+                        // pictures has a cast shadow crossing it.
+                        if matches!((wx, wz), (20, 24..=34) | (21, 24) | (21, 34)) {
+                            for y in 64..67 {
+                                blocks[Chunk::index(x, y, z)] = BLOCK_STONE;
+                            }
+                        }
+                    }
+                }
+                chunks.insert(Chunk { pos, blocks });
+                positions.push(pos);
+            }
+        }
+        let (arena, meshes) = upload_scene(device, queue, &textures, &generator, &chunks, &positions);
+        let scene = Scene {
+            name: "turf",
+            arena,
+            meshes,
+            origin: Vec3::ZERO,
+            west: (Vec3::ZERO, Vec3::X),
+            east: (Vec3::ZERO, Vec3::X),
+            underground: 0.0,
+            chunks: Some(chunks),
+        };
+        let eye = |x: f32, z: f32, up: f32| Vec3::new(x, 64.0 + bank(x.floor() as i32) as f32 + up, z);
+        let views = [
+            // Standing on the meadow looking up the bank, which is where a
+            // player sees the lips and the turf's own shade at once.
+            ("up_the_bank", eye(27.5, 40.5, 1.62), Vec3::new(14.0, -3.0, -4.0)),
+            // On the bank looking back down it: the tops of the lips, and
+            // the pillar's shadow running across them.
+            ("down_the_bank", eye(43.5, 38.5, 1.62), Vec3::new(-16.0, -4.0, -2.0)),
+            // Standing at the brink of the dug pit: the cut face, which must
+            // still be earth, with the green bank behind it.
+            ("into_the_cut", Vec3::new(18.5, 65.62, 41.5), Vec3::new(10.0, -3.5, 0.0)),
+            // Close over the partial blocks, at the height a player's eye is.
+            ("over_the_partials", Vec3::new(35.5, 65.6, 29.5), Vec3::new(-10.0, -2.0, 0.0)),
+            // Down onto the same, where acne on a flat top is plainest.
+            ("onto_the_partials", Vec3::new(34.5, 72.0, 36.5), Vec3::new(-6.0, -9.0, -6.0)),
+        ];
+        // Noon, a low morning sun with the bank's risers turned away from it,
+        // and a low evening sun **on** them -- which is the only hour at
+        // which a quarter-block lip casts across the terrace in front of it,
+        // and so the only one that can show its shadow drawn a whole cell
+        // long instead of a quarter.
+        let times = [("1324", 13.4f32 / 24.0), ("low_sun", 0.30), ("evening_sun", 0.72)];
+        let luma = |p: &image::Rgba<u8>| (u32::from(p[0]) * 3 + u32::from(p[1]) * 6 + u32::from(p[2])) / 10;
+        for (view, from, toward) in views {
+            for (when, t) in times {
+                let camera = (from, from + toward);
+                rig.frame(Mode::Step(Quality::High, false), &scene, camera, t);
+                let off = rig.read();
+                rig.frame(Mode::Step(Quality::High, true), &scene, camera, t);
+                let on = rig.read();
+                // **Which of the two answers drew each edge.** The Hard step
+                // walks the voxel volume near the player and reads the map
+                // where it cannot (`sun_visibility`); withholding the volume
+                // makes every fragment ask the map. A ragged edge that
+                // straightens here came from the walk, whose unit is a whole
+                // cell; one that does not came from the map's texels.
+                rig.knobs.no_voxel_sun.set(true);
+                rig.frame(Mode::Step(Quality::High, true), &scene, camera, t);
+                let map_only = rig.read();
+                rig.knobs.no_voxel_sun.set(false);
+                map_only.save(format!("{out}/turf_{view}_{when}_{tag}_map_only.png")).expect("write png");
+                let mut taken = image::GrayImage::new(on.width(), on.height());
+                let (mut darker, mut lighter, mut deepest) = (0usize, 0usize, 0u32);
+                for (x, y, lit) in on.enumerate_pixels() {
+                    let (plain, shaded) = (luma(off.get_pixel(x, y)), luma(lit));
+                    let drop = plain.saturating_sub(shaded);
+                    darker += usize::from(drop > 6);
+                    lighter += usize::from(shaded > plain + 1);
+                    deepest = deepest.max(drop);
+                    taken.put_pixel(x, y, image::Luma([(drop * 6).min(255) as u8]));
+                }
+                off.save(format!("{out}/turf_{view}_{when}_{tag}_off.png")).expect("write png");
+                on.save(format!("{out}/turf_{view}_{when}_{tag}_on.png")).expect("write png");
+                taken.save(format!("{out}/turf_{view}_{when}_{tag}_taken.png")).expect("write png");
+                println!("{view} {when}: {darker} pixels darker (deepest {deepest}), {lighter} lighter");
+            }
+        }
+        println!("pictures in {out}");
+    }
+
     /// **Where the shadows' milliseconds actually go**, split into the two
     /// halves that can be paid separately: taking the picture, and reading
     /// it.
