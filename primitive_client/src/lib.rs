@@ -6081,6 +6081,25 @@ fn run(
                             now,
                             &mut ui_vertices,
                         );
+                        // **The first two minutes**: one line over the belt
+                        // saying the next of the three things a player who
+                        // has just woken up should do, and gone for good
+                        // once all three are done. Driven by the same
+                        // knowledge the recipe book and the ladder page are
+                        // (`ladder::first_step`), so it cannot disagree with
+                        // either, and it costs nothing at all for anybody
+                        // who has ever held a flake.
+                        if let Some(step) = journal.first_step() {
+                            let mut painter = widgets::Painter::onto(
+                                graphics.textures.font,
+                                std::mem::take(&mut ui_vertices),
+                            );
+                            hud::first_step_line(
+                                &mut painter,
+                                settings.language.text(ui::ladder_screen::first_step_msg(step)),
+                            );
+                            ui_vertices = painter.into_vertices();
+                        }
                         // The bar and its gauges are one thing pinned to
                         // the bottom of the screen, so they grow as one
                         // and upward -- the HUD is laid out against
@@ -8673,7 +8692,7 @@ fn drain_network(
 
             ServerMessage::Discovered { kinds } => {
                 // Repaired on the way in: a list off a socket is a claim.
-                journal.discovered = primitive_shared::discovery::Discovered::from_kinds(kinds);
+                journal.set_discovered(primitive_shared::discovery::Discovered::from_kinds(kinds));
             }
 
             ServerMessage::Landmarks { spawn, bags } => {

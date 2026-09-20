@@ -989,6 +989,7 @@ pub const RECIPES: &[Name] = &[
     Name { id: "salt meat", en: "Salt meat", simple: "Meat in salt", ru: "Засолить мясо", pl: "Zasolić mięso" },
     Name { id: "salt fish", en: "Salt fish", simple: "Fish in salt", ru: "Засолить рыбу", pl: "Zasolić rybę" },
     Name { id: "roast ribs", en: "Roast ribs", simple: "Cooked ribs", ru: "Жареные рёбра", pl: "Pieczone żeberka" },
+    Name { id: "roast grubs", en: "Roast grubs", simple: "Cook bugs", ru: "Пожарить личинок", pl: "Upiec larwy" },
     Name { id: "standing torch", en: "Standing torch", simple: "Torch on a pole", ru: "Факел на шесте", pl: "Pochodnia na tyczce" },
     Name { id: "fat torch", en: "Fat torch", simple: "Torch with fat", ru: "Факел с жиром", pl: "Pochodnia z łojem" },
     Name { id: "fat rewad", en: "Rewrap with fat", simple: "New fat on a torch", ru: "Обмотка с жиром", pl: "Owijka z łojem" },

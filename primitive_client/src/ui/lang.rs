@@ -718,6 +718,65 @@ pub enum Msg {
     RecipeLead,
     RecipeNotFound,
     RecipeMayFail,
+    /// The heading over everything standing between the pack and this
+    /// row. See `crafting::Shortfall`.
+    RecipeMissing,
+    /// Prefixes the tool a row is worked with when the pack holds none of
+    /// it at any rung -- "a tool: chisel". A prefix rather than a
+    /// sentence, because what follows is a block name and block names are
+    /// not translated (see the journal's note).
+    RecipeNeedTool,
+    /// A hone with every tool of that kind already sharp: everything the
+    /// row asks for is in the pack and there is nothing for it to do.
+    RecipeNothingToWork,
+    /// Prefixes the colour the fire has to reach, which is said in the
+    /// words a smith reads rather than in degrees -- see `Msg::GlowCold`
+    /// and the note above it about the font having no degree sign.
+    RecipeHeat,
+    /// The heading over what the thing a row makes is itself good for:
+    /// the book read backwards (`crafting::uses`).
+    RecipeUsedFor,
+    /// ...and when nothing this player knows of takes it.
+    RecipeUsedForNothing,
+    // ---- the ladder page ----
+    //
+    // The seven ages, where their materials come from, and the four words
+    // the page says in its own voice. Block names inside it stay
+    // untranslated, as they do everywhere else in the journal.
+    LadderTab,
+    LadderHelp,
+    LadderHelpTouch,
+    /// Against the highest rung this player has taken.
+    LadderYouAreHere,
+    /// The heading over the rung above that one.
+    LadderNext,
+    /// The heading over everything that rung takes. What is already held
+    /// is green and what is not is pale, so one heading covers both -- a
+    /// heading that said "still to find" over a list three quarters of
+    /// which is in the pack would be arguing with its own colours.
+    LadderWants,
+    /// Said once, at the foot, for a player who has climbed all seven.
+    LadderDone,
+    AgeBareHands,
+    AgeFlint,
+    AgeFire,
+    AgeClay,
+    AgeCopper,
+    AgeBronze,
+    AgeIron,
+    FoundUnderfoot,
+    FoundRiverbank,
+    FoundHills,
+    FoundDeepRock,
+    FoundWoods,
+    // ---- the first two minutes ----
+    //
+    // One line over the belt, and only until all three are done. See
+    // `ladder::first_step` for why one at a time and why it never comes
+    // back.
+    StepStone,
+    StepFibre,
+    StepFlake,
     // ---- the body in the pack ----
     //
     // The mannequin's heading, its four parts that are not also equipment
@@ -1341,6 +1400,36 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::RecipeLead,   en: "one thing in it you have never held", simple: "you have not found one of these yet", ru: "здесь есть то, чего вы ещё не держали в руках", pl: "jest tu coś, czego jeszcze nie miałeś w rękach" },
     Line { msg: Msg::RecipeNotFound, en: "not found yet", simple: "not found yet", ru: "ещё не найдено", pl: "jeszcze nie znalezione" },
     Line { msg: Msg::RecipeMayFail, en: "can go wrong", simple: "does not always work", ru: "может не выйти", pl: "może się nie udać" },
+    Line { msg: Msg::RecipeMissing, en: "STILL MISSING", simple: "YOU STILL NEED", ru: "ЧЕГО НЕ ХВАТАЕТ", pl: "CZEGO BRAKUJE" },
+    Line { msg: Msg::RecipeNeedTool, en: "a tool:",      simple: "a tool:",    ru: "инструмент:", pl: "narzędzie:" },
+    Line { msg: Msg::RecipeNothingToWork, en: "nothing in the pack for it to work on", simple: "nothing in your bag to use it on", ru: "в рюкзаке нечего этим обрабатывать", pl: "w plecaku nie ma czego tym obrobić" },
+    Line { msg: Msg::RecipeHeat,   en: "heat:",          simple: "fire colour:", ru: "жар:", pl: "żar:" },
+    Line { msg: Msg::RecipeUsedFor, en: "GOES INTO",     simple: "USED TO MAKE", ru: "ИДЁТ НА", pl: "IDZIE NA" },
+    Line { msg: Msg::RecipeUsedForNothing, en: "nothing you know of yet", simple: "nothing you know about yet", ru: "пока ни на что из известного вам", pl: "na razie na nic, co znasz" },
+    // The ladder page. See `ui::ladder_screen`.
+    Line { msg: Msg::LadderTab,    en: "LADDER",         simple: "THE WAY UP", ru: "ПУТЬ", pl: "DROGA" },
+    Line { msg: Msg::LadderHelp,   en: "tab recipes   esc close", simple: "tab how to make   esc close", ru: "tab рецепты   esc закрыть", pl: "tab przepisy   esc zamknij" },
+    Line { msg: Msg::LadderHelpTouch, en: "tap an age to read it", simple: "tap an age to read it", ru: "коснитесь века, чтобы прочитать", pl: "dotknij epoki, by przeczytać" },
+    Line { msg: Msg::LadderYouAreHere, en: "you are here", simple: "you are here", ru: "вы здесь", pl: "tu jesteś" },
+    Line { msg: Msg::LadderNext,   en: "NEXT",           simple: "NEXT",       ru: "СЛЕДУЮЩЕЕ", pl: "NASTĘPNE" },
+    Line { msg: Msg::LadderWants,  en: "WHAT IT TAKES", simple: "WHAT YOU NEED", ru: "ЧТО НУЖНО", pl: "CZEGO TRZEBA" },
+    Line { msg: Msg::LadderDone,   en: "the whole ladder is behind you", simple: "you have done all of it", ru: "весь путь пройден", pl: "cała droga za tobą" },
+    Line { msg: Msg::AgeBareHands, en: "BARE HANDS",     simple: "JUST HANDS", ru: "ГОЛЫЕ РУКИ", pl: "GOŁE RĘCE" },
+    Line { msg: Msg::AgeFlint,     en: "FLINT",          simple: "FLINT",      ru: "КРЕМЕНЬ", pl: "KRZEMIEŃ" },
+    Line { msg: Msg::AgeFire,      en: "FIRE",           simple: "FIRE",       ru: "ОГОНЬ", pl: "OGIEŃ" },
+    Line { msg: Msg::AgeClay,      en: "CLAY",           simple: "CLAY",       ru: "ГЛИНА", pl: "GLINA" },
+    Line { msg: Msg::AgeCopper,    en: "COPPER",         simple: "COPPER",     ru: "МЕДЬ", pl: "MIEDŹ" },
+    Line { msg: Msg::AgeBronze,    en: "BRONZE",         simple: "BRONZE",     ru: "БРОНЗА", pl: "BRĄZ" },
+    Line { msg: Msg::AgeIron,      en: "IRON",           simple: "IRON",       ru: "ЖЕЛЕЗО", pl: "ŻELAZO" },
+    Line { msg: Msg::FoundUnderfoot, en: "underfoot, in any meadow", simple: "on the ground, anywhere", ru: "под ногами, в любом лугу", pl: "pod nogami, na każdej łące" },
+    Line { msg: Msg::FoundRiverbank, en: "on gravel and river banks", simple: "on stones by the water", ru: "на отмелях и берегах рек", pl: "na żwirze i brzegach rzek" },
+    Line { msg: Msg::FoundHills,   en: "in the hills, where the rock is bare", simple: "in the hills, where you can see rock", ru: "в холмах, где камень голый", pl: "w górach, gdzie skała jest naga" },
+    Line { msg: Msg::FoundDeepRock, en: "deep in the rock, down a shaft", simple: "deep underground", ru: "глубоко в породе, в шахте", pl: "głęboko w skale, w szybie" },
+    Line { msg: Msg::FoundWoods,   en: "in standing timber", simple: "in the woods", ru: "в лесу, на стоячем дереве", pl: "w lesie, na stojącym drzewie" },
+    // The first two minutes. See `ladder::first_step`.
+    Line { msg: Msg::StepStone,    en: "pick a stone up off the ground", simple: "pick up a stone", ru: "подберите с земли камень", pl: "podnieś kamień z ziemi" },
+    Line { msg: Msg::StepFibre,    en: "tear at the tall grass: it gives fibre", simple: "break tall grass to get fibre", ru: "рвите высокую траву -- из неё волокно", pl: "rwij wysoką trawę -- daje włókno" },
+    Line { msg: Msg::StepFlake,    en: "find a flint and knap it into flakes", simple: "find flint and hit it to make flakes", ru: "найдите кремень и отбейте от него отщепы", pl: "znajdź krzemień i odbij od niego odłupki" },
     // The body in the pack. See the note on `Msg::Wounds`.
     Line { msg: Msg::Wounds,       en: "WOUNDS",       simple: "HURTS",      ru: "РАНЫ", pl: "RANY" },
     Line { msg: Msg::PartLeftArm,  en: "LEFT ARM",     simple: "LEFT ARM",   ru: "ЛЕВАЯ РУКА", pl: "LEWA RĘKA" },

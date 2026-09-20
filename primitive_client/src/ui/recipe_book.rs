@@ -17,7 +17,13 @@
 //! ## What a row shows, and what it does not
 //!
 //! A known recipe shows everything: what it makes, what it takes and how
-//! much of each the pack holds, where it has to be done, what comes back.
+//! much of each the pack holds, where it has to be done, **how hot the
+//! fire has to be** (in the colour a smith reads -- see `hearth::Glow`),
+//! what is still in the way that a list of ingredients cannot say (a tool,
+//! a hone with nothing blunt left, a full pack), what comes back, and
+//! **what the thing made is itself good for** -- the book read backwards
+//! (`crafting::uses`), which is the question a player holding their first
+//! flint actually has.
 //! A lead (see `primitive_shared::discovery`) shows the thing it makes and
 //! the ingredients that have been held, and draws the one that has not as
 //! a question mark. **The search never matches that ingredient**, or a
@@ -32,7 +38,7 @@
 //! both, and the search field is drawn only where there are keys to type
 //! into it with.
 
-use primitive_shared::crafting::{has_ingredients, Recipe, Station, RECIPES};
+use primitive_shared::crafting::{has_ingredients, Heat, Recipe, Shortfall, Station, RECIPES};
 use primitive_shared::discovery::{Discovered, Knowledge};
 use primitive_shared::inventory::Inventory;
 use primitive_shared::types::{block_kind, block_name, BlockId, BLOCK_BLOOMERY, BLOCK_CAMPFIRE, BLOCK_KILN};
@@ -350,8 +356,47 @@ impl RecipeBook {
         }
         p.well(pane, WELL);
         if let Some(entry) = chosen {
-            read_out(p, layers, inventory, &RECIPES[entry.index], entry.knowledge, pane, language);
+            read_out(p, layers, inventory, discovered, &RECIPES[entry.index], entry.knowledge, pane, language);
         }
+    }
+}
+
+/// One line of "what is missing", in this player's language.
+///
+/// **Here rather than in either screen**, because both the book and the
+/// pack's crafting list say it and they must say it the same way: two
+/// wordings of the same refusal is two different games to learn, and the
+/// one in the pack is read in a hurry against the one in the book that is
+/// read carefully. See `crafting::Shortfall`.
+pub fn shortfall_text(short: Shortfall, language: Language) -> String {
+    use crate::ui::names;
+    match short {
+        Shortfall::Ingredient { block, have, need } => {
+            format!("{} {}/{}", names::block(block, language), have, need)
+        }
+        // The tool is named and the count is not, because any rung of its
+        // ladder will do: "1/1 bronze chisel" to a player who could knap a
+        // flint one would send them to the wrong age entirely.
+        Shortfall::Tool(block) => {
+            format!("{} {}", language.text(Msg::RecipeNeedTool), names::block(block, language))
+        }
+        Shortfall::NothingToWork(_) => language.text(Msg::RecipeNothingToWork).to_string(),
+        Shortfall::Station(station) => language.text(station_msg(station)).to_string(),
+        Shortfall::NoRoom => language.text(Msg::NoRoom).to_string(),
+    }
+}
+
+/// Where a row is done, as a sentence.
+fn station_msg(station: Station) -> Msg {
+    match station {
+        Station::Hands => Msg::RecipeByHand,
+        Station::Heat => Msg::RecipeAtFire,
+        Station::Forge => Msg::RecipeAtKiln,
+        Station::Bloomery => Msg::RecipeAtBloomery,
+        Station::Bench => Msg::RecipeAtBench,
+        Station::Mason => Msg::RecipeAtMason,
+        Station::Wheel => Msg::RecipeAtWheel,
+        Station::Leather => Msg::RecipeAtLeatherBench,
     }
 }
 
@@ -376,10 +421,12 @@ fn tint(block: BlockId, lead: bool) -> [f32; 4] {
 }
 
 /// The right-hand pane: one recipe, read out in full.
+#[allow(clippy::too_many_arguments)] // a page, its pictures, a pack, the knowledge, a row, a place, a language
 fn read_out(
     p: &mut Painter,
     layers: &FaceLayers,
     inventory: &Inventory,
+    discovered: &Discovered,
     recipe: &Recipe,
     knowledge: Knowledge,
     pane: Rect,
@@ -415,6 +462,23 @@ fn read_out(
         *top -= 0.055;
     };
 
+    // Everything standing between this pack and this row, worked out once:
+    // the list below is coloured by it and the section further down names
+    // what a list of ingredients cannot say.
+    //
+    // Asked of a player standing at every fire at once, because the book is
+    // read with empty hands in a field: a book that opened with "you are
+    // not at a kiln" for every metal row would be saying what the WHERE
+    // line two inches below already says.
+    let short: Vec<Shortfall> = if missing.is_some() {
+        Vec::new()
+    } else {
+        primitive_shared::crafting::shortfall(inventory, recipe, EVERYWHERE)
+            .into_iter()
+            .filter(|s| !matches!(s, Shortfall::Station(_)))
+            .collect()
+    };
+
     heading(p, Msg::RecipeMadeFrom, &mut top);
     for &(block, need) in recipe.inputs {
         let icon = Rect::new(left, top - line + 0.012, left + line - 0.012, top);
@@ -424,7 +488,17 @@ fn read_out(
             p.text(language.text(Msg::RecipeNotFound), icon.x1 + 0.025, top - 0.018, 0.9, widgets::TEXT_DIM);
         } else {
             textured(p, icon, icon_layer(layers, block), tint(block, false));
-            let have = inventory.count(block);
+            // **A tool counts at any rung of its ladder.** Counted by the
+            // id in the row, a player who had replaced their flint chisel
+            // with a bronze one read "flint chisel 0/1" in red and was
+            // being told to go back to the stone age. `shortfall` asks the
+            // question the craft path asks (`tool_slot`), so the two agree.
+            let is_the_tool = primitive_shared::crafting::used_tool(recipe) == Some(block);
+            let have = if is_the_tool {
+                if short.contains(&Shortfall::Tool(block)) { 0 } else { need }
+            } else {
+                inventory.count(block)
+            };
             let tally = format!("{have}/{need}");
             let tally_width = widgets::measure(&tally, 0.9);
             p.text(
@@ -441,15 +515,12 @@ fn read_out(
     top -= 0.02;
 
     heading(p, Msg::RecipeWhere, &mut top);
-    let (station_block, station_text) = match recipe.station {
-        Station::Hands => (None, Msg::RecipeByHand),
-        Station::Heat => (Some(BLOCK_CAMPFIRE), Msg::RecipeAtFire),
-        Station::Forge => (Some(BLOCK_KILN), Msg::RecipeAtKiln),
-        Station::Bloomery => (Some(BLOCK_BLOOMERY), Msg::RecipeAtBloomery),
-        Station::Bench => (recipe.station.workshop_block(), Msg::RecipeAtBench),
-        Station::Mason => (recipe.station.workshop_block(), Msg::RecipeAtMason),
-        Station::Wheel => (recipe.station.workshop_block(), Msg::RecipeAtWheel),
-        Station::Leather => (recipe.station.workshop_block(), Msg::RecipeAtLeatherBench),
+    let station_block = match recipe.station {
+        Station::Hands => None,
+        Station::Heat => Some(BLOCK_CAMPFIRE),
+        Station::Forge => Some(BLOCK_KILN),
+        Station::Bloomery => Some(BLOCK_BLOOMERY),
+        Station::Bench | Station::Mason | Station::Wheel | Station::Leather => recipe.station.workshop_block(),
     };
     let mut text_left = left;
     if let Some(block) = station_block {
@@ -457,8 +528,47 @@ fn read_out(
         textured(p, icon, icon_layer(layers, block), tint(block, false));
         text_left = icon.x1 + 0.025;
     }
-    p.text(&widgets::fit(language.text(station_text), 0.9, pane.x1 - 0.04 - text_left), text_left, top - 0.018, 0.9, widgets::TEXT);
+    p.text(&widgets::fit(language.text(station_msg(recipe.station)), 0.9, pane.x1 - 0.04 - text_left), text_left, top - 0.018, 0.9, widgets::TEXT);
     top -= line + 0.02;
+
+    // **How hot, said in the colour a smith reads.** "In a lit kiln" is
+    // where to stand and not how far to push the fire, and a player whose
+    // kiln is at a dark red and whose ore wants a white heat was being told
+    // nothing at all -- they could see the row, see the kiln, load it and
+    // watch nothing happen. The word is `hearth::Glow`'s, for the reason
+    // the note above `Msg::GlowCold` gives: the font has no degree sign,
+    // and a colour is what a fire actually shows you.
+    if let Some(degrees) = primitive_shared::hearth::needs_degrees(recipe) {
+        if recipe.station.is_hearth() && top - 0.05 > pane.y0 {
+            let glow = primitive_shared::hearth::Glow::of(degrees);
+            let text = format!(
+                "{} {}",
+                language.text(Msg::RecipeHeat),
+                language.text(crate::ui::chest_screen::glow_msg(glow)),
+            );
+            p.text(&widgets::fit(&text, 0.9, room), left, top, 0.9, widgets::TEXT_DIM);
+            top -= 0.06;
+        }
+    }
+
+    // **What a list of ingredients cannot say.** The counts are already
+    // above, in red, where they belong; what has nowhere else to go is the
+    // tool (which any rung of its ladder satisfies, so it has no count),
+    // the hone with nothing blunt left to hone, and the pack with no room.
+    // A row refused for want of a tool has no missing *ingredient* at all,
+    // and used to reach the player as the single word "no".
+    let rest: Vec<&Shortfall> = short.iter().filter(|s| !matches!(s, Shortfall::Ingredient { .. })).collect();
+    if !rest.is_empty() && top - line > pane.y0 {
+        heading(p, Msg::RecipeMissing, &mut top);
+        for item in rest {
+            if top - 0.05 < pane.y0 {
+                break;
+            }
+            p.text(&widgets::fit(&shortfall_text(*item, language), 0.9, room), left, top, 0.9, BAD);
+            top -= 0.05;
+        }
+        top -= 0.02;
+    }
 
     if !recipe.returns.is_empty() && top - line > pane.y0 {
         heading(p, Msg::RecipeKept, &mut top);
@@ -476,8 +586,55 @@ fn read_out(
     if recipe.failure > 0.0 && top - 0.05 > pane.y0 {
         let text = format!("{} ({}%)", language.text(Msg::RecipeMayFail), (recipe.failure * 100.0).round() as u32);
         p.text(&widgets::fit(&text, 0.85, room), left, top, 0.85, BAD);
+        top -= 0.06;
+    }
+
+    // **The book read backwards.** A player holding their first flint is
+    // not looking up a recipe called flint -- there is none -- and until
+    // this line the only way to learn that flint is a knife, a spear and a
+    // striker was to read four hundred rows looking for one. See
+    // `crafting::uses`.
+    //
+    // Only rows this player would be shown anyway (`Knowledge::Hidden` is
+    // skipped), for the reason the whole book exists: knowing what a thing
+    // is for is knowledge, and printing the iron age on the first evening
+    // turns the ladder into a shopping list.
+    if top - 0.05 <= pane.y0 {
+        return;
+    }
+    heading(p, Msg::RecipeUsedFor, &mut top);
+    let mut named = 0;
+    for (_, into) in primitive_shared::crafting::uses(recipe.output.0) {
+        if top - 0.05 < pane.y0 {
+            break;
+        }
+        if matches!(discovered.of(into), Knowledge::Hidden) {
+            continue;
+        }
+        let icon = Rect::new(left, top - 0.05, left + 0.044, top - 0.006);
+        textured(p, icon, icon_layer(layers, into.output.0), tint(into.output.0, false));
+        p.text(
+            &widgets::fit(&crate::ui::names::recipe(into.name, language), 0.85, room - 0.07),
+            icon.x1 + 0.02,
+            top,
+            0.85,
+            widgets::TEXT,
+        );
+        top -= 0.055;
+        named += 1;
+    }
+    if named == 0 {
+        p.text(&widgets::fit(language.text(Msg::RecipeUsedForNothing), 0.85, room), left, top, 0.85, widgets::TEXT_DIM);
     }
 }
+
+/// A player standing at every hearth and every workshop at once.
+///
+/// What the book's "still missing" list is read against: the page is read
+/// in a field, and telling somebody planning tomorrow that they are not
+/// standing at a kiln is telling them what the WHERE line above already
+/// says. See `read_out`.
+const EVERYWHERE: Heat = Heat { fire: true, kiln: true, bloomery: true, workshops: 0b1111 };
 
 #[cfg(test)]
 mod tests {
@@ -601,6 +758,54 @@ mod tests {
         let rect = row_rect(0, body);
         book.click((rect.centre_x(), rect.centre_y()), &hands, body);
         assert_eq!(book.selected, entries(&hands, Filter::All, "").first().map(|e| e.index));
+    }
+
+    /// **A refusal is never a blank line**, in any language, for any row.
+    /// The point of naming what is missing is lost the moment one of the
+    /// answers comes out empty, and the one that used to was the worst of
+    /// them: a row short of a *tool* has no missing ingredient at all and
+    /// the pack's list answered it with the word "no".
+    #[test]
+    fn every_way_a_recipe_can_be_refused_says_something_in_every_language() {
+        let empty = Inventory::new();
+        for &language in Language::ALL {
+            for recipe in RECIPES {
+                let short = primitive_shared::crafting::shortfall(&empty, recipe, primitive_shared::crafting::Heat::NONE);
+                assert!(!short.is_empty(), "{} refuses silently", recipe.name);
+                for item in short {
+                    let said = shortfall_text(item, language);
+                    assert!(!said.trim().is_empty(), "{} said nothing about {item:?} in {language:?}", recipe.name);
+                }
+            }
+        }
+    }
+
+    /// The detail pane, drawn for the one player it was written for: hands
+    /// that have held everything and a pack that holds nothing, so every
+    /// section is on the page at once -- what it takes, where, how hot,
+    /// what is missing, and what the thing is then good for.
+    #[test]
+    fn a_recipe_a_player_cannot_make_is_still_read_out_in_full() {
+        let everything = Discovered::from_kinds(RECIPES.iter().flat_map(|r| r.inputs.iter().map(|&(b, _)| b)));
+        let smelt = index_making(BLOCK_COPPER_INGOT);
+        let book = RecipeBook { selected: Some(smelt), ..Default::default() };
+        for aspect in [1.0, 16.0 / 9.0, 2712.0 / 1220.0] {
+            let mut p = Painter::onto_themed(
+                crate::engine::texture::FontAtlas::for_test(),
+                Vec::new(),
+                widgets::Theme::DARK,
+            );
+            book.paint(
+                &mut p,
+                &FaceLayers::empty_for_test(),
+                &Inventory::new(),
+                &everything,
+                body(aspect),
+                None,
+                Language::Russian,
+            );
+            assert!(!p.into_vertices().is_empty(), "the book drew nothing at aspect {aspect}");
+        }
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub mod ime;
 pub mod input;
 pub mod inventory_screen;
 pub mod journal;
+pub mod ladder_screen;
 pub mod lang;
 pub mod mannequin;
 pub mod keybinds;

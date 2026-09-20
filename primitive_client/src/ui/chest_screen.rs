@@ -2425,7 +2425,7 @@ fn heat_word_top() -> f32 {
 }
 
 /// The word for a heat colour.
-fn glow_msg(glow: primitive_shared::hearth::Glow) -> Msg {
+pub(crate) fn glow_msg(glow: primitive_shared::hearth::Glow) -> Msg {
     use primitive_shared::hearth::Glow;
     match glow {
         Glow::Cold => Msg::GlowCold,

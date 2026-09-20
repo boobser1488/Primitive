@@ -377,6 +377,22 @@ fn ui_snapshot() {
         ));
         write(&format!("{out}/hud.png"), &vertices, font);
 
+        // ...and the same HUD with the first two minutes' line over the
+        // belt (`hud::first_step_line`), in Russian, which is the longest
+        // of the three wordings. **The clearance is the whole point of the
+        // picture**: the line sits between the bar and the gauges of the
+        // body, and a plate that overlapped either would be exactly the
+        // notice's old mistake one row down.
+        {
+            let mut p = crate::ui::widgets::Painter::onto(font, vertices.clone());
+            crate::ui::hud::first_step_line(
+                &mut p,
+                Language::Russian.text(crate::ui::ladder_screen::first_step_msg(
+                    primitive_shared::ladder::FirstStep::Flake,
+                )),
+            );
+            write(&format!("{out}/hud_first_step.png"), &p.into_vertices(), font);
+        }
     }
 
     // The death notice, settled, grown the way the frame loop grows it.
@@ -1083,6 +1099,25 @@ fn nav_snapshot() {
         write(&format!("{out}/nav_compass_and_sky{lang}{tag}.png"), &vertices, font);
     }
 
+    // **The first two minutes**, all three of them on one sheet: the line
+    // that sits over the belt telling a player who has just woken up what
+    // to do next (`hud::first_step_line`). One picture a step, because the
+    // thing to look at is the *length* -- the Russian and Polish wordings
+    // are half as long again as the English, and a line wider than the belt
+    // would be a line running out over the world on a phone.
+    for step in primitive_shared::ladder::FIRST_STEPS {
+        for (language, lang) in [(Language::English, ""), (Language::Russian, "_ru"), (Language::Polish, "_pl")] {
+            let mut p = Painter::onto(font, Vec::new());
+            crate::ui::hud::first_step_line(
+                &mut p,
+                language.text(crate::ui::ladder_screen::first_step_msg(step)),
+            );
+            let mut vertices = p.into_vertices();
+            scale_about(&mut vertices, anchor::BOTTOM(aspect), ui_scale());
+            write(&format!("{out}/nav_first_step_{step:?}{lang}{tag}.png").to_lowercase(), &vertices, font);
+        }
+    }
+
     // The chat box asking a cairn's name, lifted over the keyboard the way
     // the frame lifts it.
     {
@@ -1158,13 +1193,14 @@ fn journal_snapshot() {
         spawn: Some((8, 70, 8)),
         bags: vec![(-96, 64, 52), (400, 64, -300)],
     };
-    journal.discovered = Discovered::from_kinds(
+    let knowledge = Discovered::from_kinds(
         pack.slots()
             .iter()
             .flatten()
             .map(|stack| stack.block)
             .chain([BLOCK_COPPER_INGOT, BLOCK_NATIVE_COPPER, BLOCK_VESSEL, BLOCK_MOULD]),
     );
+    journal.set_discovered(knowledge.clone());
     let player = PlayerMark { x: 30.0, z: -12.0, yaw: 0.6 };
 
     journal.toggle(Tab::Map);
@@ -1202,6 +1238,28 @@ fn journal_snapshot() {
         write(&format!("{out}/journal_map_pinched{touch}.png"), &vertices, font);
     }
 
+    // The ladder page, at both ends of the ladder: the copper-age player
+    // above, who is being told that bronze wants tin, and a player who has
+    // just woken up, whose page is seven rows of dim ink with the bottom
+    // one lit. The second is the one worth looking at -- a page that reads
+    // as "you have done nothing" rather than as "here is the way up" would
+    // be the opposite of what it is for.
+    {
+        journal.toggle(Tab::Ladder);
+        for (language, tag) in [(Language::English, ""), (Language::Russian, "_ru")] {
+            let mut vertices = Vec::new();
+            journal.build_into(font, &layers, &pack, player, aspect, language, &mut vertices);
+            write(&format!("{out}/journal_ladder{tag}{touch}.png"), &vertices, font);
+        }
+        journal.set_discovered(Discovered::new());
+        for (language, tag) in [(Language::English, ""), (Language::Russian, "_ru")] {
+            let mut vertices = Vec::new();
+            journal.build_into(font, &layers, &Inventory::new(), player, aspect, language, &mut vertices);
+            write(&format!("{out}/journal_ladder_beginner{tag}{touch}.png"), &vertices, font);
+        }
+        journal.set_discovered(knowledge.clone());
+    }
+
     journal.toggle(Tab::Recipes);
     let row = crate::ui::recipe_book::row_rect(3, body_rect(aspect));
     journal.set_cursor(Some((row.centre_x(), row.centre_y())), aspect, player);
@@ -1210,6 +1268,25 @@ fn journal_snapshot() {
         let mut vertices = Vec::new();
         journal.build_into(font, &layers, &pack, player, aspect, language, &mut vertices);
         write(&format!("{out}/journal_recipes{tag}{touch}.png"), &vertices, font);
+    }
+
+    // ...and a row this pack *cannot* make, which is the half of the pane
+    // that was added for the player who could not see the ladder: how hot
+    // the fire has to be, and everything still missing, by name. A hand row
+    // with everything in the pack shows neither.
+    {
+        let smelting = crate::ui::recipe_book::entries(&knowledge, Default::default(), "")
+            .iter()
+            .position(|e| primitive_shared::crafting::RECIPES[e.index].station == primitive_shared::crafting::Station::Forge)
+            .unwrap_or(0);
+        let row = crate::ui::recipe_book::row_rect(smelting, body_rect(aspect));
+        journal.set_cursor(Some((row.centre_x(), row.centre_y())), aspect, player);
+        journal.press(aspect, player);
+        for (language, tag) in [(Language::English, ""), (Language::Russian, "_ru")] {
+            let mut vertices = Vec::new();
+            journal.build_into(font, &layers, &Inventory::new(), player, aspect, language, &mut vertices);
+            write(&format!("{out}/journal_recipes_refused{tag}{touch}.png"), &vertices, font);
+        }
     }
 
     // The give menu, in the three states worth looking at.
