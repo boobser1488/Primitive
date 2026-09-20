@@ -289,6 +289,17 @@ pub enum Msg {
     Off,
     Apply,
     Vsync,
+    /// What share of the screen the game is drawn at. See
+    /// `ClientSettings::resolution_scale`.
+    ///
+    /// Named RESOLUTION rather than "resolution scale": a player who
+    /// has ever changed this in another game changed a row called
+    /// resolution, and the row shows a percentage, which says on its
+    /// own that it is a share of something.
+    Resolution,
+    /// The step of a row where the game decides for itself. Only the
+    /// resolution row has one so far.
+    Auto,
     AmbientOcclusion,
     Anisotropy,
     /// How finely the sky is drawn. See `ClientSettings::sky_scale`.
@@ -1082,6 +1093,8 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::Off,          en: "OFF",          simple: "NO",         ru: "ВЫКЛ", pl: "WYŁ" },
     Line { msg: Msg::Apply,        en: "APPLY",        simple: "USE THESE",  ru: "ПРИМЕНИТЬ", pl: "ZASTOSUJ" },
     Line { msg: Msg::Vsync,        en: "VSYNC",        simple: "SMOOTH FRAMES", ru: "ВЕРТ. СИНХРОНИЗАЦИЯ", pl: "SYNCHRONIZACJA PIONOWA" },
+    Line { msg: Msg::Resolution,   en: "RESOLUTION",   simple: "HOW MANY PIXELS", ru: "РАЗРЕШЕНИЕ", pl: "ROZDZIELCZOŚĆ" },
+    Line { msg: Msg::Auto,         en: "AUTO",         simple: "GAME DECIDES", ru: "АВТО", pl: "AUTO" },
     Line { msg: Msg::AmbientOcclusion, en: "AMBIENT OCCLUSION", simple: "SOFT CORNER SHADOWS", ru: "ЗАТЕНЕНИЕ УГЛОВ", pl: "OKLUZJA OTOCZENIA" },
     Line { msg: Msg::Anisotropy,   en: "ANISOTROPIC FILTERING", simple: "SHARPER GROUND TEXTURES", ru: "АНИЗОТРОПНАЯ ФИЛЬТРАЦИЯ", pl: "FILTROWANIE ANIZOTROPOWE" },
     Line { msg: Msg::SkyQuality,   en: "SKY QUALITY",  simple: "HOW SHARP THE SKY IS", ru: "КАЧЕСТВО НЕБА", pl: "JAKOŚĆ NIEBA" },

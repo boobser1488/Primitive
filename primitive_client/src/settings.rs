@@ -117,6 +117,8 @@ pub struct ClientSettings {
     /// magnification stays nearest-neighbour, so a block you are
     /// standing next to keeps its hard texel edges. What it cures is the
     /// crawl on faces seen edge-on at a distance.
+    ///
+    /// **Four on a desktop, off on a phone** -- see `default_anisotropy`.
     pub anisotropy: u16,
     /// Multisampling of the world, as a sample count: 1 turns it off;
     /// 2, 4 and 8 are the sizes a GPU offers.
@@ -147,6 +149,51 @@ pub struct ClientSettings {
     /// the count in force rather than the one asked for.
     #[serde(default = "default_msaa")]
     pub msaa: u32,
+    /// What share of the window's pixels the game is actually drawn at,
+    /// before the display stretches the result back over the window.
+    /// 1.0 draws every pixel the screen has; `None` lets the game pick
+    /// from the size of the screen it woke up on.
+    ///
+    /// **This is the one lever that scales the whole frame**, and the
+    /// measurement says the whole frame is worth scaling. The same
+    /// scene, the same 59k triangles and the same window on a GTX
+    /// 1050 Ti with the settings a phone opens on (MSAA off, six
+    /// chunks), at 1600x900:
+    ///
+    /// ```text
+    ///                     gpu     solid  cutout  sky    water   draws
+    /// 100%                0.672   0.264  0.279   0.063  0.056   9
+    /// 70% (0.7 Mpx)       0.429   0.171  0.181   0.038  0.034   10
+    /// 70% + no anisotropy 0.413   0.167  0.167   0.039  0.034   10
+    /// ```
+    ///
+    /// Forty-nine per cent of the pixels for thirty-six per cent less
+    /// GPU time, and every pass fell with the area rather than with the
+    /// geometry -- the sky and the water too, which is how you can tell
+    /// it is the pixels and not a scene that happened to be different.
+    /// The tenth draw call is the blit that puts the frame back on the
+    /// window; it measured 0.022 ms. That is a *desktop* card at
+    /// 1.4 Mpx; the phone this was written for has 3.3 Mpx and a
+    /// tile-based GPU that pays for every pixel twice, once shading it
+    /// and once writing it out.
+    ///
+    /// **The frame is drawn into a texture and copied, rather than the
+    /// swapchain being made smaller.** The second is the version that
+    /// costs nothing in theory -- no extra pass, the compositor scales
+    /// something anyway -- and it was written first and measured: a
+    /// 1120x630 swapchain in a 1600x900 window ran at **102 fps against
+    /// 921**, three times worse than drawing every pixel. See
+    /// `renderer::surface_config` for what that looked like and why.
+    /// What the copy also buys, if it is ever wanted, is an interface
+    /// drawn at full resolution over a scaled world; it does not do
+    /// that today.
+    ///
+    /// **Not a share of the window on a desktop**: `default_resolution_scale`
+    /// hands a desktop 1.0 and only a touch platform the automatic
+    /// choice, because a monitor's pixels were chosen by the person
+    /// looking at them and a phone's were not.
+    #[serde(default = "default_resolution_scale")]
+    pub resolution_scale: Option<f32>,
     /// How much smaller than the frame the sky is drawn, before being
     /// stretched back over it. 1 draws it at full size.
     ///
@@ -1104,6 +1151,36 @@ fn nearest_stop(stops: &[i32], value: i32) -> i32 {
 
 /// Four on a desktop, off on a phone.
 ///
+/// It is not free, which is what the old comment on the field
+/// ("free on anything with a discrete GPU") had wrong. The same scene
+/// on a GTX 1050 Ti at 1600x900 with MSAA already off, four samples
+/// against one:
+///
+/// ```text
+///            gpu     solid  cutout   fps
+/// aniso 4    0.692   0.264  0.279    845
+/// aniso 1    0.615   0.240  0.233    920
+/// ```
+///
+/// Eleven per cent of the frame's GPU time on a card with bandwidth to
+/// spare, and the extra fetches it pays for come out of exactly the
+/// budget a tile-based mobile GPU has least of. What it buys is the
+/// crawl on distant edge-on faces -- on a six-inch screen at 446 ppi,
+/// where a distant face is a couple of pixels tall and the player is
+/// walking, that crawl is close to invisible.
+///
+/// A phone that can afford it turns the row back on; this is the
+/// default, not a ceiling.
+fn default_anisotropy() -> u16 {
+    if cfg!(target_os = "android") {
+        1
+    } else {
+        4
+    }
+}
+
+/// Four on a desktop, off on a phone.
+///
 /// A discrete card resolves four samples in a fraction of a
 /// millisecond; on a phone every sample is shaded and stored by a
 /// GPU that was already the frame's bottleneck, into a framebuffer
@@ -1118,6 +1195,78 @@ fn default_msaa() -> u32 {
     } else {
         4
     }
+}
+
+/// Full size on a desktop, and the game's own choice on a phone.
+///
+/// `None` means "look at the screen and decide" -- see
+/// `auto_resolution_scale`. A desktop gets `Some(1.0)` instead, and that
+/// asymmetry is the whole point: a monitor's resolution was chosen by
+/// the person sitting in front of it, and quietly drawing their game at
+/// four fifths of it would be answering a question they did not ask. A
+/// phone's resolution was chosen by whoever priced the panel.
+///
+/// It is a `serde` default as well as the `Default`, so a settings file
+/// written before this row existed takes the same road: a desktop file
+/// keeps its full resolution and a phone file gets the automatic choice
+/// the next time the game opens.
+fn default_resolution_scale() -> Option<f32> {
+    if cfg!(target_os = "android") {
+        None
+    } else {
+        Some(1.0)
+    }
+}
+
+/// How many pixels the automatic choice aims to draw.
+///
+/// 1.6 million -- comfortably more than the 1280x720 this game was
+/// developed against, and a little under half of the 3.3 million on the
+/// phone it was tested on. The measurement behind the number is in
+/// `ClientSettings::resolution_scale`: cost follows area, so aiming at
+/// an area is aiming at a frame time.
+const AUTO_RESOLUTION_PIXELS: f32 = 1_600_000.0;
+
+/// The stops the RESOLUTION row walks, past the automatic one.
+///
+/// Sixths of nothing and thirds of nothing: twentieths, because that is
+/// what `auto_resolution_scale` rounds to and a player stepping away
+/// from the automatic choice should land on the step beside it rather
+/// than somewhere between two.
+pub const RESOLUTION_SCALES: [f32; 9] = [0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0];
+
+/// The share of a screen's pixels worth drawing, for a screen of
+/// `pixels` pixels.
+///
+/// **Screen size is the only thing there is to go on, and it is
+/// honestly a weak signal**: a flagship and a budget phone can carry
+/// the same panel and be three times apart in fill rate. The
+/// alternatives were considered and rejected. A table of GPU names is
+/// the list `GraphicsState::new` deliberately does not keep, and it is
+/// wrong for every device released after it was written. Measuring the
+/// first few seconds and adjusting -- proper dynamic resolution -- is
+/// the right answer and a much larger one: it needs a resize that does
+/// not hitch, a rule that does not oscillate, and a device to tune the
+/// rule on, and this was written without a device on the desk.
+///
+/// So: a starting point, never below six tenths (past which the
+/// interface's small text starts to break up), never above 1.0, and in
+/// twentieths so that the number a player sees in the row is one of the
+/// steps the row can walk back to. A 720p phone gets 1.0 and never
+/// knows this function exists.
+pub fn auto_resolution_scale(pixels: u32) -> f32 {
+    if pixels == 0 {
+        return 1.0;
+    }
+    let exact = (AUTO_RESOLUTION_PIXELS / pixels as f32).sqrt();
+    // To the nearest twentieth rather than down to it. Rounding down
+    // looks like the safe direction and is not: the phone this was
+    // written for lands on 0.695, and a floor would take it to 0.65 --
+    // a fifth of the pixels below what the target asked for, paid in
+    // blur, to satisfy a number that is itself a judgement call. The
+    // target is a target, not a ceiling.
+    let stepped = (exact * 20.0).round() / 20.0;
+    stepped.clamp(0.6, 1.0)
 }
 
 /// Seven tenths of the render distance: near enough to be worth having.
@@ -1206,11 +1355,14 @@ impl Default for ClientSettings {
             ambient_light: 0.02,
             block_light_boost: 1.0,
             ambient_occlusion: 0.45,
-            // On by default at a modest level: the shimmer it removes is
-            // most of what makes distant terrain look noisy, and 4x is
-            // free on anything with a discrete GPU.
-            anisotropy: 4,
+            // On by default at a modest level on a desktop: the shimmer
+            // it removes is most of what makes distant terrain look
+            // noisy. It is *not* free -- it measured eleven per cent of
+            // the frame's GPU time on a 1050 Ti, which is why the phone
+            // does not pay it. See `default_anisotropy`.
+            anisotropy: default_anisotropy(),
             msaa: default_msaa(),
+            resolution_scale: default_resolution_scale(),
             sky_scale: 3,
             // The default differs by platform, and `Default` is the
             // right place for it: it is the base both for a fresh
@@ -1487,6 +1639,18 @@ impl ClientSettings {
         } else {
             default_shadow_distance()
         };
+        // A hand-edited share, so NaN as well as the range: this one
+        // multiplies a window size and the product configures a
+        // swapchain, and a swapchain asked for NaN pixels is a
+        // validation panic before the first frame rather than a bad
+        // picture. `None` is the automatic choice and stays itself.
+        self.resolution_scale = self.resolution_scale.map(|scale| {
+            if scale.is_finite() {
+                scale.clamp(RESOLUTION_SCALES[0], 1.0)
+            } else {
+                1.0
+            }
+        });
         self.fov_degrees = self.fov_degrees.clamp(30.0, 120.0);
         self.mouse_sensitivity = self.mouse_sensitivity.clamp(0.0001, 0.05);
         // A hand-edited amplitude, so NaN as well as the range: a NaN
@@ -2189,6 +2353,80 @@ mod file_tests {
         let parsed = ClientSettings::parse("server_addr = \"127.0.0.1:7878\"\n", SETTINGS_PATH);
         assert_eq!(parsed.msaa, default_msaa());
         assert_eq!(parsed.msaa, if cfg!(target_os = "android") { 1 } else { 4 });
+    }
+
+    #[test]
+    fn a_phone_with_three_million_pixels_opens_drawing_about_half_of_them() {
+        // The device this was measured against: 1220x2712, 3.3 Mpx.
+        // The whole claim of the automatic choice is that a screen
+        // nobody chose does not get to decide the frame rate.
+        let scale = auto_resolution_scale(1220 * 2712);
+        assert_eq!(scale, 0.7, "a 3.3 Mpx phone opened at {scale}");
+        let drawn = (1220.0 * scale).floor() * (2712.0 * scale).floor();
+        assert!(
+            drawn / (1220.0 * 2712.0) < 0.55,
+            "drawing {drawn} of 3.3 million is not half of them",
+        );
+    }
+
+    #[test]
+    fn a_screen_no_bigger_than_the_game_was_developed_on_is_drawn_whole() {
+        // 720p and 800p phones, and the 1280x720 this game's frame
+        // times were all measured at. Scaling one of these would be
+        // paying for a phone that does not need it in blur that
+        // everybody sees.
+        for pixels in [1280 * 720, 1280 * 800, 1600 * 900] {
+            assert_eq!(auto_resolution_scale(pixels), 1.0, "at {pixels} pixels");
+        }
+        // A 1080p screen is a fifth over the target and is nudged by
+        // about that much -- not left alone, and nowhere near the
+        // bottom of the row either.
+        assert_eq!(auto_resolution_scale(1920 * 1080), 0.9);
+    }
+
+    #[test]
+    fn the_automatic_choice_never_goes_below_the_lowest_step_the_row_can_show() {
+        // A 4K phone, a tablet, and the absurd: the row is what a
+        // player uses to undo this, and a value it cannot display is a
+        // value they cannot step away from.
+        for pixels in [3840 * 2160, 2960 * 1440, u32::MAX] {
+            let scale = auto_resolution_scale(pixels);
+            assert!(
+                RESOLUTION_SCALES.contains(&scale),
+                "{pixels} pixels chose {scale}, which is not a step on the row",
+            );
+        }
+        // And a window of nothing at all, which Android reports
+        // mid-rotation, is not a division by zero.
+        assert_eq!(auto_resolution_scale(0), 1.0);
+    }
+
+    #[test]
+    fn a_settings_file_from_before_the_resolution_row_leaves_a_desktop_at_full_size() {
+        // The row is new; every settings file in the world lacks it.
+        // On a desktop the missing line has to mean "all of them" --
+        // a player who upgrades must not find their monitor being
+        // second-guessed.
+        let parsed = ClientSettings::parse("server_addr = \"127.0.0.1:7878\"\n", SETTINGS_PATH);
+        assert_eq!(parsed.resolution_scale, default_resolution_scale());
+        #[cfg(not(target_os = "android"))]
+        assert_eq!(parsed.resolution_scale, Some(1.0));
+        #[cfg(target_os = "android")]
+        assert_eq!(parsed.resolution_scale, None, "a phone decides for itself");
+    }
+
+    #[test]
+    fn a_hand_edited_resolution_that_is_not_a_number_does_not_reach_the_swapchain() {
+        // This one multiplies a window size and the product configures
+        // a swapchain: NaN pixels is a validation panic before the
+        // first frame, and 5000% is a phone trying to allocate a
+        // framebuffer the size of a wall.
+        for (asked, got) in [("nan", 1.0), ("0.0", 0.6), ("-3.0", 0.6), ("50.0", 1.0), ("0.8", 0.8)] {
+            let mut parsed =
+                ClientSettings::parse(&format!("resolution_scale = {asked}\n"), SETTINGS_PATH);
+            parsed.sanitize();
+            assert_eq!(parsed.resolution_scale, Some(got), "resolution_scale = {asked}");
+        }
     }
 
     #[test]
