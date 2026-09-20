@@ -1184,9 +1184,23 @@ pub const STRINGS: &[Line] = &[
     // capitals: this is a page of readings to be read down, and a column
     // of shouted words is harder to read than a column of words.
     Line { msg: Msg::VitalHealth,  en: "health",       simple: "how hurt",   ru: "здоровье", pl: "zdrowie" },
-    Line { msg: Msg::VitalHunger,  en: "food",         simple: "how full",   ru: "сытость", pl: "sytość" },
-    Line { msg: Msg::VitalThirst,  en: "water",        simple: "how thirsty", ru: "питьё", pl: "woda" },
-    Line { msg: Msg::VitalStamina, en: "breath",       simple: "puff left",  ru: "дыхание", pl: "oddech" },
+    Line { msg: Msg::VitalHunger,  en: "food",         simple: "how full",   ru: "еда", pl: "jedzenie" },
+    // **The same gauge is called the same thing here as it is beside
+    // the strip it belongs to** (`Msg::Gauge*`, printed on the pause
+    // screen's key). It was not, and the stamina row is why this rule is
+    // written down: the key called it STAMINA / СИЛЫ / WYTRZYMAŁOŚĆ and
+    // this page called it "breath / дыхание / oddech" -- which is the
+    // word the key uses for the *air* gauge. A player reading "дыхание
+    // 50%" here and looking for it on the HUD would find the bubble.
+    // Water and food were a smaller version of the same drift, in
+    // Russian and Polish only.
+    //
+    // Tiredness is deliberately still the odd one out: the key names the
+    // strip REST because the strip fills as a player rests, and this row
+    // is the same number counted the other way up. Two names for two
+    // readings, which the percentage beside each of them settles.
+    Line { msg: Msg::VitalThirst,  en: "water",        simple: "how thirsty", ru: "вода", pl: "woda" },
+    Line { msg: Msg::VitalStamina, en: "stamina",      simple: "running",    ru: "силы", pl: "wytrzymałość" },
     Line { msg: Msg::VitalTiredness, en: "tiredness",  simple: "how tired",  ru: "усталость", pl: "zmęczenie" },
     Line { msg: Msg::VitalWarmth,  en: "warmth",       simple: "how warm",   ru: "тепло", pl: "ciepło" },
     Line { msg: Msg::VitalWetness, en: "wetness",      simple: "how wet",    ru: "сырость", pl: "przemoczenie" },

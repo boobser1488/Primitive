@@ -31,6 +31,67 @@
 //! a few thousand triangles, drawn once per frame, on a screen that
 //! mostly isn't drawing a world. It buys us text with no font file to
 //! ship, no glyph atlas to pack and no dependency to add.
+//!
+//! # The seven rules this interface is held to
+//!
+//! Written down after a pass that rendered every screen at four window
+//! shapes in two languages and looked at the pictures. The player's own
+//! verdict on what was there was two words long, and every one of these
+//! rules names a specific thing in those pictures that earned it. They
+//! are here rather than in a document because a rule nobody trips over
+//! while editing is a rule that lasts one release.
+//!
+//! **1. Use the room.** A screen is drawn as large as the glass allows
+//! *before* anybody is asked to change a setting. This was the single
+//! worst thing in the audit: at 1280x720 the pack was a 710x310 postage
+//! stamp in the middle of an empty window, the hearth 400x510, and the
+//! anvil's job list 445x380 -- a quarter of the screen each, at the
+//! smallest legible size the font has, with the other three quarters
+//! carrying nothing. [`Layout::fit`] used to answer `requested`, which
+//! is 1.0 until a player finds INTERFACE SIZE; it now answers the room.
+//! The setting multiplies from there, so it is still live in both
+//! directions.
+//!
+//! **2. A panel is sized to what is in it, never to the worst case.**
+//! The anvil offers two jobs and drew a list eight rows tall, so the
+//! common case was a panel with a hole in it. A screen whose furniture
+//! is a function of its contents cannot have a hole.
+//!
+//! **3. One colour scale, and a meter owns its hue everywhere it is
+//! drawn.** The HUD had seven strips in four blues and three ambers --
+//! stamina, breath, water and rest were the same blue at a glance, and
+//! food, thirst-warning and warmth the same brown -- which is what
+//! turned the stack into a barcode. Worse, the health page of the pack
+//! drew the same seven gauges in a *fourth* language, green/yellow/pink
+//! by level, so nothing on one screen could be matched to anything on
+//! the other. See `hud::METER_INK`: one table, read by both.
+//!
+//! **4. One mark for one thing, and the mark shows the thing itself.**
+//! A heart is health on the HUD, in the legend and on the health page.
+//! A picture drawn twice is a picture that stops agreeing with itself.
+//!
+//! **5. One spacing scale.** Air between things comes from this file --
+//! [`BEVEL`], [`SHADOW_OFFSET`], the pads a screen derives from its own
+//! cell -- not from a number picked by eye at the call site. Two
+//! screens with different margins read as two programs.
+//!
+//! **6. One way out.** Escape, the key that opened it, or a tap beside
+//! the panel. No screen gets a close button of its own that the others
+//! do not have, because a control that exists on one screen and not the
+//! next is a control a player has to look for every time.
+//!
+//! **7. Anything that hit-tests is the exact inverse of what draws
+//! it.** Not a style note: the interface is authored in its own space
+//! and then multiplied, so a hit test written independently of the
+//! drawing is a panel that looks right and answers in the wrong place.
+//! Every rect here has one function that both halves call, and a test
+//! that says so.
+//!
+//! What is deliberately *not* a rule: prettiness that costs a reading.
+//! Nothing here is decorative. A bevel is there so a raised thing reads
+//! as pressable; a well is there so a figure over the world can be read
+//! at all (`hud::READOUT_WELL` measures 9.63:1 against 3.4:1 for the
+//! same glyphs over stone).
 
 use crate::engine::font::{text_width, CAP_HEIGHT, GLYPH_HEIGHT, GLYPH_SPACING, GLYPH_WIDTH};
 use crate::ui::hotbar::{HotbarVertex, UNTEXTURED};
@@ -766,6 +827,27 @@ pub fn tappable_when(desktop: f32, touch: bool) -> f32 {
 /// with the interface is a margin eating the room the interface wanted.
 const SCREEN_MARGIN: f32 = 0.06;
 
+/// How far past its authored size a fixed-shape screen grows on its own,
+/// before the player has asked for anything.
+///
+/// **Chosen against the pictures, not by taste.** At 1.6 the pack fills
+/// 1136x496 of a 1280x720 window -- the slot grid, the figure and the
+/// recipe column all legible at arm's length -- and the hearth, whose
+/// height is what runs out first, takes what is left of the glass
+/// (about 1.34) and stops. The cap matters most for the *small*
+/// screens: the death notice and the anvil's job list have room to
+/// triple, and a two-line notice drawn the height of a monitor is a
+/// billboard rather than an interface. Everything here is capped again
+/// by the glass in [`Layout::fit_wanted`], so this number can only ever
+/// make a screen smaller than the window, never larger.
+///
+/// Rejected: growing to a fixed *fraction* of the window. That reads
+/// well for the pack and badly for everything narrow -- a confirm
+/// dialogue stretched to 80% of a 22:9 phone is a sentence with a metre
+/// of air either side of it -- because the screens are not the same
+/// shape and a fraction has no idea which one it is looking at.
+const NATURAL_GROWTH: f32 = 1.6;
+
 /// What this window is, and therefore how to lay a screen out on it.
 ///
 /// ## The bug this replaced
@@ -905,8 +987,46 @@ impl Layout {
     /// is what fits, and never less than 1.0: a screen too big for the
     /// window at its authored size is clipped either way, and shrinking
     /// it would make it unreadable as well as cut off.
+    ///
+    /// **The authored size is a floor, not a target** -- rule 1 at the
+    /// top of this file, and the reason it is rule 1. This used to
+    /// answer `requested`, which is 1.0 until a player goes looking for
+    /// INTERFACE SIZE, so the default was *never grow*: at 1280x720 the
+    /// pack came out 710x310 pixels in the middle of an empty window and
+    /// the anvil's job list 445x380. The room was there the whole time
+    /// and nothing asked for it.
+    ///
+    /// So the room is taken first -- [`NATURAL_GROWTH`] of it, or as
+    /// much as there is -- and what the player asked for multiplies
+    /// *that*. The setting therefore still moves the interface at every
+    /// step (`the_interface_size_setting_actually_changes_the_interface`
+    /// is unchanged) and still cannot push a screen off the glass,
+    /// because both halves go through [`fit_wanted`](Self::fit_wanted).
     pub fn fit(&self, extent: (f32, f32)) -> f32 {
-        self.fit_wanted(self.requested, extent)
+        let natural = self.fit_wanted(NATURAL_GROWTH, extent);
+        self.fit_wanted(self.requested * natural, extent)
+    }
+
+    /// The largest a screen with these half-extents can ever be drawn at
+    /// on this window, whatever anybody asks for: the glass, less the
+    /// margin every screen keeps.
+    ///
+    /// **What the interface-size setting runs into, and the reason it
+    /// has to be askable.** Now that a screen takes the room before the
+    /// setting is consulted, a big screen on a small window is already
+    /// against this when the player first opens it, and no further
+    /// setting can move it. The tests that check the setting still does
+    /// something therefore have to be able to tell "this step did
+    /// nothing" from "this step did nothing *because there is no room
+    /// left*", and those are different bugs.
+    ///
+    /// `cfg(test)` for the reason [`desktop`](Self::desktop) is: nothing
+    /// the game draws needs to ask this, because [`fit`](Self::fit)
+    /// already applies it. Left in the build it is one dead-code warning
+    /// in a repository whose standard is that there are none.
+    #[cfg(test)]
+    pub fn ceiling(&self, extent: (f32, f32)) -> f32 {
+        self.fit_wanted(f32::INFINITY, extent)
     }
 
     /// As big as asked, capped by the glass.
@@ -925,8 +1045,18 @@ impl Layout {
     /// each direction: something growing from the middle runs out of
     /// screen at half the window, and something growing from a corner
     /// has the whole of it.
+    ///
+    /// **Without the natural growth [`fit`](Self::fit) now applies**, and
+    /// the difference is what a corner screen *is*. The only one is the
+    /// chat log, which is drawn over a world the player is still looking
+    /// at: it is a thing that appears beside the game rather than in
+    /// place of it, and a log that helped itself to a third of the glass
+    /// the moment somebody said hello would be covering the thing the
+    /// message is about. A screen that replaces the world should take
+    /// the room; one that sits beside it should take what it was asked
+    /// for and no more.
     pub fn fit_from_corner(&self, extent: (f32, f32)) -> f32 {
-        self.fit((extent.0 / 2.0, extent.1 / 2.0))
+        self.fit_wanted(self.requested, (extent.0 / 2.0, extent.1 / 2.0))
     }
 
     /// Where a click landed, in the space a screen of this extent was
@@ -2330,16 +2460,52 @@ mod tests {
         assert_eq!(desktop.content(), 1.0);
         assert_eq!(desktop.panel_half_width(1.15), 1.15);
         assert_eq!(desktop.finger(), 0.0, "a mouse is not a finger");
-        for extent in [(1.15f32, 0.95f32), (0.5, 0.4), (4.0, 4.0)] {
-            assert_eq!(desktop.fit(extent), 1.0, "{extent:?} was rescaled");
-        }
         // ...at every window shape, not only 16:9: a scale of one means
         // the interface it always had.
         for aspect in [1.0f32, 4.0 / 3.0, 16.0 / 9.0, 2712.0 / 1220.0] {
             let layout = Layout::for_screen(aspect, 1.0);
             assert_eq!(layout.at(0.105), 0.105);
-            assert_eq!(layout.fit((1.15, 0.95)), 1.0);
         }
+        // **`fit` is deliberately no longer on this list.** It asserted
+        // `fit(extent) == 1.0` for three extents and at four aspects,
+        // which is exactly the behaviour rule 1 at the top of this file
+        // was written to end: a screen that never grows unless a player
+        // finds a setting is a screen that is a postage stamp for
+        // everyone who does not. What survives of the guarantee is the
+        // half that was worth having -- a screen is never drawn
+        // *smaller* than it was authored -- and it is checked here
+        // rather than deleted.
+        for extent in [(1.15f32, 0.95f32), (0.5, 0.4), (4.0, 4.0)] {
+            assert!(desktop.fit(extent) >= 1.0, "{extent:?} was shrunk");
+        }
+        // The chat log is the one screen that still answers the old way,
+        // and for a stated reason -- see `fit_from_corner`.
+        assert_eq!(desktop.fit_from_corner((1.0, 0.8)), 1.0);
+    }
+
+    #[test]
+    fn a_screen_with_room_around_it_is_drawn_bigger_without_being_asked() {
+        // Rule 1. The three extents are measured off the real screens:
+        // the pack, the hearth and the anvil's job list, which between
+        // them are the widest, the tallest and the smallest thing the
+        // game centres on the glass. Every one of them was drawn at
+        // 1.0 -- a quarter of a 1280x720 window -- until this changed.
+        for (w, h) in [(1280.0f32, 720.0), (1920.0, 1080.0), (2712.0, 1220.0)] {
+            let layout = Layout::for_screen(w / h, 1.0);
+            for (extent, name) in
+                [((0.99f32, 0.43f32), "the pack"), ((0.56, 0.70), "the hearth"), ((0.35, 0.26), "a job list")]
+            {
+                let scale = layout.fit(extent);
+                assert!(
+                    scale > 1.2,
+                    "at {w}x{h} {name} still draws at {scale} with the setting untouched",
+                );
+            }
+        }
+        // ...and it is still the glass that stops it, not the cap: a
+        // window with no room gives none away.
+        let cramped = Layout::for_screen(1.0, 1.0);
+        assert_eq!(cramped.fit((1.2, 1.1)), 1.0, "a screen already past the glass was grown");
     }
 
     #[test]
@@ -2376,7 +2542,15 @@ mod tests {
                 let layout = Layout::for_screen(aspect, requested);
                 for extent in [(1.15f32, 0.95f32), (0.62, 0.50), (1.30, 0.72)] {
                     let scale = layout.fit(extent);
-                    assert!(scale <= requested + 1e-3, "asked for {requested}, got {scale}");
+                    // The ceiling moved with rule 1: a screen takes the
+                    // room first and the setting multiplies that, so the
+                    // most it can come to is `requested * NATURAL_GROWTH`
+                    // -- and the glass, checked below, is what actually
+                    // binds on every window in this list.
+                    assert!(
+                        scale <= requested * NATURAL_GROWTH + 1e-3,
+                        "asked for {requested}, got {scale}",
+                    );
                     assert!(scale >= 1.0, "shrank the interface to {scale}");
                     // A screen already too big for the window at its
                     // authored size -- the settings panel on a phone

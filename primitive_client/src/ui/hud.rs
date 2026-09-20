@@ -174,9 +174,15 @@ const BAR_EDGE: [f32; 4] = [0.55, 0.50, 0.42, 0.95];
 const SEGMENT_EMPTY: [f32; 4] = [0.13, 0.11, 0.11, 0.90];
 /// A highlight along the top of a filled segment.
 const SEGMENT_GLOSS: [f32; 4] = [1.0, 1.0, 1.0, 0.18];
-/// Air left. Blue, because it is the one gauge that is about water, and
-/// nothing else on this screen is that colour.
-const BREATH_FILL: [f32; 4] = [0.45, 0.72, 0.95, 0.95];
+/// Air left: a pale cyan, near enough white to read as a bubble and far
+/// enough from [`WATER_FILL`] that the two strips cannot be swapped.
+///
+/// It used to say "blue, because it is the one gauge that is about
+/// water, and nothing else on this screen is that colour" -- which was
+/// true of a HUD with three meters on it and stopped being true without
+/// anybody editing the line. The thirst bar arrived in the same blue,
+/// directly under it.
+pub const BREATH_FILL: [f32; 4] = [0.60, 0.92, 0.98, 0.95];
 /// The ghost of health just lost, drained away over a moment.
 const BAR_RECENT: [f32; 4] = [0.95, 0.83, 0.30, 0.80];
 
@@ -378,6 +384,36 @@ pub const ICON_REST: Icon = Icon([0b01110, 0b11100, 0b11000, 0b11100, 0b01110]);
 /// Temperature: a thermometer, tube and bulb.
 pub const ICON_WARMTH: Icon = Icon([0b00100, 0b01010, 0b01010, 0b11111, 0b01110]);
 
+/// One meter, everywhere it is drawn: its mark, its name and its hue.
+///
+/// **The hue joined this table after an audit that laid the screens side
+/// by side.** It used to live only in the file that painted the strip,
+/// and the price of that shows up in two places at once. On the HUD,
+/// stamina, breath, water and rest had all drifted into the same blue
+/// and food, the thirst warning and the warmth drift into the same
+/// brown -- seven strips, four of them indistinguishable from their
+/// neighbours, which is what turned the stack into a barcode rather
+/// than an instrument. And the health page of the pack drew the same
+/// seven gauges in a language of its own -- green above half, amber,
+/// pink below a quarter -- so the blue strip on the HUD and the pink
+/// bar on the page were the same thirst and nothing said so.
+///
+/// One table, read by the strip, by the page and by the pause screen's
+/// key, is the only arrangement in which those three can *agree*. See
+/// rule 3 in `widgets`.
+#[derive(Debug, Clone, Copy)]
+pub struct Gauge {
+    pub icon: Icon,
+    pub name: crate::ui::lang::Msg,
+    /// What this meter looks like when there is plenty of it.
+    ///
+    /// The colour a player is meant to learn. A meter in trouble has a
+    /// second colour -- see [`HUNGRY_FILL`] and [`PARCHED_FILL`] -- and
+    /// every one of those is the same hue held back rather than a
+    /// different one, so a low meter still reads as *that* meter.
+    pub ink: [f32; 4],
+}
+
 /// The seven meters, **in the order they are stacked on screen**, top
 /// first.
 ///
@@ -386,14 +422,14 @@ pub const ICON_WARMTH: Icon = Icon([0b00100, 0b01010, 0b01010, 0b11111, 0b01110]
 /// screen prints this list and a player reading it has to be able to
 /// lay it against what they can see. A legend in a different order from
 /// the thing it explains is worse than no legend at all.
-pub const GAUGE_LEGEND: &[(Icon, crate::ui::lang::Msg)] = &[
-    (ICON_WARMTH, crate::ui::lang::Msg::GaugeWarmth),
-    (ICON_REST, crate::ui::lang::Msg::GaugeRest),
-    (ICON_AIR, crate::ui::lang::Msg::GaugeAir),
-    (ICON_WATER, crate::ui::lang::Msg::GaugeWater),
-    (ICON_HEALTH, crate::ui::lang::Msg::GaugeHealth),
-    (ICON_STAMINA, crate::ui::lang::Msg::GaugeStamina),
-    (ICON_FOOD, crate::ui::lang::Msg::GaugeFood),
+pub const GAUGE_LEGEND: &[Gauge] = &[
+    Gauge { icon: ICON_WARMTH, name: crate::ui::lang::Msg::GaugeWarmth, ink: WARMING_FILL },
+    Gauge { icon: ICON_REST, name: crate::ui::lang::Msg::GaugeRest, ink: RESTED_FILL },
+    Gauge { icon: ICON_AIR, name: crate::ui::lang::Msg::GaugeAir, ink: BREATH_FILL },
+    Gauge { icon: ICON_WATER, name: crate::ui::lang::Msg::GaugeWater, ink: WATER_FILL },
+    Gauge { icon: ICON_HEALTH, name: crate::ui::lang::Msg::GaugeHealth, ink: HEALTH_FILL },
+    Gauge { icon: ICON_STAMINA, name: crate::ui::lang::Msg::GaugeStamina, ink: STAMINA_FILL },
+    Gauge { icon: ICON_FOOD, name: crate::ui::lang::Msg::GaugeFood, ink: FED_FILL },
 ];
 
 /// How tall -- and wide -- a mark beside a meter is drawn.
@@ -483,12 +519,24 @@ pub fn draw_icon_inked(painter: &mut Painter, icon: Icon, centre: (f32, f32), si
 /// this whole file is built on and matters most here: breath and
 /// temperature come and go, and a mark for a strip that is not on screen
 /// would be a picture of nothing, pointing at nothing.
-fn band_icon(painter: &mut Painter, track: Rect, icon: Icon) {
-    draw_icon(
+/// `ink` is **what the meter is drawing right now**, not a colour of its
+/// own. A mark is twelve pixels at 1080p and its five-by-five picture is
+/// two and a half pixels a cell -- coarser than the font, and coarser
+/// than the eye can resolve at a glance. What a glance *can* resolve at
+/// that size is a hue, so the mark is drawn in the strip's own: a violet
+/// crescent beside a violet strip is one thing seen twice, and the
+/// column of marks stops being a column of identical grey smudges.
+///
+/// It costs nothing -- the dark half underneath is what makes a mark
+/// legible over snow or a cave, and it is unchanged -- and it is the
+/// same move the pause screen's key makes, for the same reason.
+fn band_icon(painter: &mut Painter, track: Rect, icon: Icon, ink: [f32; 4]) {
+    draw_icon_inked(
         painter,
         icon,
         (BAR_LEFT - ICON_GAP - ICON_SIZE / 2.0, track.centre_y()),
         ICON_SIZE,
+        ink,
     );
 }
 
@@ -554,33 +602,75 @@ const _: () = assert!(TEMP_WELL_PROUD < STAMINA_GAP);
 /// [`NOTICE_Y`] used to do.
 const STACK_TOP: f32 = band_above(BANDS_ABOVE - 1).1 + TEMP_WELL_PROUD;
 const STAMINA_TRACK: [f32; 4] = [0.05, 0.05, 0.06, 0.85];
-const STAMINA_FILL: [f32; 4] = [0.40, 0.72, 0.92, 1.0];
+
+// ---- one hue per meter ----
+//
+// **The state this replaced, which is the whole reason the rule
+// exists.** Every colour below was chosen beside the one or two strips
+// that happened to be on screen when it was written, and each of those
+// choices was defensible on its own. Laid out together they were not:
+// stamina `[0.40, 0.72, 0.92]`, breath `[0.45, 0.72, 0.95]`, water
+// `[0.38, 0.66, 0.86]` and rest `[0.62, 0.70, 0.90]` were four blues no
+// eye can tell apart at twelve pixels tall, and food `[0.80, 0.62,
+// 0.28]`, the thirst warning `[0.74, 0.56, 0.28]` and the warmth drift
+// `[0.68, 0.46, 0.22]` were three browns. The comment on the food bar
+// still claimed "three bars in three unrelated colours"; it was true
+// when there were three bars.
+//
+// The result was a stack of seven hairlines that read as a barcode:
+// the shape said nothing (they are all the same strip), the position
+// said nothing (they are all the same width, stacked), so the colour
+// was carrying the whole of the identification and four of the seven
+// had given it away.
+//
+// So the hues are now chosen *against each other* and checked:
+// `no_two_meters_are_drawn_in_colours_a_player_could_confuse`. Health
+// is exempt from that check and only health, because it is the one
+// instrument here with a shape of its own -- notches and a figure in a
+// well -- so it cannot be mistaken for a plain strip whatever colour
+// its ramp is passing through.
+//
+// A meter in trouble keeps its hue and loses its brightness, rather
+// than borrowing somebody else's: see `HUNGRY_FILL` and
+// `PARCHED_FILL`. A low meter that changed hue would be a meter that
+// stopped being identifiable exactly when it started mattering.
+
+/// Stamina: a bright lime. It was a blue and is the one meter with no
+/// natural colour of its own -- blood is red, water is blue, food is
+/// ochre, night is violet -- so it takes the gap the others leave.
+pub const STAMINA_FILL: [f32; 4] = [0.86, 0.90, 0.34, 1.0];
 /// Spent, and locked out until enough comes back. Red, because the
 /// sprint key not working needs a visible reason.
+///
+/// The one place a meter *does* leave its hue, and it is a different
+/// thing being said: the others darken to mean "running low", this one
+/// turns to mean "a key you just pressed did nothing".
 const STAMINA_SPENT: [f32; 4] = [0.85, 0.35, 0.25, 1.0];
-/// A fed player: a warm ochre, which is the one hue on the bar stack
-/// that is neither the blue of breath and stamina nor the red of blood.
-/// Three bars in three unrelated colours is what makes them readable
-/// with a glance rather than a look.
-const FED_FILL: [f32; 4] = [0.80, 0.62, 0.28, 1.0];
+/// A fed player: a warm ochre.
+pub const FED_FILL: [f32; 4] = [0.86, 0.60, 0.22, 1.0];
 /// ...and a hungry one, past the line where wounds stop closing. Dulled
 /// rather than reddened: red is what damage means everywhere else on
 /// this HUD, and hunger is not damage until it is.
 const HUNGRY_FILL: [f32; 4] = [0.62, 0.44, 0.18, 1.0];
 
-/// The water bar, and what it turns when there is not much left.
-///
-/// Deliberately a *paler* blue than breath and stamina: the three are
-/// all cool colours in the same corner of the screen, and thirst is the
-/// slow one, so it is the quiet one.
-const WATER_FILL: [f32; 4] = [0.38, 0.66, 0.86, 1.0];
+/// The water bar: the blue, and the only one. Breath is a much paler
+/// cyan and rest has gone violet, so the drop owns this hue.
+pub const WATER_FILL: [f32; 4] = [0.38, 0.66, 0.86, 1.0];
 /// Rested, and worn out. The pair is one hue turning: a night's
-/// sleep is pale and cool, and what is left of it when there has
-/// been none goes violet and dim -- the direction reads without
-/// the legend.
-const RESTED_FILL: [f32; 4] = [0.62, 0.70, 0.90, 1.0];
-const WEARY_FILL: [f32; 4] = [0.46, 0.36, 0.58, 1.0];
-const PARCHED_FILL: [f32; 4] = [0.74, 0.56, 0.28, 1.0];
+/// sleep is pale violet, and what is left of it when there has
+/// been none is the same violet gone dim -- the direction reads
+/// without the legend. Rested was a pale *blue*, a hairline away from
+/// the water bar four strips below it, and weary was so grey that a
+/// tired player's strip sat nearer the water's blue than its own
+/// violet: `no_two_meters_are_drawn_in_colours_a_player_could_confuse`
+/// measures exactly that and used to fail on it.
+pub const RESTED_FILL: [f32; 4] = [0.72, 0.54, 0.94, 1.0];
+pub const WEARY_FILL: [f32; 4] = [0.60, 0.42, 0.82, 1.0];
+/// Thirst running out: the water's own blue, drained. It was an ochre,
+/// which is to say it was the food bar -- so the one moment the thirst
+/// meter had something urgent to say, it said it in the colour of the
+/// meter below it.
+const PARCHED_FILL: [f32; 4] = [0.26, 0.42, 0.60, 1.0];
 
 /// The temperature gauge, at its four notable states.
 ///
@@ -633,6 +723,18 @@ const COUNT_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.85];
 /// without looking directly at the bar, so it has to carry the warning
 /// on its own -- a bar that is only ever red tells you nothing until it
 /// is nearly empty.
+/// What a full health gauge looks like: the top of [`fill_colour`]'s
+/// ramp, written down so the pause screen's key and the health page can
+/// print the same green the bar prints.
+///
+/// It is a *sample* of the ramp rather than its source, and that is the
+/// honest shape for it: health is the one meter whose colour is a
+/// reading rather than a name, so anything that shows health outside
+/// the bar has to pick a point on the ramp to stand for it, and "full"
+/// is the only point that is not arbitrary. There is a test that the
+/// two have not drifted.
+pub const HEALTH_FILL: [f32; 4] = [0.30, 0.78, 0.32, 1.0];
+
 fn fill_colour(fraction: f32) -> [f32; 4] {
     let f = fraction.clamp(0.0, 1.0);
     if f > 0.5 {
@@ -677,7 +779,16 @@ pub fn health_bar(painter: &mut Painter, current: f32, max: f32, recent: f32) {
     );
     painter.quad(track, BAR_TRACK);
     painter.border(track, BAR_EDGE_WIDTH, BAR_EDGE);
-    band_icon(painter, track, ICON_HEALTH);
+    // **The one mark that keeps the pale ink**, and health is the
+    // reason the rule is worth stating: the other six are strips that
+    // look alike, so their marks are inked to tell them apart. This one
+    // is notched, carries a figure in a well and already runs green to
+    // red as it drains -- it is the most distinguishable object on the
+    // HUD before a mark is drawn at all. A heart that changed colour
+    // with the bar under it would be the same fact drawn a third time,
+    // and a heart fixed at full green would say "well" over an orange
+    // gauge. Neutral is the only thing it can honestly be.
+    band_icon(painter, track, ICON_HEALTH, ICON_INK);
 
     // How much health each segment stands for, and how full each one is.
     //
@@ -772,6 +883,7 @@ pub fn stamina_bar(painter: &mut Painter, fraction: f32, exhausted: bool) {
     } else {
         0.0
     };
+    let fill = if exhausted { STAMINA_SPENT } else { STAMINA_FILL };
     let (y0, y1) = band_below(0);
     let track = Rect::new(BAR_LEFT, y0, BAR_LEFT + BAR_WIDTH, y1);
     painter.quad(track, STAMINA_TRACK);
@@ -784,11 +896,11 @@ pub fn stamina_bar(painter: &mut Painter, fraction: f32, exhausted: bool) {
                 track.x0 + BAR_WIDTH * fraction,
                 track.y1,
             ),
-            if exhausted { STAMINA_SPENT } else { STAMINA_FILL },
+            fill,
         );
     }
     painter.border(track, BAR_EDGE_WIDTH, BAR_EDGE);
-    band_icon(painter, track, ICON_STAMINA);
+    band_icon(painter, track, ICON_STAMINA, fill);
 }
 
 /// Draws the breath meter, above the health gauge.
@@ -818,7 +930,7 @@ pub fn breath_bar(painter: &mut Painter, fraction: f32) {
         );
     }
     painter.border(track, BAR_EDGE_WIDTH, BAR_EDGE);
-    band_icon(painter, track, ICON_AIR);
+    band_icon(painter, track, ICON_AIR, BREATH_FILL);
 }
 
 /// Draws the hunger bar, directly under the stamina strip.
@@ -841,6 +953,11 @@ pub fn nourishment_bar(painter: &mut Painter, fraction: f32) {
     } else {
         1.0
     };
+    let fill = if fraction < primitive_shared::food::REGEN_THRESHOLD {
+        HUNGRY_FILL
+    } else {
+        FED_FILL
+    };
     let (y0, y1) = band_below(1);
     let track = Rect::new(BAR_LEFT, y0, BAR_LEFT + BAR_WIDTH, y1);
     painter.quad(track, STAMINA_TRACK);
@@ -853,15 +970,11 @@ pub fn nourishment_bar(painter: &mut Painter, fraction: f32) {
             // `food::REGEN_THRESHOLD`). That is the one thing about
             // hunger a player has to be able to see coming, so the bar
             // *changes colour* at it rather than merely getting shorter.
-            if fraction < primitive_shared::food::REGEN_THRESHOLD {
-                HUNGRY_FILL
-            } else {
-                FED_FILL
-            },
+            fill,
         );
     }
     painter.border(track, BAR_EDGE_WIDTH, BAR_EDGE);
-    band_icon(painter, track, ICON_FOOD);
+    band_icon(painter, track, ICON_FOOD, fill);
 }
 
 /// Writes the stack size into each occupied hotbar slot.
@@ -1089,6 +1202,11 @@ pub fn hydration_bar(painter: &mut Painter, fraction: f32) {
     } else {
         1.0
     };
+    let fill = if fraction < primitive_shared::body::PARCHED {
+        PARCHED_FILL
+    } else {
+        WATER_FILL
+    };
     let (y0, y1) = band_above(0);
     let track = Rect::new(BAR_LEFT, y0, BAR_LEFT + BAR_WIDTH, y1);
     painter.quad(track, STAMINA_TRACK);
@@ -1098,15 +1216,11 @@ pub fn hydration_bar(painter: &mut Painter, fraction: f32) {
             // The same two-colour trick the hunger bar uses, at the
             // threshold that actually means something: below `PARCHED`
             // the player is losing water faster than they can ignore.
-            if fraction < primitive_shared::body::PARCHED {
-                PARCHED_FILL
-            } else {
-                WATER_FILL
-            },
+            fill,
         );
     }
     painter.border(track, BAR_EDGE_WIDTH, BAR_EDGE);
-    band_icon(painter, track, ICON_WATER);
+    band_icon(painter, track, ICON_WATER, fill);
 }
 
 /// The tiredness strip, above the water bar.
@@ -1130,21 +1244,22 @@ pub fn rest_bar(painter: &mut Painter, fatigue: f32) {
         0.0
     };
     let left = 1.0 - fatigue;
+    let fill = if fatigue > primitive_shared::body::TIRED_AT {
+        WEARY_FILL
+    } else {
+        RESTED_FILL
+    };
     let (y0, y1) = band_above(2);
     let track = Rect::new(BAR_LEFT, y0, BAR_LEFT + BAR_WIDTH, y1);
     painter.quad(track, STAMINA_TRACK);
     if left > 0.0 {
         painter.quad(
             Rect::new(track.x0, track.y0, track.x0 + BAR_WIDTH * left, track.y1),
-            if fatigue > primitive_shared::body::TIRED_AT {
-                WEARY_FILL
-            } else {
-                RESTED_FILL
-            },
+            fill,
         );
     }
     painter.border(track, BAR_EDGE_WIDTH, BAR_EDGE);
-    band_icon(painter, track, ICON_REST);
+    band_icon(painter, track, ICON_REST, fill);
 }
 
 /// How tired a player has to be before the strip appears at all.
@@ -1304,7 +1419,7 @@ pub fn temperature_gauge(painter: &mut Painter, body: BodyGauges) {
         fill,
     );
     painter.border(track, BAR_EDGE_WIDTH, BAR_EDGE);
-    band_icon(painter, track, ICON_WARMTH);
+    band_icon(painter, track, ICON_WARMTH, fill);
 
     // The figure, in the same column the health gauge writes its own
     // in, so the two line up rather than each finding its own margin.
@@ -3510,7 +3625,8 @@ mod tests {
     /// thing about the artwork a test can actually judge.
     #[test]
     fn no_mark_is_empty_and_none_is_a_solid_block() {
-        for (icon, msg) in GAUGE_LEGEND {
+        for gauge in GAUGE_LEGEND {
+            let (icon, msg) = (gauge.icon, gauge.name);
             let set: u32 = icon.0.iter().map(|row| row.count_ones()).sum();
             let cells = (ICON_GRID * ICON_GRID) as u32;
             assert!(
@@ -3526,11 +3642,92 @@ mod tests {
         }
         // ...and no two of them are the same picture, which is the one
         // way a legend of six can be a legend of five.
-        for (index, (a, _)) in GAUGE_LEGEND.iter().enumerate() {
-            for (b, msg) in GAUGE_LEGEND.iter().skip(index + 1) {
-                assert_ne!(a, b, "two meters share a mark ({msg:?})");
+        for (index, a) in GAUGE_LEGEND.iter().enumerate() {
+            for b in GAUGE_LEGEND.iter().skip(index + 1) {
+                assert_ne!(a.icon, b.icon, "two meters share a mark ({:?})", b.name);
             }
         }
+    }
+
+    /// The colour half of the same property, and it is the half that
+    /// actually failed.
+    ///
+    /// Seven strips of identical shape, identical width and identical
+    /// spacing carry their whole identity in a hue. Four of them had
+    /// quietly become the same blue and three the same brown, each for
+    /// a good local reason, over the releases that took the stack from
+    /// three meters to seven. Nothing could catch that but laying the
+    /// colours side by side, which is what this does.
+    ///
+    /// **Manhattan distance in straight RGB, not a perceptual space.**
+    /// A proper one would be better and is not worth a dependency for a
+    /// table of seven: what is being asked is "are these two obviously
+    /// different", and at a third of a unit summed across the channels
+    /// they always are. The number was set against the failures it has
+    /// to catch -- the old stamina and breath came to 0.10 between them
+    /// and the old food and thirst warning to 0.14.
+    ///
+    /// **Two meters are left out, and it is the same reason twice:
+    /// neither is a plain coloured strip.** Health is notched into ten
+    /// segments with a figure in a well at the end of it, and warmth is
+    /// a zoned track with a marker and a temperature written along it.
+    /// Both are recognised by shape before their colour is looked at,
+    /// and neither *has* a colour -- health's is a reading on a
+    /// green-to-red ramp and warmth's is one of six points on a scale,
+    /// so what stands for them in [`GAUGE_LEGEND`] is the nearest
+    /// single thing for the key and the health page rather than a name.
+    /// The five this does check are strips and nothing else, which is
+    /// exactly where the confusion was. Leaving warmth in would have
+    /// meant holding the food bar away from a temperature that is
+    /// *supposed* to be warm-coloured, and the whole stack would have
+    /// been pushed around by a comparison that no eye ever makes.
+    #[test]
+    fn no_two_meters_are_drawn_in_colours_a_player_could_confuse() {
+        const CONFUSABLE: f32 = 0.30;
+        let apart = |a: [f32; 4], b: [f32; 4]| {
+            (0..3).map(|c| (a[c] - b[c]).abs()).sum::<f32>()
+        };
+        let shaped = |gauge: &&Gauge| {
+            matches!(
+                gauge.name,
+                crate::ui::lang::Msg::GaugeHealth | crate::ui::lang::Msg::GaugeWarmth
+            )
+        };
+        let strips = || GAUGE_LEGEND.iter().filter(|g| !shaped(g));
+        assert_eq!(strips().count(), 5, "a meter arrived or left without this test being told");
+        for (index, a) in strips().enumerate() {
+            for b in strips().skip(index + 1) {
+                let distance = apart(a.ink, b.ink);
+                assert!(
+                    distance > CONFUSABLE,
+                    "{:?} and {:?} are {distance:.2} apart: {:?} against {:?}",
+                    a.name,
+                    b.name,
+                    a.ink,
+                    b.ink,
+                );
+            }
+        }
+        // The low-on-it colour of a meter is the *same* meter held
+        // back, never a hue somebody else owns. Thirst running out used
+        // to be drawn in the food bar's ochre, which is the worst
+        // possible moment for a meter to look like its neighbour.
+        for (low, full, name) in [
+            (PARCHED_FILL, WATER_FILL, "thirst"),
+            (HUNGRY_FILL, FED_FILL, "hunger"),
+            (WEARY_FILL, RESTED_FILL, "tiredness"),
+        ] {
+            for other in strips().filter(|g| apart(g.ink, full) > 1e-6) {
+                assert!(
+                    apart(low, other.ink) > apart(low, full),
+                    "a low {name} bar is nearer {:?} than it is to its own hue",
+                    other.name,
+                );
+            }
+        }
+        // ...and the green the key and the health page print is still
+        // the green the bar draws when the player is unhurt.
+        assert_eq!(HEALTH_FILL, fill_colour(1.0), "the health key drifted off its own ramp");
     }
 
     #[test]
