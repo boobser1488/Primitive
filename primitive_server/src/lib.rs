@@ -2689,7 +2689,7 @@ async fn tick_loop(ctx: Arc<Context>) {
                     weather != primitive_shared::weather::Weather::Clear,
                 )
             };
-            let (blows, births, deaths, fallen, staked, dung, heavy) = {
+            let (blows, births, deaths, fallen, staked, dung, heavy, thefts) = {
                 let mut animals = ctx.animals.lock().unwrap_or_else(|e| e.into_inner());
                 animals.carrying_fire(std::mem::take(&mut fire_bearers));
                 animals.player_signs(std::mem::take(&mut player_signs));
@@ -2714,6 +2714,7 @@ async fn tick_loop(ctx: Arc<Context>) {
                     animals.take_staked(),
                     animals.take_dung(),
                     animals.heavy_feet(),
+                    animals.take_thefts(),
                 )
             };
             // **A pit's cover gives way under a deer, and under a person**
@@ -2728,6 +2729,11 @@ async fn tick_loop(ctx: Arc<Context>) {
             // the carcasses' reason: `set_block` and the broadcast.
             for at in dung {
                 lay_animal_dung(&ctx, at);
+            }
+            // ...and what the monkeys took, for the same reason: an
+            // inventory is the tick loop's, not the animals'.
+            for (who, thief) in thefts {
+                rob_the_hand(&ctx, who, thief);
             }
             for (entity, at) in births {
                 entity_appeared(&ctx, entity, at, true);
@@ -2789,7 +2795,15 @@ async fn tick_loop(ctx: Arc<Context>) {
                     | Species::Herring
                     | Species::Gull
                     | Species::Rat
+                    | Species::Monkey
                     | Species::Horse => Blow::Blunt,
+                    // **A claw, and it is the only claw in the game that
+                    // does not come with weight behind it.** A pinch cuts
+                    // where a bear's swipe breaks, and half a point of it
+                    // cannot break anything anyway (`Species::Crab`); what
+                    // it gets right is the *kind* of hurt, so a hand that
+                    // has been nipped bleeds a little rather than aching.
+                    Species::Crab => Blow::Claw,
                 };
                 let outcome = strike_player(&ctx, &victim, blow.damage, how, wound);
                 if !matches!(outcome, survival::Outcome::Unchanged) {
@@ -6096,7 +6110,7 @@ pub(crate) fn use_block(
     // (`ground::scraped`): the same take into the pack, what is left the bare
     // block. An empty hand only, so a mossy log still strips under an axe.
     if primitive_shared::types::picks_by_hand(block) || (held.is_none() && primitive_shared::ground::is_mossy(block)) {
-        pick_by_hand(ctx, handle, at, block);
+        pick_by_hand(ctx, handle, at, block, held);
         return;
     }
 
@@ -6496,6 +6510,55 @@ pub(crate) fn spend_held(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>
     refresh_carried_weight(handle);
 }
 
+/// **A monkey has reached somebody's hand**: one of what is in it goes, and
+/// they are told so.
+///
+/// One, and out of the *hand* rather than out of the pack, which is the whole
+/// of what makes the theft answerable. The monkey came at what it could see
+/// (`animals::raid` reads `PlayerSign::held`), so what it takes is the thing
+/// the player was holding out -- and the defence is the obvious one: put the
+/// food away, or do not stand in the grove eating.
+///
+/// **Not the stack.** A troop that emptied a slot would be a troop that costs
+/// a morning's smoking in one touch, and the player would have no way to
+/// learn the rule before it had already been expensive. One at a time is a
+/// mechanic that teaches itself: the first monkey is a curiosity, the third
+/// is a decision about where the stores live.
+///
+/// A hand with nothing in it costs nothing, and that is not a special case
+/// worth avoiding -- the monkey decided a fraction of a second ago, against a
+/// sign that is a tick old, and a player who put the apple away in that
+/// fraction has earned it.
+fn rob_the_hand(
+    ctx: &Arc<Context>,
+    who: primitive_shared::protocol::PlayerId,
+    thief: primitive_shared::protocol::EntityId,
+) {
+    // Which monkey is not read yet, and the argument is in `rob_the_hand`'s
+    // own doc: nothing is carried away that can be recovered. It is taken
+    // because the day something is -- a monkey that drops what it stole when
+    // it is killed -- the tick loop already knows which one to ask.
+    let _ = thief;
+    let Some(handle) = ctx.registry.get(who) else {
+        return;
+    };
+    let (slot, taken, left) = {
+        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = state.selected_slot;
+        let Some(held) = state.inventory.block_in(slot).filter(|&b| primitive_shared::food::is_food(b)) else {
+            return;
+        };
+        state.inventory.take_from(slot, 1);
+        state.inventory_dirty = true;
+        (slot, held, state.inventory.block_in(slot))
+    };
+    let _ = taken;
+    held_slot_changed(ctx, handle.id, slot, left);
+    send_inventory(&handle);
+    refresh_carried_weight(&handle);
+    handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::MonkeyTakesIt });
+}
+
 /// How long a scored trunk takes to bleed again, in seconds.
 ///
 /// Ten minutes: a player who wants a torch for every night taps a stand of
@@ -6712,9 +6775,21 @@ fn pick_by_hand(
     handle: &Arc<players::PlayerHandle>,
     at: (i32, i32, i32),
     block: primitive_shared::types::BlockId,
+    held: Option<primitive_shared::types::BlockId>,
 ) {
     use primitive_shared::types::{block_drop, block_drop_count, block_residue};
 
+    // **A mussel bed is a pick of its own, and the only one the hand's
+    // contents change**: an edge prises a clump off where fingers take them
+    // one at a time (`shore::gather`). Before the moss, because a bed has no
+    // `block_drop` at all -- what it gives is decided by what is on it and
+    // what is holding it, which is the one thing `block_drop` cannot say.
+    if primitive_shared::shore::is_bed(block) {
+        let Some((left, count)) = primitive_shared::shore::gather(block, held) else {
+            return;
+        };
+        return finish_pick(ctx, handle, at, block, primitive_shared::types::BLOCK_MUSSELS, count, left);
+    }
     // Moss is a pick of its own: what comes off is a wad of moss and what is
     // left is the block without it, where breaking it would give the log.
     let (fruit, count, left) = match primitive_shared::ground::scraped(block) {
@@ -6726,6 +6801,28 @@ fn pick_by_hand(
             (fruit, u32::from(block_drop_count(block)), block_residue(block))
         }
     };
+    finish_pick(ctx, handle, at, block, fruit, count, left);
+}
+
+/// Writes one pick into the world: what comes away goes into the pack, what
+/// is left stands in the cell, and everything that has to hear about it does.
+///
+/// **Split out of `pick_by_hand` for the mussel bed**, which decides its own
+/// `fruit`, `count` and `left` out of `shore::gather` -- three answers the
+/// block tables cannot give, because they depend on what is in the hand. The
+/// half that follows, including the put-it-back if the pack is full, is the
+/// same for an apple, a wad of moss and a handful of mussels, and one copy of
+/// it is what stops the day somebody fixes the full-pack bug in two of three.
+#[allow(clippy::too_many_arguments)]
+fn finish_pick(
+    ctx: &Arc<Context>,
+    handle: &Arc<players::PlayerHandle>,
+    at: (i32, i32, i32),
+    block: primitive_shared::types::BlockId,
+    fruit: primitive_shared::types::BlockId,
+    count: u32,
+    left: primitive_shared::types::BlockId,
+) {
     if !ctx.world.set_block(at.0, at.1, at.2, left) {
         return;
     }
@@ -8084,7 +8181,7 @@ pub(crate) fn attack_animal(
 ) {
     use primitive_shared::combat;
 
-    let (from, damage, poison, reach) = {
+    let (from, damage, poison, reach, in_hand) = {
         let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.vitals.is_dead() {
             return;
@@ -8126,6 +8223,9 @@ pub(crate) fn attack_animal(
                 0.0
             },
             combat::reach_with(held),
+            // Carried out of the lock for the crab: what is in the hand
+            // decides whether a claw can reach the hand back (see below).
+            held,
         )
     };
 
@@ -8139,10 +8239,44 @@ pub(crate) fn attack_animal(
         return;
     }
 
-    let struck = {
+    let (struck, species) = {
         let mut animals = ctx.animals.lock().unwrap_or_else(|e| e.into_inner());
-        animals.strike_poisoned(target, primitive_shared::geometry::narrow(from), reach, damage, poison)
+        let species = animals
+            .species_index(target)
+            .and_then(|i| primitive_shared::animals::Species::ALL.get(i as usize).copied());
+        (
+            animals.strike_poisoned(target, primitive_shared::geometry::narrow(from), reach, damage, poison),
+            species,
+        )
     };
+
+    // **A crab pinches the hand that closes on it**, and only a hand: with
+    // anything in it the blow lands from further off than a claw reaches.
+    //
+    // Here rather than in `Animals`, because what comes back out of a blow
+    // has to reach the player who threw it, and the animals module is given
+    // player *positions* and not player handles -- the same line `raid` is
+    // on the other side of. It is not a `Blow` either: a `Blow` is something
+    // an animal decided to do on its own tick, and this is the answer to a
+    // gesture, in the same breath as the gesture.
+    //
+    // **Killed or not, it pinches** -- what it takes is the grab reaching
+    // it, and a swing that missed reached nothing. A crab killed outright
+    // still got its claw in first, and the alternative -- a nip only when
+    // the crab survives -- would make the whole mechanic vanish on the
+    // player's first morning, because a fist kills a crab in one. Half a
+    // point is what the first evening on a beach costs; see `Species::Crab`.
+    if species == Some(primitive_shared::animals::Species::Crab)
+        && in_hand.is_none()
+        && !matches!(struck, animals::Struck::Missed)
+    {
+        let nip = primitive_shared::animals::Species::Crab.damage();
+        let how = primitive_shared::animals::Species::Crab.death_cause();
+        let outcome = strike_player(ctx, handle, nip, how, primitive_shared::injury::Blow::Claw);
+        if !matches!(outcome, survival::Outcome::Unchanged) {
+            report_vitals(ctx, handle, outcome);
+        }
+    }
     // **And one thrust takes it off.** The spear keeps its wear and
     // loses its paste, which is the whole of what "one use" means --
     // done here rather than in `Animals` because the pack is the
@@ -17670,6 +17804,72 @@ mod set_down_tests {
     fn a_floor(ctx: &Arc<Context>) {
         assert!(ctx.world.set_block(SPOT.0, SPOT.1 - 1, SPOT.2, BLOCK_STONE));
         assert!(ctx.world.set_block(SPOT.0, SPOT.1, SPOT.2, BLOCK_AIR));
+    }
+
+    // ---- the shore ----
+
+    #[test]
+    fn a_mussel_bed_gives_one_to_a_hand_and_two_to_a_knife_and_then_it_is_bare_rock() {
+        use primitive_shared::shore;
+        use primitive_shared::types::{BLOCK_MUSSELS, BLOCK_MUSSEL_ROCK};
+        // **The whole gesture through the server**, which is the half a unit
+        // test of `shore::gather` cannot reach: the cell is written, the pack
+        // is filled, and when the last mussel is off the rock the block is a
+        // different id -- which is what makes a stripped headland something a
+        // player can see (`types::BLOCK_MUSSEL_BED`).
+        let take = |held: Option<Stack>, gestures: usize| {
+            let (ctx, handle, _rx) = a_hunter();
+            a_floor(&ctx);
+            assert!(ctx.world.set_block(SPOT.0, SPOT.1, SPOT.2, shore::bed_holding(shore::BED_FULL)));
+            hold(&handle, held);
+            for _ in 0..gestures {
+                use_block(&ctx, &handle, SPOT);
+            }
+            let got = handle.state.lock().unwrap().inventory.count(BLOCK_MUSSELS);
+            (got, ctx.world.cached_block(SPOT.0, SPOT.1, SPOT.2).unwrap())
+        };
+        let (by_hand, left) = take(None, 1);
+        assert_eq!(by_hand, 1, "a hand took {by_hand} mussels");
+        assert_eq!(shore::mussels_in(left), shore::BED_FULL - 1, "the rock did not thin");
+
+        let (by_knife, left) = take(Some(Stack::new(BLOCK_COPPER_KNIFE, 1)), 1);
+        assert_eq!(by_knife, 2, "a knife took {by_knife} mussels");
+        assert_eq!(shore::mussels_in(left), shore::BED_FULL - 2);
+
+        // ...and stripped, with one gesture to spare: the spare one has to
+        // give nothing rather than a fifth mussel off a bare rock.
+        let (all, left) = take(None, usize::from(shore::BED_FULL) + 1);
+        assert_eq!(all, u32::from(shore::BED_FULL), "a bare rock went on giving");
+        assert_eq!(left, BLOCK_MUSSEL_ROCK, "the stripped bed kept the crusted rock's picture");
+    }
+
+    #[test]
+    fn a_crab_taken_with_a_bare_hand_gets_its_claw_in_and_one_taken_with_a_knife_does_not() {
+        use primitive_shared::animals::Species;
+        // **The smallest decision in the game, checked as health.** A player
+        // who reaches into the dark for supper pays half a point for it, and
+        // one who swings a knife pays nothing -- because a knife lands from
+        // further off than a claw reaches (see the pinch in `strike_entity`).
+        let grab = |held: Option<Stack>| {
+            let (ctx, handle, _rx) = a_hunter();
+            a_floor(&ctx);
+            let feet = handle.state.lock().unwrap().position;
+            let at = (feet.0 as f32, feet.1 as f32, feet.2 as f32 + 1.0);
+            let crab = ctx.animals.lock().unwrap().spawn_at(Species::Crab, at).expect("no crab would come");
+            hold(&handle, held);
+            let before = handle.state.lock().unwrap().vitals.health();
+            attack_animal(&ctx, &handle, crab);
+            let after = handle.state.lock().unwrap().vitals.health();
+            before - after
+        };
+        let nipped = grab(None);
+        assert!(nipped > 0.0, "a crab grabbed bare-handed did not pinch");
+        assert!(
+            (nipped - Species::Crab.damage()).abs() < 0.01,
+            "a pinch cost {nipped} rather than {}",
+            Species::Crab.damage()
+        );
+        assert_eq!(grab(Some(Stack::new(BLOCK_COPPER_KNIFE, 1))), 0.0, "a knife did not keep the claw off");
     }
 
     #[test]

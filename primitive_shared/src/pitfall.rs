@@ -57,6 +57,10 @@ pub fn breaks_through(species: Species) -> bool {
         | Species::Horse => true,
         Species::Hare
         | Species::Rat
+        // A monkey is the size of a dog and goes over a covered pit on four
+        // light hands; a crab weighs nothing at all.
+        | Species::Monkey
+        | Species::Crab
         | Species::Fowl
         | Species::Gull
         | Species::Fish

@@ -3479,6 +3479,86 @@ pub const BLOCK_LODESTONE: BlockId = 698;
 /// for, if they travel.
 pub const BLOCK_WATER_COMPASS: BlockId = 699;
 
+// ---- the shore: mussel beds, starfish and what a crab is worth ----
+//
+// **Numbered from 300**, in the long empty run between the meadow's flowers
+// and the savanna, and not at 700: the 690s are full and another change was
+// counting through them at the same time. See the note above
+// `BLOCK_HANDFUL_EARTH`, which took its own run for the same reason, and
+// `build::the_ids_still_free_under_seven_hundred_are_listed`, which prints
+// what is left.
+
+/// **A mussel bed**: the floor of the tidal shallows, crusted with mussels.
+///
+/// **A whole cell of rock and not a sprite standing on one**, which is what
+/// a crust of mussels is: they *are* the surface of the stone. The alternative
+/// -- a flat picture in the water over the floor, the way the shell and the
+/// starfish are drawn -- was written first and taken out, because a block
+/// that sits in water has to be `Matter::Liquid` for the mesher to draw the
+/// sea round it, and `Matter::Liquid` means the water simulation owns the
+/// cell: the first mussel taken off a bed woke the sim there and it wrote
+/// water over the bed. That is the right answer for kelp, whose cut stem
+/// leaves water behind, and the wrong one for a rock.
+///
+/// The variant is **how many mussels are left**, one to
+/// [`crate::shore::BED_FULL`] -- the wild hive's field said again, and for
+/// the hive's reason: it fills one mussel at a time on the growth clock
+/// (`ripens_into`), so a shore worked out this morning is thin this evening
+/// and whole in a week. That is the fishing spot's rule
+/// (`fishing::SPOT_HOLDS`) written into the world instead of into a table of
+/// pressure nobody can see.
+///
+/// **A stripped bed is a different id** ([`BLOCK_MUSSEL_ROCK`]) and not a
+/// count of nought, which is the berry bush's shape exactly
+/// (`BLOCK_BILBERRY_BARE`) and is here for the berry bush's reason: a
+/// picture belongs to an id, so a bed that kept its own id when the last
+/// mussel came off would look full for ever. The whole of what makes
+/// over-gathering a thing a player can *see* -- a headland of bare rock
+/// where somebody has been along -- is that those are two pictures.
+///
+/// **A block and not an animal**, which is the argument `BLOCK_STARFISH`
+/// makes at length: a mussel does not go anywhere.
+pub const BLOCK_MUSSEL_BED: BlockId = 300;
+/// ...and the rock with the last of them off it. See `BLOCK_MUSSEL_BED`.
+pub const BLOCK_MUSSEL_ROCK: BlockId = 306;
+/// **Mussels**, a handful of them, as they come off the rock. Food, and food
+/// that has to be cooked: see `food::sickness_seconds`.
+pub const BLOCK_MUSSELS: BlockId = 301;
+/// ...and the same handful opened over a fire.
+pub const BLOCK_COOKED_MUSSELS: BlockId = 302;
+/// **A starfish** on the sea floor, drawn flat like the shell it lies beside
+/// (`BLOCK_SHELL`).
+///
+/// **A block, and the argument is worth writing down**, because three
+/// answers were weighed and two of them are animals:
+///
+/// * *A `Species`.* It would inherit a mind, a gait, a hit box, a stamina, a
+///   sheet of twelve pictures and a slot in the skeleton table
+///   (`SKELETON_BLOCKS`) -- the whole apparatus of a body that goes
+///   somewhere -- for a thing that does not go anywhere, cannot be hunted,
+///   is not food and has nothing to flee. Every predicate in
+///   `animals::Species` would get a row saying "not this one".
+/// * *An entity that is not an animal*, the way a raft is. A raft is a thing
+///   a player steers; a starfish is a thing a player finds. An entity is
+///   streamed, ticked and interpolated, and none of those verbs is true of
+///   it.
+/// * **A block (chosen).** The sea floor already has one of these -- the
+///   shell, which exists to tell a swimmer that the sand under them is a sea
+///   bed -- and a starfish is the same sentence with a consequence attached.
+///   And the consequence is *about a place*: a shore with starfish on it
+///   grows fewer mussels (`shore::starfish_stall`), which is a fact about
+///   that stretch of rock. A block is a place; that is the whole of what a
+///   block is.
+///
+/// What it costs to be wrong here is small and it is worth saying: a starfish
+/// that should crawl does not. It moves a few inches an hour in life, and
+/// nothing in this game has a clock that slow.
+pub const BLOCK_STARFISH: BlockId = 303;
+/// **Crab meat**, raw: what is in the claws and the body of one crab.
+pub const BLOCK_CRAB_MEAT: BlockId = 304;
+/// ...and the crab put whole on the embers.
+pub const BLOCK_COOKED_CRAB: BlockId = 305;
+
 // ---- building in stages: handfuls, mortar, walls laid in place ----
 //
 // See `build` for all of it. **Numbered from 415**, in the empty run between
@@ -4763,6 +4843,14 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     (BLOCK_CAIRN, "cairn"),
     (BLOCK_LODESTONE, "lodestone"),
     (BLOCK_WATER_COMPASS, "water_compass"),
+    // The shore. See `shore`.
+    (BLOCK_MUSSEL_BED, "mussel_bed"),
+    (BLOCK_MUSSEL_ROCK, "mussel_rock"),
+    (BLOCK_MUSSELS, "mussels"),
+    (BLOCK_COOKED_MUSSELS, "cooked_mussels"),
+    (BLOCK_STARFISH, "starfish"),
+    (BLOCK_CRAB_MEAT, "crab_meat"),
+    (BLOCK_COOKED_CRAB, "cooked_crab"),
     // Building in stages. See `build`.
     (BLOCK_HANDFUL_EARTH, "handful_earth"),
     (BLOCK_HANDFUL_SAND, "handful_sand"),
@@ -7914,6 +8002,17 @@ pub fn ripens_into(id: BlockId) -> Option<BlockId> {
         BLOCK_WILD_HIVE if crate::bees::honey_in(id) < crate::bees::HIVE_FULL => {
             Some(crate::bees::hive_holding(crate::bees::honey_in(id) + 1))
         }
+        // ...and a mussel bed fills a mussel at a time, as a raided hive
+        // fills a comb at a time and for exactly the hive's reason: a bed
+        // picked over early is worth less than one left alone, and a rock
+        // that came back full in one step would make the walk along the
+        // headland pointless. A full bed ripens into nothing. What makes it
+        // *slow* is not here -- it is the number of steps the server counts
+        // before it runs this (`shore::REGROW_STEPS`), because this table
+        // says what a thing becomes and never how long it takes.
+        BLOCK_MUSSEL_BED | BLOCK_MUSSEL_ROCK if crate::shore::mussels_in(id) < crate::shore::BED_FULL => {
+            Some(crate::shore::bed_holding(crate::shore::mussels_in(id) + 1))
+        }
         // ...and the two berries of the forest floor, picked, as the bush.
         BLOCK_BILBERRY_BARE => Some(BLOCK_BILBERRY),
         BLOCK_STRAWBERRY_BARE => Some(BLOCK_STRAWBERRY),
@@ -7945,7 +8044,12 @@ pub fn ripens_into(id: BlockId) -> Option<BlockId> {
 pub fn picks_by_hand(id: BlockId) -> bool {
     // ...and coconuts, which are the palm's apples: the thing a player
     // walked to, taken without felling the thing that grows it.
+    // ...and a mussel bed with anything on it, which is the same gesture
+    // again on a rock: what comes off is the mussels and what stays is the
+    // bed, thinner. **Only while there is something on it** -- a bare bed is
+    // not a pick that gives nothing, it is a rock, and a rock is broken.
     matches!(block_kind(id), BLOCK_APPLE_LEAVES_FRUIT | BLOCK_PALM_COCONUTS)
+        || crate::shore::mussels_in(id) > 0
 }
 
 /// The lit form of a hearth that can be struck alight, if it is one.
@@ -8406,8 +8510,9 @@ pub fn can_grow_on(plant: BlockId, ground: BlockId) -> bool {
         // ...and a flake of flint, which lies where the nodule it was
         // struck off lies.
         // ...and a pebble of stream tin, which is a pebble.
+        // ...and a starfish, which lies on the bed as the shell does.
         BLOCK_STICK | BLOCK_PEBBLE | BLOCK_FLINT | BLOCK_FLINT_FLAKE | BLOCK_ASH | BLOCK_NATIVE_COPPER
-        | BLOCK_SHELL | BLOCK_STREAM_TIN => full_floor,
+        | BLOCK_SHELL | BLOCK_STREAM_TIN | BLOCK_STARFISH => full_floor,
         // ...and anything a hand sets down, on the pebble's terms: a whole
         // floor, never a drift or the top of a fence post.
         BLOCK_SET_DOWN => full_floor,
@@ -8845,6 +8950,12 @@ pub fn is_known_block(id: BlockId) -> bool {
     // is a claim.
     if kind == BLOCK_WILD_HIVE {
         return (id & VARIANT_MASK) >> VARIANT_SHIFT <= BlockId::from(crate::bees::HIVE_FULL);
+    }
+    // ...and a mussel bed on how many mussels are left on it, for the hive's
+    // reason: the server writes a new count into the world every time a hand
+    // comes off the rock, and a fifth mussel is a claim.
+    if kind == BLOCK_MUSSEL_BED {
+        return crate::shore::is_valid_bed(id);
     }
     // ...and the ten old answers' three counts, each held to what it counts:
     // a young cheese's or a must's stage (`ferment::STAGES`), how long a hare

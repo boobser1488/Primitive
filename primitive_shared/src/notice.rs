@@ -110,6 +110,10 @@ pub enum Notice {
     TooMuchLyingAround,
     SetDownOnSolidGround,
     RaftNeedsOpenWater,
+    // ---- the shore and the grove ----
+    /// **A monkey has taken what was in your hand.** Appended, like every
+    /// notice before it, because the index is on the wire.
+    MonkeyTakesIt,
 }
 
 impl Notice {
@@ -182,13 +186,23 @@ impl Notice {
         Notice::TooMuchLyingAround,
         Notice::SetDownOnSolidGround,
         Notice::RaftNeedsOpenWater,
+        Notice::MonkeyTakesIt,
     ];
 
     /// Whether this is news rather than a refusal: said the same way, but
     /// it does not end a run at a station the way a refusal does (the
     /// client's `ServerMessage::Notice` arm).
     pub fn is_news(self) -> bool {
-        matches!(self, Notice::HorseIsYours | Notice::HorseTakesFood | Notice::AshDugIn | Notice::HorseThrowsYou)
+        matches!(
+            self,
+            Notice::HorseIsYours
+                | Notice::HorseTakesFood
+                | Notice::AshDugIn
+                | Notice::HorseThrowsYou
+                // News, and the worst news the shore has: nothing was
+                // refused, something was taken.
+                | Notice::MonkeyTakesIt
+        )
     }
 }
 
@@ -202,7 +216,7 @@ mod tests {
     fn every_notice_is_in_the_list_the_translations_are_checked_against() {
         // The last variant's index is the count: the list must be as long,
         // and hold no notice twice.
-        assert_eq!(Notice::ALL.len(), Notice::RaftNeedsOpenWater as usize + 1);
+        assert_eq!(Notice::ALL.len(), Notice::MonkeyTakesIt as usize + 1);
         for (i, notice) in Notice::ALL.iter().enumerate() {
             assert_eq!(*notice as usize, i, "{notice:?} is out of place in `ALL`");
         }

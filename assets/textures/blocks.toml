@@ -1229,3 +1229,29 @@ pit_cover = "plants/leaf_litter.png"
 salt_pan = "pottery/clay.png"
 salt_pan_brine = { top = "pottery/salt_pan_brine.png", all = "pottery/clay.png" }
 salt_pan_salt = { top = "pottery/salt_pan_salt.png", all = "pottery/clay.png" }
+
+# ---- the shore: the mussel beds, the starfish and what comes off them ----
+#
+# The two rocks are one picture and the same picture with the mussels on it,
+# which is what makes over-gathering something a player can see from the dune
+# (`types::BLOCK_MUSSEL_BED`): a headland of bare grey rock is a headland
+# somebody has been along. Both are the cobble's own light and shade over a
+# wetter grey, so a bed reads as part of the sea floor rather than as a thing
+# placed on it -- and neither is tinted: the climate tint is the colour of
+# land plants, and a rock under the tide is not a plant (the kelp's rule).
+mussel_rock = "terrain/mussel_rock.png"
+# **The mussels are the top of the rock and its sides are rock**, because
+# that is what a bed is: a crust on the surface the tide covers. The block is
+# a whole cell of the sea floor (`types::BLOCK_MUSSEL_BED`), so the picture
+# has to say which face a player is looking at -- and a cube of mussels on
+# all six sides would read as a lump of ore.
+mussel_bed = { top = "terrain/mussel_bed.png", all = "terrain/mussel_rock.png" }
+starfish = "terrain/starfish.png"
+mussels = "food/mussels.png"
+cooked_mussels = "food/cooked_mussels.png"
+# A crab is drawn whole on both icons rather than as a cut of meat, because
+# one of these *is* one crab -- and raw and cooked are the same silhouette in
+# two colours, which is the one case this pack recolours rather than redraws
+# (see the fish above).
+crab_meat = "food/crab_meat.png"
+cooked_crab = "food/cooked_crab.png"

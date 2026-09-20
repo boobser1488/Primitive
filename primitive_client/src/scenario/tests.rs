@@ -3254,3 +3254,93 @@ fn biometp_steppe_puts_the_player_on_solid_ground_in_the_steppe() {
         rested.1
     );
 }
+
+// ---------------------------------------------------------------- the shore
+
+#[test]
+fn a_player_wades_out_to_a_mussel_bed_strips_it_and_is_left_looking_at_bare_rock() {
+    // **The whole of what a shore is worth, played as a player plays it.**
+    // Every unit test of `shore::gather` passed while the gesture itself was
+    // unreachable: a bed is picked with the right click the berry bush uses
+    // (`types::picks_by_hand`), and whether *that* is what a click on this
+    // block does is a question about the client's gesture table, the
+    // server's `use_block` and the block's own id all agreeing.
+    //
+    // It also states the thing the mechanic is for: the rock changes picture
+    // when the last mussel comes off it, so a stripped headland is something
+    // a player can see rather than a number they have to remember.
+    use primitive_shared::shore;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let rock = (x0 + 2, GROUND + 1, z);
+    s.stand_at(feet_on(x0, z));
+    // **A stick in the hand, and it is not decoration.** The first handful
+    // of mussels lands in the selected slot, and from that moment a right
+    // click on anything is a player eating raw shellfish (`UseGesture::Eat`
+    // outranks the pick) -- which is what this scenario did on its first
+    // run, and is also exactly what would happen to a player. Holding
+    // something that is not food is the answer both of them have.
+    s.give(t::BLOCK_STICK, 1);
+    s.select(t::BLOCK_STICK);
+    // One cell, and it is the sea floor itself: a bed *is* the rock
+    // (`types::BLOCK_MUSSEL_BED`), which is what the generator lays in the
+    // shallows (`worldgen::place_seabed`).
+    s.build(&[(rock, shore::bed_holding(shore::BED_FULL))]);
+    s.look_at_face(rock, (-1, 0, 0));
+    assert_eq!(s.aimed().map(|(cell, _)| cell), Some(rock), "not looking at the bed");
+
+    // Once for every mussel on it, and one more for luck: the spare gesture
+    // has to give nothing rather than a fifth mussel off a bare rock.
+    for _ in 0..usize::from(shore::BED_FULL) + 1 {
+        s.use_aimed();
+        s.seconds(0.4);
+    }
+    let want = u32::from(shore::BED_FULL);
+    assert!(
+        s.until(3.0, |s| s.inventory.count(t::BLOCK_MUSSELS) >= want),
+        "the pack holds {} mussels after stripping a bed",
+        s.inventory.count(t::BLOCK_MUSSELS)
+    );
+    assert_eq!(s.inventory.count(t::BLOCK_MUSSELS), want, "a bare rock went on giving");
+    // ...and what is left is the other picture, on the client's own copy of
+    // the world: this is the half a server-side test cannot see.
+    assert!(
+        s.until(3.0, |s| s.block(rock) == Some(t::BLOCK_MUSSEL_ROCK)),
+        "the rock still looks full: {:?}",
+        s.block(rock).map(t::block_name)
+    );
+    s.shot("mussel_bed_stripped");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_monkey_that_reaches_a_player_holding_food_takes_one_and_the_player_is_told() {
+    use primitive_shared::animals::Species;
+    // **The troop's whole point, end to end.** A monkey decides in the
+    // animals module (`animals::raid`), the theft is settled in the tick loop
+    // against a pack the animals cannot reach (`rob_the_hand`), and the
+    // player learns about it from a notice -- three parts that have to agree
+    // about one event, which is exactly what a scenario is for.
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.give(t::BLOCK_APPLE, 3);
+    s.select(t::BLOCK_APPLE);
+    // Standing still for a moment, so the sign the animals read already says
+    // "holding an apple" before the monkey is asked anything.
+    s.seconds(0.5);
+    let feet = s.feet();
+    let at = (feet.x as f32 + 4.0, feet.y as f32, feet.z as f32);
+    s.server().spawn_animal(Species::Monkey, at).expect("no monkey would come");
+
+    let robbed = s.until(15.0, |s| {
+        s.heard.iter().any(|m| matches!(m, ServerMessage::Notice { what: Notice::MonkeyTakesIt }))
+    });
+    assert!(robbed, "a monkey stood four blocks from an apple for fifteen seconds and did nothing");
+    assert!(
+        s.until(2.0, |s| s.inventory.count(t::BLOCK_APPLE) == 2),
+        "the monkey took {} apples",
+        3 - s.inventory.count(t::BLOCK_APPLE)
+    );
+    no_corrections(&s);
+}

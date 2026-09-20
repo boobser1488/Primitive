@@ -682,6 +682,31 @@ pub fn voice_of(species: Species, cry: Cry) -> Option<Sfx> {
     if species == Species::Rat {
         return voice_of(Species::Hare, if cry == Cry::Idle { Cry::Alarm } else { cry });
     }
+    // **A monkey is heard as the fowl**, and nothing was downloaded for it.
+    // The budget was there for recordings and the borrow is the better
+    // answer anyway: what these clips *are* is a small warm-blooded thing
+    // calling in short repeated bursts -- which is what a troop in a crown
+    // is, and a bird is the only animal already recorded doing it. A hare's
+    // squeal is one long note and would have read as a wounded animal every
+    // time the troop merely saw somebody.
+    //
+    // Its idle and its alarm are deliberately the *same* clip, because for
+    // this animal they are the same event: a troop chattering is a troop
+    // saying something is there, and whether that something is you or a
+    // branch is not a distinction a chatter makes. See
+    // `soundscape::idle_chance`, which is the only thing that differs --
+    // a monkey talks more than anything else alive.
+    if species == Species::Monkey {
+        return voice_of(Species::Fowl, if cry == Cry::Idle { Cry::Alarm } else { cry });
+    }
+    // **A crab is heard as a hare, and it has nothing to say until it is
+    // trodden on.** `idle_chance` gives it no calm voice at all: a beach at
+    // night is the surf, not a chorus. What is left is a blow and a death,
+    // and the smallest, shortest squeal in the bank is the nearest thing
+    // there is to a shell going under a foot.
+    if species == Species::Crab {
+        return voice_of(Species::Hare, cry);
+    }
     VOICES
         .contains(&(species, cry))
         .then_some(Sfx::Animal(species, cry))
@@ -1945,8 +1970,11 @@ mod tests {
         // not a gap waiting for three more files.
         let holder = |species: Species| match species {
             Species::Trout | Species::Pike | Species::Herring => Species::Fish,
-            // ...and the rat, which is heard as a hare: see `voice_of`.
-            Species::Rat => Species::Hare,
+            // ...and the rat and the crab, heard as a hare, and the monkey,
+            // heard as the fowl: see `voice_of` for what each borrows and
+            // why nothing was recorded for them.
+            Species::Rat | Species::Crab => Species::Hare,
+            Species::Monkey => Species::Fowl,
             other => other,
         };
         let mut owner: HashMap<usize, Species> = HashMap::new();

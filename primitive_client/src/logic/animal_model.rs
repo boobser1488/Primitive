@@ -3230,13 +3230,22 @@ mod tests {
     }
 
     #[test]
-    fn an_animal_is_longer_than_it_is_wide() {
-        // The one proportion that makes a box read as a quadruped rather
-        // than as a crate.
+    fn an_animal_has_a_long_way_and_a_short_way_and_the_crab_lies_across_its_own() {
+        // The one proportion that makes a box read as a body rather than as
+        // a crate: a third longer one way than the other, so the silhouette
+        // has a front and a flank.
+        //
+        // **The crab is the same proportion with the sign turned round**,
+        // which is the animal: its long axis runs *across* its heading
+        // (`Species::sidles`), and the shared hit box is turned the same way
+        // -- see `every_animal_has_a_long_way_and_a_short_way_and_the_crab_is
+        // _the_one_turned_sideways`, which is this property stated of the
+        // numbers the server validates a blow with.
         for &species in Species::ALL {
             let (width, _, length) = extent(species);
+            let (long, short) = if species.sidles() { (width, length) } else { (length, width) };
             assert!(
-                length > width * 1.3,
+                long > short * 1.3,
                 "{} is {length:.2} long and {width:.2} wide",
                 species.name()
             );
@@ -3558,6 +3567,21 @@ mod tests {
         assert!(skins.contains(&Skin::Face), "a boar with no face");
     }
 
+    /// **The one animal in this world with nothing to hang an ear on.**
+    ///
+    /// Not an omission. A crab hears through the water and the sand, and a
+    /// pair of fur-rimmed ears on a carapace would be a crab drawn as a
+    /// small dog. It has a head and a muzzle like everything else -- the eye
+    /// bar and the mouthparts (`animals/crab.bbmodel`) -- because those are
+    /// real parts of a crab and because a body the rest of the game cannot
+    /// find a head on is a body with no skeleton (`skeleton_parts`).
+    ///
+    /// The ear test names this rather than quietly skipping it, so the day
+    /// somebody adds a second shelled animal they decide it on purpose.
+    fn is_shelled(species: Species) -> bool {
+        species == Species::Crab
+    }
+
     /// The part every animal has one of.
     fn head_of(species: Species) -> &'static Part {
         parts(species)
@@ -3876,7 +3900,9 @@ mod tests {
             // is a hole under the feathers, and drawing one would be
             // drawing something nobody has ever seen on a bird.
             // ...nor on a fish, which hears through its skin.
-            let wanted = if species.flies() || species.swims() { 0 } else { 2 };
+            // ...nor on the crab, which has no head to put them on
+            // (`is_shelled`).
+            let wanted = if species.flies() || species.swims() || is_shelled(species) { 0 } else { 2 };
             assert_eq!(ears.len(), wanted, "{} has {} ears", species.name(), ears.len());
             for e in ears {
                 assert_eq!(

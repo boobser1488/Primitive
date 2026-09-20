@@ -12475,6 +12475,79 @@ pub const BLOCKS: &[BlockDef] = &[
         weight: 3.0,
         ..SET_ROW
     },
+    // ---- the shore. See `shore`. ----
+    //
+    // **A mussel bed is the sea floor, not a thing standing on it**, and
+    // that is the one surprising row here. A crust of mussels *is* the rock
+    // -- so this is a whole cell of cobble with a different top, where the
+    // shell and the starfish beside it are flat sprites in the water over
+    // the floor.
+    //
+    // Written that way after the other one was tried and failed: a block
+    // with `Matter::Liquid` belongs to the water simulation, which is the
+    // right answer for kelp (a cut stem leaves water) and the wrong one for
+    // a rock -- the first mussel taken off a bed woke the sim on that cell
+    // and it wrote water over the bed. `Matter::Liquid` means "the water
+    // owns this cell"; a bed that has to survive being edited cannot say it.
+    //
+    // **Broken, it gives cobble and not mussels.** Everything the bed is
+    // worth comes off it by hand (`shore::gather`, the berry bush's
+    // gesture); a bed that also paid out when somebody hit it with a pick
+    // would make the pick the fast way to strip a shore, which is the
+    // opposite of the whole mechanic.
+    BlockDef {
+        id: crate::types::BLOCK_MUSSEL_BED,
+        name: "mussel_bed",
+        drop: Some(crate::types::BLOCK_COBBLESTONE),
+        // **Not placeable**, unlike the cobble it is written against and
+        // gives back. A bed is a thing the tide made: it is never in
+        // anybody's hand, so a row on the "what can be put down" list would
+        // be an entry for a gesture that cannot happen -- and the day
+        // somebody `/give`s one, a mussel bed built into a wall is a wall
+        // that grows mussels.
+        placeable: false,
+        ..COBBLE_ROW
+    },
+    BlockDef {
+        id: crate::types::BLOCK_MUSSEL_ROCK,
+        name: "mussel_rock",
+        drop: Some(crate::types::BLOCK_COBBLESTONE),
+        placeable: false,
+        ..COBBLE_ROW
+    },
+    BlockDef { id: crate::types::BLOCK_MUSSELS, name: "mussels", drop: Some(crate::types::BLOCK_MUSSELS), weight: 0.3, ..ITEM_ROW },
+    BlockDef {
+        id: crate::types::BLOCK_COOKED_MUSSELS,
+        name: "cooked_mussels",
+        drop: Some(crate::types::BLOCK_COOKED_MUSSELS),
+        weight: 0.25,
+        ..ITEM_ROW
+    },
+    // **A starfish, and it drops nothing** -- the shell's row said again and
+    // for the shell's reason: every use anybody has proposed for one is a
+    // job something in the pack already does. What it is for is the mussels
+    // it is sitting next to (`shore::starfish_stall`), and prising it off is
+    // the whole of the interaction.
+    BlockDef {
+        id: crate::types::BLOCK_STARFISH,
+        name: "starfish",
+        shape: Shape::Flat,
+        matter: Matter::Liquid,
+        opacity: 1,
+        hardness: Some(0.2),
+        work: Work::Any,
+        drop: None,
+        weight: 0.0,
+        ..SET_ROW
+    },
+    BlockDef { id: crate::types::BLOCK_CRAB_MEAT, name: "crab_meat", drop: Some(crate::types::BLOCK_CRAB_MEAT), weight: 0.25, ..ITEM_ROW },
+    BlockDef {
+        id: crate::types::BLOCK_COOKED_CRAB,
+        name: "cooked_crab",
+        drop: Some(crate::types::BLOCK_COOKED_CRAB),
+        weight: 0.25,
+        ..ITEM_ROW
+    },
 ];
 
 /// What every carried thing among the ten old answers is written against: an

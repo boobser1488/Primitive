@@ -42,6 +42,17 @@ yelp and whine for the wolf, rabbits for the hare, chickens, pheasants and
 junglefowl for wild fowl, a donkey for the zebra past its one bray, goats
 for a wounded antelope.
 
+**The shore's two are borrowed and nothing was fetched for them**, and that
+was a choice rather than a budget. A monkey is heard as the wild fowl:
+these clips are a small warm-blooded thing calling in short repeated bursts,
+which is exactly what a troop in a crown is, and the bird is the only animal
+in the set already recorded doing it -- where a hare's squeal is one long
+note and would have read as a wounded animal every time a troop merely saw
+somebody. A crab is heard as the hare, and only when it is trodden on: it has
+no calm voice at all (`soundscape::idle_chance`), because a beach at night is
+the surf and not a chorus. See `bank::voice_of`, where both borrows are
+written down.
+
 **The horse has its own recordings now** -- snorts, whinnies and a last
 breath under `wild/horse_*`, and hoofbeats at a walk, a trot and a gallop,
 on soft ground and on stone or wood, under `step/hoof_*`. It used to be

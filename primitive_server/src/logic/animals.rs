@@ -918,6 +918,18 @@ const TURN_COST: f32 = 0.33;
 /// Rejected too: **deriving it from the mass** -- `Species` has no mass, and
 /// inventing one to feed a steering coefficient is a second body model.
 fn nimbleness(species: Species) -> f32 {
+    // **A sidler turns as fast as it likes, and its width is beside the
+    // point.** Everything else here has to swing a body round to go a new
+    // way, which is why the number is read off how wide that body is; a crab
+    // is already pointing every way at once (`Species::sidles`), so the
+    // question does not apply to it. Without this the widest animal in the
+    // world would have been the slowest to change its mind, which is the
+    // opposite of what a crab on a beach does -- and what a player would
+    // have seen is a thing that took half a second to decide which rock to
+    // go under, standing still in a hand's reach.
+    if species.sidles() {
+        return 1.8;
+    }
     (0.6 / species.width()).clamp(0.8, 1.8)
 }
 
@@ -1722,6 +1734,16 @@ enum Mind {
     /// missile the boar was rebuilt to stop being; aimed at a deer, it is
     /// the only way a wolf ever catches anything, because a deer that has
     /// seen it runs at six metres a second and a stalk does not.
+    ///
+    /// **...and the monkey, which is the one thing here that chases a
+    /// person** (`raid`). It is allowed the homing missile's steering for
+    /// the reason the boar is not: what arrives is not a blow. A monkey that
+    /// reaches you takes what is in your hand and runs, and every one of the
+    /// things that make a charge fair -- see it coming, step aside, back
+    /// away -- are answers to it as well; the difference is that ignoring it
+    /// costs a dinner rather than a quarter of your health. It is also
+    /// slower than a sprinting player (`Species::run_speed`), which a wolf
+    /// is not.
     Chase,
     /// Blown, turning round, deciding whether to go again.
     Recover,
@@ -1927,7 +1949,22 @@ pub struct Animal {
     charge_at: Option<(f32, f32)>,
     /// Seconds of anger left. Set by being hit, and counted down
     /// wherever the boar happens to be -- see `Species::grudge_seconds`.
+    ///
+    /// **A monkey spends it the other way round**, staying away instead of
+    /// coming at you, and it is the same fact about the animal: this person
+    /// and I have had words. See `raid`.
     angry_for: f32,
+    /// Whose dinner it has just taken, for the tick loop to settle against
+    /// their pack (`Animals::take_thefts`).
+    ///
+    /// **Here rather than a blow.** A theft is not damage and must not go
+    /// through `Blow`: what it touches is an inventory, which the animals
+    /// module has never been given and is not being given now (see the note
+    /// on `Neighbours::centre` about mechanics that can reach everything).
+    /// It is drained the way dung and a dead horse's bags are, which is the
+    /// pattern this module already has for "something happened that the
+    /// server has to finish".
+    stole_from: Option<PlayerId>,
     /// Seconds until it is hungry again. Only a predator ever has any.
     ///
     /// A stomach rather than an appetite: a wolf that has eaten stops
@@ -2644,6 +2681,10 @@ pub struct Animals {
     /// load in them (`horse::Gear::left_behind`) -- for the tick loop to throw
     /// down as items, which this file cannot do (see `staked`).
     spilled: Vec<Spilled>,
+    /// Who a monkey robbed this step, and which monkey did it, for the tick
+    /// loop to take out of their pack -- this file has no inventories. See
+    /// `raid` and `take_thefts`.
+    thefts: Vec<(PlayerId, EntityId)>,
     /// Whether it is raining on the world, for the kept horses standing out
     /// in it (`husbandry::EXPOSED_CONDITION_PER_DAY`). Told by the tick loop.
     raining: bool,
@@ -2719,6 +2760,7 @@ impl Animals {
             dung: Vec::new(),
             raided: None,
             spilled: Vec::new(),
+            thefts: Vec::new(),
             raining: false,
             #[cfg(test)]
             rays_cast: 0,
@@ -3262,6 +3304,7 @@ impl Animals {
             target: None,
             hurt_for: 0.0,
             gore_cooldown: 0.0,
+            stole_from: None,
             charge_at: None,
             angry_for: 0.0,
             fed_for: 0.0,
@@ -3413,6 +3456,9 @@ impl Animals {
         let wind = self.wind;
         let mut rays = RAYS_PER_TICK;
         let mut bites = Vec::new();
+        // Gathered here and appended after the loop, for `bites`' reason:
+        // nothing may touch `self` while the animals are being walked.
+        let mut thefts: Vec<(PlayerId, EntityId)> = Vec::new();
         // **What the world itself does to an animal, this tick.** Three
         // things a player already answers to (`logic::survival`) and
         // nothing here ever did: a fall from height, standing in fire,
@@ -3484,7 +3530,11 @@ impl Animals {
             }
             animal.hurt_for = (animal.hurt_for - dt).max(0.0);
             animal.settle_for = (animal.settle_for - dt).max(0.0);
+            if let Some(who) = animal.stole_from.take() {
+                thefts.push((who, animal.id));
+            }
         }
+        self.thefts.append(&mut thefts);
         #[cfg(test)]
         {
             self.rays_cast += u64::from(RAYS_PER_TICK - rays);
@@ -4327,15 +4377,22 @@ impl Animals {
         let Some(ground) = surface_under(world, x, origin.1 + 16.0, z) else {
             return;
         };
-        // Grass and nothing else: an animal standing on a rock face, in
-        // a desert or on a cave floor is one that came from nowhere.
-        // `can_grow_on` is asked with a tuft, because "would a plant grow
-        // here" is exactly the question -- and it is one function rather
-        // than a second list of what counts as pasture.
+        // Grass, or the shore's own sand: an animal standing on a rock
+        // face, in a desert or on a cave floor is one that came from
+        // nowhere. `can_grow_on` is asked with a tuft, because "would a
+        // plant grow here" is exactly the question -- and it is one function
+        // rather than a second list of what counts as pasture.
+        //
+        // **Asked twice, cheaply then properly.** Which floors count depends
+        // on the species (`spawn_ground`), and the species is not picked
+        // until the country is known a dozen lines below; so this first ask
+        // is "could *anything* stand here", which throws out the rock face
+        // and the cave without doing the work, and the species' own answer
+        // comes after it.
         let Some(under) = world.block(x.floor() as i32, ground - 1, z.floor() as i32) else {
             return;
         };
-        if !is_pasture(under) {
+        if !Species::ALL.iter().any(|&species| spawn_ground(species, under)) {
             return;
         }
 
@@ -4351,6 +4408,9 @@ impl Animals {
         // than of the generator, because this file has a `BlockWorld`
         // and nothing else -- and because a wood a player planted is a
         // wood. See `Species::needs_trees`.
+        if !spawn_ground(species, under) {
+            return;
+        }
         if species.needs_trees() && !wooded(world, x, ground, z) {
             return;
         }
@@ -4400,7 +4460,7 @@ impl Animals {
             // ...and the same country: a herd of zebra spawned on the edge
             // of the savanna stops at the edge, rather than putting its last
             // animal among the deer a few blocks over the line.
-            if !is_pasture(under)
+            if !spawn_ground(species, under)
                 || !species.lives_in(country(cx, cz))
                 || !fits(world, (f64::from(cx), f64::from(ground as f32), f64::from(cz)), species)
             {
@@ -4899,6 +4959,12 @@ impl Animals {
     /// see `Animals::spilled`.
     pub fn take_spilled(&mut self) -> Vec<Spilled> {
         std::mem::take(&mut self.spilled)
+    }
+
+    /// Who the monkeys robbed since the tick loop last asked, and which
+    /// monkey did each: see `Animals::thefts`.
+    pub fn take_thefts(&mut self) -> Vec<(PlayerId, EntityId)> {
+        std::mem::take(&mut self.thefts)
     }
 
     /// Tells the animals whether it is raining, for the kept horses standing
@@ -5902,6 +5968,21 @@ fn think(
         }
     }
 
+    // **A troop does not run from a person, it comes for what they have.**
+    // Before the flight, because for a monkey the sight of somebody is the
+    // *opportunity* rather than the fright -- and after `maybe`, because a
+    // half-noticed figure is not something to steal from. A monkey that has
+    // been hit goes back to running like everything else: see `raid`, which
+    // reads the grudge.
+    if animal.species.pilfers() {
+        if let Some((Some(who), at, distance)) = danger {
+            let held = senses.figures.iter().find(|f| f.who == who).and_then(|f| f.held);
+            if raid(animal, Mark { who, at, distance, held }, seen, world, rng) {
+                return;
+            }
+        }
+    }
+
     match danger {
         Some((who, at, _)) => {
             // A `target` only exists for people. What it is *for* is the
@@ -6734,6 +6815,150 @@ fn nest_near(world: &dyn BlockWorld, animal: &Animal) -> Option<(f32, f32)> {
 /// making for its cover or its herd, keeping to the line it is already on,
 /// and how far each can actually be run -- which is what takes a deer round
 /// the end of a wall instead of into the corner beside it.
+/// How fast a climber goes up a trunk, in blocks a second.
+///
+/// A little under its own walk, which is what climbing is: the same effort
+/// turned through a right angle. Fast enough that a monkey with a player
+/// under it is out of a spear's reach in a second and a half, which is the
+/// number the whole animal turns on.
+const TRUNK_CLIMB_SPEED: f32 = 1.6;
+
+/// ...and how fast it comes back down: quicker, because coming down a trunk
+/// is a controlled fall and every animal that climbs does it that way.
+const TRUNK_DESCEND_SPEED: f32 = 2.4;
+
+/// **What holds a climber up, and which way it is going.**
+///
+/// `None` for anything that is not a climber, and for a climber with no
+/// timber against it -- both of which fall like everything else, which is the
+/// half of this that makes it a climb rather than a flight.
+///
+/// The rule is the whole animal in four lines: a climber whose own cell or
+/// the cell it faces is a trunk or a crown (`animals::is_cover`, which is
+/// already this game's word for "standing timber") is *held*, and it goes up
+/// while it has a reason to be up and down when it has not. The reason is
+/// `Mind::Flee`: a monkey that has been frightened goes up the nearest thing,
+/// and a monkey with nothing to fear comes down to the fruit. Nothing else
+/// about it is special -- the collider, the turning, the speed across the
+/// ground and the fall when it lets go are every other animal's.
+///
+/// **Rejected: a target altitude, the bird's way** (`FLIGHT_HEIGHT`). It is
+/// three lines fewer and wrong in all of them: a height is a place in the
+/// *air*, so a monkey would have held it over open sand with nothing under
+/// it, and the palms would have been scenery it happened to hover among
+/// rather than the thing it was in. The whole point of a troop is that the
+/// grove is where they are safe and the beach is where they are not.
+///
+/// **Rejected: climbing only while a player is looking.** It is cheaper and
+/// it is the kind of cheat that is found the first time somebody watches a
+/// grove through the dark with a torch out.
+fn climbing(animal: &Animal, world: &dyn BlockWorld) -> Option<f32> {
+    if !animal.species.climbs() {
+        return None;
+    }
+    let (x, y, z) = animal.at();
+    // Its own middle and the cell its nose is in: a monkey against a trunk
+    // is not standing inside it. Half a block ahead is inside the next cell
+    // for anything this size.
+    let (sin, cos) = animal.yaw.sin_cos();
+    let ahead = (x + cos * 0.6, z + sin * 0.6);
+    let holds = [(x, z), ahead].into_iter().any(|(cx, cz)| {
+        world
+            .block(cx.floor() as i32, y.floor() as i32, cz.floor() as i32)
+            .is_some_and(is_cover)
+    });
+    if !holds {
+        return None;
+    }
+    Some(if animal.mind == Mind::Flee { TRUNK_CLIMB_SPEED } else { -TRUNK_DESCEND_SPEED })
+}
+
+/// How close a monkey has to get to a person to have their dinner off them,
+/// in blocks.
+///
+/// **An arm's length, and it is the whole of what makes the theft fair.** A
+/// troop that lifted things from six blocks away would be a tax; at an arm's
+/// length the player can see it coming, can back away, can throw a stone
+/// (`Species::grudge_seconds`), and can simply not stand there. What it costs
+/// is attention -- which is exactly the thing a camp with stores in it is
+/// asking for.
+const STEAL_REACH: f32 = 1.5;
+
+/// How far off a monkey will start a raid, in blocks.
+///
+/// Well inside its `awareness` of twenty: a monkey sees a person across the
+/// grove and does nothing about it, and comes in when they are close enough
+/// that crossing the ground is a dash rather than a march. A troop that set
+/// off at twenty blocks would be at the camp before the player got back to
+/// it, which is a theft nobody watched happen -- and a theft nobody watched
+/// is the rat's mechanic, indoors, at night (`Species::Rat`), not this one.
+const RAID_RANGE: f32 = 9.0;
+
+/// **What a monkey does about a person instead of running from one.**
+///
+/// `true` when it decided the thought. Three states, in order, and they are
+/// the three halves of a theft anybody has ever watched happen:
+///
+/// * **Nothing, if it has been hit.** `angry_for` is the grudge every other
+///   animal spends *coming at you*; a monkey spends it staying away, which is
+///   the same field meaning the same thing -- "this person and I have had
+///   words" -- read by an animal that was never going to fight. A stone
+///   thrown at a monkey buys two minutes (`Species::grudge_seconds`), and the
+///   player who works that out has the tool the mechanic is for.
+/// * **Come, while there is something to come for.** Food in the hand is the
+///   whole of what it wants, and that is deliberately the *only* thing it
+///   reads: a monkey that raided a pack it could not see would be a monkey
+///   with x-ray eyes, and a player would never learn what drew it. What draws
+///   it is what they are holding, and they can see that too.
+/// * **Take it and go.** Inside `STEAL_REACH` it marks the theft for the tick
+///   loop to settle against the pack (`Animals::take_thefts`) and bolts, with
+///   the same grudge set on itself: a monkey that has just robbed somebody
+///   does not come back for seconds.
+///
+/// Rejected: **a mind that went for the *chest*** rather than for the hand. It
+/// is what the player asked for in so many words ("steals food from a
+/// player's camp"), and it is a worse mechanic: a container the animals could
+/// open is a larder that empties while nobody is there, which is the thing
+/// the rat's own note says is a bad feeling, and the defence against it is a
+/// wall -- built once, thought about never. The hand is the version that
+/// happens *in front of you*, and a camp is guarded by being at it.
+/// Who a monkey has decided to rob and what it can see of them: the three
+/// facts `raid` reads about a person, together, so the function takes a
+/// person rather than three of a person's parts.
+#[derive(Debug, Clone, Copy)]
+struct Mark {
+    who: PlayerId,
+    at: (f32, f32, f32),
+    distance: f32,
+    /// What is in their hand: see `PlayerSign::held`.
+    held: Option<primitive_shared::types::BlockId>,
+}
+
+fn raid(animal: &mut Animal, mark: Mark, seen: &Neighbours, world: &dyn BlockWorld, rng: &mut Rng) -> bool {
+    let Mark { who, at, distance, held } = mark;
+    if animal.angry_for > 0.0 || distance > RAID_RANGE {
+        return false;
+    }
+    if !held.is_some_and(primitive_shared::food::is_food) {
+        return false;
+    }
+    animal.target = Some(who);
+    animal.threat_at = None;
+    let toward = (at.2 - animal.at().2).atan2(at.0 - animal.at().0);
+    if distance <= STEAL_REACH {
+        animal.stole_from = Some(who);
+        // Its own grudge, set on itself: see the doc above.
+        animal.angry_for = animal.species.grudge_seconds();
+        bolt(animal, world, toward + std::f32::consts::PI, seen);
+        return true;
+    }
+    animal.mind = Mind::Chase;
+    animal.wants_yaw = toward;
+    animal.attitude = primitive_shared::protocol::Attitude::Alert;
+    animal.next_thought = rng.range(0.15, 0.35);
+    true
+}
+
 fn bolt(animal: &mut Animal, world: &dyn BlockWorld, away: f32, seen: &Neighbours) {
     animal.mind = Mind::Flee;
     animal.next_thought = FLEE_SECONDS;
@@ -7681,6 +7906,25 @@ fn standing_in_food(world: &dyn BlockWorld, feet: (f32, f32, f32)) -> bool {
 /// Asked as "would that ground's own grass grow here", with the tuft that
 /// belongs on it, so a field of turf under a roof or on a cave ledge is
 /// still refused exactly as it was.
+/// Is this a floor the spawner will put `species` down on?
+///
+/// **Grass for everything that grazes or hunts, and the shore's own floor
+/// for the shore's two** (`Species::walks_on_sand`, which carries the whole
+/// argument). `is_pasture` on its own was the answer for eighteen species
+/// and would have meant a world with no crabs and no monkeys in it: a beach
+/// is sand, and sand grows nothing.
+///
+/// The shore's list is what a tideline is made of and deliberately not "any
+/// solid block": an animal standing on a rock face, on a cave floor or on
+/// somebody's roof is still an animal that came from nowhere, which is what
+/// the pasture test was protecting.
+fn spawn_ground(species: Species, under: primitive_shared::types::BlockId) -> bool {
+    use primitive_shared::types::{block_kind, BLOCK_COBBLESTONE, BLOCK_GRAVEL, BLOCK_SAND};
+    is_pasture(under)
+        || (species.walks_on_sand()
+            && matches!(block_kind(under), BLOCK_SAND | BLOCK_GRAVEL | BLOCK_COBBLESTONE))
+}
+
 fn is_pasture(under: primitive_shared::types::BlockId) -> bool {
     use primitive_shared::types::{block_kind, BLOCK_DRY_GRASS, BLOCK_DRY_TURF, BLOCK_TALL_GRASS};
     match block_kind(under) {
@@ -9007,6 +9251,11 @@ fn walk(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
         animal.velocity.1 += (-LANDING_SINK - animal.velocity.1).clamp(-pull, pull);
     } else if wading {
         animal.velocity.1 = (animal.velocity.1 + BUOYANCY * dt).min(SWIM_RISE);
+    } else if let Some(up) = climbing(animal, world) {
+        // **A monkey holding on to a tree.** See `climbing` for the whole
+        // of it; what happens here is only that the timber replaces gravity
+        // while a hand is on it, which is what a climb is.
+        animal.velocity.1 = up;
     } else {
         animal.velocity.1 = (animal.velocity.1 + GRAVITY * dt).max(TERMINAL_VELOCITY);
     }
@@ -10389,6 +10638,19 @@ fn wooded(world: &dyn BlockWorld, x: f32, ground: i32, z: f32) -> bool {
                         | BLOCK_APPLE_LEAVES_FRUIT
                         | BLOCK_ACACIA_LEAVES
                         | primitive_shared::types::BLOCK_MAPLE_LEAVES
+                        // **...and a palm**, whose trunk is a *branch* to
+                        // every rule in the game (`types::is_branch`) and
+                        // whose crown is fronds rather than leaves -- so
+                        // neither of the two lists above had ever heard of
+                        // it. A grove on a hot shore was "not wooded", and
+                        // the one animal that lives in one (`Species::Monkey`)
+                        // would never have been put in a world at all. A bear
+                        // reads the same line and is none the worse for it:
+                        // there are no bears on a tropical beach
+                        // (`Species::lives_in`).
+                        | primitive_shared::types::BLOCK_PALM_TRUNK
+                        | primitive_shared::types::BLOCK_PALM_FRONDS
+                        | primitive_shared::types::BLOCK_PALM_COCONUTS
                 ) {
                     wood += 1;
                     if wood >= 12 {
@@ -10486,6 +10748,54 @@ mod tests {
 
     fn player(at: (f32, f32, f32)) -> Vec<(primitive_shared::protocol::PlayerId, (f32, f32, f32))> {
         vec![(1, at)]
+    }
+
+    #[test]
+    fn a_frightened_monkey_goes_up_the_trunk_it_is_against_and_a_calm_one_comes_down() {
+        // **The whole of the climb, as the two answers `climbing` gives.**
+        // What makes a troop safe in the palms is not a speed and not an
+        // altitude: it is that the timber it is touching holds it up while
+        // it has a reason to be up, and lets it down when it has not. See
+        // `climbing` for why this is not the bird's target altitude.
+        let world = meadow(8);
+        for y in 21..27 {
+            world.put(2, y, 0, primitive_shared::types::BLOCK_LOG);
+        }
+        let mut animals = Animals::seeded(5);
+        let id = animals.spawn(Species::Monkey, (1.55, 21.0, 0.5)).expect("a monkey");
+        let up = {
+            let monkey = animals.find_mut_for_test(id).expect("the monkey");
+            // Facing the trunk, half a stride off it: the hand is on the wood.
+            monkey.yaw = 0.0;
+            monkey.mind = Mind::Flee;
+            climbing(monkey, &world)
+        };
+        assert_eq!(up, Some(TRUNK_CLIMB_SPEED), "a frightened monkey against a trunk did not climb it");
+        let down = {
+            let monkey = animals.find_mut_for_test(id).expect("the monkey");
+            monkey.mind = Mind::Idle;
+            climbing(monkey, &world)
+        };
+        assert_eq!(down, Some(-TRUNK_DESCEND_SPEED), "a calm monkey stayed up the tree");
+        // ...and out on the grass, with nothing to hold, it falls like
+        // everything else -- which is what makes the grove a place rather
+        // than a height.
+        let loose = {
+            let monkey = animals.find_mut_for_test(id).expect("the monkey");
+            monkey.position = (-4.0, 21.0, -4.0);
+            monkey.mind = Mind::Flee;
+            climbing(monkey, &world)
+        };
+        assert_eq!(loose, None, "a monkey climbed thin air");
+        // Nothing else in the world does any of this.
+        for &species in Species::ALL.iter().filter(|s| !s.climbs()) {
+            let other = animals.spawn(species, (1.55, 21.0, 0.5));
+            let Some(other) = other else { continue };
+            let animal = animals.find_mut_for_test(other).expect("the animal");
+            animal.yaw = 0.0;
+            animal.mind = Mind::Flee;
+            assert_eq!(climbing(animal, &world), None, "a {} climbed a tree", species.name());
+        }
     }
 
     /// The distance between two points on the ground.
@@ -14323,6 +14633,62 @@ mod tests {
         }
         world.set_biome(Some(primitive_shared::worldgen::Biome::Beach));
         world
+    }
+
+    #[test]
+    fn a_palm_grove_on_the_sand_fills_with_monkeys_and_crabs_where_a_bare_beach_gets_only_crabs() {
+        // **The bug this test exists for, and it would have shipped.** The
+        // land spawner's ground test was `is_pasture` -- grass a tuft would
+        // grow in -- because for eighteen species "will it stand here" and
+        // "is there grass here" were the same question. A beach is sand, so
+        // under that test a world had no crabs and no monkeys in it at all,
+        // and nothing anywhere said so: the spawner simply returned. See
+        // `spawn_ground`, and `wooded`, which had never heard of a palm
+        // either.
+        use primitive_shared::worldgen::Biome;
+        let reach = SPAWN_MAX as i32 + GROUP_SPREAD as i32 + 8;
+        let count = |world: &TestWorld| {
+            let mut animals = Animals::seeded(91);
+            let mut seen: Vec<Species> = Vec::new();
+            for _ in 0..4000 {
+                animals.populate(world, &player((-6.5, 21.0, 0.5)), false);
+                for animal in animals.animals.iter() {
+                    if !seen.contains(&animal.species) {
+                        seen.push(animal.species);
+                    }
+                }
+                animals.animals.clear();
+            }
+            seen
+        };
+        let bare = shore(reach);
+        assert!(bare.biome(0, 0) == Some(Biome::Beach), "the fixture is not a beach");
+        let on_bare = count(&bare);
+        assert!(on_bare.contains(&Species::Crab), "a beach with no crabs on it: {on_bare:?}");
+        assert!(
+            !on_bare.contains(&Species::Monkey),
+            "a troop of monkeys on a strand with nothing growing on it: {on_bare:?}"
+        );
+
+        // ...and the same sand with palms standing in it. Palms, not oaks: a
+        // hot shore grows palms, and a palm's trunk is a *branch* to every
+        // rule in the game, which is why `wooded` had to be told about it.
+        //
+        // The grove covers the whole ring the spawner reaches into
+        // (`SPAWN_MIN`..`SPAWN_MAX`), because a spot is picked at a random
+        // bearing and a copse the size of a copse would be found once in a
+        // hundred tries -- which is a test that passes or fails on its seed.
+        let grove = shore(reach);
+        for dz in (-reach..=reach).step_by(4) {
+            for dx in (-reach..-30).step_by(4) {
+                for y in 21..27 {
+                    grove.put(dx, y, dz, primitive_shared::types::BLOCK_PALM_TRUNK);
+                }
+                grove.put(dx, 27, dz, primitive_shared::types::BLOCK_PALM_FRONDS);
+            }
+        }
+        let in_grove = count(&grove);
+        assert!(in_grove.contains(&Species::Monkey), "a palm grove with no troop in it: {in_grove:?}");
     }
 
     #[test]

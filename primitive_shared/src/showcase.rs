@@ -545,6 +545,28 @@ fn aquarium(c: &mut Canvas, (x, z): (i32, i32)) {
     for (dx, dz) in [(0, -1), (-1, -4), (2, 3), (0, 3)] {
         c.set(x + dx, floor + 1, z + dz, BLOCK_SHELL);
     }
+    // **The tidal shallows, in the corner where the water is thinnest.** The
+    // shelf along the south is three below the surface -- wading depth --
+    // and the whole point of a mussel bed is that it is worked without
+    // swimming (`worldgen::MUSSEL_DEPTHS`), so the beds go on the shelf
+    // rather than out in the basin. Three of them, one already stripped, and
+    // a starfish on the rock next to the bare one: the rule a player has to
+    // work out for themselves is that the bare bed is the one with a
+    // starfish beside it (`shore::starfish_stall`).
+    for (dx, on) in [(-4i32, crate::shore::BED_FULL), (-2, crate::shore::BED_FULL - 1), (0, 0)] {
+        c.set(x + dx, surface - 3, z + 4, crate::shore::bed_holding(on));
+        // **Water over it, whatever the meadow put there.** The seagrass is
+        // laid over this shelf a few lines up and it grows on sand
+        // (`types::can_grow_on`); a tuft left standing on a bed would be a
+        // plant rooted in something that will not hold it.
+        c.set(x + dx, surface - 2, z + 4, BLOCK_WATER);
+    }
+    // Two blocks from the bare bed and four from the half-picked one, which
+    // is the reach (`shore::STARFISH_REACH`): one of the three is stalled
+    // and the others are not.
+    c.set(x + 2, surface - 2, z + 4, crate::types::BLOCK_STARFISH);
+    // ...and one out on the open sand, which is where a swimmer finds them.
+    c.set(x - 1, floor + 1, z - 2, crate::types::BLOCK_STARFISH);
     // A way in: a step cut down from the north rim.
     c.set(x, GROUND_Y, z - 6, BLOCK_AIR);
     c.set(x, GROUND_Y - 1, z - 6, BLOCK_STONE);
