@@ -961,15 +961,25 @@ fn sample_cutout(uv: vec2<f32>, named: u32) -> vec4<f32> {
     // `textureLoad` takes no derivative, so it is legal past nothing and
     // costs one fetch on the near fragments of a cut-out.
     let ramp = (abs(ddx) + abs(ddy)) * resolution;
-    let size = vec2<f32>(textureDimensions(block_textures).xy);
-    let under = textureLoad(
-        block_textures,
-        vec2<i32>(clamp(fract(held) * size, vec2<f32>(0.0), size - 1.0)),
-        i32(animated(named)),
-        0,
-    ).a;
-    let magnified = max(ramp.x, ramp.y) < 1.0;
-    return vec4<f32>(filtered.rgb, select(filtered.a, under, magnified));
+    // **Behind the branch, not behind a `select`.** `select` is a value and
+    // both of its arms are evaluated, so the fetch below was taken on every
+    // cut-out fragment in the frame and thrown away on the minified ones --
+    // which is most of a canopy and every distant tuft. `textureLoad` takes
+    // no derivative, so it is legal in non-uniform control flow and the
+    // branch is allowed where `textureSampleGrad`'s would not be. The
+    // answer is unchanged to the byte; what changes is one fetch a fragment
+    // on the far two thirds of the foliage.
+    var alpha = filtered.a;
+    if (max(ramp.x, ramp.y) < 1.0) {
+        let size = vec2<f32>(textureDimensions(block_textures).xy);
+        alpha = textureLoad(
+            block_textures,
+            vec2<i32>(clamp(fract(held) * size, vec2<f32>(0.0), size - 1.0)),
+            i32(animated(named)),
+            0,
+        ).a;
+    }
+    return vec4<f32>(filtered.rgb, alpha);
 }
 
 // How much of the sun a face turned along `normal` catches, 0.35..1.

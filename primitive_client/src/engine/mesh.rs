@@ -1597,12 +1597,12 @@ pub struct Neighbourhood {
     /// A list for `pottery`'s reason, and usually an empty one: a chest
     /// somebody has open is one cell in a world of them.
     swung_lids: Vec<(i32, i32, i32)>,
-    /// Whether the stones and sticks of this chunk are laid flat rather
-    /// than given their thickness (`relief`). Set after `fill` by the
-    /// dispatch, which knows how far the chunk is from the player
-    /// (`lod::relief_at`); cleared by `fill`, so a snapshot nobody told --
-    /// every test and every photograph -- draws them solid.
-    stones_lie_flat: bool,
+    /// How much thickness the stones and sticks of this chunk are given
+    /// (`relief`). Set after `fill` by the dispatch, which knows how far the
+    /// chunk is from the player (`lod::stones_at`); reset by `fill` to the
+    /// two-tier surface, so a snapshot nobody told -- every test and every
+    /// photograph -- draws them whole.
+    stone_detail: crate::engine::lod::StoneDetail,
     /// Whether this chunk's crowns are built as solid shells rather than
     /// see-through with their insides (`lod::leaves_see_through_at`). Set
     /// after `fill` by the dispatch, cleared by `fill` -- so, like the
@@ -2294,10 +2294,11 @@ impl Neighbourhood {
         self.ceiling
     }
 
-    /// Lays this chunk's stones and sticks flat, for a chunk too far away
-    /// for their thickness to be a pixel. See `lod::relief_at`.
-    pub fn lay_stones_flat(&mut self, flat: bool) {
-        self.stones_lie_flat = flat;
+    /// How much thickness this chunk's stones and sticks are given: the
+    /// two-tier surface near, one tier past the default line, the flat quad
+    /// past the player's. See `lod::stones_at`.
+    pub fn lay_stones(&mut self, detail: crate::engine::lod::StoneDetail) {
+        self.stone_detail = detail;
     }
 
     /// Builds this chunk's crowns as solid shells, for a chunk past the
@@ -2399,7 +2400,7 @@ impl Default for Neighbourhood {
             coarse: false,
             pottery: Vec::new(),
             swung_lids: Vec::new(),
-            stones_lie_flat: false,
+            stone_detail: crate::engine::lod::StoneDetail::Full,
             leaves_solid: false,
         }
     }
@@ -2459,7 +2460,7 @@ impl Neighbourhood {
         self.swung_lids.clear();
         // ...and a far chunk's flat stones do not follow the snapshot to a
         // near one.
-        self.stones_lie_flat = false;
+        self.stone_detail = crate::engine::lod::StoneDetail::Full;
         // ...nor its solid crowns.
         self.leaves_solid = false;
 
@@ -2893,10 +2894,15 @@ pub fn build_mesh(
     // Asked once for the chunk rather than six times per cell: it is one
     // flag on the snapshot, and the face loop is the hottest code here.
     let coarse = cache.is_coarse();
-    // A stone's thickness, or the flat quad: near, the relief; far, and in
-    // any chunk `lod::coarsen` rewrote, the quad. See `lod::relief_at` for
-    // where near ends and what it measured.
-    let reliefs_here = !coarse && !cache.stones_lie_flat;
+    // A stone's thickness, or the flat quad: both tiers near, the
+    // silhouette alone past the default line, and the quad far off or in
+    // any chunk `lod::coarsen` rewrote. See `lod::stones_at` for where each
+    // line falls and what the middle band was measured to be worth.
+    let stone_detail = if coarse {
+        crate::engine::lod::StoneDetail::Flat
+    } else {
+        cache.stone_detail
+    };
     // A crown's inside, or only its outside: see `face_visible` and
     // `MeshBuffers::leaves_solid`.
     let shell_crowns = coarse || cache.leaves_solid;
@@ -2983,7 +2989,8 @@ pub fn build_mesh(
                             [x as f32, y as f32 - rest_drop(id, cache.block_near(cell, y, 0, -1, 0)), z as f32],
                             id,
                             textures.layer_for_face(id, 0),
-                            if reliefs_here { textures.relief(id) } else { None },
+                            if stone_detail == crate::engine::lod::StoneDetail::Flat { None } else { textures.relief(id) },
+                        stone_detail,
                             cache.light_near(cell, y, 0, 0, 0),
                             vertices,
                             sprites,
@@ -3114,7 +3121,8 @@ pub fn build_mesh(
                         [x as f32, y as f32 - rest_drop(id, cache.block_near(cell, y, 0, -1, 0)), z as f32],
                         id,
                         textures.layer_for_face(id, 0),
-                        if reliefs_here { textures.relief(id) } else { None },
+                        if stone_detail == crate::engine::lod::StoneDetail::Flat { None } else { textures.relief(id) },
+                        stone_detail,
                         cache.light_near(cell, y, 0, 0, 0),
                         vertices,
                         sprites,
@@ -8707,6 +8715,7 @@ fn flat_block(
     block: BlockId,
     layer: u32,
     relief: Option<&crate::engine::relief::Relief>,
+    detail: crate::engine::lod::StoneDetail,
     light: u8,
     vertices: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
@@ -8719,7 +8728,7 @@ fn flat_block(
     // one binary (`FaceLayers::without_reliefs`).
     if let Some(relief) = relief {
         let inset = primitive_shared::types::flat_inset(block);
-        relief.append(cell, at, inset, layer, light, vertices, indices);
+        relief.append(cell, at, inset, layer, light, detail, vertices, indices);
         return;
     }
     let (sky, block_light) = (light & 0x0F, (light >> 4) & 0x0F);
@@ -14325,10 +14334,10 @@ mod plant_tests {
             (0, 1, 0) => BLOCK_PEBBLE,
             _ => BLOCK_AIR,
         });
-        cache.lay_stones_flat(true);
+        cache.lay_stones(crate::engine::lod::StoneDetail::Flat);
         let out = mesh_of(&cache);
         assert_eq!(out.sprite_end - out.leaf_end, 6, "a far stone kept its thickness");
-        cache.lay_stones_flat(false);
+        cache.lay_stones(crate::engine::lod::StoneDetail::Full);
         cache.mark_coarse();
         let out = mesh_of(&cache);
         assert_eq!(out.sprite_end - out.leaf_end, 6, "a coarse chunk's stone kept its thickness");
