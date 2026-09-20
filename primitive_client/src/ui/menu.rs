@@ -4568,7 +4568,7 @@ impl Menu {
         let unit_width = {
             let names: f32 = items
                 .iter()
-                .map(|(_, msg)| widgets::measure(say(ctx, *msg), 1.0))
+                .map(|gauge| widgets::measure(say(ctx, gauge.name), 1.0))
                 .sum();
             widgets::measure(title, 1.0)
                 + BETWEEN
@@ -4605,11 +4605,19 @@ impl Menu {
         p.text(title, x, centre_y + cap / 2.0, scale, MENU.ink_dim);
         x += (widgets::measure(title, 1.0) + BETWEEN) * scale;
 
-        for (icon, msg) in items {
+        for gauge in items {
             let side = ICON * scale;
-            hud::draw_icon(p, *icon, (x + side / 2.0, centre_y), side);
+            // **Each mark in its own meter's colour**, which turns a
+            // list of names into a key. The marks used to be drawn in
+            // one pale ink, so a player who had worked out that the
+            // violet strip was the one they wanted still had to count
+            // strips to find it; now the violet moon in this row *is*
+            // the violet strip over the hotbar. It costs nothing -- the
+            // shadow underneath is what makes a mark legible over a
+            // world, and it is unchanged.
+            hud::draw_icon_inked(p, gauge.icon, (x + side / 2.0, centre_y), side, gauge.ink);
             x += (ICON + AFTER_ICON) * scale;
-            let name = say(ctx, *msg);
+            let name = say(ctx, gauge.name);
             p.text(name, x, centre_y + cap / 2.0, scale, MENU.ink);
             x += (widgets::measure(name, 1.0) + BETWEEN) * scale;
         }
@@ -5856,7 +5864,13 @@ mod tests {
         // Same count, new shape: the title went up from 0.52 to the main
         // menu's 0.62 so the legend under it has a band of its own (see
         // `Menu::PAUSE_TITLE_TOP`).
-        ("paused", 1152, 13024866501460846824, 5754712921476445603),
+        // ...and the colour hash alone after that, with the count and
+        // every position untouched: the seven marks in the legend are
+        // drawn in their own meters' inks instead of one pale grey, so
+        // the key is now a colour key as well as a list of names. See
+        // `gauge_legend`, and `hud::GAUGE_LEGEND` for the table both
+        // halves read.
+        ("paused", 1152, 13024866501460846824, 16641318740995359347),
         // Shape only: the three buttons and BACK stand on columns cut from
         // the panel (see `columns`) instead of widths of their own.
         ("worlds", 630, 3959520323719984746, 8754961225334795139),

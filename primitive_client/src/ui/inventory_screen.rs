@@ -1194,8 +1194,32 @@ impl Default for Vitals {
 /// actually used is whichever is smaller, this or what fits.
 const VITAL_ROW: f32 = 0.060;
 /// How wide the little bar beside a reading is, and how tall.
-const VITAL_BAR: f32 = 0.26;
+///
+/// It was 0.26. The four hundredths it gave up paid for [`VITAL_MARK`]
+/// and its gap, so the readings at the end of the rows sit within two
+/// thousandths of where they always did and the wound column beside
+/// them did not have to move at all.
+const VITAL_BAR: f32 = 0.22;
 const VITAL_BAR_HEIGHT: f32 = 0.020;
+
+/// The mark at the head of a row, for the vitals that are also strips
+/// over the hotbar.
+///
+/// **The join between the two screens, and it was missing.** A player
+/// who wanted to know which strip was which read the HUD, came here and
+/// found ten words and ten bars in a colour scheme of their own -- the
+/// same seven quantities described twice with nothing in common. The
+/// mark is the one thing both screens can carry unchanged: the heart at
+/// the head of this row is the heart beside that strip, and the pause
+/// screen's key names it.
+///
+/// Four rows have no mark -- wetness, filth, diet and recovery -- and
+/// that blank is information rather than an omission: those four are
+/// *not* on the HUD, so a player looking for them among the strips
+/// would look forever.
+const VITAL_MARK: f32 = 0.030;
+/// Air between a mark and the word it belongs to.
+const VITAL_MARK_GAP: f32 = 0.012;
 /// How far the bars sit from the labels: the longest label in the
 /// longest language plus air. Measured against Polish
 /// ("roznorodnosc jedzenia") rather than English, which is the shortest
@@ -1261,25 +1285,44 @@ fn health_page(p: &mut Painter, vitals: &Vitals, injuries: &Injuries, language: 
     let percent = |fraction: f32| format!("{:.0}%", fraction.clamp(0.0, 1.0) * 100.0);
     let groups = f32::from(body.diet_groups.min(4)) / 4.0;
 
-    // (label, what it reads, its colour, how full its bar is)
+    // (label, what it reads, its colour, how full its bar is, the mark
+    // and bar colour it shares with the strip over the hotbar)
     //
     // A table rather than ten copies of the same three draw calls, on
     // the argument `player_model::PARTS` makes at length: a row that is
     // data can be reordered or retuned by anybody, and a row that is
     // code is arithmetic nobody can edit.
-    let rows: [(Msg, String, [f32; 4], Option<f32>); 10] = [
-        (Msg::VitalHealth, percent(vitals.health), good_high(vitals.health), Some(vitals.health)),
-        (Msg::VitalHunger, percent(vitals.nourishment), good_high(vitals.nourishment), Some(vitals.nourishment)),
-        (Msg::VitalThirst, percent(body.hydration), good_high(body.hydration), Some(body.hydration)),
-        (Msg::VitalStamina, percent(vitals.stamina), good_high(vitals.stamina), Some(vitals.stamina)),
-        (Msg::VitalTiredness, percent(body.fatigue), good_low(body.fatigue), Some(body.fatigue)),
-        (Msg::VitalWarmth, format!("{:.0}C", body.temperature_c), warmth_colour, None),
-        (Msg::VitalWetness, percent(body.wetness), good_low(body.wetness), Some(body.wetness)),
-        (Msg::VitalDirt, percent(body.grime), good_low(body.grime), Some(body.grime)),
+    //
+    // **The last column is the fix this pass was for.** The reading's
+    // colour says how a row is *doing* -- green above half, amber, pink
+    // when it is serious -- and that is worth keeping, because four of
+    // these are good when they fall and a single ramp would be a lie on
+    // half the page. But it was on the bar as well, so the bar said
+    // nothing the number did not and the page had no way at all of
+    // saying *which meter this is*. The bar now carries the meter's own
+    // hue out of `hud::GAUGE_LEGEND` -- the blue of the drop, the ochre
+    // of the bowl -- and the reading keeps the ramp. Two facts, two
+    // places, instead of one fact twice.
+    //
+    // Tiredness takes `WEARY_FILL` rather than the rested violet
+    // because this page counts it the other way up: the strip fills as
+    // a player rests and this bar fills as they tire, so the colour it
+    // wants is the one the strip turns when it is nearly empty. Same
+    // hue, right end of it.
+    type Row = (Msg, String, [f32; 4], Option<f32>, Option<(crate::ui::hud::Icon, [f32; 4])>);
+    let rows: [Row; 10] = [
+        (Msg::VitalHealth, percent(vitals.health), good_high(vitals.health), Some(vitals.health), Some((crate::ui::hud::ICON_HEALTH, crate::ui::hud::HEALTH_FILL))),
+        (Msg::VitalHunger, percent(vitals.nourishment), good_high(vitals.nourishment), Some(vitals.nourishment), Some((crate::ui::hud::ICON_FOOD, crate::ui::hud::FED_FILL))),
+        (Msg::VitalThirst, percent(body.hydration), good_high(body.hydration), Some(body.hydration), Some((crate::ui::hud::ICON_WATER, crate::ui::hud::WATER_FILL))),
+        (Msg::VitalStamina, percent(vitals.stamina), good_high(vitals.stamina), Some(vitals.stamina), Some((crate::ui::hud::ICON_STAMINA, crate::ui::hud::STAMINA_FILL))),
+        (Msg::VitalTiredness, percent(body.fatigue), good_low(body.fatigue), Some(body.fatigue), Some((crate::ui::hud::ICON_REST, crate::ui::hud::WEARY_FILL))),
+        (Msg::VitalWarmth, format!("{:.0}C", body.temperature_c), warmth_colour, None, Some((crate::ui::hud::ICON_WARMTH, warmth_colour))),
+        (Msg::VitalWetness, percent(body.wetness), good_low(body.wetness), Some(body.wetness), None),
+        (Msg::VitalDirt, percent(body.grime), good_low(body.grime), Some(body.grime), None),
         // Out of four, which is how many groups there are -- the rule
         // that reads this (`food::diet_regen_factor`) reads the count
         // and nothing else. A bare "3" would be a number with no scale.
-        (Msg::VitalDiet, format!("{}/4", body.diet_groups.min(4)), good_high(groups), Some(groups)),
+        (Msg::VitalDiet, format!("{}/4", body.diet_groups.min(4)), good_high(groups), Some(groups), None),
         (
             Msg::VitalRecovery,
             format!("x{:.2}", body.recovery),
@@ -1294,6 +1337,7 @@ fn health_page(p: &mut Painter, vitals: &Vitals, injuries: &Injuries, language: 
             // fraction of anything, and a bar under it would have to
             // invent a maximum to be a fraction of.
             None,
+            None,
         ),
     ];
 
@@ -1307,10 +1351,26 @@ fn health_page(p: &mut Painter, vitals: &Vitals, injuries: &Injuries, language: 
     // they do not sprawl when there is room to spare.
     let floor = panel.y0 + FOOTER_MARGIN + line;
     let step = ((top - floor) / (rows.len() - 1) as f32).min(VITAL_ROW);
-    for (index, (label, reading, colour, fraction)) in rows.iter().enumerate() {
+    let words_left = left + VITAL_MARK + VITAL_MARK_GAP;
+    for (index, (label, reading, colour, fraction, meter)) in rows.iter().enumerate() {
         let baseline = top - index as f32 * step;
-        p.text(language.text(*label), left, baseline, scale, widgets::INK_DIM);
-        let bar_left = left + VITAL_LABEL_WIDTH;
+        // Centred on the cap height rather than the cell, for the
+        // reason `hud::readout` centres its figures that way: two of
+        // the nine rows of a glyph are descender space that none of
+        // these words uses, and counting them sits the mark visibly
+        // low beside its own label.
+        let middle = baseline - widgets::PIXEL * scale * crate::engine::font::CAP_HEIGHT as f32 / 2.0;
+        if let Some((icon, ink)) = *meter {
+            crate::ui::hud::draw_icon_inked(
+                p,
+                icon,
+                (left + VITAL_MARK / 2.0, middle),
+                VITAL_MARK,
+                ink,
+            );
+        }
+        p.text(language.text(*label), words_left, baseline, scale, widgets::INK_DIM);
+        let bar_left = words_left + VITAL_LABEL_WIDTH;
         if let Some(fraction) = *fraction {
             let floor = baseline - line + (line - VITAL_BAR_HEIGHT) / 2.0;
             let track = Rect::new(bar_left, floor, bar_left + VITAL_BAR, floor + VITAL_BAR_HEIGHT);
@@ -1319,7 +1379,12 @@ fn health_page(p: &mut Painter, vitals: &Vitals, injuries: &Injuries, language: 
             if filled > 0.0 {
                 p.quad(
                     Rect::new(track.x0, track.y0, track.x0 + track.width() * filled, track.y1),
-                    *colour,
+                    // The meter's own hue where there is one, and the
+                    // good/bad ramp for the four that are not on the
+                    // HUD -- those have nothing to be consistent with,
+                    // and a grey bar beside a pink number would read as
+                    // a bar that had stopped working.
+                    meter.map_or(*colour, |(_, ink)| ink),
                 );
             }
         }
@@ -1967,6 +2032,23 @@ pub(crate) fn hover_note(p: &mut Painter, cursor: (f32, f32), text: &str, bounds
     note_box(p, cursor, &[(text.to_string(), TOOLTIP_INK)], bounds);
 }
 
+/// The hairline round a note.
+const NOTE_EDGE: f32 = 0.002;
+
+/// The band a note may be drawn in: the panel, less the furniture at the
+/// top of it.
+///
+/// **Not `panel_rect`**, which is what every note on this screen used to
+/// be held to. That rectangle includes the title, the tidy button and
+/// the tab strip, so a note taken from the top of the recipe grid rode
+/// up over the tabs and hid one of the three controls a player uses on
+/// every visit. The content band is the room a note is allowed, and it
+/// is the room it needs: everything a note can be about is in it.
+fn note_bounds() -> Rect {
+    let panel = panel_rect();
+    Rect::new(panel.x0 + PANEL_PAD, panel.y0, panel.x1 - PANEL_PAD, content_top())
+}
+
 /// The box itself: lines, sized, placed and drawn.
 fn note_box(p: &mut Painter, cursor: (f32, f32), lines: &[(String, [f32; 4])], bounds: Rect) {
     let scale = TOOLTIP_SCALE;
@@ -1981,11 +2063,32 @@ fn note_box(p: &mut Painter, cursor: (f32, f32), lines: &[(String, [f32; 4])], b
     let height = line_height * lines.len() as f32 + 0.020;
     // Up and to the right of the pointer, then pulled back inside the
     // panel: a tooltip that runs off the screen is worse than none.
-    let x0 = (cursor.0 + 0.014).min(bounds.x1 - width);
-    let y0 = (cursor.1 + 0.012).min(bounds.y1 - height);
+    //
+    // **Clamped at the near edges as well as the far ones**, which it
+    // was not. A note wider than the room to the right of the cursor was
+    // slid left until it fitted, with nothing stopping it sliding past
+    // the panel's own left edge; and `bounds` reaching to the top of the
+    // panel meant a note taken from the top row of the recipe grid was
+    // drawn over the tab strip -- in the picture that started this pass,
+    // the word RUCKSACK was completely covered by a note about a beam.
+    // A tooltip is a thing that explains a control; covering a different
+    // control to do it is the one thing it may not do. See
+    // `note_bounds`.
+    //
+    // The hairline is taken off the room rather than added to the box,
+    // because `Painter::border` draws *outside* the rectangle it is
+    // given: a note pushed flush against the edge of the band would
+    // hang its own outline two thousandths past it. The same trap
+    // `hud::BAR_WIDTH` is written the way it is to avoid.
+    let x0 = (cursor.0 + 0.014)
+        .min(bounds.x1 - width - NOTE_EDGE)
+        .max(bounds.x0 + NOTE_EDGE);
+    let y0 = (cursor.1 + 0.012)
+        .min(bounds.y1 - height - NOTE_EDGE)
+        .max(bounds.y0 + NOTE_EDGE);
     let rect = Rect::new(x0, y0, x0 + width, y0 + height);
     p.quad(rect, TOOLTIP_BG);
-    p.border(rect, 0.002, TOOLTIP_EDGE);
+    p.border(rect, NOTE_EDGE, TOOLTIP_EDGE);
     for (n, (text, colour)) in lines.iter().enumerate() {
         p.text(
             text,
@@ -2012,7 +2115,7 @@ fn tooltip(
     // wound needs. On a phone this is what a tap on an arm with empty hands
     // shows, which is how a player with no pointer reads the figure.
     if let Some(part) = body_part_at(cursor) {
-        note_box(p, cursor, &crate::ui::mannequin::lines(part, injuries, language), panel_rect());
+        note_box(p, cursor, &crate::ui::mannequin::lines(part, injuries, language), note_bounds());
         return;
     }
     // A body square, before the pack: the four are outside the grid, so
@@ -2028,7 +2131,7 @@ fn tooltip(
         let Some(name) = part_name(part, language) else {
             return;
         };
-        note_box(p, cursor, &[(name.to_string(), TOOLTIP_INK)], panel_rect());
+        note_box(p, cursor, &[(name.to_string(), TOOLTIP_INK)], note_bounds());
         return;
     }
     let lines = match slot_place_at(cursor).and_then(|place| slot_in_place(tab, place)) {
@@ -2073,7 +2176,7 @@ fn tooltip(
         },
     };
 
-    note_box(p, cursor, &lines, panel_rect());
+    note_box(p, cursor, &lines, note_bounds());
 
 }
 
@@ -4182,6 +4285,50 @@ mod tests {
     }
 
     #[test]
+    fn a_note_never_covers_the_tabs_or_hangs_off_the_panel() {
+        // The picture that earned this: a note about a beam, taken from
+        // the top row of the recipe grid, drawn straight over the word
+        // RUCKSACK. A tooltip explains a control; one that hides a
+        // different control has cost more than it paid.
+        //
+        // Every corner of the content band is tried, and with a long
+        // line as well as a short one -- the failure needs a note wide
+        // or tall enough to be pushed somewhere, and a one-word note
+        // fits wherever it is put.
+        let bounds = note_bounds();
+        let long = "Bronzowy hełm (stępiony) x1   1 kg";
+        for text in ["oak", long] {
+            for corner in [
+                (bounds.x0, bounds.y0),
+                (bounds.x1, bounds.y0),
+                (bounds.x0, bounds.y1),
+                (bounds.x1, bounds.y1),
+                (bounds.centre_x(), bounds.y1),
+            ] {
+                let mut p = Painter::new(FontAtlas::for_test());
+                hover_note(&mut p, corner, text, bounds);
+                for v in p.into_vertices() {
+                    assert!(
+                        v.position[0] >= bounds.x0 - 1e-3
+                            && v.position[0] <= bounds.x1 + 1e-3
+                            && v.position[1] >= bounds.y0 - 1e-3
+                            && v.position[1] <= bounds.y1 + 1e-3,
+                        "a note at {corner:?} put a vertex at {:?}, outside {bounds:?}",
+                        v.position,
+                    );
+                }
+            }
+        }
+        // ...and the band it is held to really does start below the
+        // tabs, which is the half of the fix a coordinate test cannot
+        // see on its own.
+        assert!(
+            bounds.y1 <= tab_rect(0).y0 + 1e-3,
+            "the note band reaches up into the tab strip",
+        );
+    }
+
+    #[test]
     fn the_health_page_shows_every_vital_the_server_sends() {
         // **Every one, and the test is what makes that true.** The page
         // is a table (`health_page`) and a table is easy to add a row to
@@ -4764,22 +4911,44 @@ mod touch_layout_tests {
     const PHONE: f32 = 2712.0 / 1220.0;
 
     #[test]
-    fn the_interface_size_setting_makes_the_pack_bigger_across_its_range() {
+    fn the_interface_size_setting_makes_the_pack_bigger_until_the_glass_stops_it() {
         // **The complaint this answers**, in the player's words: the
         // interface setting "affects only the HUD". It did -- every
         // centred screen was capped by one number that worked out to
         // 1.05 whatever the window was, so the hotbar moved and nothing
         // else did.
+        //
+        // **What changed, and why the name did.** It used to demand a
+        // step of the pack for every step of the setting all the way to
+        // the top of the range, and that was only satisfiable because
+        // the pack started absurdly small: at 1.0 it was a quarter of a
+        // 1280x720 window, so there was a great deal of unused glass for
+        // the setting to walk through. Rule 1 in `widgets` spends that
+        // glass on the default, and a screen that begins nearly filling
+        // the window cannot be made to fill it three more times. So the
+        // property is the honest one: each step is a bigger pack unless
+        // the pack is already against the glass -- and a step that does
+        // nothing while there is still room is still a failure.
         for aspect in [16.0f32 / 9.0, PHONE] {
             let mut previous = 0.0;
-            for requested in [1.0f32, 1.5, 2.0] {
-                let scale = grow_by(Layout::for_screen(aspect, requested));
+            for requested in [0.5f32, 1.0, 1.5, 2.0] {
+                let layout = Layout::for_screen(aspect, requested);
+                let scale = grow_by(layout);
+                let room_left = scale < layout.ceiling(extent()) - 1e-3;
                 assert!(
-                    scale > previous + 0.1,
-                    "at {aspect:.2}, asking for {requested} drew the pack at {scale},                      barely past {previous}",
+                    scale > previous + 0.1 || !room_left,
+                    "at {aspect:.2}, asking for {requested} drew the pack at {scale}, \
+                     barely past {previous}, with glass to spare",
                 );
                 previous = scale;
             }
+            // ...and somewhere in that range the pack did grow, or the
+            // setting is inert again by another route.
+            let layout = Layout::for_screen(aspect, 2.0);
+            assert!(
+                grow_by(layout) > grow_by(Layout::for_screen(aspect, 0.5)) * 1.1,
+                "at {aspect:.2} the whole range of the setting draws one pack",
+            );
         }
     }
 
@@ -4806,11 +4975,20 @@ mod touch_layout_tests {
         // The failure a touch floor introduced and this is here to stop
         // coming back: the setting moved between 0.5 and 1.5 and the
         // pack sat still, because the floor was above all of them.
+        //
+        // The pairs moved down the range with rule 1 in `widgets`. The
+        // failure being guarded against is a *floor* -- several settings
+        // all answering the same number because something underneath
+        // them refuses to go below it -- and a floor bites at the bottom
+        // of the range, which is where these now look. Above the glass
+        // the settings genuinely do answer the same number, and that is
+        // arithmetic rather than a bug: see the test above.
         let layout = |r| Layout::for_screen(PHONE, r);
-        for pair in [(1.0f32, 1.25f32), (1.25, 1.5), (1.5, 1.75), (1.75, 2.0)] {
+        for pair in [(0.5f32, 0.7f32), (0.7, 0.9), (0.9, 1.1)] {
             let (small, large) = (grow_by(layout(pair.0)), grow_by(layout(pair.1)));
+            let room_left = small < layout(pair.0).ceiling(extent()) - 1e-3;
             assert!(
-                large > small * 1.05,
+                large > small * 1.05 || !room_left,
                 "{} and {} both draw the pack at about {small}",
                 pair.0,
                 pair.1,

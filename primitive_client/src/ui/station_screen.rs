@@ -34,7 +34,7 @@ use crate::ui::hotbar::HotbarVertex;
 use crate::ui::lang::{Language, Msg};
 use crate::ui::widgets::{self, Painter, Rect};
 
-/// How big the screen is in its own space, for `Layout::fit`.
+/// How big this station's screen is in its own space, for `Layout::fit`.
 ///
 /// **Half-extents**, which is the convention `Layout::fit` and every other
 /// screen here use: a panel drawn about the middle runs out of glass at half
@@ -42,9 +42,18 @@ use crate::ui::widgets::{self, Painter, Rect};
 /// the full size once, it made the screen refuse to grow past a scale of one
 /// on any window -- the cap came out twice as tight as it should be, which
 /// looks like an interface-size setting that does nothing.
-pub const EXTENT: (f32, f32) = (PANEL_HALF_WIDTH, PANEL_HALF_HEIGHT);
+pub fn extent_for(game: Game) -> (f32, f32) {
+    (PANEL_HALF_WIDTH, Panel::for_game(game).frame.height() / 2.0)
+}
 
 const PANEL_HALF_WIDTH: f32 = 0.62;
+/// The tallest this panel may be: the height it used to be at every
+/// station, whatever was on it.
+///
+/// A ceiling now rather than the height itself -- see [`Panel::for_game`]
+/// for the hole that made -- and kept as a ceiling so a station that grows
+/// a long list one day is clipped by the same number it always was rather
+/// than quietly running off the glass.
 const PANEL_HALF_HEIGHT: f32 = 0.52;
 /// Air inside the panel's edge.
 const PAD: f32 = 0.05;
@@ -53,6 +62,16 @@ const ROW_HEIGHT: f32 = 0.12;
 const ROW_GAP: f32 = 0.025;
 /// How tall the striking bar is.
 const BAR_HEIGHT: f32 = 0.16;
+/// How far under the bar the pips that count the blows hang, and how tall
+/// one is. Named because [`Panel::for_game`] has to know how much room the
+/// bar and its pips come to together before it can decide how tall the
+/// panel is; they used to be two bare numbers inside [`Panel::pip`].
+const PIP_DROP: f32 = 0.030;
+const PIP_HEIGHT: f32 = 0.022;
+/// Air between the heading and whatever the screen is showing.
+const ROWS_UNDER_TITLE: f32 = 0.06;
+/// ...and between that and the line at the foot of the panel.
+const BAND_BREATH: f32 = 0.03;
 /// How wide the button that shuts the screen is. Not a whole row: it sits in
 /// the corner under the last of the words, where a back button goes.
 const CLOSE_WIDTH: f32 = 0.34;
@@ -214,7 +233,10 @@ impl StationScreen {
     }
 
     pub fn grow_by(&self, layout: widgets::Layout) -> f32 {
-        layout.fit(EXTENT)
+        // The shut screen's game is nobody's, and nothing is drawn: the
+        // anvil's shape stands in so the number is never a division by an
+        // extent of zero.
+        layout.fit(extent_for(self.open.as_ref().map_or(Game::Anvil, |open| open.game)))
     }
 
     /// Which job is under the cursor, if any. Exposed for the tests, which
@@ -385,7 +407,17 @@ impl StationScreen {
             let label = job_label(job, language);
             p.button(row, "", hovered, true);
             let words = panel.words(index);
-            p.label_in(words, &label, widgets::button_label_scale(words, &label, 1.0), widgets::INK);
+            // **Against the picture, not floating in the middle of the
+            // row.** Centring put a two-word name half a panel away
+            // from the thing it names, with a lake of slab between
+            // them, and a column of names each starting at a different
+            // x is a column nobody can scan: the eye has to find every
+            // one of them separately. Every other list in the game --
+            // the recipe book, the health page, a chest's rows -- reads
+            // down a left edge, and this is the same list. The hit area
+            // is the whole slab and did not move.
+            let scale = widgets::button_label_scale(words, &label, 1.0);
+            p.label_left(words, &label, 0.0, scale, widgets::INK);
             // **The picture of what comes off it, beside the words.** Three
             // rows at the wheel say "unfired" three times, and a player
             // scanning for the jug reads a shape faster than a word -- the
@@ -547,15 +579,41 @@ pub struct Panel {
 
 impl Panel {
     pub fn for_game(game: Game) -> Panel {
-        // One shape for both, because they hold the same things: a heading,
-        // a short list, a bar and a line of words. A wheel panel sized to its
-        // own three rows would jump when a player walked from one station to
-        // the other, and a screen that changes size for no reason the player
-        // caused reads as a glitch.
-        let frame = Rect::centred(0.0, 0.0, PANEL_HALF_WIDTH * 2.0, PANEL_HALF_HEIGHT * 2.0);
+        // ---- how tall this panel is ----
+        //
+        // **It used to be 1.04 at every station and in every state, and the
+        // anvil is what that cost.** The anvil offers two jobs. The panel
+        // held eight rows' worth of room, so what a player actually met --
+        // the common case, every time, on the first station in the game --
+        // was two buttons at the top of a slab with two thirds of it empty
+        // underneath. A picture of it reads as a screen that failed to
+        // finish drawing. The sawhorse's seven pieces filled it and nothing
+        // else ever did.
+        //
+        // The line this replaces argued that one shape for both games stops
+        // the screen jumping. The half of that worth keeping is the half
+        // about *one* station: a panel that changed size between picking a
+        // job and swinging at the bar would jump under the player's hand in
+        // the middle of one interaction, and that is the glitch. So the
+        // height is the taller of this game's two states, which is stable
+        // for as long as anybody is looking at it. Two different stations
+        // being different sizes is not a jump -- it is two screens, reached
+        // by walking somewhere, with a world in between.
+        let columns = if jobs_of(game).len() > ROWS_IN_A_COLUMN { 2 } else { 1 };
+        let lines = jobs_of(game).len().div_ceil(columns).max(1) as f32;
+        let list = lines * ROW_HEIGHT + (lines - 1.0) * ROW_GAP;
+        // The bar with its pips under it: `pip` hangs them 0.03 below the
+        // bar and they are 0.022 tall, and both numbers are read off there
+        // rather than repeated, so a taller pip cannot silently overrun the
+        // line beneath.
+        let run = BAR_HEIGHT + PIP_DROP + PIP_HEIGHT;
+        let heading = PAD + widgets::cell_height(TITLE_SCALE) + ROWS_UNDER_TITLE;
+        let footing = PAD + ROW_HEIGHT * 0.7 + 0.03 + widgets::cell_height(NOTE_SCALE) + BAND_BREATH;
+        let height = (heading + list.max(run) + footing).min(PANEL_HALF_HEIGHT * 2.0);
+
+        let frame = Rect::centred(0.0, 0.0, PANEL_HALF_WIDTH * 2.0, height);
         let title_top = frame.y1 - PAD - widgets::cell_height(TITLE_SCALE);
-        let rows_top = title_top - 0.06;
-        let bar = Rect::new(frame.x0 + PAD, -BAR_HEIGHT / 2.0, frame.x1 - PAD, BAR_HEIGHT / 2.0);
+        let rows_top = title_top - ROWS_UNDER_TITLE;
         let close = Rect::new(
             frame.x1 - PAD - CLOSE_WIDTH,
             frame.y0 + PAD,
@@ -568,7 +626,15 @@ impl Panel {
         // as the English -- ran straight through it. Measured off the button's
         // own top edge, so the two cannot drift apart.
         let note_top = close.y1 + 0.03 + widgets::cell_height(NOTE_SCALE);
-        let columns = if jobs_of(game).len() > ROWS_IN_A_COLUMN { 2 } else { 1 };
+        // The bar sits in the middle of the band the list would have used,
+        // rather than at y = 0. It was at zero because the panel was
+        // centred there and the two happened to agree; with the panel sized
+        // to its contents they no longer do, and a bar pinned to the origin
+        // would hang out of the bottom of a short one.
+        let band_top = rows_top;
+        let band_bottom = note_top + BAND_BREATH;
+        let bar_top = band_top - ((band_top - band_bottom) - run).max(0.0) / 2.0;
+        let bar = Rect::new(frame.x0 + PAD, bar_top - BAR_HEIGHT, frame.x1 - PAD, bar_top);
         Panel { frame, close, bar, title_top, note_top, rows_top, columns }
     }
 
@@ -616,8 +682,8 @@ impl Panel {
         let span = 0.05;
         let total = of as f32 * span;
         let left = -total / 2.0 + index as f32 * span;
-        let top = self.bar.y0 - 0.03;
-        Rect::new(left + span * 0.15, top - 0.022, left + span * 0.85, top)
+        let top = self.bar.y0 - PIP_DROP;
+        Rect::new(left + span * 0.15, top - PIP_HEIGHT, left + span * 0.85, top)
     }
 }
 
