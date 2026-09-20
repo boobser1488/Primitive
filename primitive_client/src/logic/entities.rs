@@ -80,6 +80,61 @@ const STALE_AFTER: Duration = Duration::from_secs(2);
 /// impossibly far apart; roughly one server tick.
 const NOMINAL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How far a glide's length may be pulled either side of the server's own
+/// interval to keep the drawn motion on the server's rhythm. See
+/// `playout_span`.
+///
+/// **This is the price of not twitching, and it is small.** Twenty
+/// milliseconds against a fifty-millisecond tick is a body drawn crossing
+/// its ground up to two fifths fast or slow for one tick when the network
+/// wobbles -- against the old behaviour, which was the right speed and then
+/// a dead stop for whatever the packet was late by. It covers the two things
+/// that actually jitter: a server thread sleeping on a fifteen-millisecond
+/// Windows timer, and a client that reads its socket once a frame.
+///
+/// Rejected: extrapolating past the newest snapshot rather than fitting the
+/// glide to the time it has. It costs nothing in lag and it guesses; a
+/// guessed position is a deer that slides through the tree it actually
+/// stopped at, and this module already refuses to extrapolate for the
+/// falling block that would go through its own landing site.
+const PLAYOUT_SLACK: Duration = Duration::from_millis(20);
+
+/// How long the glide a snapshot starts is given to cross, where the
+/// snapshot arrived `now`, the one before it was due at `previous`, and the
+/// server took `interval` between them.
+///
+/// **The server's rhythm, not the network's, and never a stop.** The glide
+/// ends where the rhythm says this snapshot is due -- one interval after the
+/// one before it -- so a packet that came late leaves its glide a little
+/// less time and one that came early a little more. The body always has
+/// somewhere to go, which is the whole point: the old scheme gave every
+/// glide exactly one interval from whenever the packet landed, so a late
+/// packet was a body that stood still until it came.
+///
+/// Clamped to `PLAYOUT_SLACK` either side of the interval, which is what
+/// keeps the schedule honest: without it, a run of early packets walks the
+/// glide further and further ahead of the arrivals and the animal is drawn
+/// crawling a third of a second behind where it is.
+///
+/// A free function because it is the whole of the mechanism, and a test can
+/// hand it a sequence of arrival times without a network. See
+/// `a_snapshot_that_arrives_early_or_late_still_leaves_the_body_somewhere_to_go`.
+fn playout_span(previous: Option<Instant>, now: Instant, rhythm: Duration) -> Duration {
+    let low = rhythm.saturating_sub(PLAYOUT_SLACK).max(Duration::from_millis(1));
+    let high = rhythm + PLAYOUT_SLACK;
+    match previous {
+        Some(previous) => (previous + rhythm).saturating_duration_since(now).clamp(low, high),
+        None => rhythm,
+    }
+}
+
+/// How fast a body comes over into its bank and back out of it, in radians
+/// a second of turn per second. See `Entity::banked`.
+///
+/// Ten: a deer reaches a full turn's worth of lean in a third of a second,
+/// which is about how long a running animal takes to get its weight over.
+const BANK_RATE: f32 = 10.0;
+
 /// The furthest anything may move in one snapshot and still count as
 /// having *walked* there.
 ///
@@ -108,6 +163,38 @@ struct Entity {
     /// a different tick rate interpolates correctly.
     updated_at: Instant,
     interval: Duration,
+    /// When the glide from `previous` to `current` *starts on screen* --
+    /// which is not when the packet arrived.
+    ///
+    /// **This is the whole of the twitch.** The glide used to be given
+    /// exactly one server tick to cross, whenever the packet happened to
+    /// land, so a packet that arrived five milliseconds late left the animal
+    /// standing on its target for five milliseconds -- a whole frame at
+    /// sixty -- and then covering the next tick's ground in what was left of
+    /// it. Nothing is wrong with the arithmetic and everything is wrong with
+    /// the clock it is on: snapshots are *made* on a rhythm and *arrive*
+    /// with the jitter of a server thread sleeping on a fifteen-millisecond
+    /// timer and a client that reads its socket once a frame. Measured on a
+    /// scripted deer: a stalled frame in eight, on every animal at once,
+    /// which is exactly "они дёргаются".
+    ///
+    /// So a glide is given the time it actually has: it starts where the
+    /// body is being drawn and ends when `Entities::due` -- a playout clock
+    /// kept on the server's own rhythm -- says this snapshot is due. A
+    /// packet that ran late leaves its glide a little less time and the body
+    /// crosses a little faster; one that came early, a little more. What
+    /// varies is a fraction of the speed instead of the whole of it, and the
+    /// body never stops.
+    ///
+    /// Rejected: a deeper buffer that plays whole segments a snapshot behind.
+    /// It is the textbook answer and it keeps the drawn speed exact, but it
+    /// needs three samples per entity and a promotion step, and it pays
+    /// another tick of lag on where a deer is when a spear is thrown at it.
+    plays_from: Instant,
+    /// How long this glide has to cross, which is not `interval`: see
+    /// `plays_from`. The interval is what the *server* took, and the gait
+    /// and the turn rate are measured against that.
+    span: Duration,
     /// Whether the server has it lying still, how far over it was drawn
     /// when that last changed, and when. See `tipped_over`.
     lying: bool,
@@ -148,6 +235,28 @@ struct Entity {
     /// `animal_model::HEAD_RATE`, once per entity per frame, which is one
     /// subtract and one clamp for each animal on screen.
     head: f32,
+    /// How hard the body is banked into its turn right now, in radians a
+    /// second of turn -- the number `Motion::turning` is handed.
+    ///
+    /// **Eased, for the reason the head is.** What `turning` measures is a
+    /// step function: it is one number for a whole snapshot and another the
+    /// instant the next one lands, so a deer that began a turn snapped from
+    /// upright to its full bank between two frames and snapped back when it
+    /// stopped. A body has mass; it takes a moment to come over and a moment
+    /// to come back, and `BANK_RATE` is that moment.
+    banked: f32,
+    /// Which way the last blow threw it: `+1` to its right, `-1` to its
+    /// left. See `animal_model::STAGGER_ROLL`.
+    ///
+    /// **Rolled per blow, because the flinch used to be one-sided.** The
+    /// wire does not say which side a hit came from, so the body always
+    /// rolled the same way -- every animal in the world tipping right, every
+    /// time anything touched it. A side drawn on the rising edge of `hurt`
+    /// from the animal's own id and how many blows it has taken costs
+    /// nothing and is never the same twice running.
+    flinch_side: f32,
+    /// How many blows this client has seen land, for `flinch_side`.
+    blows: u32,
     /// Seconds this entity has been on screen: the clock the idle motions
     /// run on. See `animal_model::Motion::age`.
     age: f32,
@@ -201,10 +310,14 @@ impl Entity {
         self.previous_yaw + delta * self.progress(now)
     }
 
+    /// How far along the glide we are, 0 to 1.
+    ///
+    /// Against `span`, the time this glide was given, and not against the
+    /// server's interval: see `plays_from`.
     fn progress(&self, now: Instant) -> f32 {
-        let elapsed = now.duration_since(self.updated_at).as_secs_f32();
-        let interval = self.interval.as_secs_f32().max(1e-4);
-        (elapsed / interval).clamp(0.0, 1.0)
+        let elapsed = now.saturating_duration_since(self.plays_from).as_secs_f32();
+        let span = self.span.as_secs_f32().max(1e-4);
+        (elapsed / span).clamp(0.0, 1.0)
     }
 
     /// Position to draw at, `now`.
@@ -239,7 +352,15 @@ impl Entity {
         (((self.current.y - self.previous.y) as f32) / interval).clamp(-MAX_RISE, MAX_RISE)
     }
 
-    /// How fast it is turning, in radians a second, positive to its left.
+    /// How fast it is turning, in radians a second, **positive to its
+    /// right**.
+    ///
+    /// Right, because that is what a growing yaw is everywhere else in this
+    /// game: `Camera::right_horizontal` is `forward × Y`, which at a yaw of
+    /// nought is `+Z`, and the heading `(cos yaw, sin yaw)` swings toward
+    /// `+Z` as the yaw grows. This doc-comment said "left" and the lean was
+    /// built on it, so every animal banked *out* of every turn -- the
+    /// player's "наклоняются в одну сторону". See `animal_model`'s `lean`.
     ///
     /// **Measured from the two facings the client is already easing between**,
     /// not sent: the server turns an animal at a rate the snapshots describe
@@ -284,7 +405,9 @@ impl Entity {
             beat: self.beat,
             hurt,
             head: self.head,
-            turning: self.turning(),
+            // The eased bank, not the raw measurement: see `banked`.
+            turning: self.banked,
+            flinch_side: self.flinch_side,
             age: self.age,
             youth: 1.0 - primitive_shared::youth::from_wire(growth),
             fallen: (self.dying / crate::logic::animal_model::FALL_SECONDS).clamp(0.0, 1.0),
@@ -316,6 +439,30 @@ pub struct Entities {
     /// it. `None` until a server says, which is what the fallback in
     /// `tick_duration` is for.
     tick_duration: Option<Duration>,
+    /// How long a server tick's worth of snapshot actually takes to arrive
+    /// here, smoothed: the rhythm the glides are cut to.
+    ///
+    /// **Not the tick duration, and the difference is the twitch coming
+    /// back.** The handshake says what the server *aims* at; what a client
+    /// sees is that rate through a sleeping server thread, a socket read
+    /// once a frame and two clocks that do not agree to the millisecond. A
+    /// glide cut to the nominal fifty milliseconds while the packets really
+    /// come every fifty-five finishes early every time and the body stands
+    /// still for the difference -- which is the stall this module was
+    /// rewritten to be rid of, arriving by a slower road. Smoothed hard
+    /// (a seventh of each measurement) so a single late packet moves it
+    /// almost not at all.
+    rhythm: Option<Duration>,
+    /// When the newest snapshot's state is due on screen: the playout
+    /// clock.
+    ///
+    /// **A snapshot arrives when the network feels like it and is drawn on
+    /// the server's rhythm.** Each snapshot is scheduled one interval after
+    /// the one before, so the glides are laid end to end with no seam and no
+    /// stall, however the packets themselves were bunched. See
+    /// `Entity::plays_from` for what that fixed, and `PLAYOUT_SLACK` for how
+    /// far behind the arrivals the schedule is kept.
+    due: Option<Instant>,
     /// When this world started, so the item bob and spin have a clock
     /// that does not restart every frame.
     started: Option<Instant>,
@@ -778,7 +925,17 @@ impl Entities {
     }
 
     pub fn apply_snapshot(&mut self, tick: u64, states: &[EntityState]) {
-        let now = Instant::now();
+        self.apply_snapshot_at(tick, states, Instant::now());
+    }
+
+    /// The same, told when the packet arrived.
+    ///
+    /// **The arrival time is an argument so that a test can be a network.**
+    /// What this module is for is drawing smoothly through a ragged
+    /// delivery, and a test that cannot say "this one came fifteen
+    /// milliseconds late" cannot test that at all -- it can only sleep and
+    /// hope, which is how a timing bug survives a suite.
+    pub(crate) fn apply_snapshot_at(&mut self, tick: u64, states: &[EntityState], now: Instant) {
         self.started.get_or_insert(now);
 
         // How many server ticks this snapshot is past the last one.
@@ -798,9 +955,38 @@ impl Entities {
         // stretching one snapshot's motion over two and a half seconds
         // would draw an animal gliding rather than admitting it lost
         // touch.
-        let interval = (self.tick_duration() * ticks.min(u32::MAX as u64) as u32)
+        let steps = ticks.min(u32::MAX as u64) as u32;
+        let interval = (self.tick_duration() * steps)
             .clamp(Duration::from_millis(5), Duration::from_millis(500));
+
+        // The rhythm the packets really keep, a tick at a time. Measured
+        // before `last_snapshot` is moved on, and only believed when it is
+        // somewhere near the rate the server claims -- a gap of two seconds
+        // is a client that was not being served, and averaging that in would
+        // draw the next second of every animal in slow motion.
+        if let Some(last) = self.last_snapshot {
+            let measured = now.saturating_duration_since(last) / steps.max(1);
+            let tick = self.tick_duration();
+            if measured > tick / 4 && measured < tick * 4 {
+                self.rhythm = Some(match self.rhythm {
+                    Some(rhythm) => (rhythm * 6 + measured) / 7,
+                    None => measured,
+                });
+            }
+        }
         self.last_snapshot = Some(now);
+
+        // **When this snapshot is due on screen**, on the server's rhythm
+        // rather than on the packet's: one interval after the snapshot
+        // before it, so the glides meet exactly. See `PLAYOUT_SLACK` for the
+        // two ways the schedule is re-laid -- a packet so late that the
+        // buffer is spent, and a client that has drifted further behind
+        // than it needs to be.
+        // How long the glide this snapshot starts is given, and when it
+        // therefore ends: the playout clock, cut to the rhythm the packets
+        // are really keeping. See `playout_span` and `rhythm`.
+        let span = playout_span(self.due, now, self.rhythm.map_or(interval, |r| r * steps));
+        self.due = Some(now + span);
 
         // Collected here and moved into `self.blows` after the loop: the
         // closure below already holds `self.entities` mutably, and a
@@ -839,19 +1025,33 @@ impl Entities {
                     {
                         if after > before {
                             struck.push(current.as_vec3());
+                            // Which way this one throws it. See `flinch_side`.
+                            e.blows = e.blows.wrapping_add(1);
+                            let spun = (state.id ^ 0x9E37_79B9_7F4A_7C15)
+                                .wrapping_mul(0x2545_F491_4F6C_DD1D)
+                                .wrapping_add(u64::from(e.blows).wrapping_mul(0xD1B5_4A32_D192_ED03));
+                            e.flinch_side = if spun >> 60 & 1 == 0 { 1.0 } else { -1.0 };
                         }
                     }
                     // Continue from where it is being drawn, not from the
-                    // last snapshot's position: if a frame was dropped
-                    // the drawn position is somewhere in between, and
-                    // restarting from the older sample would step back.
+                    // last snapshot's position: the glide it was on may not
+                    // have finished -- see `plays_from` -- and restarting
+                    // from either end of it would be a jump.
                     e.previous = e.drawn(now);
                     // One interval of walking is finished, and the next
                     // one is however far this snapshot moves it.
                     // Horizontal only: falling is not walking, and a
                     // hare dropped off a ledge should not paddle on the
                     // way down.
-                    e.walked += e.step;
+                    //
+                    // **As far as the glide had got at `plays_from`**, which
+                    // is a whole interval in the ordinary case and less when
+                    // the schedule had to be re-laid. Billing the whole
+                    // interval either way would jump the walk phase forward
+                    // by whatever was left of the old glide, and a leg that
+                    // jumps once a packet is the strobe the phase is
+                    // measured from distance to avoid.
+                    e.walked += e.step * e.progress(now);
                     let moved = Vec3::new((current.x - e.current.x) as f32, 0.0, (current.z - e.current.z) as f32)
                         .length();
                     // **A jump is not a stride.** An entity that moved
@@ -866,9 +1066,7 @@ impl Entities {
                     e.step = if moved > MAX_STRIDE { 0.0 } else { moved };
                     e.current = current;
                     // Continue from the facing being *drawn*, for the
-                    // reason the position does: a dropped frame leaves
-                    // the animal part way round, and starting the next
-                    // ease from the older sample would snap it back.
+                    // reason the position does.
                     e.previous_yaw = e.drawn_yaw(now);
                     e.kind = state.kind;
                     // **When it stopped, not whether it is stopped.**
@@ -887,6 +1085,8 @@ impl Entities {
                         e.tip_since = now;
                     }
                     e.updated_at = now;
+                    e.plays_from = now;
+                    e.span = span;
                     e.interval = interval;
                 })
                 .or_insert(Entity {
@@ -901,6 +1101,8 @@ impl Entities {
                     previous: current,
                     current,
                     updated_at: now,
+                    plays_from: now,
+                    span,
                     interval,
                     walked: 0.0,
                     step: 0.0,
@@ -931,6 +1133,11 @@ impl Entities {
                     // bird drawn three times. The server spreads its own
                     // climb-and-glide from the same id (`Animal::air_phase`).
                     beat: (state.id % 331) as f32 * 0.037,
+                    // Upright and untouched: an animal that comes into view
+                    // is not mid-turn and has not been hit here.
+                    banked: 0.0,
+                    flinch_side: 1.0,
+                    blows: 0,
                     dying: 0.0,
 });
         }
@@ -1037,9 +1244,16 @@ impl Entities {
         // `dt` is read here at all: see `Entity::head`.
         let dt = dt.max(0.0);
         let step = crate::logic::animal_model::HEAD_RATE * dt;
+        // **...and the bank comes over with the body.** The measured turn
+        // rate is a step function -- one value for a whole snapshot -- so a
+        // lean taken straight off it snapped on and off in single frames.
+        // See `Entity::banked` and `BANK_RATE`.
+        let over = BANK_RATE * dt;
         for entity in self.entities.values_mut() {
             let wanted = entity.head_wanted();
             entity.head += (wanted - entity.head).clamp(-step, step);
+            let turning = entity.turning();
+            entity.banked += (turning - entity.banked).clamp(-over, over);
             entity.age += dt;
             // **The wingbeat, turned by the flight rather than by the
             // ground covered.** See `Entity::beat`: the rate answers to how
@@ -1848,6 +2062,373 @@ fn append_cube(
 
 #[cfg(test)]
 mod tests {
+    /// **The twitch, stated as a property.** The glide used to start when a
+    /// packet was read and end one server tick later, so a packet five
+    /// milliseconds late left the animal standing on its target for a frame
+    /// and then covering the next tick's ground in what was left of it --
+    /// measured at one stalled frame in eight, on every animal at once.
+    /// Snapshots are *made* on a rhythm and *arrive* with the jitter of a
+    /// sleeping server thread and a socket read once a frame, so the
+    /// schedule has to keep the rhythm and not the arrivals.
+    #[test]
+    fn a_snapshot_that_arrives_early_or_late_still_leaves_the_body_somewhere_to_go() {
+        let interval = Duration::from_millis(50);
+        let start = Instant::now();
+        // Arrivals wobbling by a third of a tick either way, the way they do
+        // between a server on a fifteen-millisecond timer and a client that
+        // reads its socket once a frame.
+        let wobble = [0i64, 12, -9, 15, -14, 7, -3, 11, -12, 4];
+        let mut due = None;
+        let mut spans = Vec::new();
+        let mut ends = Vec::new();
+        for (i, off) in wobble.iter().enumerate() {
+            let arrival = start + interval * (i as u32 + 1);
+            let arrival = if *off >= 0 {
+                arrival + Duration::from_millis(*off as u64)
+            } else {
+                arrival - Duration::from_millis(off.unsigned_abs())
+            };
+            let span = playout_span(due, arrival, interval);
+            assert!(
+                span >= Duration::from_millis(25),
+                "snapshot {i} was given {span:?} to cross a whole tick of ground, which is a lurch"
+            );
+            due = Some(arrival + span);
+            spans.push(span);
+            ends.push(arrival + span);
+        }
+        // The schedule tracks the server rather than the arrivals: over ten
+        // snapshots the ends stay within a slack of the rhythm they were
+        // made on, however the packets were bunched.
+        for (i, end) in ends.iter().enumerate() {
+            let rhythm = ends[0] + interval * i as u32;
+            let off = if *end > rhythm { *end - rhythm } else { rhythm - *end };
+            assert!(
+                off <= PLAYOUT_SLACK,
+                "snapshot {i} was drawn {off:?} off the server's rhythm"
+            );
+        }
+        assert!(
+            spans.iter().any(|s| *s != interval),
+            "nothing about this test's jitter reached the glide at all"
+        );
+    }
+
+    /// ...and the same thing end to end: with the snapshots arriving raggedly
+    /// the drawn position keeps moving every frame, rather than freezing on
+    /// one and jumping on the next.
+    #[test]
+    fn a_walking_animal_is_drawn_moving_on_every_frame_however_the_packets_land() {
+        use primitive_shared::animals::Species;
+        use primitive_shared::protocol::Attitude;
+        let mut entities = Entities::default();
+        entities.set_tick_rate(20.0);
+        let interval = Duration::from_millis(50);
+        let start = Instant::now();
+        let at = |tick: u64| {
+            vec![EntityState {
+                id: 1,
+                kind: EntityKind::Animal {
+                    species: Species::Deer,
+                    yaw: 0.0,
+                    hurt: 0.0,
+                    attitude: Attitude::Easy,
+                    growth: u8::MAX,
+                    tack: 0,
+                },
+                // Four blocks a second, along +X.
+                x: tick as f64 * 0.2,
+                y: 20.0,
+                z: 0.0,
+            }]
+        };
+        // A ragged network against a steady sixty frames a second: the
+        // packets land where they land and the frames are drawn on their own
+        // clock, which is the arrangement the game is in.
+        let wobble = [0u64, 13, 4, 16, 2, 9, 15, 1, 11, 6];
+        let arrivals: Vec<Instant> = wobble
+            .iter()
+            .enumerate()
+            .map(|(i, off)| start + interval * (i as u32 + 1) + Duration::from_millis(*off))
+            .collect();
+        let mut next = 0;
+        let mut drawn: Vec<(Instant, f64)> = Vec::new();
+        let mut frame = start;
+        while frame < *arrivals.last().expect("arrivals") {
+            while next < arrivals.len() && arrivals[next] <= frame {
+                entities.apply_snapshot_at(next as u64 + 1, &at(next as u64 + 1), arrivals[next]);
+                next += 1;
+            }
+            if let Some(entity) = entities.entities.get(&1) {
+                drawn.push((frame, entity.drawn(frame).x));
+            }
+            frame += Duration::from_millis(16);
+        }
+        // Past the first two snapshots -- an entity seen for the first time
+        // is placed, not eased -- every frame moves it on.
+        let moving = &drawn[drawn.len() / 2..];
+        for pair in moving.windows(2) {
+            let step = pair[1].1 - pair[0].1;
+            assert!(
+                step > 0.01,
+                "the deer was drawn at {:.3} and then at {:.3}: a frame it stood still on",
+                pair[0].1,
+                pair[1].1
+            );
+        }
+    }
+
+    /// **The walk phase does not jump when a packet lands.** The legs are
+    /// swung from distance covered, and the distance is billed a glide at a
+    /// time; billing a whole glide for one that was only part drawn skips
+    /// whatever was left of it, and a leg that skips once a packet is the
+    /// strobe the whole distance-driven gait exists to avoid.
+    #[test]
+    fn the_walk_phase_is_continuous_across_a_server_update() {
+        use primitive_shared::animals::Species;
+        use primitive_shared::protocol::Attitude;
+        let mut entities = Entities::default();
+        entities.set_tick_rate(20.0);
+        let interval = Duration::from_millis(50);
+        let start = Instant::now();
+        let at = |tick: u64| {
+            vec![EntityState {
+                id: 1,
+                kind: EntityKind::Animal {
+                    species: Species::Deer,
+                    yaw: 0.0,
+                    hurt: 0.0,
+                    attitude: Attitude::Easy,
+                    growth: u8::MAX,
+                    tack: 0,
+                },
+                x: tick as f64 * 0.2,
+                y: 20.0,
+                z: 0.0,
+            }]
+        };
+        let mut worst: f32 = 0.0;
+        let mut before = 0.0f32;
+        for tick in 1..=8u64 {
+            let arrival = start + interval * tick as u32;
+            // What the last frame before the packet was read drew, and
+            // what the first frame after it draws: the same instant, either
+            // side of the update.
+            if tick > 2 {
+                let entity = entities.entities.get(&1).expect("the deer");
+                before = entity.gait(arrival).0;
+            }
+            entities.apply_snapshot_at(tick, &at(tick), arrival);
+            if tick > 2 {
+                let entity = entities.entities.get(&1).expect("the deer");
+                let after = entity.gait(arrival).0;
+                worst = worst.max((after - before).abs());
+            }
+        }
+        // A millimetre of walking: a twentieth of what one frame of a walk
+        // covers, and nothing an eye can find.
+        assert!(
+            worst < 0.001,
+            "the walk phase jumped {worst:.4} blocks when a snapshot landed"
+        );
+    }
+
+    /// **A turn to the right leans right, and a turn to the left leans
+    /// left**, measured on the drawn geometry and not on the number that
+    /// makes it -- because the number is what was wrong. `Entity::turning`
+    /// is positive when the yaw grows, which is a turn to the animal's
+    /// right; the pose's roll takes the top of the model to its left. The
+    /// two were multiplied together, so every animal in the world banked
+    /// *out* of every corner: "наклоняются в одну сторону", whichever way
+    /// they went.
+    #[test]
+    fn a_turn_to_the_right_leans_the_body_right_and_a_turn_to_the_left_leans_it_left() {
+        use primitive_shared::animals::Species;
+        use primitive_shared::protocol::Attitude;
+        // The top of the drawn body, across the animal: at a yaw of nought
+        // it faces +X and its right hand is +Z (`Camera::right_horizontal`),
+        // so a bank to its right takes the top of it toward +Z.
+        let tops_at = |turn: f32| {
+            let mut entities = Entities::default();
+            entities.set_tick_rate(20.0);
+            let at = |yaw: f32, x: f64| {
+                vec![EntityState {
+                    id: 1,
+                    kind: EntityKind::Animal {
+                        species: Species::Deer,
+                        yaw,
+                        hurt: 0.0,
+                        attitude: Attitude::Easy,
+                        growth: u8::MAX,
+                        tack: 0,
+                    },
+                    x,
+                    y: 20.0,
+                    z: 0.0,
+                }]
+            };
+            // Running, and turning `turn` radians in one server tick.
+            entities.apply_snapshot(1, &at(0.0, 0.0));
+            entities.apply_snapshot(2, &at(turn, 0.3));
+            // A whole second of easing, so the bank has fully come over.
+            entities.tick(1.0);
+            let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+            entities.build_meshes_into(
+                Vec3::ZERO,
+                &FaceLayers::empty_for_test(),
+                &LightMap::new(),
+                None,
+                &mut vertices,
+                &mut indices,
+                &mut Vec::new(),
+                &mut Vec::new(),
+            );
+            assert!(!vertices.is_empty(), "no deer was drawn");
+            // The mean z of everything drawn above the animal's middle.
+            let high: Vec<&Vertex> = vertices.iter().filter(|v| v.position[1] > 20.0).collect();
+            let sum: f32 = high.iter().map(|v| v.position[2]).sum();
+            sum / high.len() as f32
+        };
+        let straight = tops_at(0.0);
+        let right = tops_at(0.3);
+        let left = tops_at(-0.3);
+        assert!(
+            right > straight + 0.01,
+            "turning right, the top of the deer sat at {right:.3} against {straight:.3} running straight: it leant the wrong way"
+        );
+        assert!(
+            left < straight - 0.01,
+            "turning left, the top of the deer sat at {left:.3} against {straight:.3} running straight: it leant the wrong way"
+        );
+    }
+
+    /// **A blow does not always tip an animal the same way.** The side a hit
+    /// came from is not on the wire, so the flinch used to roll every animal
+    /// the same way every time -- a herd being driven all leaning together.
+    /// The side is drawn per blow on the client that sees it.
+    #[test]
+    fn a_second_blow_does_not_always_throw_an_animal_the_same_way() {
+        use primitive_shared::animals::Species;
+        use primitive_shared::protocol::Attitude;
+        let mut entities = Entities::default();
+        entities.set_tick_rate(20.0);
+        let mut sides = Vec::new();
+        let mut tick = 0u64;
+        // Twelve animals, each hit once: what a player driving a herd sees.
+        for id in 1..=12u64 {
+            let at = |hurt: f32| {
+                vec![EntityState {
+                    id,
+                    kind: EntityKind::Animal {
+                        species: Species::Deer,
+                        yaw: 0.0,
+                        hurt,
+                        attitude: Attitude::Easy,
+                        growth: u8::MAX,
+                        tack: 0,
+                    },
+                    x: 0.0,
+                    y: 20.0,
+                    z: 0.0,
+                }]
+            };
+            tick += 1;
+            entities.apply_snapshot(tick, &at(0.0));
+            tick += 1;
+            entities.apply_snapshot(tick, &at(1.0));
+            sides.push(entities.entities.get(&id).expect("the deer").flinch_side);
+        }
+        assert!(
+            sides.contains(&1.0) && sides.contains(&-1.0),
+            "a dozen animals were all thrown the same way: {sides:?}"
+        );
+    }
+
+    /// **A diagnostic, not a guard**: plays a scripted animal through the
+    /// client's own interpolation on a real clock, with the snapshots
+    /// arriving as they do in the game (a frame's worth of jitter on the way
+    /// in), and prints, per frame, what the model would be handed.
+    ///
+    /// ```text
+    /// cargo test -p primitive_client --lib what_an_animal_is_handed_frame_by_frame -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a diagnostic: sleeps through three seconds of frames and prints a table"]
+    fn what_an_animal_is_handed_frame_by_frame() {
+        use primitive_shared::animals::Species;
+        use primitive_shared::protocol::Attitude;
+        let mut entities = Entities::default();
+        entities.set_tick_rate(20.0);
+        let (mut x, mut z, mut yaw) = (0.0f64, 0.0f64, 0.0f32);
+        let mut tick = 0u64;
+        let dt = 0.05f32;
+        let mut jitter = 7u64;
+        let start = Instant::now();
+        let mut next_packet = start;
+        let mut last_frame = start;
+        let mut last_draw = (0.0f64, 0.0f64);
+        println!("    t  frame   moved   speed  turning     lean    swing    yaw");
+        loop {
+            let now = Instant::now();
+            let t = now.duration_since(start).as_secs_f32();
+            if t > 3.0 {
+                break;
+            }
+            if now >= next_packet {
+                let speed = if t < 2.4 { 4.0 } else { 0.0 };
+                let turn = if (0.6..1.0).contains(&t) {
+                    3.5
+                } else if (1.6..2.0).contains(&t) {
+                    -3.5
+                } else {
+                    0.0
+                };
+                yaw = (yaw + turn * dt).rem_euclid(std::f32::consts::TAU);
+                x += f64::from(yaw.cos() * speed * dt);
+                z += f64::from(yaw.sin() * speed * dt);
+                tick += 1;
+                entities.apply_snapshot(
+                    tick,
+                    &[EntityState {
+                        id: 1,
+                        kind: EntityKind::Animal {
+                            species: Species::Deer,
+                            yaw,
+                            hurt: 0.0,
+                            attitude: Attitude::Easy,
+                            growth: u8::MAX,
+                            tack: 0,
+                        },
+                        x,
+                        y: 20.0,
+                        z,
+                    }],
+                );
+                jitter = jitter.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let wobble = (jitter >> 33) % 17;
+                next_packet = now + Duration::from_millis(42 + wobble);
+            }
+            let frame_dt = now.duration_since(last_frame).as_secs_f32();
+            last_frame = now;
+            entities.tick(frame_dt);
+            let entity = entities.entities.get(&1).expect("the deer");
+            let at = entity.drawn(now);
+            let motion = entity.motion(now);
+            let moved = ((at.x - last_draw.0).powi(2) + (at.z - last_draw.1).powi(2)).sqrt();
+            last_draw = (at.x, at.z);
+            let pace = if motion.speed < 0.6 { 0.0 } else { (motion.speed / 4.0).clamp(0.35, 1.0) };
+            let lean = (motion.turning * 0.16 * pace).clamp(-0.2, 0.2);
+            let swing = (motion.walked * 2.0).sin() * 0.7 * pace;
+            println!(
+                "{t:5.2} {frame_dt:6.4} {moved:7.4} {:7.3} {:8.3} {lean:8.3} {swing:8.3} {:6.2}",
+                motion.speed,
+                motion.turning,
+                entity.drawn_yaw(now),
+            );
+            std::thread::sleep(Duration::from_millis(16));
+        }
+    }
+
 
     #[test]
     fn a_knife_set_down_points_the_way_its_player_was_looking() {
@@ -1921,7 +2502,10 @@ mod tests {
         let now = Instant::now();
         let entity = entities.entities.get_mut(&1).expect("the deer");
         entity.interval = Duration::from_millis(200);
-        entity.updated_at = now;
+        // The glide, not the arrival: `plays_from` and `span` are what the
+        // drawing runs on now (see `Entity::plays_from`).
+        entity.span = Duration::from_millis(200);
+        entity.plays_from = now;
         (entities, now)
     }
 
@@ -2465,7 +3049,8 @@ mod tests {
             entities.apply_snapshot(2, &at(2.38));
             for entity in entities.entities.values_mut() {
                 entity.interval = Duration::from_secs(1000);
-                entity.updated_at = Instant::now() - Duration::from_secs(370);
+                entity.span = Duration::from_secs(1000);
+                entity.plays_from = Instant::now() - Duration::from_secs(370);
             }
             entities.tick(1.0 / 60.0);
             let origin = (base + DVec3::new(3.0, 20.0, 2.0)).as_vec3();
@@ -2499,7 +3084,8 @@ mod tests {
         // Halfway through the interval between the two snapshots.
         let entity = entities.entities.get_mut(&1).expect("entity");
         entity.interval = Duration::from_millis(100);
-        entity.updated_at = Instant::now() - Duration::from_millis(50);
+        entity.span = Duration::from_millis(100);
+        entity.plays_from = Instant::now() - Duration::from_millis(50);
         entities.tick(1.0 / 60.0);
 
         let y = drawn_y(&entities);
@@ -2521,7 +3107,8 @@ mod tests {
         // not merely approaching it.
         let entity = entities.entities.get_mut(&1).expect("entity");
         entity.interval = Duration::from_millis(50);
-        entity.updated_at = Instant::now() - Duration::from_millis(50);
+        entity.span = Duration::from_millis(50);
+        entity.plays_from = Instant::now() - Duration::from_millis(50);
         entities.tick(1.0 / 60.0);
 
         assert!(

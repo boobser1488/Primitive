@@ -9740,6 +9740,8 @@ pub(crate) mod offscreen_repro {
     /// Through `fs_cutout`, for the reason `what_a_savanna_looks_like` gives.
     /// **Give `GPU_REPRO_DIR` an absolute directory**: a test runs in the
     /// crate's own directory.
+
+
     #[test]
     #[ignore = "a tool: needs a GPU; writes pictures of the savanna's animals to GPU_REPRO_DIR"]
     fn what_the_savanna_animals_look_like() {
@@ -9836,6 +9838,158 @@ pub(crate) mod offscreen_repro {
             let _ = picture.save(format!("{dir}/savanna_animals_{name}.png"));
         }
         println!("savanna animal pictures in {dir}");
+    }
+
+    /// **Every animal, standing, walking and turning, through the real
+    /// shader** -- the pictures an argument about how the bestiary moves and
+    /// how it is drawn has to be had over.
+    ///
+    /// ```text
+    /// GPU_REPRO_DIR=C:/Users/Admin/Downloads/flatcraft/shots/animals \
+    ///     cargo test -p primitive_client --lib \
+    ///     how_every_animal_stands_walks_and_turns -- --ignored --nocapture
+    /// ```
+    ///
+    /// Four pictures a species, from two fixed angles so a before and an
+    /// after can be laid side by side: side on standing, side on a quarter
+    /// stride into a walk, and a three-quarter view banking each way at a
+    /// run. The bank is what a turn looks like from in front and nothing at
+    /// all from directly beside, which is why the turning pair has its own
+    /// camera.
+    ///
+    /// On a patch of the real turf, meshed by the real mesher, because an
+    /// animal against an empty sky is an animal whose legs nobody can see
+    /// the ends of.
+    ///
+    /// **Give `GPU_REPRO_DIR` an absolute directory**: a test runs in the
+    /// crate's own directory.
+    #[test]
+    #[ignore = "a tool: needs a GPU; writes a picture of every animal to GPU_REPRO_DIR"]
+    fn how_every_animal_stands_walks_and_turns() {
+        let Some((device, queue)) = gpu() else {
+            println!("no GPU adapter on this machine; skipping");
+            return;
+        };
+        let Ok(dir) = std::env::var("GPU_REPRO_DIR") else {
+            println!("set GPU_REPRO_DIR to keep the pictures");
+            return;
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
+        let textures = TextureManager::load(device, queue, assets, 16).expect("textures load");
+
+        use crate::logic::animal_model::{build, Motion};
+        use crate::logic::chunk_manager::ChunkManager;
+        use primitive_shared::animals::Species;
+        use primitive_shared::lighting::LightMap;
+        use primitive_shared::types::{
+            Chunk, ChunkPos, BLOCK_AIR, BLOCK_GRASS, BLOCK_STONE, CHUNK_SIZE_X, CHUNK_SIZE_Z,
+            CHUNK_VOLUME,
+        };
+
+        // One patch of turf, meshed once: every animal stands on the same
+        // ground, so two pictures differ only by what is in them.
+        let pos = ChunkPos::new(0, 0);
+        let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+        for z in 0..CHUNK_SIZE_Z {
+            for x in 0..CHUNK_SIZE_X {
+                blocks[Chunk::index(x, 0, z)] = BLOCK_STONE;
+                blocks[Chunk::index(x, 1, z)] = BLOCK_GRASS;
+            }
+        }
+        let mut chunks = ChunkManager::new(4);
+        chunks.insert(Chunk { pos, blocks });
+        let mut light = LightMap::new();
+        light.load_chunk(&chunks, pos);
+        let mut cache = crate::engine::mesh::Neighbourhood::default();
+        cache.fill(pos, &chunks, &light);
+        let mut mesh = crate::engine::mesh::MeshBuffers::default();
+        crate::engine::mesh::build_mesh(
+            pos,
+            &cache,
+            &textures.face_layers(),
+            &primitive_shared::worldgen::WorldGen::new(0),
+            &mut mesh,
+        );
+        let ground = (mesh.vertices.clone(), mesh.indices[..mesh.sprite_end as usize].to_vec());
+
+        // A quarter of the way into a stride, where the legs are at their
+        // widest: `animal_model::STRIDE` turns blocks walked into radians.
+        let quarter = std::f32::consts::FRAC_PI_2 / 2.0;
+        for &species in Species::ALL {
+            let centre = Vec3::new(8.5, 2.0 + species.height() * 0.5, 8.5);
+            let run = species.run_speed().max(1.0);
+            let poses: [(&str, f32, Motion); 4] = [
+                ("standing", 0.0, Motion::default()),
+                (
+                    "walking",
+                    0.0,
+                    Motion { speed: species.walk_speed(), walked: quarter / 2.0, ..Default::default() },
+                ),
+                // Turning at a run, seen from in front: the bank is across
+                // the body and invisible from directly beside it.
+                (
+                    "turning_right",
+                    0.0,
+                    Motion { speed: run, walked: quarter / 2.0, turning: 2.5, ..Default::default() },
+                ),
+                (
+                    "turning_left",
+                    0.0,
+                    Motion { speed: run, walked: quarter / 2.0, turning: -2.5, ..Default::default() },
+                ),
+            ];
+            for (name, yaw, motion) in poses {
+                let (mut vertices, mut indices) = (ground.0.clone(), ground.1.clone());
+                let (mut v, mut idx) = (Vec::new(), Vec::new());
+                build(
+                    species,
+                    centre,
+                    yaw,
+                    motion,
+                    &textures.face_layers(),
+                    (15, 0),
+                    &mut v,
+                    &mut idx,
+                );
+                let base = vertices.len() as u32;
+                vertices.extend(v);
+                indices.extend(idx.iter().map(|i| i + base));
+                // Framed off the animal's own size, so a hare and a bear
+                // both fill the picture.
+                let reach = species.length().max(species.height()).max(0.4);
+                let (eye, at) = if name.starts_with("turning") {
+                    (
+                        // Head on: a bank is a roll about the animal's own
+                        // length, so from in front it is the whole picture
+                        // and from beside it is a handful of pixels.
+                        centre + Vec3::new(reach * 1.5, reach * 0.12, -reach * 0.25),
+                        centre - Vec3::Y * reach * 0.05,
+                    )
+                } else {
+                    (
+                        centre + Vec3::new(0.0, reach * 0.22, -reach * 1.25),
+                        centre - Vec3::Y * reach * 0.1,
+                    )
+                };
+                let picture = draw_terrain_as(
+                    device,
+                    queue,
+                    &textures,
+                    &vertices,
+                    &indices,
+                    &[],
+                    &[],
+                    eye,
+                    at,
+                    wgpu::Color { r: 0.62, g: 0.72, b: 0.86, a: 1.0 },
+                    "fs_cutout",
+                    1,
+                );
+                let _ = picture.save(format!("{dir}/{}_{name}.png", species.name()));
+            }
+        }
+        println!("animal pictures in {dir}");
     }
 
     /// **The bear beside the boar and the wolf**, alive, mid-stride, dead,
