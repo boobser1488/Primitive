@@ -1663,30 +1663,39 @@ pub fn sky_hint(painter: &mut Painter, text: &str) {
     painter.text_centred(text, 0.0, SKY_HINT_TOP, SKY_HINT_SCALE, widgets::TEXT);
 }
 
-const FIRST_STEP_SCALE: f32 = 0.8;
+const FIRST_MINUTE_SCALE: f32 = widgets::size::CAPTION;
 /// Air between the notice's plate and this one.
-const FIRST_STEP_CLEARANCE: f32 = 0.022;
-/// **One thing to do next, for a player who has just woken up.**
+const FIRST_MINUTE_CLEARANCE: f32 = 0.022;
+/// **One fact about the world, for a player who has nothing at all.**
 ///
 /// The player said the progression was completely unclear, and the worst
 /// of that is the first two minutes: a meadow, empty hands, and no reason
-/// to touch anything in particular. So three prompts, one at a time, and
-/// then never again -- see `ladder::first_step` for why one and why it
-/// does not come back. A line over the belt and not a modal: a box that
-/// has to be dismissed is a tutorial, and a tutorial was the thing asked
-/// against.
+/// to touch anything in particular. The first answer was three prompts in
+/// a row, phrased as instructions, and his verdict on them was "что за
+/// тупые подсказки". Both halves of that were fair. What is drawn now is
+/// **one** line, once, and it is a statement rather than an order --
+/// "камни лежат прямо на земле" and not "подберите камень". The
+/// difference is not politeness: a fact leaves the player deciding what
+/// to do with it, and an instruction does not.
 ///
-/// Drawn in the belt's own ink on the belt's own plate, because that is
-/// where the answer to the line is: the stone it tells you to pick up
-/// lands in the slot underneath it.
-pub fn first_step_line(painter: &mut Painter, text: &str) {
-    let ink = widgets::ink_width(text, FIRST_STEP_SCALE);
-    let cell = widgets::cell_height(FIRST_STEP_SCALE);
+/// When it is drawn at all is `journal::Journal::first_minute`, which is
+/// stricter than the old rule by two clauses. Everything else a new
+/// player might want to be told is on the pack's path tab
+/// (`ui::ladder_screen`), behind a key they press anyway.
+///
+/// A line over the belt and not a modal: a box that has to be dismissed
+/// is a tutorial, and a tutorial was the thing asked against. Drawn in
+/// the belt's own ink on the belt's own plate, because that is where the
+/// answer to the line is -- the stone it mentions lands in the slot
+/// underneath it.
+pub fn first_minute_line(painter: &mut Painter, text: &str) {
+    let ink = widgets::ink_width(text, FIRST_MINUTE_SCALE);
+    let cell = widgets::cell_height(FIRST_MINUTE_SCALE);
     painter.quad(
-        Rect::new(-ink / 2.0 - 0.014, FIRST_STEP_TOP - cell - 0.004, ink / 2.0 + 0.014, FIRST_STEP_TOP + 0.012),
+        Rect::new(-ink / 2.0 - 0.014, FIRST_MINUTE_TOP - cell - 0.004, ink / 2.0 + 0.014, FIRST_MINUTE_TOP + 0.012),
         SAIL_DIAL_BG,
     );
-    painter.text_centred(text, 0.0, FIRST_STEP_TOP, FIRST_STEP_SCALE, widgets::TEXT);
+    painter.text_centred(text, 0.0, FIRST_MINUTE_TOP, FIRST_MINUTE_SCALE, widgets::TEXT);
 }
 
 /// The top of the first two minutes' line, which is what `Painter::text`
@@ -1703,11 +1712,11 @@ pub fn first_step_line(painter: &mut Painter, text: &str) {
 /// not over the belt, because three gauges live there. The notice and this
 /// can be up at once -- a refusal while a new player is being prompted --
 /// so this clears the plate rather than sharing its row.
-const FIRST_STEP_TOP: f32 = NOTICE_Y
+const FIRST_MINUTE_TOP: f32 = NOTICE_Y
     + NOTICE_HALF_HEIGHT
-    + widgets::cell_height(FIRST_STEP_SCALE)
+    + widgets::cell_height(FIRST_MINUTE_SCALE)
     + 0.004
-    + FIRST_STEP_CLEARANCE;
+    + FIRST_MINUTE_CLEARANCE;
 
 /// The dark half of every pair. Near-black, and the same behind a
 /// frame, a letter and the stick's ring.
@@ -3895,7 +3904,7 @@ mod tests {
         );
     }
 
-    /// **...and neither is the first two minutes' line**, which is the
+    /// **...and neither is the first minute's line**, which is the
     /// same mistake made again one row up.
     ///
     /// It was placed "just over the belt" -- `hotbar::TOP + 0.055` -- and
@@ -3905,18 +3914,34 @@ mod tests {
     /// plate as well as the gauges: the two can be up at once, and a
     /// refusal while a new player is being told to pick up a stone must
     /// not land on the same row.
+    ///
+    /// In every language, because the plate is as wide as its words and
+    /// the words are not the same length twice: `there are stones lying
+    /// on the ground` is the English of a line Polish spells half again
+    /// longer, and a plate wider than the belt is a plate lying on the
+    /// world.
     #[test]
-    fn the_first_two_minutes_line_clears_both_the_gauges_and_the_notice() {
-        let mut p = painter();
-        first_step_line(&mut p, "найдите кремень и отбейте от него отщепы");
-        let (low, high) = vertical_extent(&p.vertices);
-        assert!(low > STACK_TOP, "the prompt starts at {low}, over gauges reaching {STACK_TOP}");
-        assert!(
-            low > NOTICE_Y + NOTICE_HALF_HEIGHT,
-            "the prompt starts at {low}, on the notice's plate which reaches {}",
-            NOTICE_Y + NOTICE_HALF_HEIGHT,
-        );
-        assert!(high < 0.0, "the prompt reaches the crosshair");
+    fn the_first_minutes_line_clears_the_gauges_the_notice_and_the_belt() {
+        for language in crate::ui::lang::Language::ALL.iter().copied() {
+            let mut p = painter();
+            first_minute_line(&mut p, language.text(crate::ui::lang::Msg::StepStone));
+            let (low, high) = vertical_extent(&p.vertices);
+            assert!(low > STACK_TOP, "{language:?}: the line starts at {low}, over gauges reaching {STACK_TOP}");
+            assert!(
+                low > NOTICE_Y + NOTICE_HALF_HEIGHT,
+                "{language:?}: the line starts at {low}, on the notice's plate which reaches {}",
+                NOTICE_Y + NOTICE_HALF_HEIGHT,
+            );
+            assert!(high < 0.0, "{language:?}: the line reaches the crosshair");
+            // ...and its plate fits the window at its narrowest, which
+            // is the square one -- the belt is 0.93 across and a line
+            // wider than the glass is a line on the world.
+            let widest = p
+                .vertices
+                .iter()
+                .fold(0.0f32, |so_far, v| so_far.max(v.position[0].abs()));
+            assert!(widest < 1.0, "{language:?}: the plate is {widest} from the middle, past a square window's edge");
+        }
     }
 
     #[test]

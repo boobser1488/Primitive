@@ -77,8 +77,13 @@ const BAND_BREATH: f32 = 0.03;
 const CLOSE_WIDTH: f32 = 0.34;
 /// Text sizes: the heading, and the line under the bar. A job row letters
 /// itself to the button it is in (`Painter::button`).
-const TITLE_SCALE: f32 = 1.0;
-const NOTE_SCALE: f32 = 0.78;
+///
+/// **Aliases for two of the five, not sizes of their own.** They were
+/// 1.0 and 0.78 -- an anvil's title a third smaller than a rung's and
+/// its note a hair bigger than a tooltip's, for no reason either number
+/// could give. See `widgets::size`.
+const TITLE_SCALE: f32 = widgets::size::TITLE;
+const NOTE_SCALE: f32 = widgets::size::NOTE;
 
 /// What the frame loop should do about a gesture on this screen.
 #[derive(Debug, Clone, PartialEq, Eq)]

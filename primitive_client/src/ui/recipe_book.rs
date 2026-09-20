@@ -307,7 +307,7 @@ impl RecipeBook {
                 } else {
                     (format!("{}_", self.query), widgets::TEXT)
                 };
-                p.label_left(field, &widgets::fit(&text, 0.9, field.width() - 0.04), 0.02, 0.9, colour);
+                p.label_left(field, &widgets::fit(&text, widgets::size::BODY, field.width() - 0.04), 0.02, widgets::size::BODY, colour);
             }
         }
 
@@ -316,9 +316,9 @@ impl RecipeBook {
         p.well(list, WELL);
         if rows.is_empty() {
             let message = if discovered.is_empty() { Msg::RecipesEmpty } else { Msg::RecipesNoMatch };
-            let lines = widgets::wrap(language.text(message), ((list.width() - 0.08) / widgets::measure("m", 0.85)).max(8.0) as usize);
+            let lines = widgets::wrap(language.text(message), ((list.width() - 0.08) / widgets::measure("m", widgets::size::BODY)).max(8.0) as usize);
             for (n, line) in lines.iter().enumerate() {
-                p.text(line, list.x0 + 0.04, list.y1 - 0.06 - n as f32 * 0.06, 0.85, widgets::TEXT_DIM);
+                p.text(line, list.x0 + 0.04, list.y1 - 0.06 - n as f32 * 0.06, widgets::size::BODY, widgets::TEXT_DIM);
             }
         }
         let chosen = self
@@ -341,13 +341,13 @@ impl RecipeBook {
             textured(p, icon, icon_layer(layers, recipe.output.0), tint(recipe.output.0, lead));
             let makeable = !lead && has_ingredients(inventory, recipe);
             let count = if lead { "?".to_string() } else { format!("x{}", recipe.output.1) };
-            let count_width = widgets::measure(&count, 0.85) + 0.02;
+            let count_width = widgets::measure(&count, widgets::size::NOTE) + 0.02;
             let name_room = rect.width() - side - 0.05 - count_width;
             let name_colour = if lead { widgets::TEXT_DIM } else { widgets::TEXT };
             let name_rect = Rect::new(icon.x1 + 0.02, rect.y0, rect.x1, rect.y1);
-            p.label_left(name_rect, &widgets::fit(&crate::ui::names::recipe(recipe.name, language), 0.9, name_room), 0.0, 0.9, name_colour);
+            p.label_left(name_rect, &widgets::fit(&crate::ui::names::recipe(recipe.name, language), widgets::size::BODY, name_room), 0.0, widgets::size::BODY, name_colour);
             let count_rect = Rect::new(rect.x1 - count_width, rect.y0, rect.x1 - 0.01, rect.y1);
-            p.label_in(count_rect, &count, 0.85, if makeable { GOOD } else { widgets::TEXT_DIM });
+            p.label_in(count_rect, &count, widgets::size::NOTE, if makeable { GOOD } else { widgets::TEXT_DIM });
         }
 
         let pane = detail_rect(body);
@@ -444,13 +444,13 @@ fn read_out(
     let big = 0.12;
     textured(p, Rect::new(left, top - big, left + big, top), icon_layer(layers, recipe.output.0), tint(recipe.output.0, false));
     let title = format!("{} x{}", crate::ui::names::recipe(recipe.name, language), recipe.output.1);
-    p.text(&widgets::fit(&title, 1.2, room - big - 0.03), left + big + 0.03, top - 0.03, 1.2, widgets::TEXT);
+    p.text(&widgets::fit(&title, widgets::size::TITLE, room - big - 0.03), left + big + 0.03, top - 0.03, widgets::size::TITLE, widgets::TEXT);
     if missing.is_some() {
         p.text(
-            &widgets::fit(language.text(Msg::RecipeLead), 0.8, room - big - 0.03),
+            &widgets::fit(language.text(Msg::RecipeLead), widgets::size::NOTE, room - big - 0.03),
             left + big + 0.03,
             top - 0.085,
-            0.8,
+            widgets::size::NOTE,
             widgets::TEXT_DIM,
         );
     }
@@ -458,7 +458,7 @@ fn read_out(
 
     let line = 0.072;
     let heading = |p: &mut Painter, text: Msg, top: &mut f32| {
-        p.text(language.text(text), left, *top, 0.85, HEADING);
+        p.text(language.text(text), left, *top, widgets::size::CAPTION, HEADING);
         *top -= 0.055;
     };
 
@@ -484,8 +484,8 @@ fn read_out(
         let icon = Rect::new(left, top - line + 0.012, left + line - 0.012, top);
         if Some(block_kind(block)) == missing {
             p.well(icon, [0.03, 0.03, 0.03, 1.0]);
-            p.label_in(icon, "?", 1.0, BAD);
-            p.text(language.text(Msg::RecipeNotFound), icon.x1 + 0.025, top - 0.018, 0.9, widgets::TEXT_DIM);
+            p.label_in(icon, "?", widgets::size::BODY, BAD);
+            p.text(language.text(Msg::RecipeNotFound), icon.x1 + 0.025, top - 0.018, widgets::size::BODY, widgets::TEXT_DIM);
         } else {
             textured(p, icon, icon_layer(layers, block), tint(block, false));
             // **A tool counts at any rung of its ladder.** Counted by the
@@ -500,15 +500,15 @@ fn read_out(
                 inventory.count(block)
             };
             let tally = format!("{have}/{need}");
-            let tally_width = widgets::measure(&tally, 0.9);
+            let tally_width = widgets::measure(&tally, widgets::size::BODY);
             p.text(
-                &widgets::fit(&crate::ui::names::block(block, language), 0.9, room - line - tally_width - 0.06),
+                &widgets::fit(&crate::ui::names::block(block, language), widgets::size::BODY, room - line - tally_width - 0.06),
                 icon.x1 + 0.025,
                 top - 0.018,
-                0.9,
+                widgets::size::BODY,
                 widgets::TEXT,
             );
-            p.text(&tally, pane.x1 - 0.04 - tally_width, top - 0.018, 0.9, if have >= need { GOOD } else { BAD });
+            p.text(&tally, pane.x1 - 0.04 - tally_width, top - 0.018, widgets::size::BODY, if have >= need { GOOD } else { BAD });
         }
         top -= line;
     }
@@ -528,7 +528,7 @@ fn read_out(
         textured(p, icon, icon_layer(layers, block), tint(block, false));
         text_left = icon.x1 + 0.025;
     }
-    p.text(&widgets::fit(language.text(station_msg(recipe.station)), 0.9, pane.x1 - 0.04 - text_left), text_left, top - 0.018, 0.9, widgets::TEXT);
+    p.text(&widgets::fit(language.text(station_msg(recipe.station)), widgets::size::BODY, pane.x1 - 0.04 - text_left), text_left, top - 0.018, widgets::size::BODY, widgets::TEXT);
     top -= line + 0.02;
 
     // **How hot, said in the colour a smith reads.** "In a lit kiln" is
@@ -546,7 +546,7 @@ fn read_out(
                 language.text(Msg::RecipeHeat),
                 language.text(crate::ui::chest_screen::glow_msg(glow)),
             );
-            p.text(&widgets::fit(&text, 0.9, room), left, top, 0.9, widgets::TEXT_DIM);
+            p.text(&widgets::fit(&text, widgets::size::BODY, room), left, top, widgets::size::BODY, widgets::TEXT_DIM);
             top -= 0.06;
         }
     }
@@ -564,7 +564,7 @@ fn read_out(
             if top - 0.05 < pane.y0 {
                 break;
             }
-            p.text(&widgets::fit(&shortfall_text(*item, language), 0.9, room), left, top, 0.9, BAD);
+            p.text(&widgets::fit(&shortfall_text(*item, language), widgets::size::BODY, room), left, top, widgets::size::BODY, BAD);
             top -= 0.05;
         }
         top -= 0.02;
@@ -577,15 +577,15 @@ fn read_out(
             let icon = Rect::new(x, top - line + 0.012, x + line - 0.012, top);
             textured(p, icon, icon_layer(layers, block), tint(block, false));
             let name = crate::ui::names::block(block, language);
-            p.text(&name, icon.x1 + 0.02, top - 0.018, 0.9, widgets::TEXT);
-            x = icon.x1 + 0.06 + widgets::measure(&name, 0.9);
+            p.text(&name, icon.x1 + 0.02, top - 0.018, widgets::size::BODY, widgets::TEXT);
+            x = icon.x1 + 0.06 + widgets::measure(&name, widgets::size::BODY);
         }
         top -= line + 0.02;
     }
 
     if recipe.failure > 0.0 && top - 0.05 > pane.y0 {
         let text = format!("{} ({}%)", language.text(Msg::RecipeMayFail), (recipe.failure * 100.0).round() as u32);
-        p.text(&widgets::fit(&text, 0.85, room), left, top, 0.85, BAD);
+        p.text(&widgets::fit(&text, widgets::size::NOTE, room), left, top, widgets::size::NOTE, BAD);
         top -= 0.06;
     }
 
@@ -614,17 +614,17 @@ fn read_out(
         let icon = Rect::new(left, top - 0.05, left + 0.044, top - 0.006);
         textured(p, icon, icon_layer(layers, into.output.0), tint(into.output.0, false));
         p.text(
-            &widgets::fit(&crate::ui::names::recipe(into.name, language), 0.85, room - 0.07),
+            &widgets::fit(&crate::ui::names::recipe(into.name, language), widgets::size::BODY, room - 0.07),
             icon.x1 + 0.02,
             top,
-            0.85,
+            widgets::size::BODY,
             widgets::TEXT,
         );
         top -= 0.055;
         named += 1;
     }
     if named == 0 {
-        p.text(&widgets::fit(language.text(Msg::RecipeUsedForNothing), 0.85, room), left, top, 0.85, widgets::TEXT_DIM);
+        p.text(&widgets::fit(language.text(Msg::RecipeUsedForNothing), widgets::size::BODY, room), left, top, widgets::size::BODY, widgets::TEXT_DIM);
     }
 }
 

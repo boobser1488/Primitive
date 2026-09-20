@@ -486,17 +486,93 @@ pub const TEXT_GOOD: [f32; 4] = [0.58, 0.88, 0.52, 1.0];
 
 pub const SCRIM: [f32; 4] = [0.03, 0.03, 0.04, 0.62];
 
-/// How large the word naming a group of slots is written, on every stone
-/// screen.
+/// **Every size any of the world's screens writes at, and there are
+/// five.**
 ///
-/// **One size where there were three.** The pack wrote WORN, WOUNDS and
-/// CRAFTING at 0.62, a hearth wrote GOES IN at 0.72 and a chest wrote
-/// STORED at 0.86: one job, three sizes, and the smallest of them on the
-/// screen that is open most. Laid side by side in `ui::snapshot` the three
-/// read as the work of three hands. 0.80 is the largest that still hangs
-/// inside the band the pack leaves over its trays, and a word too long for
-/// its column is fitted down from it (`fitted_scale`) rather than run on.
-pub const CAPTION_SCALE: f32 = 0.80;
+/// ## Why a scale at all
+///
+/// The player's words were "то слишком крупный, то наоборот" -- some of
+/// it too big, some of it too small. He was right, and counting made
+/// that embarrassing: the pack, the chests, the stations and the journal
+/// between them wrote at 0.62, 0.66, 0.68, 0.72, 0.74, 0.75, 0.8, 0.82,
+/// 0.85, 0.86, 0.9, 1.0, 1.3 -- thirteen sizes for five jobs, every one
+/// of them a number somebody typed while looking at one screen. Two
+/// captions over two grids on the same panel were 0.80 and 0.62, and a
+/// wound line was whatever `fitted_scale` left of 0.74 after the
+/// sentence, so a page of wounds was a page in four sizes.
+///
+/// A type scale is not decoration. Its whole job is that the *same kind
+/// of thing* is the same size wherever it is drawn, so a player can tell
+/// what a line is by looking at it rather than by reading it.
+///
+/// ## Why these five and not more
+///
+/// Each one names a job, and two jobs that cannot be told apart in a
+/// sentence do not get two sizes. The gaps between them are wide enough
+/// to read as different -- a tenth is not a size, it is a wobble, and
+/// the old list was mostly wobbles.
+///
+/// ## What is deliberately not here
+///
+/// The HUD (`hud::NOTICE_SCALE` and its neighbours) and the menu write
+/// at their own sizes and always have. They are different surfaces: the
+/// HUD is read over a moving world at arm's length and the menu is the
+/// only screen with no world behind it. What this scale governs is the
+/// stone screens -- the pack, the containers, the stations, the journal
+/// -- which are one visual thing and were drawn as several.
+///
+/// Fitting is still allowed and still right: `fitted_scale` takes one of
+/// these as its ceiling and comes down only when a word genuinely will
+/// not fit a column. What is not allowed is *starting* anywhere else.
+pub mod size {
+    /// The one word naming a screen or a pane: `INVENTORY`, `BRONZE
+    /// AGE`. There is one of these on a screen, and it is the only text
+    /// bigger than the writing under it.
+    pub const TITLE: f32 = 1.30;
+
+    /// **The default.** Anything a player reads as language: an item's
+    /// name, a row of a list, a sentence about a wound, the line saying
+    /// what the pack weighs. If you are unsure which size something is,
+    /// it is this one.
+    pub const BODY: f32 = 0.90;
+
+    /// The small word naming a group of slots -- `WORN`, `WOUNDS`,
+    /// `CRAFTING`, `STORED`. Smaller than body text on purpose: it is a
+    /// label on a thing rather than something to read, and it is set in
+    /// the quiet ink.
+    ///
+    /// 0.80 is the largest that still hangs inside the band the pack
+    /// leaves over its trays.
+    pub const CAPTION: f32 = 0.80;
+
+    /// A second line: a status, a unit, a reason, a tooltip, the
+    /// `1-20 of 23` beside a caption. Always subordinate to something
+    /// else on the same screen, and never the only thing said.
+    pub const NOTE: f32 = 0.72;
+
+    /// The number stamped in the corner of a slot.
+    ///
+    /// **Sized so three digits fit and are never shrunk.** It was 0.72
+    /// with "if it does not fit, multiply by 0.8", which meant `128`
+    /// was drawn visibly smaller than `12` in the square beside it --
+    /// the single most visible case of the complaint this scale is the
+    /// answer to. The largest stack in the game is 128 and a jug holds
+    /// under a thousand units, so three digits is the whole of what has
+    /// to fit; `a_three_digit_count_fits_a_slot_without_being_shrunk`
+    /// is what holds this number down.
+    pub const COUNT: f32 = 0.70;
+}
+
+/// How far the baseline sits below the `top` [`Painter::text`] is given.
+///
+/// What two labels of *different sizes on one row* have to agree on. A
+/// glyph hangs from `top`, so sharing a `top` lines up the cap tops and
+/// leaves the baselines a couple of pixels apart -- which is exactly
+/// what a caption and the small count beside it looked like. Sharing a
+/// baseline is what the eye reads as "one row".
+pub const fn cap_height(scale: f32) -> f32 {
+    PIXEL * scale * CAP_HEIGHT as f32
+}
 
 /// Where a caption over a row starts: its own height and a hair above the
 /// row's top edge, because `Painter::text` hangs the glyphs down from `top`.
@@ -803,6 +879,24 @@ pub fn as_a_phone<T>(body: impl FnOnce() -> T) -> T {
     }
     let _restore = Restore(PRETEND_TOUCH.with(std::cell::Cell::get));
     PRETEND_TOUCH.with(|cell| cell.set(Some(true)));
+    body()
+}
+
+/// Runs `body` with the layout functions answering for the pointer named.
+///
+/// The general form of [`as_a_phone`]: a property that has to hold on a
+/// desktop *and* on a phone is one loop over `[false, true]` rather than
+/// the same assertions written twice.
+#[cfg(test)]
+pub fn with_touch<T>(touch: bool, body: impl FnOnce() -> T) -> T {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PRETEND_TOUCH.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(PRETEND_TOUCH.with(std::cell::Cell::get));
+    PRETEND_TOUCH.with(|cell| cell.set(Some(touch)));
     body()
 }
 
@@ -1363,6 +1457,56 @@ pub struct Painter {
     content: f32,
 }
 
+/// One line of text a painter drew, with the box it occupies.
+///
+/// **Test-only, and it exists because the overlaps were found by a
+/// person looking at PNGs.** A caption written across the slots it
+/// names, or a count and a heading sharing a row, is invisible to every
+/// test this interface had: the vertex list says a glyph is at a
+/// coordinate, not which line it belongs to, and a test cannot tell a
+/// caption's `C` from a count's `1`. Recording the *call* gives a test
+/// the one thing it needs, which is a box round each line.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Written {
+    pub rect: Rect,
+    pub text: String,
+    pub scale: f32,
+}
+
+#[cfg(test)]
+thread_local! {
+    static WRITTEN: std::cell::RefCell<Option<Vec<Written>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `body` and answers every line of text drawn inside it.
+///
+/// **A recorder rather than a field on the painter**, because a screen
+/// is not built through one painter that the caller keeps: `build_into`
+/// takes a vertex list, makes a painter, and hands the list back. A
+/// field would have needed every one of those signatures to grow a way
+/// of getting it out again. A thread-local costs nothing in the game --
+/// it is not compiled into it -- and works through any entry point.
+///
+/// A thread-local and not a global, for the reason `PRETEND_TOUCH` is
+/// one: `cargo test` runs several tests at once and a global would have
+/// one test recording another test's screen.
+#[cfg(test)]
+pub fn while_recording_text<T>(body: impl FnOnce() -> T) -> (T, Vec<Written>) {
+    struct Restore(Option<Vec<Written>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            WRITTEN.with(|cell| *cell.borrow_mut() = self.0.take());
+        }
+    }
+    let restore = Restore(WRITTEN.with(|cell| cell.borrow_mut().replace(Vec::new())));
+    let answer = body();
+    let lines = WRITTEN.with(|cell| cell.borrow().clone().unwrap_or_default());
+    drop(restore);
+    (answer, lines)
+}
+
 impl Default for Painter {
     fn default() -> Self {
         Self::new(crate::engine::texture::FontAtlas::for_test())
@@ -1734,6 +1878,20 @@ impl Painter {
     /// thousand vertices a frame and cost more frame time than the world
     /// behind it. See `texture::FontAtlas`.
     pub fn text(&mut self, text: &str, left: f32, top: f32, scale: f32, colour: [f32; 4]) {
+        // The box this line occupies, kept so a test can ask what
+        // overlaps what. See `while_recording_text`.
+        #[cfg(test)]
+        if !text.trim().is_empty() {
+            WRITTEN.with(|cell| {
+                if let Some(lines) = cell.borrow_mut().as_mut() {
+                    lines.push(Written {
+                        rect: Rect::new(left, top - cell_height(scale), left + ink_width(text, scale), top),
+                        text: text.to_string(),
+                        scale,
+                    });
+                }
+            });
+        }
         let px = PIXEL * scale;
         let advance = (GLYPH_WIDTH + GLYPH_SPACING) as f32 * px;
         let (w, h) = (GLYPH_WIDTH as f32 * px, GLYPH_HEIGHT as f32 * px);
@@ -2720,6 +2878,153 @@ mod tests {
         let second = Rect::centred(0.0, 0.3 - 0.12, 1.0, 0.09);
         assert!(second.y1 < first.y0, "adjacent buttons overlap");
     }
+
+    /// **The stone screens write at the five named sizes and at no
+    /// others**, and this reads the source to say so.
+    ///
+    /// ## Why a test that parses Rust
+    ///
+    /// Because the property is about what somebody types. Every other
+    /// way of checking it needs the scale to stop being an `f32`, and
+    /// making it a newtype means touching a hundred call sites in six
+    /// files to catch a mistake nobody makes twice a year. What this
+    /// costs is forty lines of bracket matching; what it buys is that
+    /// `p.text(..., 0.62, ...)` -- the exact line that gave one screen
+    /// two captions at two sizes -- cannot be committed again.
+    ///
+    /// ## What it allows
+    ///
+    /// A named size, a variable, or a call. `fitted_scale(word,
+    /// size::CAPTION, room, 0.7)` is *right*: the ceiling is one of the
+    /// five and the floor is how far a long word may come down before it
+    /// is left to overflow. What it refuses is a scale argument that
+    /// *starts* with a digit, which is the shape every one of the
+    /// thirteen sizes had.
+    ///
+    /// ## What it does not cover
+    ///
+    /// The HUD and the menu. They are different surfaces and they have
+    /// always had sizes of their own -- see the note on `widgets::size`.
+    #[test]
+    fn the_stone_screens_write_at_the_named_sizes_and_at_no_others() {
+        // The screens the player was talking about: the pack, the
+        // things that share its widgets, and the journal's pages.
+        let sources: [(&str, &str); 9] = [
+            ("inventory_screen.rs", include_str!("inventory_screen.rs")),
+            ("chest_screen.rs", include_str!("chest_screen.rs")),
+            ("station_screen.rs", include_str!("station_screen.rs")),
+            ("mannequin.rs", include_str!("mannequin.rs")),
+            ("ladder_screen.rs", include_str!("ladder_screen.rs")),
+            ("recipe_book.rs", include_str!("recipe_book.rs")),
+            ("give_screen.rs", include_str!("give_screen.rs")),
+            ("map_screen.rs", include_str!("map_screen.rs")),
+            ("journal.rs", include_str!("journal.rs")),
+        ];
+        // Which argument of each call is the size.
+        let calls: [(&str, usize); 5] = [
+            (".text(", 3),
+            (".text_centred(", 3),
+            (".label_in(", 2),
+            (".label_left(", 3),
+            (".label_in_two_tones(", 2),
+        ];
+        let mut offenders = Vec::new();
+        for (name, source) in sources {
+            for (call, index) in calls {
+                let mut from = 0;
+                while let Some(at) = source[from..].find(call) {
+                    let open = from + at + call.len();
+                    from = open;
+                    let Some(args) = balanced(&source[open..]) else {
+                        continue;
+                    };
+                    let Some(scale) = split_top_level(args).into_iter().nth(index) else {
+                        continue;
+                    };
+                    let scale = scale.trim();
+                    if scale.starts_with(|c: char| c.is_ascii_digit()) {
+                        let line = source[..open].matches('\n').count() + 1;
+                        offenders.push(format!("{name}:{line} writes at {scale}"));
+                    }
+                }
+            }
+        }
+        // ...and the back door: a file that writes `SCALE` at the call
+        // site and defines `const SCALE: f32 = 0.62;` ten lines up has
+        // named nothing. Every `*_SCALE` on these screens has to be one
+        // of the five or derived from one.
+        for (name, source) in sources {
+            for (at, text) in source.lines().enumerate() {
+                let text = text.trim();
+                // The map's zoom is a scale too and it is not a text
+                // one: `MIN_SCALE` is blocks to the pixel. Named here
+                // rather than guessed from the identifier, because a
+                // guess is how a real offender gets waved through.
+                let zoom = ["MIN_SCALE", "MAX_SCALE", "DEFAULT_SCALE"]
+                    .iter()
+                    .any(|name| text.contains(name));
+                let is_size = text.starts_with("const ")
+                    && text.contains("SCALE")
+                    && text.contains(": f32 =")
+                    && !zoom;
+                if is_size && !text.contains("size::") {
+                    offenders.push(format!("{name}:{} defines {text}", at + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a size nobody named -- use one of `widgets::size`:\n{}",
+            offenders.join("\n"),
+        );
+        // ...and the scan itself has to be doing something, or a
+        // refactor that renamed `text` would make this pass forever.
+        assert!(
+            sources.iter().any(|(_, s)| s.contains("size::CAPTION")),
+            "the scan found no named sizes at all: has `Painter::text` been renamed?",
+        );
+    }
+
+    /// The text of a call's arguments: everything up to the `)` that
+    /// closes the `(` just consumed.
+    #[cfg(test)]
+    fn balanced(after_open: &str) -> Option<&str> {
+        let mut depth = 1usize;
+        for (at, c) in after_open.char_indices() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&after_open[..at]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Splits on the commas that are not inside a nested call.
+    #[cfg(test)]
+    fn split_top_level(args: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let (mut depth, mut start) = (0usize, 0usize);
+        for (at, c) in args.char_indices() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    parts.push(&args[start..at]);
+                    start = at + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(&args[start..]);
+        parts
+    }
+
 
     #[test]
     fn text_starts_where_it_is_asked_to() {

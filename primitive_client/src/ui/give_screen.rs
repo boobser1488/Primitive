@@ -509,7 +509,7 @@ impl GiveScreen {
                 } else {
                     (format!("{}_", self.query), widgets::TEXT)
                 };
-                p.label_left(field, &widgets::fit(&text, 0.9, field.width() - 0.04), 0.02, 0.9, colour);
+                p.label_left(field, &widgets::fit(&text, widgets::size::BODY, field.width() - 0.04), 0.02, widgets::size::BODY, colour);
             }
         }
 
@@ -521,7 +521,7 @@ impl GiveScreen {
                 language.text(Msg::RecipesNoMatch),
                 list.x0 + 0.04,
                 list.y1 - 0.06,
-                0.9,
+                widgets::size::BODY,
                 widgets::TEXT_DIM,
             );
         }
@@ -541,7 +541,7 @@ impl GiveScreen {
             );
             let room = rect.x1 - icon.x1 - 0.03;
             let label = Rect::new(icon.x1 + 0.018, rect.y0, rect.x1, rect.y1);
-            p.label_left(label, &widgets::fit(&crate::ui::names::identified(name, language), 0.85, room), 0.0, 0.85, widgets::TEXT);
+            p.label_left(label, &widgets::fit(&crate::ui::names::identified(name, language), widgets::size::BODY, room), 0.0, widgets::size::BODY, widgets::TEXT);
         }
 
         // ...and what the server said, which is the half of this screen
@@ -549,7 +549,7 @@ impl GiveScreen {
         let status = status_rect(body);
         p.well(status, WELL);
         let (text, ink) = self.status_line(language);
-        p.label_left(status, &widgets::fit(&text, 0.85, status.width() - 0.06), 0.03, 0.85, ink);
+        p.label_left(status, &widgets::fit(&text, widgets::size::NOTE, status.width() - 0.06), 0.03, widgets::size::NOTE, ink);
     }
 
     /// What the bar at the bottom says, and in what ink.

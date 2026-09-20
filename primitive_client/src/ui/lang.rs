@@ -749,14 +749,14 @@ pub enum Msg {
     RecipeUsedFor,
     /// ...and when nothing this player knows of takes it.
     RecipeUsedForNothing,
-    // ---- the ladder page ----
+    // ---- the path page, which is a tab of the pack ----
     //
     // The seven ages, where their materials come from, and the four words
     // the page says in its own voice. Block names inside it stay
-    // untranslated, as they do everywhere else in the journal.
+    // untranslated, as they do everywhere else. `LadderTab` is the tab's
+    // word and it kept its name -- the page is still the ladder, it has
+    // just moved out of the journal (see `ui::ladder_screen`).
     LadderTab,
-    LadderHelp,
-    LadderHelpTouch,
     /// Against the highest rung this player has taken.
     LadderYouAreHere,
     /// The heading over the rung above that one.
@@ -780,14 +780,37 @@ pub enum Msg {
     FoundHills,
     FoundDeepRock,
     FoundWoods,
-    // ---- the first two minutes ----
+    // ---- the first two minutes, and the page that carries them ----
     //
-    // One line over the belt, and only until all three are done. See
-    // `ladder::first_step` for why one at a time and why it never comes
-    // back.
+    // Three sentences, each a *fact about the world* rather than an order.
+    // They were orders -- "pick a stone up off the ground" -- and the
+    // player's reply was "что за тупые подсказки". A game that tells a
+    // grown adult to pick up a stone is a game talking down to them; a
+    // game that mentions there are stones on the ground has told them the
+    // same thing and left the decision where it belongs. See
+    // `hud::first_minute_line` for the one that is still drawn over the
+    // belt and the one condition it is drawn under.
     StepStone,
     StepFibre,
     StepFlake,
+    // ---- the path page, in the pack ----
+    //
+    // The tab is `LadderTab`, which is the word it already had. What is
+    // new is the three headings the page adds to the ladder it grew out
+    // of: what to do now, the handful of controls that are not guessable,
+    // and what this player has turned up. See `ui::ladder_screen`.
+    LearnNow,
+    LearnControls,
+    /// The two mouse buttons, which no key binding names and which are
+    /// the whole of how the world is touched.
+    LearnDig,
+    LearnPlace,
+    /// ...and the same two under a thumb, where there are no buttons.
+    LearnDigTouch,
+    LearnPlaceTouch,
+    /// How much of the world this player has turned up: kinds held, out
+    /// of every kind there is.
+    LearnFound,
     // ---- the body in the pack ----
     //
     // The mannequin's heading, its four parts that are not also equipment
@@ -1419,10 +1442,14 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::RecipeHeat,   en: "heat:",          simple: "fire colour:", ru: "жар:", pl: "żar:" },
     Line { msg: Msg::RecipeUsedFor, en: "GOES INTO",     simple: "USED TO MAKE", ru: "ИДЁТ НА", pl: "IDZIE NA" },
     Line { msg: Msg::RecipeUsedForNothing, en: "nothing you know of yet", simple: "nothing you know about yet", ru: "пока ни на что из известного вам", pl: "na razie na nic, co znasz" },
-    // The ladder page. See `ui::ladder_screen`.
+    // The path page, in the pack. See `ui::ladder_screen`.
+    //
+    // It has no help line of its own any more. It had two -- `tab
+    // recipes   esc close` and `tap an age to read it` -- and both were
+    // about the journal's footer, which this page no longer stands in;
+    // the pack closes the pack's way, and a page with one thing to press
+    // does not need telling that it can be pressed.
     Line { msg: Msg::LadderTab,    en: "LADDER",         simple: "THE WAY UP", ru: "ПУТЬ", pl: "DROGA" },
-    Line { msg: Msg::LadderHelp,   en: "tab recipes   esc close", simple: "tab how to make   esc close", ru: "tab рецепты   esc закрыть", pl: "tab przepisy   esc zamknij" },
-    Line { msg: Msg::LadderHelpTouch, en: "tap an age to read it", simple: "tap an age to read it", ru: "коснитесь века, чтобы прочитать", pl: "dotknij epoki, by przeczytać" },
     Line { msg: Msg::LadderYouAreHere, en: "you are here", simple: "you are here", ru: "вы здесь", pl: "tu jesteś" },
     Line { msg: Msg::LadderNext,   en: "NEXT",           simple: "NEXT",       ru: "СЛЕДУЮЩЕЕ", pl: "NASTĘPNE" },
     Line { msg: Msg::LadderWants,  en: "WHAT IT TAKES", simple: "WHAT YOU NEED", ru: "ЧТО НУЖНО", pl: "CZEGO TRZEBA" },
@@ -1440,9 +1467,17 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::FoundDeepRock, en: "deep in the rock, down a shaft", simple: "deep underground", ru: "глубоко в породе, в шахте", pl: "głęboko w skale, w szybie" },
     Line { msg: Msg::FoundWoods,   en: "in standing timber", simple: "in the woods", ru: "в лесу, на стоячем дереве", pl: "w lesie, na stojącym drzewie" },
     // The first two minutes. See `ladder::first_step`.
-    Line { msg: Msg::StepStone,    en: "pick a stone up off the ground", simple: "pick up a stone", ru: "подберите с земли камень", pl: "podnieś kamień z ziemi" },
-    Line { msg: Msg::StepFibre,    en: "tear at the tall grass: it gives fibre", simple: "break tall grass to get fibre", ru: "рвите высокую траву -- из неё волокно", pl: "rwij wysoką trawę -- daje włókno" },
-    Line { msg: Msg::StepFlake,    en: "find a flint and knap it into flakes", simple: "find flint and hit it to make flakes", ru: "найдите кремень и отбейте от него отщепы", pl: "znajdź krzemień i odbij od niego odłupki" },
+    Line { msg: Msg::StepStone,    en: "there are stones lying on the ground", simple: "there are stones on the ground", ru: "камни лежат прямо на земле", pl: "kamienie leżą wprost na ziemi" },
+    Line { msg: Msg::StepFibre,    en: "tall grass comes apart into fibre", simple: "tall grass gives you fibre", ru: "высокая трава расходится на волокно", pl: "wysoka trawa rozchodzi się na włókno" },
+    Line { msg: Msg::StepFlake,    en: "flint splits into flakes when it is struck", simple: "hit flint and it breaks into flakes", ru: "кремень от удара колется на отщепы", pl: "krzemień od uderzenia łupie się na odłupki" },
+    // The path page. See `ui::ladder_screen`.
+    Line { msg: Msg::LearnNow,     en: "WHAT NOW",      simple: "WHAT TO DO", ru: "ЧТО СЕЙЧАС", pl: "CO TERAZ" },
+    Line { msg: Msg::LearnControls, en: "CONTROLS",     simple: "THE KEYS",   ru: "УПРАВЛЕНИЕ", pl: "STEROWANIE" },
+    Line { msg: Msg::LearnDig,     en: "left button -- dig, and hit", simple: "left button breaks things", ru: "левая кнопка -- копать и бить", pl: "lewy przycisk -- kopać i bić" },
+    Line { msg: Msg::LearnPlace,   en: "right button -- place, and use", simple: "right button puts things down", ru: "правая кнопка -- ставить и брать", pl: "prawy przycisk -- stawiać i używać" },
+    Line { msg: Msg::LearnDigTouch, en: "left thumb -- dig, and hit", simple: "left thumb breaks things", ru: "левый палец -- копать и бить", pl: "lewy kciuk -- kopać i bić" },
+    Line { msg: Msg::LearnPlaceTouch, en: "right thumb -- place, and use", simple: "right thumb puts things down", ru: "правый палец -- ставить и брать", pl: "prawy kciuk -- stawiać i używać" },
+    Line { msg: Msg::LearnFound,   en: "FOUND SO FAR",  simple: "WHAT YOU HAVE SEEN", ru: "НАЙДЕНО", pl: "ZNALEZIONE" },
     // The body in the pack. See the note on `Msg::Wounds`.
     Line { msg: Msg::Wounds,       en: "WOUNDS",       simple: "HURTS",      ru: "РАНЫ", pl: "RANY" },
     Line { msg: Msg::PartLeftArm,  en: "LEFT ARM",     simple: "LEFT ARM",   ru: "ЛЕВАЯ РУКА", pl: "LEWA RĘKA" },

@@ -6104,22 +6104,22 @@ fn run(
                             now,
                             &mut ui_vertices,
                         );
-                        // **The first two minutes**: one line over the belt
-                        // saying the next of the three things a player who
-                        // has just woken up should do, and gone for good
-                        // once all three are done. Driven by the same
-                        // knowledge the recipe book and the ladder page are
-                        // (`ladder::first_step`), so it cannot disagree with
-                        // either, and it costs nothing at all for anybody
-                        // who has ever held a flake.
-                        if let Some(step) = journal.first_step() {
+                        // **The first minute**: one line over the belt,
+                        // for a player who has held nothing and is
+                        // carrying nothing, and gone for good the moment
+                        // they pick anything up. Driven by the same
+                        // knowledge the recipe book and the path page are
+                        // (`Journal::first_minute`), so it cannot disagree
+                        // with either, and it costs nothing at all for
+                        // anybody who has ever held a flake.
+                        if journal.first_minute(&inventory) {
                             let mut painter = widgets::Painter::onto(
                                 graphics.textures.font,
                                 std::mem::take(&mut ui_vertices),
                             );
-                            hud::first_step_line(
+                            hud::first_minute_line(
                                 &mut painter,
-                                settings.language.text(ui::ladder_screen::first_step_msg(step)),
+                                settings.language.text(ui::lang::Msg::StepStone),
                             );
                             ui_vertices = painter.into_vertices();
                         }
@@ -6356,6 +6356,14 @@ fn run(
                                     nourishment,
                                     stamina: stamina.fraction(),
                                     body,
+                                },
+                                // What the path tab is drawn from:
+                                // what this player has held, and what
+                                // their keys are bound to. See
+                                // `ui::ladder_screen::Learning`.
+                                ui::ladder_screen::Learning {
+                                    discovered: journal.discovered(),
+                                    keys: &settings.keybinds,
                                 },
                                 settings.language,
                                 &mut ui_vertices,

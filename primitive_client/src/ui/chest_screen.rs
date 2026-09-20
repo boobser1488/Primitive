@@ -161,7 +161,7 @@ const FLAME: [f32; 4] = [0.90, 0.45, 0.10, 1.0];
 const SUN: [f32; 4] = [0.93, 0.80, 0.35, 1.0];
 const PROGRESS: [f32; 4] = [0.93, 0.93, 0.93, 1.0];
 
-const HINT_SCALE: f32 = 0.68;
+const HINT_SCALE: f32 = widgets::size::NOTE;
 /// The one line of instruction the screen still prints.
 ///
 /// Kept short on purpose: the panel is exactly as wide as ten slots,
@@ -1078,11 +1078,11 @@ impl ChestScreen {
         }
         // A flame beside the word, from the same sheet the fire in the
         // world is drawn with.
-        let label_top = widgets::caption_top_over(fuel.y1, CAPTION_SCALE);
+        let label_top = widgets::caption_top_over(fuel.y1, widgets::size::CAPTION);
         let flame_icon = crate::ui::inventory_screen::icon_beside(
             p,
             (fuel.x0, label_top),
-            widgets::cell_height(CAPTION_SCALE) * 1.05,
+            widgets::cell_height(widgets::size::CAPTION) * 1.05,
             layers.flame(0),
         );
         // The same size as the captions over the other groups, and fitted
@@ -1093,7 +1093,7 @@ impl ChestScreen {
             fuel_word,
             flame_icon.x1 + 0.006,
             label_top,
-            widgets::fitted_scale(fuel_word, CAPTION_SCALE, room, 0.7),
+            widgets::fitted_scale(fuel_word, widgets::size::CAPTION, room, 0.7),
             widgets::INK_DIM,
         );
 
@@ -1130,8 +1130,20 @@ impl ChestScreen {
         }
         // The caption quiet and the reading under it not: `yellow` is the
         // thing a player came to this corner to find out.
-        p.text(language.text(Msg::HearthHeat), heat.x0, heat_label_top(), 0.72, widgets::INK_DIM);
-        p.text(language.text(glow_msg(glow)), heat.x0, heat_word_top(), 0.72, widgets::INK);
+        // A caption over a reading, at the size every caption on a
+        // stone screen is, with the reading under it at the size
+        // everything a player reads as language is. They were both 0.72
+        // -- one size for two jobs -- so the word naming the readout and
+        // the readout itself had the same weight on the page.
+        p.text(
+            language.text(Msg::HearthHeat),
+            heat.x0,
+            heat_label_top(),
+            widgets::size::CAPTION,
+            widgets::INK_DIM,
+        );
+        let word = language.text(glow_msg(glow));
+        p.text(word, heat.x0, heat_word_top(), heat_word_scale(word), widgets::INK);
 
         // ...and the arrow, filling towards the results.
         //
@@ -1194,7 +1206,7 @@ impl ChestScreen {
         // `arrow.centre_x()` is what this used to be, and even in
         // English "not burning -- strike it with flint" was already
         // wide enough to be drawn straight over an ingredient slot.
-        p.text_centred(&say, 0.0, hearth_status_y(), 0.68, colour);
+        p.text_centred(&say, 0.0, hearth_status_y(), widgets::size::NOTE, colour);
     }
 
     /// The rack half of the screen: a frame, a tray, and the sky.
@@ -1276,7 +1288,7 @@ impl ChestScreen {
             language.text(Msg::RackWeather),
             gauge.x0,
             gauge.y0 - 0.010,
-            0.62,
+            widgets::size::CAPTION,
             widgets::INK_DIM,
         );
 
@@ -1347,8 +1359,8 @@ impl ChestScreen {
         p.text_centred(
             &reading,
             arrow.centre_x(),
-            arrow.y1 + widgets::cell_height(0.68) + 0.012,
-            0.68,
+            arrow.y1 + widgets::cell_height(widgets::size::NOTE) + 0.012,
+            widgets::size::NOTE,
             widgets::INK,
         );
 
@@ -1372,7 +1384,7 @@ impl ChestScreen {
             language.text(say),
             0.0,
             rack_status_y(),
-            0.68,
+            widgets::size::NOTE,
             if curing && rate > 0.0 {
                 widgets::TEXT_GOOD
             } else {
@@ -1412,7 +1424,7 @@ impl ChestScreen {
             &format!("{held} / {JUG_UNITS}"),
             rect.centre_x(),
             vessel_reading_y(),
-            0.72,
+            widgets::size::BODY,
             widgets::INK,
         );
         let full = held >= JUG_UNITS;
@@ -1420,7 +1432,7 @@ impl ChestScreen {
             language.text(if full { Msg::VesselFull } else { Msg::VesselEmpty }),
             0.0,
             vessel_status_y(),
-            0.68,
+            widgets::size::NOTE,
             if full { widgets::TEXT_BAD } else { widgets::INK_DIM },
         );
     }
@@ -1619,7 +1631,7 @@ impl ChestScreen {
                 label,
                 top_left.x0,
                 caption_top(side),
-                CAPTION_SCALE,
+                widgets::size::CAPTION,
                 // The quiet tier: this names a region, and the amber
                 // title above already says which screen it is. Three
                 // steps -- title, contents, the words naming a half --
@@ -1791,7 +1803,10 @@ impl ChestScreen {
         // there, so the rule was a second line saying what the first one
         // already said. Worse than redundant: the tray reaches lower
         // than the rule did, so the two crossed.
-        p.text(&summary, grid_left(), panel.y0 + 0.108, 0.86, widgets::INK);
+        // The same size the pack writes its own summary at: two
+        // screens saying "this is what you are carrying" in two sizes
+        // was the drift this scale exists to stop.
+        p.text(&summary, grid_left(), panel.y0 + 0.108, widgets::size::BODY, widgets::INK);
         // The stall's own line: the owner is pricing and the buyer is
         // trading, and the chest's shift-click hint is neither.
         let hint = match (layout, self.stall()) {
@@ -2047,7 +2062,7 @@ fn work_tray(layout: Layout) -> Option<Rect> {
 }
 
 /// A caption over a group of slots on a working half, at the size every
-/// stone screen writes one (`widgets::CAPTION_SCALE`).
+/// stone screen writes one (`widgets::size::CAPTION`).
 ///
 /// `flush_right` hangs the word off the group's right edge instead of its
 /// left. **The results sit at the right of the panel**, and a word written
@@ -2060,16 +2075,11 @@ fn work_tray(layout: Layout) -> Option<Rect> {
 /// shares with the caption at the other end, so the two cannot meet in the
 /// middle whichever language is the longer.
 fn caption_over(p: &mut Painter, group: Rect, text: &str, flush_right: bool, room: f32) {
-    let scale = widgets::fitted_scale(text, CAPTION_SCALE, room, 0.7);
+    let scale = widgets::fitted_scale(text, widgets::size::CAPTION, room, 0.7);
     let top = widgets::caption_top_over(group.y1, scale);
     let x = if flush_right { group.x1 - widgets::ink_width(text, scale) } else { group.x0 };
     p.text(text, x, top, scale, widgets::INK_DIM);
 }
-
-/// How large a region caption is written: the size every stone screen
-/// writes one at. It was 0.86 here and 0.62 on the pack, for the same
-/// word doing the same job -- see `widgets::CAPTION_SCALE`.
-const CAPTION_SCALE: f32 = widgets::CAPTION_SCALE;
 
 /// Where the word naming a grid is written: above its top row, always.
 ///
@@ -2087,7 +2097,7 @@ const CAPTION_SCALE: f32 = widgets::CAPTION_SCALE;
 /// which is what the first cut of this screen got wrong on every
 /// heading it had.
 fn caption_top(side: Side) -> f32 {
-    widgets::caption_top_over(slot_rect(side, HOTBAR_SLOTS).y1, CAPTION_SCALE)
+    widgets::caption_top_over(slot_rect(side, HOTBAR_SLOTS).y1, widgets::size::CAPTION)
 }
 
 /// The tray around one grid, down to whatever it has at the bottom.
@@ -2382,7 +2392,7 @@ fn flame_rect() -> Rect {
 /// into the margin under the arrow, which is where it used to be and
 /// why it used to reach the slot beside it.
 fn hearth_status_y() -> f32 {
-    flame_rect().y0 - 0.010 - widgets::cell_height(0.68) - 0.014
+    flame_rect().y0 - 0.010 - widgets::cell_height(widgets::size::NOTE) - 0.014
 }
 
 /// The hottest the heat gauge shows, in degrees.
@@ -2420,8 +2430,20 @@ fn heat_label_top() -> f32 {
 }
 
 /// Where the colour of the fire is written: under HEAT, inside the same row.
+/// How large the colour word under `HEAT` is written.
+///
+/// `size::BODY` -- it is the thing a player came to this corner to read
+/// -- fitted down when the word will not go in the column. That column
+/// is the one stretch of the fuel row nothing else uses and it cannot be
+/// widened (see `heat_rect`), and `очень горячий` is half again longer
+/// than `yellow`: English reads at the full size and Russian comes down
+/// a notch rather than running over the gauge.
+pub(crate) fn heat_word_scale(word: &str) -> f32 {
+    widgets::fitted_scale(word, widgets::size::BODY, heat_rect().width(), 0.7)
+}
+
 fn heat_word_top() -> f32 {
-    heat_label_top() - widgets::cell_height(0.72) - 0.010
+    heat_label_top() - widgets::cell_height(widgets::size::CAPTION) - 0.010
 }
 
 /// The word for a heat colour.
@@ -2540,7 +2562,7 @@ const STATUS_HEIGHT: f32 = 0.052;
 /// off the arrow's middle put half of it over the frame slot and the
 /// other half out past the tray.
 fn rack_status_y() -> f32 {
-    rack_gauge_rect().y0 - 0.010 - widgets::cell_height(0.62) - 0.014
+    rack_gauge_rect().y0 - 0.010 - widgets::cell_height(widgets::size::NOTE) - 0.014
 }
 
 /// The top of the rack's half. Measured up from the pack, exactly the
@@ -2923,7 +2945,7 @@ pub fn stall_slot_rect(slot: usize) -> Option<Rect> {
 /// Small and whole beats large and cut off, for the one word on the screen
 /// the buyer came to read.
 fn stall_caption(p: &mut Painter, row_top: f32, text: &str) {
-    let scale = widgets::fitted_scale(text, CAPTION_SCALE, grid_width(), 0.35);
+    let scale = widgets::fitted_scale(text, widgets::size::CAPTION, grid_width(), 0.35);
     p.text(text, grid_left(), widgets::caption_top_over(row_top, scale), scale, widgets::INK_DIM);
 }
 
@@ -3142,7 +3164,7 @@ mod bulk_tests {
             // `caption_top` is the top of the line and the glyphs hang
             // down from it, so clearing the row means the *bottom* of
             // the line clears it.
-            let bottom = caption - widgets::cell_height(CAPTION_SCALE);
+            let bottom = caption - widgets::cell_height(widgets::size::CAPTION);
             assert!(
                 bottom >= top_row.y1,
                 "{side:?}: the caption reaches down to {bottom:.3}, into a row \
@@ -3205,7 +3227,6 @@ mod bulk_tests {
         // else uses -- see `heat_rect` for the label that ruled out the row
         // above. Every colour word, in every language, has to fit it.
         use primitive_shared::hearth::{Glow, USED_SLOTS};
-        const SCALE: f32 = 0.72;
         let overlaps = |a: Rect, b: Rect| a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0;
         let heat = heat_rect();
         let slots: Vec<(usize, Rect)> = (0..USED_SLOTS)
@@ -3216,15 +3237,23 @@ mod bulk_tests {
         }
         assert!(!overlaps(heat, flame_rect()), "the two gauges overlap");
         for language in Language::ALL {
-            let mut lines = vec![(language.text(Msg::HearthHeat), heat_label_top())];
+            // Each line measured at the size it is actually drawn at:
+            // the caption is fixed and the colour word fits itself to
+            // the column (`heat_word_scale`).
+            let mut lines = vec![(
+                language.text(Msg::HearthHeat),
+                heat_label_top(),
+                widgets::size::CAPTION,
+            )];
             for glow in Glow::ALL {
-                lines.push((language.text(glow_msg(glow)), heat_word_top()));
+                let word = language.text(glow_msg(glow));
+                lines.push((word, heat_word_top(), heat_word_scale(word)));
             }
-            for (text, top) in lines {
+            for (text, top, scale) in lines {
                 let line = Rect::new(
                     heat.x0,
-                    top - widgets::cell_height(SCALE),
-                    heat.x0 + widgets::ink_width(text, SCALE),
+                    top - widgets::cell_height(scale),
+                    heat.x0 + widgets::ink_width(text, scale),
                     top,
                 );
                 assert!(
@@ -3322,7 +3351,7 @@ mod bulk_tests {
     #[test]
     fn the_hearth_status_line_never_covers_a_slot_however_long_the_words_are() {
         use primitive_shared::hearth::USED_SLOTS;
-        const SCALE: f32 = 0.68;
+        const SCALE: f32 = widgets::size::NOTE;
         let slots: Vec<Rect> = (0..USED_SLOTS).filter_map(hearth_slot_rect).collect();
         assert!(!slots.is_empty(), "a hearth with no slots at all");
         let top = hearth_status_y();

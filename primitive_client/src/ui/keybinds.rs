@@ -472,22 +472,27 @@ mod tests {
     }
 
     #[test]
-    fn the_controls_screen_still_has_room_for_all_of_them() {
-        // The controls list is drawn as one row per action inside a
-        // fixed panel, with no scrolling: the rows simply run off the
-        // bottom when there are too many, and the one that vanishes is
-        // whichever was added last. See `menu::build_controls`, which
-        // is where these numbers come from.
+    fn another_binding_costs_a_scroll_and_never_a_shorter_row() {
+        // **This test used to say the opposite.** It checked that every
+        // binding still fitted one fixed panel, because the screen drew
+        // all of them at once and divided the panel between them -- so
+        // the assertion that "passed" was the rows being squeezed, and
+        // the day it failed the answer would have been to squeeze them
+        // further. The list scrolls now (`menu::ListRows`), so what has
+        // to hold is the reverse: the row height owes nothing to how
+        // many bindings there are, and a nineteenth binding is one more
+        // row below the fold rather than a thinner row for everybody.
         const PANEL_HEIGHT: f32 = 0.76 - -0.62;
         let row = crate::ui::menu::controls_row_height();
-        let used = 0.060 + Action::ALL.len() as f32 * (row + 0.010);
+        assert!(row >= 0.055, "the rows are too short to read");
+        // A window worth scrolling: several full-size rows at once, not
+        // a slot showing one.
+        let visible = ((PANEL_HEIGHT - 0.06) / (row + 0.014)) as usize;
         assert!(
-            used <= PANEL_HEIGHT,
-            "{} actions need {used} of {PANEL_HEIGHT} at a row height of {row} --              the rows have shrunk as far as they can and this screen now needs to scroll",
+            visible >= 8,
+            "only {visible} of the {} bindings are on screen at a time",
             Action::ALL.len()
         );
-        // ...and not by making the print unreadable.
-        assert!(row >= 0.055, "the rows are too short to read");
     }
 
     #[test]

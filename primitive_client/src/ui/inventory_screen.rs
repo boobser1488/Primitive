@@ -140,7 +140,6 @@ const FOOTER_MARGIN: f32 = 0.028;
 /// How far the count's shadow is offset, and what colour it is.
 const COUNT_SHADOW: f32 = 0.0034;
 const COUNT_DARK: [f32; 4] = [0.13, 0.13, 0.13, 1.0];
-const COUNT_SCALE: f32 = 0.72;
 const COUNT_TEXT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// A stack at the slot limit is worth pointing out: it is the reason
 /// the next pickup will claim another slot.
@@ -324,17 +323,29 @@ pub enum Tab {
     /// The worn rucksack's squares, in the row the pack's own storage
     /// occupies on the page before.
     Backpack,
+    /// The seven ages, what the next one takes, the handful of controls
+    /// nobody can guess, and how much of the world has turned up.
+    ///
+    /// It was a tab of the journal. See `ui::ladder_screen` for the
+    /// argument that moved it here and for why it is not in both.
+    Learn,
 }
 
-/// The three, left to right, in the order they are drawn and indexed.
+/// The four, left to right, in the order they are drawn and indexed.
 ///
-/// **The pack is in the middle**, which is where the eye and the thumb
-/// both start, because it is the page the screen is opened for nine
-/// times out of ten. The body is to its left because a player reads left
-/// to right and "how am I" comes before "what have I"; the rucksack is
-/// to its right because it is the pack's overflow and it is not always
-/// there.
-pub const ALL_TABS: [Tab; 3] = [Tab::Health, Tab::Pack, Tab::Backpack];
+/// A player reads them as a sentence about themselves: how am I, what
+/// have I, what else have I, where am I going. The body is first because
+/// "how am I" comes before "what have I"; the rucksack follows the pack
+/// because it is the pack's overflow and it is not always there; the
+/// path is last because it is the one page that is not about this
+/// minute.
+///
+/// **The pack used to be in the middle** and the note here said so --
+/// the middle is where the eye and the thumb both start, and the pack is
+/// what the screen is opened for nine times out of ten. Four tabs have
+/// no middle, and of the two places the pack could go, second keeps it
+/// where a returning player's thumb already is.
+pub const ALL_TABS: [Tab; 4] = [Tab::Health, Tab::Pack, Tab::Backpack, Tab::Learn];
 
 impl Tab {
     fn label(self) -> Msg {
@@ -342,6 +353,7 @@ impl Tab {
             Tab::Health => Msg::TabHealth,
             Tab::Pack => Msg::TabPack,
             Tab::Backpack => Msg::TabBackpack,
+            Tab::Learn => Msg::LadderTab,
         }
     }
 }
@@ -425,6 +437,9 @@ pub struct InventoryScreen {
     /// with every addition eventually cannot be drawn at all, on a
     /// monitor nobody has yet.
     recipe_scroll: usize,
+    /// Which rung the path page is reading out. See
+    /// `ui::ladder_screen::LadderScreen`.
+    path: crate::ui::ladder_screen::LadderScreen,
 }
 
 impl InventoryScreen {
@@ -586,11 +601,18 @@ impl InventoryScreen {
             return Some(Intent::Sort);
         }
 
-        // **Nothing below this point is on the health page.** It is a
-        // page of readings with no slot, no recipe and no drop target,
-        // so a click anywhere on it that is not a tab is a click on
+        // **Nothing below this point is on the health or path pages.**
+        // Both are pages of reading with no slot, no recipe and no drop
+        // target, so a click on either that is not a tab is a click on
         // nothing -- and letting it fall through would hit-test the
-        // squares of the page underneath, which are not drawn.
+        // squares of the page underneath, which are not drawn. The path
+        // page does have one thing to press, and it is pressed here
+        // rather than below, for the same reason.
+        if self.tab == Tab::Learn {
+            self.path.click(cursor);
+            self.release();
+            return None;
+        }
         if self.tab == Tab::Health {
             self.release();
             return None;
@@ -746,7 +768,7 @@ impl InventoryScreen {
     /// same on both slot pages and [`slot_in_place`] is the one thing
     /// that differs, so it is applied here and nowhere else.
     fn slot_at(&self, cursor: (f32, f32)) -> Option<usize> {
-        if self.tab == Tab::Health {
+        if matches!(self.tab, Tab::Health | Tab::Learn) {
             return None;
         }
         slot_place_at(cursor).and_then(|place| slot_in_place(self.tab, place))
@@ -797,6 +819,9 @@ impl InventoryScreen {
         self.open.hash(&mut h);
         self.held.hash(&mut h);
         self.tab.hash(&mut h);
+        // Which rung is read out. Left out, pressing one would light it
+        // and read out the one before it until the mouse moved.
+        self.path.key().hash(&mut h);
         self.recipe_scroll.hash(&mut h);
         self.cursor
             .map(|(x, y)| (x.to_bits(), y.to_bits()))
@@ -841,6 +866,7 @@ impl InventoryScreen {
             &primitive_shared::inventory::Equipment::new(),
             injuries,
             &Vitals { stamina: stamina_fraction, ..Vitals::default() },
+            crate::ui::ladder_screen::Learning::nothing_yet(),
             language,
             &mut out,
         );
@@ -859,6 +885,7 @@ impl InventoryScreen {
         equipment: &primitive_shared::inventory::Equipment,
         injuries: &Injuries,
         vitals: &Vitals,
+        learning: crate::ui::ladder_screen::Learning,
         language: Language,
         out: &mut Vec<HotbarVertex>,
     ) {
@@ -891,6 +918,14 @@ impl InventoryScreen {
         // the drawing code.
         if self.tab == Tab::Health {
             health_page(&mut p, vitals, injuries, language);
+            *out = p.into_vertices();
+            return;
+        }
+        // ...and the path page, for the same reason: it shares the
+        // panel, the header and the tabs with the pages below, and not
+        // one thing under this line.
+        if self.tab == Tab::Learn {
+            self.path.paint(&mut p, layers, learning, self.cursor, language);
             *out = p.into_vertices();
             return;
         }
@@ -951,7 +986,7 @@ impl InventoryScreen {
             // no caption of their own: the squares under it are one slot
             // wide, and no language names them that briefly.
             let room = slot_rect(HOTBAR_SLOTS + 1).x1 - top.x0;
-            let scale = widgets::fitted_scale(text, widgets::CAPTION_SCALE, room, 0.7);
+            let scale = widgets::fitted_scale(text, widgets::size::CAPTION, room, 0.7);
             p.text(text, top.x0, widgets::caption_top_over(top.y1, scale), scale, widgets::INK_DIM);
         }
         for part in 0..primitive_shared::equipment::SLOTS {
@@ -1012,7 +1047,7 @@ impl InventoryScreen {
             let text = language.text(Msg::Wounds);
             // No further than the squares' own caption beside it.
             let room = equipment_rect(0).x0 - figure.x0 - 0.012;
-            let scale = widgets::fitted_scale(text, widgets::CAPTION_SCALE, room, 0.7);
+            let scale = widgets::fitted_scale(text, widgets::size::CAPTION, room, 0.7);
             p.text(text, figure.x0, widgets::caption_top_over(figure.y1, scale), scale, widgets::INK_DIM);
             crate::ui::mannequin::draw(
                 &mut p,
@@ -1079,7 +1114,7 @@ impl InventoryScreen {
             // its first row is well below the caption line the worn
             // squares use and the two cannot collide.
             let room = slot_rect(SLOTS - 1).x1 - row.x0;
-            let scale = widgets::fitted_scale(text, widgets::CAPTION_SCALE, room, 0.7);
+            let scale = widgets::fitted_scale(text, widgets::size::CAPTION, room, 0.7);
             p.text(text, row.x0, widgets::caption_top_over(row.y1, scale), scale, widgets::ACCENT);
         }
 
@@ -1119,8 +1154,8 @@ impl InventoryScreen {
         // and the tails of "y" and "%" were being cut off by the bottom
         // bevel. A line's own height plus a margin above the floor
         // cannot be cut by it.
-        let baseline = panel.y0 + widgets::cell_height(0.9) + FOOTER_MARGIN;
-        p.text(&summary, grid_left(), baseline, 0.9, colour);
+        let baseline = panel.y0 + widgets::cell_height(widgets::size::BODY) + FOOTER_MARGIN;
+        p.text(&summary, grid_left(), baseline, widgets::size::BODY, colour);
 
         // Last, so they sit over everything they describe. The stack in
         // hand rides the cursor: the gesture is click-then-click rather
@@ -1220,11 +1255,25 @@ const VITAL_BAR_HEIGHT: f32 = 0.020;
 const VITAL_MARK: f32 = 0.030;
 /// Air between a mark and the word it belongs to.
 const VITAL_MARK_GAP: f32 = 0.012;
-/// How far the bars sit from the labels: the longest label in the
-/// longest language plus air. Measured against Polish
-/// ("roznorodnosc jedzenia") rather than English, which is the shortest
-/// of the four and would have put the bars through the words.
-const VITAL_LABEL_WIDTH: f32 = 0.50;
+/// The narrowest the label column is ever drawn, and the widest.
+///
+/// **It used to be one number, 0.50, and it was wrong.** The comment on
+/// it said it had been measured against Polish, and it had -- at some
+/// earlier size, for some earlier set of rows. At the size the page
+/// actually writes, `roznorodnosc jedzenia` is 0.68 across, so the
+/// Polish page drew its longest label straight through the bar beside
+/// it. A fixed column has to be re-measured by hand every time a word,
+/// a language or a size changes, and nothing tells you when it was not.
+///
+/// So the column is measured from the labels it is actually holding
+/// (see `health_page`), between a floor -- so a page of short words does
+/// not pull the bars up against them -- and a ceiling that leaves the
+/// wounds beside it a readable column. Nothing on this page is
+/// clickable, so a column that is a little wider in Polish costs
+/// nothing; a control that moved with the language would be a different
+/// argument (see the note over `tab_rect`).
+const VITAL_LABEL_MIN: f32 = 0.50;
+const VITAL_LABEL_MAX: f32 = 0.78;
 
 /// Draws the health page: every vital down the left, every wound down
 /// the right.
@@ -1341,8 +1390,24 @@ fn health_page(p: &mut Painter, vitals: &Vitals, injuries: &Injuries, language: 
         ),
     ];
 
-    let scale = 0.82;
+    // A row of this page is a word and a number a player reads, so it is
+    // written at the size everything read as language is written at. It
+    // was 0.82 -- a size nothing else in the game used -- which put the
+    // readings a notch under the summary line on the page next door and
+    // a notch over the caption above them.
+    let scale = widgets::size::BODY;
     let line = widgets::cell_height(scale);
+    // **The label column is measured, not remembered.** See
+    // `VITAL_LABEL_MIN`: the fixed 0.50 was measured against Polish once
+    // and then the size changed under it, and nothing says when a
+    // written-down measurement has gone stale except a picture nobody
+    // took.
+    let label_width = rows
+        .iter()
+        .map(|(label, ..)| widgets::measure(language.text(*label), scale))
+        .fold(VITAL_LABEL_MIN, f32::max)
+        .min(VITAL_LABEL_MAX)
+        + widgets::measure("m", scale);
     // **The step is measured, not written down.** Ten rows of a fixed
     // 0.072 put the last one through the bottom of the panel, and the
     // only thing that would have caught that is somebody looking at the
@@ -1369,8 +1434,17 @@ fn health_page(p: &mut Painter, vitals: &Vitals, injuries: &Injuries, language: 
                 ink,
             );
         }
-        p.text(language.text(*label), words_left, baseline, scale, widgets::INK_DIM);
-        let bar_left = words_left + VITAL_LABEL_WIDTH;
+        // Elided rather than allowed to run into the bar, in the one
+        // case the ceiling bites: `fit` is what every other list on
+        // these screens does with a name too long for its column.
+        p.text(
+            &widgets::fit(language.text(*label), scale, label_width - widgets::measure("m", scale)),
+            words_left,
+            baseline,
+            scale,
+            widgets::INK_DIM,
+        );
+        let bar_left = words_left + label_width;
         if let Some(fraction) = *fraction {
             let floor = baseline - line + (line - VITAL_BAR_HEIGHT) / 2.0;
             let track = Rect::new(bar_left, floor, bar_left + VITAL_BAR, floor + VITAL_BAR_HEIGHT);
@@ -1409,59 +1483,79 @@ fn health_page(p: &mut Painter, vitals: &Vitals, injuries: &Injuries, language: 
     // The gap is a reading's width plus air: the numbers are
     // right-aligned by nothing, so "100%" is the widest of them and
     // the wounds have to start clear of it.
-    let wounds_left = left + VITAL_LABEL_WIDTH + VITAL_BAR + 0.22;
+    let wounds_left = words_left + label_width + VITAL_BAR + 0.22;
     let room = (panel.x1 - PANEL_PAD - wounds_left).max(0.0);
     p.text(
         language.text(Msg::VitalInjuries),
         wounds_left,
         top,
-        widgets::CAPTION_SCALE,
+        widgets::size::CAPTION,
         widgets::INK_DIM,
     );
-    let note = 0.74;
-    let mut y = top - 0.056;
+
+    // **Every line the same size, wrapped, and down to the panel's own
+    // floor.** Three separate mistakes lived in these fifteen lines and
+    // they were all the player's complaint:
+    //
+    // * each line was `fitted_scale`d on its own, so a page of wounds
+    //   was a page in four sizes -- `ТОРС` at full size over a sentence
+    //   shrunk to two thirds of it, which is the "то слишком крупный,
+    //   то наоборот" exactly;
+    // * the size it started from, 0.74, was nothing else's;
+    // * the floor was `panel.y0 + FOOTER_HEIGHT`, and `FOOTER_HEIGHT` is
+    //   room for the summary line that *the other two pages* draw. This
+    //   page draws no summary, so it was throwing away a seventh of the
+    //   panel and the shelter lines under the wounds -- which are the
+    //   whole reason a player opens this page in the cold -- fell off
+    //   the bottom of a panel with room to spare. Found by looking at a
+    //   PNG, which is the third time that sentence has been written in
+    //   this file.
+    //
+    // Wrapping rather than shrinking, because a sentence at half size
+    // beside a word at full size is not a smaller line, it is a
+    // different voice.
+    let note = widgets::size::NOTE;
+    let step = widgets::cell_height(note) + 0.010;
+    let floor = panel.y0 + FOOTER_MARGIN;
+    let columns = ((room / widgets::measure("m", note)) as usize).max(8);
+    let mut y = top - widgets::cell_height(widgets::size::CAPTION) - 0.020;
+    let say = |p: &mut Painter, y: &mut f32, text: &str, colour: [f32; 4]| {
+        for line in widgets::wrap(text, columns) {
+            // Stops at the panel's floor rather than running through it.
+            // A body can carry more wounds than there is room to list,
+            // and what is listed first is the worst -- `mannequin::lines`
+            // sorts by danger, so the ones that fall off the end are the
+            // ones that matter least.
+            if *y - widgets::cell_height(note) < floor {
+                return;
+            }
+            p.text(&line, wounds_left, *y, note, colour);
+            *y -= step;
+        }
+    };
     let mut said_anything = false;
     for part in primitive_shared::injury::Part::ALL {
         if injuries.part(part).is_whole() {
             continue;
         }
         for (text, colour) in crate::ui::mannequin::lines(part, injuries, language) {
-            // Stops at the panel's floor rather than running through it.
-            // A body can carry more wounds than there is room to list,
-            // and what is listed first is the worst -- `mannequin::lines`
-            // sorts by danger, so the ones that fall off the end are the
-            // ones that matter least.
-            if y - widgets::cell_height(note) < panel.y0 + FOOTER_HEIGHT {
-                break;
-            }
-            // Fitted to the room, on `widgets::button`'s reasoning: a
-            // wound is described in a whole sentence, and the sentence
-            // is half again longer in Polish than in English.
-            let fitted = widgets::fitted_scale(&text, note, room, 0.45);
-            p.text(&text, wounds_left, y, fitted, colour);
-            y -= widgets::cell_height(note) + 0.010;
+            say(p, &mut y, &text, colour);
             said_anything = true;
         }
         y -= 0.008;
     }
     if !said_anything {
-        p.text(language.text(Msg::NoWounds), wounds_left, y, note, widgets::TEXT_GOOD);
-        y -= widgets::cell_height(note) + 0.010;
+        say(p, &mut y, language.text(Msg::NoWounds), widgets::TEXT_GOOD);
     }
 
     // ---- the place, under the wounds ----
     //
     // Under them and not above, because a wound is the more urgent line
-    // and the list sorts by danger; and fitted to the same room, stopping
+    // and the list sorts by danger; wrapped to the same column, stopping
     // at the same floor, for the same reasons.
     y -= 0.024;
     for (text, colour) in shelter_lines(body, language) {
-        if y - widgets::cell_height(note) < panel.y0 + FOOTER_HEIGHT {
-            break;
-        }
-        let fitted = widgets::fitted_scale(&text, note, room, 0.45);
-        p.text(&text, wounds_left, y, fitted, colour);
-        y -= widgets::cell_height(note) + 0.010;
+        say(p, &mut y, &text, colour);
     }
 }
 
@@ -1514,11 +1608,11 @@ pub(crate) fn shelter_lines(body: &crate::ui::hud::BodyGauges, language: Languag
     lines
 }
 
-/// Draws the three tabs.
+/// Draws the four tabs.
 ///
-/// The one showing is a *well* and the other two are buttons: the page
-/// you are on is the hole the panel's content comes out of, and the two
-/// you are not on are things to press. That is one shape carrying the
+/// The one showing is a *well* and the rest are buttons: the page you
+/// are on is the hole the panel's content comes out of, and the ones you
+/// are not on are things to press. That is one shape carrying the
 /// state rather than a colour, which survives being looked at on a phone
 /// in daylight.
 fn tab_strip(
@@ -1532,10 +1626,10 @@ fn tab_strip(
         let rect = tab_rect(index);
         let text = language.text(tab.label());
         // The rucksack page exists only while a rucksack is worn. Drawn
-        // greyed rather than hidden, because a strip that changes from
-        // three tabs to two moves the other two -- and a control that
-        // moves when the player takes their pack off is a control they
-        // have to find again.
+        // greyed rather than hidden, because a strip that lost a tab
+        // would move the rest of them -- and a control that moves when
+        // the player takes their pack off is a control they have to find
+        // again.
         let enabled = tab != Tab::Backpack || backpack_on;
         let hovered = cursor.is_some_and(|(x, y)| rect.contains(x, y));
         p.tab(rect, text, tab == showing, hovered, enabled);
@@ -1921,14 +2015,18 @@ fn draw_slot_full(
     // the cell's own edge with a fixed margin, which is fine for one
     // digit and wrong for three: "128" started outside its slot on the
     // left and sat on the bevel at the bottom. Measured, then clamped
-    // into the cell's inner area -- and a count too wide even for that
-    // is drawn smaller rather than allowed out.
+    // into the cell's inner area.
+    //
+    // **And it is one size now, whatever the number.** It used to fall
+    // back to four fifths of itself when three digits did not fit,
+    // which is how a pack came to show `128` visibly smaller than the
+    // `12` in the square beside it -- the player's "то слишком крупный,
+    // то наоборот", in one screenshot. `size::COUNT` is chosen so three
+    // digits fit and no fallback is needed; the test that holds it there
+    // is `a_three_digit_count_fits_a_slot_without_being_shrunk`.
     let label = count.to_string();
     let inner = inset(cell);
-    let mut scale = COUNT_SCALE;
-    if widgets::ink_width(&label, scale) > inner.width() - 0.006 {
-        scale *= 0.8;
-    }
+    let scale = widgets::size::COUNT;
     let width = widgets::ink_width(&label, scale);
     let x0 = (inner.x1 - width - 0.007).max(inner.x0 + 0.002);
     // Lifted by the shadow's own offset as well: the shadow is drawn
@@ -1981,7 +2079,11 @@ pub(crate) fn held_stack(
         crate::ui::hotbar::icon_tint(block, [1.0, 1.0, 1.0, 0.85]),
     );
     let label = inventory.count_in(slot).to_string();
-    let scale = 0.66;
+    // The same size a count is in a slot: the thing under the cursor is
+    // a stack, drawn as a stack, and a number that changed size when it
+    // was picked up would be the screen saying it had become something
+    // else.
+    let scale = widgets::size::COUNT;
     p.text(
         &label,
         rect.x1 - widgets::ink_width(&label, scale),
@@ -2015,7 +2117,9 @@ const TOOLTIP_DIM: [f32; 4] = widgets::Theme::DARK.ink_dim;
 const TOOLTIP_GOOD: [f32; 4] = [0.52, 0.88, 0.55, 1.0];
 const TOOLTIP_BAD: [f32; 4] = [1.00, 0.48, 0.42, 1.0];
 
-const TOOLTIP_SCALE: f32 = 0.72;
+/// A tooltip is a second line about something else on the screen, so it
+/// is written at the size every second line is. See `widgets::size`.
+const TOOLTIP_SCALE: f32 = widgets::size::NOTE;
 
 /// Names what the cursor is over.
 ///
@@ -2872,9 +2976,12 @@ fn crafting_panel(
     // Level with the word over the pack, because it is the same kind of
     // word over the same kind of grid.
     let first = recipe_rect(scroll, scroll);
-    // The count stays the small print it was: it is a number beside a
-    // heading, not a heading.
-    let label_scale = 0.62;
+    // The count is a second line about the heading beside it, so it is
+    // written at the size every second line is (`size::NOTE`). It was
+    // 0.62 -- a size nothing else on the screen used -- which is why
+    // `СОЗДАНИЕ` and `1-20 из 23` read as two labels from two different
+    // screens sharing one row.
+    let label_scale = widgets::size::NOTE;
     let counted = recipes_overflow(offered.len()).then(|| {
         format!("{}-{} {} {}",
             scroll + 1,
@@ -2886,20 +2993,34 @@ fn crafting_panel(
     // column less whatever the count beside it takes -- `MAKING THINGS` and
     // `1-16 of 23` share one line.
     let heading = language.text(Msg::Crafting);
+    // **A whole space between them, not two hundredths.** The gap was
+    // 0.02 -- about three device pixels at 1280 -- so the heading and
+    // the count touched in Russian and read as one run-on word. A gap
+    // measured in the text's own `m` cannot be too small for the text.
+    let counted_gap = widgets::measure("mm", label_scale);
     let room = recipe_grid_width()
-        - counted.as_ref().map_or(0.0, |c| widgets::ink_width(c, label_scale) + 0.02);
-    let heading_scale = widgets::fitted_scale(heading, widgets::CAPTION_SCALE, room, 0.7);
+        - counted.as_ref().map_or(0.0, |c| widgets::ink_width(c, label_scale) + counted_gap);
+    let heading_scale = widgets::fitted_scale(heading, widgets::size::CAPTION, room, 0.7);
     // Its own height above the row: `top` is the top of the text and the
     // glyphs hang down from it, so anything less writes the word across the
     // slots it names.
-    p.text(heading, first.x0, widgets::caption_top_over(first.y1, heading_scale), heading_scale, widgets::INK_DIM);
+    let caption_top = widgets::caption_top_over(first.y1, heading_scale);
+    p.text(heading, first.x0, caption_top, heading_scale, widgets::INK_DIM);
     // How far down a longer table this is, when there is one.
+    //
+    // **On the heading's baseline, not on one of its own.** It was
+    // placed at `first.y1 + 0.030` while the heading sits a whole cell
+    // and a hair above the same edge, so the two words on this row were
+    // drawn a hundredth apart vertically as well as at two sizes -- the
+    // picture reads as a caption with something leaning on it. Both
+    // hang from the same `top` now, so their cap lines agree.
     if let Some(counted) = counted {
         let width = widgets::ink_width(&counted, label_scale);
+        let drop = widgets::cap_height(heading_scale) - widgets::cap_height(label_scale);
         p.text(
             &counted,
             recipe_left() + recipe_grid_width() - width,
-            first.y1 + 0.030,
+            caption_top - drop,
             label_scale,
             widgets::INK_DIM,
         );
@@ -2999,6 +3120,22 @@ fn content_top() -> f32 {
         .max(recipes_height())
         .max(equipment_column_height())
         / 2.0
+}
+
+/// The band a page that is not a grid gets to draw in.
+///
+/// Everything between the tabs and the panel's floor, padded. Named,
+/// because the path page is laid out inside it and a second copy of
+/// "panel, less the header, less the tabs, less the footer margin" is a
+/// page that drifts off the panel the next time the header grows.
+pub fn content_band() -> Rect {
+    let panel = panel_rect();
+    Rect::new(
+        panel.x0 + PANEL_PAD,
+        panel.y0 + FOOTER_MARGIN,
+        panel.x1 - PANEL_PAD,
+        content_top(),
+    )
 }
 
 /// Where a slot sits on screen.
@@ -4165,6 +4302,7 @@ mod tests {
             &worn,
             &hurt,
             &vitals,
+            crate::ui::ladder_screen::Learning::nothing_yet(),
             Language::English,
             &mut vertices,
         );
@@ -4192,6 +4330,233 @@ mod tests {
             "a rucksack would not go on"
         );
         (pack, worn)
+    }
+
+
+    // ---- the type scale, and text that stays out of the way ----
+    //
+    // The player's two complaints about these screens were one sentence
+    // -- "в инвентаре текст заходит на элементы, и то слишком крупный,
+    // то наоборот" -- and they are two properties: nothing is written
+    // over anything, and the same kind of thing is the same size
+    // everywhere. Both were true only as far as somebody had last
+    // looked at a PNG. These are the three tests that hold them.
+
+    /// Every page of the pack, in every language, with a pack that is
+    /// full and named at its longest.
+    fn every_page_as_drawn(
+    ) -> Vec<(Tab, Language, Vec<crate::ui::widgets::Written>)> {
+        let (pack, worn) = with_a_rucksack();
+        let mut hurt = Injuries::default();
+        hurt.inflict(Part::LeftArm, primitive_shared::injury::Kind::Cut, 0.8);
+        hurt.inflict(Part::RightLeg, primitive_shared::injury::Kind::Fracture, 0.9);
+        let vitals = Vitals {
+            health: 0.34,
+            nourishment: 0.22,
+            stamina: 0.61,
+            body: crate::ui::hud::BodyGauges {
+                hydration: 0.45,
+                fatigue: 0.82,
+                wetness: 0.5,
+                grime: 0.65,
+                recovery: 0.72,
+                diet_groups: 2,
+                ..crate::ui::hud::BodyGauges::default()
+            },
+        };
+        let mut pages = Vec::new();
+        for &language in Language::ALL {
+            for tab in ALL_TABS {
+                let mut screen = InventoryScreen::new();
+                screen.open = true;
+                screen.sync(&pack);
+                screen.set_tab(tab);
+                // **No cursor.** The tooltip and the stack in hand are
+                // drawn *at* the pointer and are meant to cover what is
+                // under them; a test that counted those as overlaps
+                // would be a test nobody could make pass.
+                let (_, lines) = crate::ui::widgets::while_recording_text(|| {
+                    let mut out = Vec::new();
+                    screen.build_into(
+                        FontAtlas::for_test(),
+                        &FaceLayers::empty_for_test(),
+                        &pack,
+                        &worn,
+                        &hurt,
+                        &vitals,
+                        crate::ui::ladder_screen::Learning::nothing_yet(),
+                        language,
+                        &mut out,
+                    );
+                });
+                // A recorder that answered nothing would make both
+                // tests below pass by drawing nothing, which is the one
+                // way a layout test can lie.
+                assert!(!lines.is_empty(), "{tab:?}/{language:?} wrote nothing at all");
+                pages.push((tab, language, lines));
+            }
+        }
+        pages
+    }
+
+    /// **No reading on the body page is written through the bar beside
+    /// it**, in any of the four languages.
+    ///
+    /// The column used to be a written-down 0.50 whose comment said it
+    /// had been measured against Polish. It had been, once, at a size
+    /// the page no longer writes at: `roznorodnosc jedzenia` is 0.68
+    /// across at `size::BODY`, so the Polish page drew its longest label
+    /// straight through the bar. A number somebody measured by hand is a
+    /// number that goes stale silently; this is what stops it.
+    #[test]
+    fn no_reading_on_the_body_page_is_written_through_the_bar_beside_it() {
+        for (tab, language, lines) in every_page_as_drawn() {
+            if tab != Tab::Health {
+                continue;
+            }
+            // The bars and the readings are drawn from the same
+            // `label_width` the labels are, so the one thing worth
+            // asserting is that no two lines on a row touch -- which
+            // `no_two_lines_the_pack_writes_are_drawn_over_each_other`
+            // already says. What this adds is the bar, which is not
+            // text: every label has to end before the first bar starts.
+            let bar_left = lines
+                .iter()
+                .filter(|line| line.text.ends_with('%'))
+                .map(|line| line.rect.x0)
+                .fold(f32::INFINITY, f32::min);
+            assert!(bar_left.is_finite(), "{language:?}: the body page printed no readings");
+            let bar_left = bar_left - VITAL_BAR - 0.020;
+            // Only the rows' own labels, which are the lines that begin
+            // exactly at the column the marks leave -- the title and the
+            // tabs are over this page too and neither is a row of it.
+            let words_left =
+                grid_left() - body_column_width() + VITAL_MARK + VITAL_MARK_GAP;
+            for line in &lines {
+                if (line.rect.x0 - words_left).abs() > 1e-4 {
+                    continue;
+                }
+                assert!(
+                    line.rect.x1 <= bar_left + 1e-4,
+                    "{language:?}: {:?} reaches {} and the bars start at {bar_left}",
+                    line.text,
+                    line.rect.x1,
+                );
+            }
+        }
+    }
+
+    /// **A label either sits wholly inside a slot or wholly clear of
+    /// every slot, and nothing straddles one.**
+    ///
+    /// The two cases are the count stamped in a square's corner, which
+    /// belongs there, and everything else, which does not. What this
+    /// catches is the third case: a caption drawn across the top row of
+    /// the grid it names, or a heading whose last letters lie on the
+    /// first slot. That is what "текст заходит на элементы" is, and no
+    /// test the pack had could see it -- the vertex list says where a
+    /// glyph is, not which line it belongs to. See
+    /// `widgets::while_recording_text`.
+    #[test]
+    fn nothing_the_pack_writes_straddles_the_edge_of_a_slot() {
+        // **Only the squares that page draws.** The body page and the
+        // path page are pages of writing with no slot on them at all,
+        // and measuring their text against a grid that is not there
+        // would fail on `22%` sitting where a slot would have been.
+        let squares: Vec<Rect> = (0..SLOTS)
+            .map(slot_rect)
+            .chain((0..primitive_shared::equipment::SLOTS).map(equipment_rect))
+            .chain((0..visible_recipes()).map(|place| recipe_rect(place, 0)))
+            .collect();
+        for (tab, language, lines) in every_page_as_drawn() {
+            if matches!(tab, Tab::Health | Tab::Learn) {
+                continue;
+            }
+            for line in &lines {
+                for square in &squares {
+                    let overlaps = line.rect.x0 < square.x1
+                        && line.rect.x1 > square.x0
+                        && line.rect.y0 < square.y1
+                        && line.rect.y1 > square.y0;
+                    let inside = line.rect.x0 >= square.x0 - 1e-4
+                        && line.rect.x1 <= square.x1 + 1e-4
+                        && line.rect.y0 >= square.y0 - 1e-4
+                        && line.rect.y1 <= square.y1 + 1e-4;
+                    assert!(
+                        !overlaps || inside,
+                        "{tab:?}/{language:?}: {:?} is written across the edge of a slot \
+                         ({:?} against {square:?})",
+                        line.text,
+                        line.rect,
+                    );
+                }
+            }
+        }
+    }
+
+    /// **No two lines are drawn on top of each other.**
+    ///
+    /// The exception is a line drawn twice at the same place, which is a
+    /// shadow -- `hud::readout` and the slot counts both draw a dark
+    /// copy a pixel behind a bright one, and that is one line as far as
+    /// a reader is concerned.
+    ///
+    /// This is the test that found `СОЗДАНИЕ` and `1-20 из 23` sharing a
+    /// row two hundredths and two sizes apart.
+    #[test]
+    fn no_two_lines_the_pack_writes_are_drawn_over_each_other() {
+        for (tab, language, lines) in every_page_as_drawn() {
+            for (i, a) in lines.iter().enumerate() {
+                for b in &lines[i + 1..] {
+                    if a.text == b.text {
+                        continue;
+                    }
+                    // A hair of tolerance: a glyph cell carries two rows
+                    // of descender space that most lines leave empty, so
+                    // two stacked lines touch by a pixel without either
+                    // of them being readable as over the other.
+                    let slack = crate::ui::widgets::PIXEL * 1.5;
+                    let over = a.rect.x0 < b.rect.x1 - slack
+                        && a.rect.x1 > b.rect.x0 + slack
+                        && a.rect.y0 < b.rect.y1 - slack
+                        && a.rect.y1 > b.rect.y0 + slack;
+                    assert!(
+                        !over,
+                        "{tab:?}/{language:?}: {:?} is drawn over {:?}",
+                        a.text, b.text,
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Three digits fit a slot at `size::COUNT`, with room for the
+    /// shadow.**
+    ///
+    /// What holds that number down. It used to be 0.72 with "and if it
+    /// does not fit, multiply by 0.8", so `128` was drawn visibly
+    /// smaller than the `12` in the square beside it. The largest stack
+    /// in the game is 128 and a jug holds under a thousand units, so
+    /// three digits is the whole of what has to fit -- and if a future
+    /// stack limit needs four, this is what will say so.
+    #[test]
+    fn a_three_digit_count_fits_a_slot_without_being_shrunk() {
+        let inner = inset(Rect::new(0.0, 0.0, CELL, CELL));
+        // The widest three digits this font has, rather than "128":
+        // every digit in it is the same width, but saying so out loud is
+        // what makes the assertion mean what it says.
+        let widest = "888";
+        assert!(
+            widgets::ink_width(widest, widgets::size::COUNT) + COUNT_SHADOW + 0.009 <= inner.width(),
+            "a three-digit count no longer fits a slot at size::COUNT",
+        );
+        // A relation between two constants, so it is checked where
+        // constants are: at compile time. As a runtime `assert!` clippy
+        // rightly calls it an assertion with a constant value.
+        const _: () = assert!(
+            primitive_shared::inventory::MAX_STACK < 1000,
+            "a stack of four digits: size::COUNT has to come down, or the corner has to grow",
+        );
     }
 
     #[test]
@@ -4365,6 +4730,7 @@ mod tests {
                 &worn,
                 &Injuries::default(),
                 vitals,
+                crate::ui::ladder_screen::Learning::nothing_yet(),
                 Language::English,
                 &mut out,
             );
@@ -4414,6 +4780,7 @@ mod tests {
             &worn,
             &hurt,
             &calm,
+            crate::ui::ladder_screen::Learning::nothing_yet(),
             Language::English,
             &mut with_wounds,
         );
@@ -4823,6 +5190,7 @@ mod tests {
                     &worn,
                     &hurt,
                     &low,
+                    crate::ui::ladder_screen::Learning::nothing_yet(),
                     language,
                     &mut out,
                 );

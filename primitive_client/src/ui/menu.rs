@@ -440,6 +440,95 @@ impl FormRows {
     }
 }
 
+/// A window onto a list of full-size rows that is longer than the panel
+/// holding it: how tall a row is, how many of them fit, where each one
+/// is drawn, and the lane the scrollbar runs down.
+///
+/// **One copy of this arithmetic, deliberately.** The settings screen
+/// and the key-bindings screen are the same screen with different rows
+/// in it, and for a long time they were not: settings scrolled, and the
+/// bindings screen divided its panel by however many bindings there
+/// were and drew every one of them at whatever height was left over.
+/// At eighteen bindings that is a row a third of a finger tall, with
+/// the key button inside it thinner still -- a list that looks right
+/// and cannot be pressed. That screen's own comment admitted what it
+/// was doing ("a player who wants both is asking for a scrolling
+/// bindings list, which this is not"), which is the shape of a bug
+/// waiting to be reported rather than a design.
+///
+/// The second copy of "how many rows fit" was what let the two screens
+/// drift apart in the first place, so there is one. A new list on this
+/// menu that asks here gets the settings screen's spacing, its finger
+/// floor and its scrollbar without any of them being retyped.
+struct ListRows {
+    row_height: f32,
+    gap: f32,
+    pad: f32,
+    /// The scrollbar's lane, taken out of the rows whether or not there
+    /// is one to draw -- same reasoning as the world list: a list that
+    /// reflows the moment it grows past its panel is a list whose rows
+    /// move under the finger.
+    gutter: f32,
+    /// The air inside a row, between it and the buttons on it.
+    inset: f32,
+    visible: usize,
+}
+
+impl ListRows {
+    /// A row at a desktop's size, and the air between two of them.
+    ///
+    /// The numbers the settings screen was designed around. They are
+    /// not derived from the row count on purpose: **a row's height is
+    /// not the variable here -- how many are on screen is.**
+    const HEIGHT: f32 = 0.105;
+    const GAP: f32 = 0.014;
+
+    fn plan(layout: widgets::Layout, panel: Rect) -> Self {
+        let gap = layout.at(Self::GAP);
+        let inset = layout.at(0.012);
+        // A row is as tall as the writing asks for, or as tall as the
+        // finger that has to hit it -- and its buttons sit inside it by
+        // `inset`, so the row has to be a finger *plus* that, or the
+        // button comes out a finger short of one.
+        let row_height = layout.at(Self::HEIGHT).max(layout.finger() + inset * 2.0);
+        let pad = layout.at(0.03);
+        // `n` rows have `n - 1` gaps between them, not `n`: counting a
+        // gap after the last row threw away a whole row whenever the
+        // arithmetic landed just short, which on the phone's shape it
+        // did -- five rows drawn and a row's worth of empty panel under
+        // them.
+        // ...and a row that misses by a thousandth of a screen is a row
+        // that fits. Without the slack the arithmetic lands on 4.99 and
+        // 6.83 at two of the sizes this is drawn at, and the first of
+        // those threw away a row that had room for itself.
+        let visible =
+            (((panel.height() - pad * 2.0 + gap + 0.002) / (row_height + gap)) as usize).max(1);
+        Self { row_height, gap, pad, gutter: layout.at(0.022), inset, visible }
+    }
+
+    /// Where the `index`-th row *of those on screen* is drawn.
+    ///
+    /// **Everything that hit-tests a row comes through here**, which is
+    /// the only way the two can be exact inverses of each other. A hot
+    /// rect worked out anywhere else is a click that lands on the wrong
+    /// setting the moment the list is scrolled.
+    fn row(&self, panel: Rect, index: usize) -> Rect {
+        let y =
+            panel.y1 - self.pad - self.row_height - index as f32 * (self.row_height + self.gap);
+        Rect::new(panel.x0 + self.pad, y, panel.x1 - self.pad - self.gutter, y + self.row_height)
+    }
+
+    /// The track the scrollbar is drawn in, down the gutter.
+    fn track(&self, layout: widgets::Layout, panel: Rect) -> Rect {
+        Rect::new(
+            panel.x1 - self.pad - self.gutter + layout.at(0.006),
+            panel.y0 + self.pad,
+            panel.x1 - self.pad,
+            panel.y1 - self.pad,
+        )
+    }
+}
+
 /// Which field of the current form has focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
@@ -1117,6 +1206,16 @@ pub struct Menu {
     /// seventeen settings the rows had shrunk to a squint.
     settings_scroll: usize,
     settings_visible: usize,
+    /// The same pair again for the key-bindings screen, which is the
+    /// settings screen with bindings in it.
+    ///
+    /// **It had neither, and drew all eighteen rows at once.** The
+    /// height they had to share shrank with every binding added, so the
+    /// screen got quietly worse each time the game got a new key -- and
+    /// the row a player wanted was never off the panel, only too thin
+    /// to aim at. See `ListRows`.
+    controls_scroll: usize,
+    controls_visible: usize,
     /// What is extending the server, and the same scroll/selection pair
     /// every other list on this menu carries.
     ///
@@ -1449,6 +1548,8 @@ impl Menu {
             world_visible: 1,
             settings_scroll: 0,
             settings_visible: 1,
+            controls_scroll: 0,
+            controls_visible: 1,
             extensions: Extensions::Unasked,
             extension_selected: 0,
             extension_scroll: 0,
@@ -1645,6 +1746,12 @@ impl Menu {
         match self.screen {
             Screen::Worlds => self.scroll_worlds(rows),
             Screen::Settings => self.scroll_settings(rows),
+            // ...and the bindings, which reach this the same two ways
+            // the settings do: a wheel, and a thumb drag, which the
+            // backend turns into a wheel before it ever gets here (see
+            // `touch::Gesture::Scrolled` in `lib.rs`). So a phone got a
+            // scrollable bindings list without a control of its own.
+            Screen::Controls => self.scroll_controls(rows),
             Screen::Servers => self.scroll_servers(rows),
             Screen::Extensions => self.scroll_extensions(rows),
             _ => {}
@@ -1768,9 +1875,22 @@ impl Menu {
         self.server_scroll = self.clamp_server_scroll(self.server_scroll as i32);
     }
 
+    /// Scrolls the key-bindings list; same shape as `scroll_settings`.
+    pub fn scroll_controls(&mut self, rows: i32) {
+        self.controls_scroll = self.clamp_controls_scroll(self.controls_scroll as i32 + rows);
+    }
+
     /// See `clamp_scroll` -- the same rule, for the settings list.
     fn clamp_settings_scroll(&self, wanted: i32) -> usize {
         let last = Setting::ALL.len().saturating_sub(self.settings_visible.max(1)) as i32;
+        wanted.clamp(0, last.max(0)) as usize
+    }
+
+    /// See `clamp_scroll` -- the same rule, for the key-bindings list.
+    fn clamp_controls_scroll(&self, wanted: i32) -> usize {
+        let last = crate::ui::keybinds::Action::ALL
+            .len()
+            .saturating_sub(self.controls_visible.max(1)) as i32;
         wanted.clamp(0, last.max(0)) as usize
     }
 
@@ -1852,6 +1972,25 @@ impl Menu {
             },
             Screen::Controls => match key {
                 Key::Escape => Some(self.apply(Action::Back)),
+                // The arrows move the view, not a highlight -- the
+                // settings screen's rule, for the same reason: nothing
+                // here is "chosen", so a highlight would be a promise
+                // Enter cannot keep.
+                //
+                // **Safe only because of where this is called from.**
+                // While a binding is being listened for, the raw key is
+                // what the player is choosing, and `lib.rs` takes it
+                // through `awaiting_key` before `key` is ever reached.
+                // So Up is a scroll here and a binding there, and this
+                // arm cannot steal the capture.
+                Key::Up => {
+                    self.scroll_controls(-1);
+                    None
+                }
+                Key::Down => {
+                    self.scroll_controls(1);
+                    None
+                }
                 _ => None,
             },
             // Escape puts a held control down before it leaves, so the
@@ -2447,6 +2586,9 @@ impl Menu {
             Action::OpenControls => {
                 self.notice = None;
                 self.rebinding = None;
+                // From the top, like the settings screen: it is opened
+                // to find a key, not to resume where somebody left off.
+                self.controls_scroll = 0;
                 self.screen = Screen::Controls;
             }
             Action::RebindKey(action) => {
@@ -2683,6 +2825,10 @@ impl Menu {
         // rebuilt at the same moment. The list read as frozen.
         self.server_scroll.hash(&mut h);
         self.settings_scroll.hash(&mut h);
+        // ...and the bindings list's, for exactly the reason above: a
+        // scroll that does not reach this key is a list that goes on
+        // being drawn -- and pressed -- where it was.
+        self.controls_scroll.hash(&mut h);
         // The extensions list, and both of the things a player does to
         // it. **The list itself is in here because it arrives late**:
         // the answer comes back several frames after the screen opened,
@@ -3206,8 +3352,6 @@ impl Menu {
         // settings and readable for about twelve of them; at seventeen
         // every row had shrunk to a strip. A row's height is not the
         // variable here -- how many are on screen is.
-        const GAP: f32 = 0.014;
-        const ROW_HEIGHT: f32 = 0.105;
         /// How large the word on a switch is next to the number on a
         /// slider.
         ///
@@ -3222,32 +3366,17 @@ impl Menu {
         /// the label they were the smallest text on it. 0.80 is quieter
         /// than the label and still a word rather than a footnote.
         const TOGGLE_TEXT_SCALE: f32 = 0.80;
-        let gap = layout.at(GAP);
-        let inset = layout.at(0.012);
-        // A row is as tall as the writing asks for, or as tall as the
-        // finger that has to hit it -- and its buttons sit inside it by
-        // `inset`, so the row has to be a finger *plus* that, or the
-        // button comes out a finger short of one.
-        let row_height = layout.at(ROW_HEIGHT).max(layout.finger() + inset * 2.0);
-        let pad = layout.at(0.03);
-        // `n` rows have `n - 1` gaps between them, not `n`: counting a
-        // gap after the last row threw away a whole row whenever the
-        // arithmetic landed just short, which on the phone's shape it
-        // did -- five rows drawn and a row's worth of empty panel under
-        // them.
-        // ...and a row that misses by a thousandth of a screen is a row
-        // that fits. Without the slack the arithmetic lands on 4.99 and
-        // 6.83 at two of the sizes this is drawn at, and the first of
-        // those threw away a row that had room for itself.
-        let visible = (((panel.height() - pad * 2.0 + gap + 0.002) / (row_height + gap)) as usize)
-            .max(1);
+        // See `ListRows`: the row height, the gap, the padding, the
+        // gutter and "how many fit" are the key-bindings screen's as
+        // well, and they are one piece of arithmetic because the two
+        // screens are one list.
+        let rows = ListRows::plan(layout, panel);
+        let inset = rows.inset;
+        let visible = rows.visible;
         self.settings_visible = visible;
         self.settings_scroll = self.clamp_settings_scroll(self.settings_scroll as i32);
         let first = self.settings_scroll;
         let count = Setting::ALL.len();
-        // The scrollbar's lane, taken out of the rows whether or not
-        // there is one to draw -- same reasoning as the world list.
-        let gutter = layout.at(0.022);
         // How much of a row its buttons own, and therefore what
         // everything else on it keeps clear of. Wide enough for the two
         // of them side by side with a finger's width each, which on a
@@ -3261,10 +3390,8 @@ impl Menu {
             value: 1.0,
             controls,
         };
-        let mut y = panel.y1 - pad - row_height;
-
-        for setting in Setting::ALL.iter().skip(first).take(visible).copied() {
-            let row = Rect::new(panel.x0 + pad, y, panel.x1 - pad - gutter, y + row_height);
+        for (index, setting) in Setting::ALL.iter().skip(first).take(visible).copied().enumerate() {
+            let row = rows.row(panel, index);
 
             if setting.is_text() {
                 p.well(row, MENU.row);
@@ -3340,23 +3467,11 @@ impl Menu {
                     self.add_button(p, cursor, plus, "+", Action::Tweak(setting, 1), enabled);
                 }
             }
-
-            y -= row_height + gap;
         }
 
         // The scrollbar, drawn by the same rules as the world list's:
         // only when there is something to scroll.
-        p.scrollbar(
-            Rect::new(
-                panel.x1 - pad - gutter + layout.at(0.006),
-                panel.y0 + pad,
-                panel.x1 - pad,
-                panel.y1 - pad,
-            ),
-            first,
-            visible,
-            count,
-        );
+        p.scrollbar(rows.track(layout, panel), first, visible, count);
 
         if let Some((text, good)) = self.notice_line(ctx) {
             let colour = if good { widgets::TEXT_GOOD } else { widgets::TEXT_BAD };
@@ -3576,13 +3691,24 @@ impl Menu {
     }
 
     fn build_controls(&mut self, p: &mut Painter, cursor: Option<(f32, f32)>, ctx: &MenuContext) {
-        // The settings screen's twin -- see it for the three kinds of
-        // number and why the row count is what gives.
+        // The settings screen's twin, and now literally so: the same
+        // `ListRows`, the same scrollbar, the same wheel and arrow
+        // keys. See it for the three kinds of number and why the row
+        // count is what gives.
         //
-        // Never reached on a phone: the settings screen does not offer
-        // the button (there are no keys to bind). Converted anyway,
-        // because a screen that only *usually* cannot be reached is a
-        // screen that eventually is.
+        // **It used to squeeze instead.** Every binding was drawn,
+        // always, and the row height was whatever eighteen of them
+        // could afford between them -- so each new binding made every
+        // row shorter, and on a phone's shape the key buttons came out
+        // a third of a finger tall. In the player's words: "в меню
+        // кнопок сделай список как в обычных настройках, а не сжимай
+        // элементы."
+        //
+        // Reached on a phone only when somebody asks for it -- the
+        // settings screen offers the thumb-controls editor there
+        // instead -- but a screen that only *usually* cannot be reached
+        // is a screen that eventually is, so the rows have a finger
+        // floor like every other list here.
         use crate::ui::keybinds::Action as Bind;
 
         let layout = ctx.layout;
@@ -3600,43 +3726,46 @@ impl Menu {
         let panel = Rect::new(-half_width, footer_y1 + 0.11, half_width, title_top - 0.14);
         p.panel(panel);
 
-        let pad = layout.at(0.030);
-        let gap = layout.at(0.010);
-        // As tall as the finger that has to hit it -- but never taller
-        // than the eleven of them can afford between them. **This
-        // screen has no window onto its list**: it draws every binding
-        // there is, so a row that grows past its share does not push the
-        // others down a scroll, it pushes them off the panel. That is
-        // the one place a finger floor has to give way, and it gives way
-        // here rather than on the settings screen because a phone never
-        // reaches this one -- there are no keys on it to bind.
-        let count = Bind::ALL.len() as f32;
-        // Never wider than its share, and never nothing: at the top of
-        // the interface-size range eleven rows do not fit this panel at
-        // any readable height, and what a screen with no scroll can do
-        // about that is keep them all on it. A player who wants both is
-        // asking for a scrolling bindings list, which this is not.
-        let affordable =
-            ((panel.height() - pad * 2.0 - gap * (count - 1.0)) / count).max(0.03);
-        let row_height = layout
-            .at(controls_row_height())
-            .max(layout.finger())
-            .min(affordable);
-        // The air inside a row, capped by the row: a fixed inset on a
-        // row squeezed to a strip is a button with negative height.
-        let inset = layout.at(0.011).min(row_height * 0.15);
-        let mut y = panel.y1 - pad - row_height;
+        let rows = ListRows::plan(layout, panel);
+        let inset = rows.inset;
+        let visible = rows.visible;
+        self.controls_visible = visible;
+        self.controls_scroll = self.clamp_controls_scroll(self.controls_scroll as i32);
+        let first = self.controls_scroll;
+        let count = Bind::ALL.len();
 
-        let controls = layout.at(0.44).max(layout.finger() + layout.at(0.02));
-        for action in Bind::ALL {
-            let row = Rect::new(panel.x0 + pad, y, panel.x1 - pad, y + row_height);
+        // How much of a row the key button owns. One button rather than
+        // the settings screen's pair, and wider than either of them: it
+        // holds a key's *name*, and "L SHIFT" at the width of a plus
+        // sign is a button that has to be guessed at.
+        //
+        // **Never more than its share of the row**, which it used to
+        // be: at the top of the interface-size range on a square window
+        // the asked-for width is wider than the panel, so the button
+        // began off the left-hand edge of the glass -- half a control
+        // that cannot be pressed, over a label it had covered. Three
+        // fifths leaves the longest binding name room to be read
+        // beside the longest key name.
+        let edge = layout.at(0.02);
+        let row_width = panel.width() - rows.pad * 2.0 - rows.gutter;
+        let controls = layout
+            .at(0.44)
+            .max(layout.finger() + edge * 2.0)
+            .min(row_width * 0.6);
+        for (index, action) in Bind::ALL.iter().copied().skip(first).take(visible).enumerate() {
+            // Drawn here and pressed here, from the one rect -- see
+            // `ListRows::row`. Only the rows on screen get a hot rect
+            // at all: one left behind for a row that has been scrolled
+            // away is a click that rebinds something the player cannot
+            // see.
+            let row = rows.row(panel, index);
             p.well(row, MENU.row);
             p.label_left(row, action.label(ctx.settings.language), layout.at(0.025), layout.at(0.95), MENU.ink);
 
             let button = Rect::new(
                 row.x1 - controls,
                 row.y0 + inset,
-                row.x1 - layout.at(0.02),
+                row.x1 - edge,
                 row.y1 - inset,
             );
             let listening = self.rebinding == Some(action);
@@ -3657,9 +3786,12 @@ impl Menu {
             } else {
                 self.add_button(p, cursor, button, &label, Action::RebindKey(action), true);
             }
-
-            y -= row_height + gap;
         }
+
+        // The scrollbar, in the lane `ListRows` kept for it, by the
+        // same rule as every other list on this menu: drawn only when
+        // there is something below the fold.
+        p.scrollbar(rows.track(layout, panel), first, visible, count);
 
         if let Some((text, good)) = self.notice_line(ctx) {
             let colour = if good { widgets::TEXT_GOOD } else { widgets::TEXT_BAD };
@@ -4798,24 +4930,33 @@ fn edit_for(key: Key) -> Option<Edit> {
     })
 }
 
-/// How tall one row of the controls screen is.
+/// How tall one row of the key-bindings screen is, on a desktop.
 ///
-/// Derived from how many actions there are rather than fixed, because
-/// the list grows: the thirteenth binding was what pushed the last row
-/// off the bottom of the panel, and the list does not scroll -- a row
-/// that falls off is simply a key nobody can rebind, with nothing on
-/// screen saying so.
+/// **A constant now, because the list scrolls.** It used to be a
+/// division: the panel's height shared out between however many
+/// bindings there were, clamped to a floor. Every binding added made
+/// every row shorter, so the screen got quietly worse each time the
+/// game gained a key -- and once the division hit its floor the rows
+/// stopped shrinking and started running off the bottom of the panel
+/// instead, which is a key nobody can rebind with nothing on screen
+/// saying so. Between those two failures there was a band where it
+/// merely looked bad: eighteen rows a third of a finger tall, each
+/// with a key button thinner still.
 ///
-/// The floor is where the text stops being comfortably readable. Past
-/// that this screen needs scrolling rather than smaller print, and the
-/// test in `keybinds` is what will say so.
+/// None of that is a row's problem. **A row's height is not the
+/// variable -- how many are on screen is**, which is what a window onto
+/// the list gives you and what the settings screen has always had. So
+/// this is `ListRows::HEIGHT`: the one row height every list on this
+/// menu is drawn at.
+///
+/// Only the test in `keybinds` reads it now, which is the other half of
+/// the same change: the screen no longer needs to be told how tall a
+/// row is, because `ListRows` decides that for every list here. What is
+/// left is somewhere for that test to check the number against without
+/// writing it out a second time.
+#[cfg(test)]
 pub fn controls_row_height() -> f32 {
-    const PANEL_HEIGHT: f32 = 0.76 - -0.62;
-    const TOP_PAD: f32 = 0.030;
-    const GAP: f32 = 0.010;
-    let available = PANEL_HEIGHT - TOP_PAD * 2.0;
-    let rows = crate::ui::keybinds::Action::ALL.len() as f32;
-    (available / rows - GAP).clamp(0.055, 0.098)
+    ListRows::HEIGHT
 }
 
 
@@ -6001,7 +6142,14 @@ mod tests {
         // more row of the same ninety-odd vertices.
         // ...and WALK / GET OFF (`keybinds::Action::Rein`, C), the horse's
         // key, one more row again.
-        ("controls", 2682, 13879285464829512363, 6314649886350392355),
+        // ...and then the screen stopped drawing all eighteen at once.
+        // It is a window onto the list now, exactly as the settings
+        // screen is (`ListRows`), so what it draws is the twelve rows
+        // that fit at a readable height plus a scrollbar -- eight
+        // hundred vertices fewer, and every one of the twelve a
+        // full-height row rather than the strip the squeeze left. The
+        // shape and the colour move with them.
+        ("controls", 1884, 14124537724609837711, 8649509288934718163),
         // Shape only: BACK is the middle third of the panel (`columns`).
         ("credits", 648, 4653236891393317696, 3024564837030182243),
         // Shape only, as the credits.
@@ -7635,6 +7783,486 @@ mod settings_layout_tests {
         let settings = ClientSettings::default();
         for setting in Setting::ALL {
             assert!(!setting.label_in(&settings).is_empty());
+        }
+    }
+}
+
+/// The key-bindings screen is a scrolling list, and has to behave like
+/// one.
+#[cfg(test)]
+mod controls_list_tests {
+    use super::*;
+    use crate::ui::keybinds::Action as Bind;
+
+    /// Every shape this screen is drawn on that has ever been argued
+    /// about, and both ends of the interface size a player is likely to
+    /// pick.
+    ///
+    /// The square and the tall window are in here because a desktop
+    /// window can be dragged to any shape at all, and this list used to
+    /// answer a short panel by making its rows shorter -- so the shapes
+    /// with the least vertical room are exactly the ones it got wrong.
+    fn every_shape() -> Vec<(f32, f32, widgets::Layout)> {
+        let mut out = Vec::new();
+        for aspect in [16.0f32 / 9.0, 4.0 / 3.0, 2712.0 / 1220.0, 1.0, 0.75] {
+            for scale in [1.0f32, 1.5] {
+                out.push((aspect, scale, widgets::Layout::for_screen(aspect, scale)));
+            }
+        }
+        out
+    }
+
+    fn controls_on(layout: widgets::Layout, scroll: usize) -> Menu {
+        let settings = ClientSettings::default();
+        let worlds = Worlds::load(
+            std::env::temp_dir().join("primitive-controls-tests-no-such-folder"),
+        );
+        let mut menu = Menu::new(ServerList::default());
+        menu.screen = Screen::Controls;
+        menu.controls_scroll = scroll;
+        let ctx = MenuContext {
+            version: "test",
+            font: crate::engine::texture::FontAtlas::for_test(),
+            settings: &settings,
+            worlds: &worlds,
+            background: Backdrop::Bare,
+            layout,
+        };
+        let _ = menu.build(&ctx);
+        menu
+    }
+
+    /// Which binding the hit-test table answers for a point -- the
+    /// table a real click goes through, read the way `hovered` reads it.
+    fn pressed_at(menu: &Menu, at: (f32, f32)) -> Option<Action> {
+        menu.hot
+            .iter()
+            .find(|(rect, _)| rect.contains(at.0, at.1))
+            .map(|(_, action)| action.clone())
+    }
+
+    #[test]
+    fn every_binding_row_is_pressed_where_it_is_drawn_at_every_scroll_position() {
+        // **The failure this catches is silent.** A list that scrolls
+        // its drawing and not its hit-test table looks perfectly
+        // ordinary and rebinds the wrong action -- and the player finds
+        // out later, in the middle of something, with their jump key
+        // gone. So: at every shape, at every scroll position the list
+        // can reach, the button for a binding answers for that binding
+        // at its own middle and at all four of its corners.
+        for (aspect, scale, layout) in every_shape() {
+            let mut scroll = 0;
+            loop {
+                let menu = controls_on(layout, scroll);
+                let visible = menu.controls_visible;
+                let on_screen: Vec<Bind> =
+                    Bind::ALL.iter().copied().skip(scroll).take(visible).collect();
+                assert!(!on_screen.is_empty(), "{aspect}:1 at {scale} shows no bindings");
+
+                // Exactly the window, and nothing else. A hot rect left
+                // behind for a row that has been scrolled away is a
+                // click that lands on a binding nobody can see.
+                let offered: Vec<Bind> = menu
+                    .hot
+                    .iter()
+                    .filter_map(|(_, action)| match action {
+                        Action::RebindKey(bind) => Some(*bind),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    offered, on_screen,
+                    "{aspect}:1 at {scale}, scrolled to {scroll}: the rows offered to be \
+                     pressed are not the rows on screen",
+                );
+
+                for bind in &on_screen {
+                    let wanted = Action::RebindKey(*bind);
+                    let (rect, _) = menu
+                        .hot
+                        .iter()
+                        .find(|(_, action)| *action == wanted)
+                        .unwrap_or_else(|| panic!("{bind:?} has no button"));
+                    // A hair inside each corner: a rectangle's own edge
+                    // is a boundary case, not the thing being checked.
+                    let in_by = (rect.width().min(rect.height()) * 0.1).min(0.002);
+                    for at in [
+                        (rect.centre_x(), rect.centre_y()),
+                        (rect.x0 + in_by, rect.y0 + in_by),
+                        (rect.x1 - in_by, rect.y0 + in_by),
+                        (rect.x0 + in_by, rect.y1 - in_by),
+                        (rect.x1 - in_by, rect.y1 - in_by),
+                    ] {
+                        assert_eq!(
+                            pressed_at(&menu, at),
+                            Some(wanted.clone()),
+                            "{aspect}:1 at {scale}, scrolled to {scroll}: {bind:?} is drawn \
+                             at {rect:?} and {at:?} presses something else",
+                        );
+                    }
+                }
+
+                let mut moved = controls_on(layout, scroll);
+                moved.scroll_controls(1);
+                if moved.controls_scroll == scroll {
+                    break;
+                }
+                scroll = moved.controls_scroll;
+            }
+            // ...and the walk above really did reach the end of the
+            // list, rather than stopping at the first screenful.
+            assert_eq!(
+                scroll,
+                Bind::ALL.len() - controls_on(layout, 0).controls_visible,
+                "{aspect}:1 at {scale}: the list stopped short of its last row",
+            );
+        }
+    }
+
+    #[test]
+    fn no_binding_row_is_drawn_outside_the_panel_at_any_interface_size() {
+        // The squeeze this replaced had the opposite failure mode: the
+        // rows always fitted, by being however thin they had to be. Now
+        // that they are a fixed height the thing that has to hold is
+        // that the window onto them is honest -- nothing drawn under
+        // the footer buttons, nothing off the side of the glass, and no
+        // two rows on top of each other.
+        for (aspect, scale, layout) in every_shape() {
+            let menu = controls_on(layout, 0);
+            let footer = menu
+                .hot
+                .iter()
+                .find(|(_, action)| matches!(action, Action::Back))
+                .map(|(rect, _)| *rect)
+                .expect("a DONE button");
+            let reset = menu
+                .hot
+                .iter()
+                .find(|(_, action)| matches!(action, Action::ResetKeys))
+                .map(|(rect, _)| *rect)
+                .expect("a RESET TO DEFAULTS button");
+            assert!(
+                (footer.y1 - reset.y1).abs() < 1e-5,
+                "{aspect}:1 at {scale}: the two footer buttons are at different heights",
+            );
+
+            let mut rows: Vec<Rect> = menu
+                .hot
+                .iter()
+                .filter(|(_, action)| matches!(action, Action::RebindKey(_)))
+                .map(|(rect, _)| *rect)
+                .collect();
+            assert_eq!(
+                rows.len(),
+                menu.controls_visible,
+                "{aspect}:1 at {scale}: more rows are offered than fit",
+            );
+            for rect in &rows {
+                assert!(
+                    rect.y0 > footer.y1,
+                    "{aspect}:1 at {scale}: a binding at {rect:?} reaches the footer at \
+                     {}",
+                    footer.y1,
+                );
+                assert!(rect.y1 < 1.0, "{aspect}:1 at {scale}: {rect:?} is off the top");
+                assert!(
+                    rect.x0 > -layout.edge() && rect.x1 < layout.edge(),
+                    "{aspect}:1 at {scale}: {rect:?} runs off the side",
+                );
+                // Tall enough to read, and -- where there is a finger
+                // rather than a pointer -- tall enough to hit.
+                assert!(
+                    rect.height() >= layout.finger() - 1e-5,
+                    "{aspect}:1 at {scale}: a row {} tall is under the finger",
+                    rect.height(),
+                );
+            }
+            rows.sort_by(|a, b| b.y0.partial_cmp(&a.y0).expect("no NaN rows"));
+            for pair in rows.windows(2) {
+                assert!(
+                    pair[0].y0 >= pair[1].y1,
+                    "{aspect}:1 at {scale}: {:?} and {:?} overlap",
+                    pair[0],
+                    pair[1],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_bindings_list_scrolls_with_the_wheel_and_stops_at_both_ends() {
+        let mut menu = controls_on(widgets::Layout::desktop(), 0);
+        assert!(
+            menu.controls_visible < Bind::ALL.len(),
+            "every binding fits; this screen has nothing to scroll",
+        );
+        // Through `Menu::scroll`, which is where the wheel arrives --
+        // and where a thumb drag arrives too, the backend having turned
+        // it into a wheel. The screen used to be missing from that
+        // match, so the list could not be moved at all.
+        menu.scroll(2);
+        assert_eq!(menu.controls_scroll, 2, "the wheel did not move the list");
+        menu.scroll(-10);
+        assert_eq!(menu.controls_scroll, 0, "it scrolled off the top");
+        menu.scroll(1000);
+        assert_eq!(
+            menu.controls_scroll,
+            Bind::ALL.len() - menu.controls_visible,
+            "it scrolled past the last binding",
+        );
+    }
+
+    #[test]
+    fn an_arrow_key_moves_the_list_and_never_steals_a_binding() {
+        // Up and down scroll here, as they do on the settings screen.
+        // What must not happen is this arm taking a key the screen was
+        // listening for: `lib.rs` asks `awaiting_key` first, so while a
+        // rebind is in flight `key` is never called at all -- and the
+        // day that changes, this is the test that says what broke.
+        let mut menu = controls_on(widgets::Layout::desktop(), 0);
+        assert_eq!(menu.key(Key::Down), None);
+        assert_eq!(menu.controls_scroll, 1, "Down did not move the list");
+        assert_eq!(menu.key(Key::Up), None);
+        assert_eq!(menu.controls_scroll, 0, "Up did not move it back");
+
+        menu.apply(Action::RebindKey(Bind::Jump));
+        assert_eq!(
+            menu.awaiting_key(),
+            Some(Bind::Jump),
+            "the screen stopped listening for the new key",
+        );
+    }
+
+    #[test]
+    fn opening_the_bindings_starts_at_the_top_of_the_list() {
+        let mut menu = controls_on(widgets::Layout::desktop(), 0);
+        menu.scroll_controls(1000);
+        assert_ne!(menu.controls_scroll, 0);
+        menu.apply(Action::Back);
+        menu.apply(Action::OpenControls);
+        assert_eq!(menu.controls_scroll, 0);
+    }
+
+    #[test]
+    fn every_binding_can_be_reached_by_scrolling() {
+        // The whole point of the window: a binding below the fold is
+        // still a binding a player can get to. Under the old squeeze
+        // the eighteenth row was on screen and too thin to aim at;
+        // under a window that never scrolled it would be unreachable.
+        let layout = widgets::Layout::desktop();
+        let mut reachable: Vec<Bind> = Vec::new();
+        let mut scroll = 0;
+        loop {
+            let menu = controls_on(layout, scroll);
+            for (_, action) in &menu.hot {
+                if let Action::RebindKey(bind) = action {
+                    if !reachable.contains(bind) {
+                        reachable.push(*bind);
+                    }
+                }
+            }
+            let mut moved = controls_on(layout, scroll);
+            moved.scroll_controls(1);
+            if moved.controls_scroll == scroll {
+                break;
+            }
+            scroll = moved.controls_scroll;
+        }
+        for bind in Bind::ALL {
+            assert!(
+                reachable.contains(&bind),
+                "{bind:?} cannot be rebound at any scroll position",
+            );
+        }
+    }
+}
+
+/// Pictures of the key-bindings screen, for a person to look at.
+///
+/// **Its own twenty-line rasteriser, and that is deliberate.**
+/// `ui::snapshot` already turns interface quads into a PNG, but it
+/// renders a fixed cast of screens and every one of its helpers --
+/// `write`, `fill`, `draw_glyph` -- is private to that module. Making
+/// them public to take four pictures of one screen would widen a test
+/// harness's surface for the sake of a tool; the twenty lines that fill
+/// a box and stamp a glyph cost nothing here and leave that file alone.
+///
+/// What it draws is only what this screen has in it: boxes and text.
+/// Block icons and triangles, which the pack and the map need, are not
+/// here because the bindings list has neither.
+///
+/// ```text
+/// KEYBIND_SHOT_DIR=shots/ui3/after cargo test -p primitive_client --lib \
+///     keybind_shots -- --ignored --nocapture
+/// PRIMITIVE_TOUCH_UI=1 KEYBIND_SHOT_DIR=shots/ui3/after \
+///     cargo test -p primitive_client --lib keybind_shots -- --ignored --nocapture
+/// ```
+#[cfg(test)]
+mod controls_shots {
+    use super::*;
+    use crate::engine::font::{glyph, GLYPH_HEIGHT, GLYPH_WIDTH};
+    use crate::engine::texture::{FontAtlas, GLYPHS};
+    use crate::ui::hotbar::{HotbarVertex, UNTEXTURED};
+
+    /// The window a picture is taken through.
+    #[derive(Clone, Copy)]
+    struct Shot {
+        width: u32,
+        height: u32,
+        scale: f32,
+    }
+
+    impl Shot {
+        fn aspect(&self) -> f32 {
+            self.width as f32 / self.height as f32
+        }
+    }
+
+    /// UVs come back through a float; a rounded key compares them safely.
+    fn uv_key(v: f32) -> i32 {
+        (v * 10_000.0).round() as i32
+    }
+
+    /// Fills one rectangle in interface coordinates, blended by its alpha.
+    fn fill(pixels: &mut [[u8; 4]], shot: Shot, r: (f32, f32, f32, f32), tint: [f32; 4]) {
+        let (w, h) = (shot.width as i32, shot.height as i32);
+        let to_x = |x: f32| ((x / shot.aspect() + 1.0) * 0.5 * shot.width as f32).round() as i32;
+        // Y is up in interface coordinates and down in an image.
+        let to_y = |y: f32| ((1.0 - (y + 1.0) * 0.5) * shot.height as f32).round() as i32;
+        let (px0, px1) = (to_x(r.0).max(0), to_x(r.2).min(w));
+        let (py0, py1) = (to_y(r.3).max(0), to_y(r.1).min(h));
+        let alpha = tint[3].clamp(0.0, 1.0);
+        for y in py0..py1 {
+            for x in px0..px1 {
+                let at = (y * w + x) as usize;
+                let under = pixels[at];
+                for channel in 0..3 {
+                    let over = tint[channel].clamp(0.0, 1.0) * 255.0;
+                    pixels[at][channel] =
+                        (under[channel] as f32 * (1.0 - alpha) + over * alpha).round() as u8;
+                }
+            }
+        }
+    }
+
+    /// Stamps one letter off the same bitmap font the game draws with,
+    /// because most layout mistakes are text mistakes.
+    fn draw_glyph(
+        pixels: &mut [[u8; 4]],
+        shot: Shot,
+        c: char,
+        r: (f32, f32, f32, f32),
+        tint: [f32; 4],
+    ) {
+        let (w, h) = (r.2 - r.0, r.3 - r.1);
+        for (row, bits) in glyph(c).iter().enumerate() {
+            for column in 0..GLYPH_WIDTH {
+                if bits & (1 << (GLYPH_WIDTH - 1 - column)) == 0 {
+                    continue;
+                }
+                let px0 = r.0 + w * column as f32 / GLYPH_WIDTH as f32;
+                let py1 = r.3 - h * row as f32 / GLYPH_HEIGHT as f32;
+                fill(
+                    pixels,
+                    shot,
+                    (px0, py1 - h / GLYPH_HEIGHT as f32, px0 + w / GLYPH_WIDTH as f32, py1),
+                    tint,
+                );
+            }
+        }
+    }
+
+    fn write(path: &str, shot: Shot, vertices: &[HotbarVertex], font: FontAtlas) {
+        let glyphs: std::collections::HashMap<(u32, i32, i32), char> = GLYPHS
+            .chars()
+            .map(|c| {
+                let (layer, u, v) = font.place(c);
+                ((layer, uv_key(u), uv_key(v)), c)
+            })
+            .collect();
+        // A mid-grey ground, so a panel nearly the colour of the
+        // background shows up as the problem it is.
+        let mut pixels = vec![[70u8, 78, 92, 255]; (shot.width * shot.height) as usize];
+        for quad in vertices.chunks_exact(6) {
+            let xs = quad.iter().map(|v| v.position[0]);
+            let ys = quad.iter().map(|v| v.position[1]);
+            let r = (
+                xs.clone().fold(f32::MAX, f32::min),
+                ys.clone().fold(f32::MAX, f32::min),
+                xs.fold(f32::MIN, f32::max),
+                ys.fold(f32::MIN, f32::max),
+            );
+            let tint = quad[0].tint;
+            match quad[0].tex_layer {
+                UNTEXTURED => fill(&mut pixels, shot, r, tint),
+                // A glyph quad's corner is its *smallest* uv, whichever
+                // corner happens to come first in the run.
+                layer => {
+                    let at = (
+                        layer,
+                        uv_key(quad.iter().map(|v| v.uv[0]).fold(f32::MAX, f32::min)),
+                        uv_key(quad.iter().map(|v| v.uv[1]).fold(f32::MAX, f32::min)),
+                    );
+                    if let Some(&c) = glyphs.get(&at) {
+                        draw_glyph(&mut pixels, shot, c, r, tint);
+                    }
+                }
+            }
+        }
+        let mut flat = Vec::with_capacity(pixels.len() * 4);
+        for pixel in &pixels {
+            flat.extend_from_slice(pixel);
+        }
+        let image: image::RgbaImage = image::ImageBuffer::from_raw(shot.width, shot.height, flat)
+            .expect("the buffer is the right size");
+        image.save(path).expect("write png");
+        println!("wrote {path}");
+    }
+
+    #[test]
+    #[ignore = "a tool: writes PNGs of the key-bindings screen for a person to look at"]
+    fn keybind_shots() {
+        let out = std::env::var("KEYBIND_SHOT_DIR").unwrap_or_else(|_| ".".to_string());
+        std::fs::create_dir_all(&out).expect("output directory");
+        // The same resolution the game packs the font at, so the text in
+        // the picture is the text the game would draw.
+        let font = FontAtlas::for_size(32, 1_000);
+        let worlds =
+            Worlds::load(std::env::temp_dir().join("primitive-keybind-shots-no-such-folder"));
+        let mut settings = ClientSettings::default();
+        // A phone is a different layout, not a different size, so it is
+        // named in the file rather than left to be guessed at.
+        let touch = if crate::ui::lang::touch_primary() { "_touch" } else { "" };
+
+        for shot in [
+            Shot { width: 1280, height: 720, scale: 1.0 },
+            Shot { width: 1920, height: 1080, scale: 1.0 },
+            // The phone this pass was for, and the same interface size
+            // on a window with half the pixels: the shape that runs out
+            // of room first.
+            Shot { width: 2712, height: 1220, scale: 1.5 },
+            Shot { width: 1280, height: 720, scale: 1.5 },
+        ] {
+            for (language, tag) in [(Language::English, "en"), (Language::Russian, "ru")] {
+                settings.language = language;
+                let mut menu = Menu::new(ServerList::default());
+                menu.screen = Screen::Controls;
+                let ctx = MenuContext {
+                    version: "test",
+                    font,
+                    settings: &settings,
+                    worlds: &worlds,
+                    background: Backdrop::Bare,
+                    layout: widgets::Layout::for_screen(shot.aspect(), shot.scale),
+                };
+                let mut vertices = Vec::new();
+                menu.build_into(&ctx, &mut vertices);
+                let name = format!(
+                    "{out}/keybinds_{}x{}_s{}{touch}_{tag}.png",
+                    shot.width, shot.height, shot.scale
+                );
+                write(&name, shot, &vertices, font);
+            }
         }
     }
 }

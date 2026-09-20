@@ -94,8 +94,10 @@ const CAIRN: [f32; 4] = [0.80, 0.78, 0.72, 1.0];
 /// What a cairn's name is written on, so it reads over snow and forest
 /// alike.
 const LABEL_PLATE: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
-/// How big a cairn's name is written.
-const LABEL_SCALE: f32 = 0.7;
+/// How big a cairn's name is written: a note about something else on
+/// the page, which is what `size::NOTE` is. It was 0.7, a size nothing
+/// else in the game used.
+const LABEL_SCALE: f32 = widgets::size::NOTE;
 
 /// A button laid over the corner of the map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -550,8 +552,8 @@ pub fn paint(
     arrow(p, at, heading(player.yaw), 0.034, PLAYER);
 
     if map.surveyed() == 0 {
-        let text = widgets::fit(language.text(Msg::MapUnexplored), 0.9, body.width() - 0.3);
-        p.text_centred(&text, body.centre_x(), body.centre_y() + 0.1, 0.9, widgets::TEXT_DIM);
+        let text = widgets::fit(language.text(Msg::MapUnexplored), widgets::size::BODY, body.width() - 0.3);
+        p.text_centred(&text, body.centre_x(), body.centre_y() + 0.1, widgets::size::BODY, widgets::TEXT_DIM);
     }
 
     for control in CONTROLS {
@@ -574,7 +576,7 @@ pub fn paint(
 /// The legend along the bottom of the journal: four marks and their
 /// names, left to right from `left`.
 pub fn legend(p: &mut Painter, left: f32, middle: f32, language: Language) {
-    let scale = 0.8;
+    let scale = widgets::size::NOTE;
     let mut x = left;
     let mut entry = |p: &mut Painter, draw: &dyn Fn(&mut Painter, (f32, f32)), text: &str| {
         draw(p, (x + 0.015, middle));

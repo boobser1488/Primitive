@@ -385,13 +385,11 @@ fn ui_snapshot() {
         // notice's old mistake one row down.
         {
             let mut p = crate::ui::widgets::Painter::onto(font, vertices.clone());
-            crate::ui::hud::first_step_line(
+            crate::ui::hud::first_minute_line(
                 &mut p,
-                Language::Russian.text(crate::ui::ladder_screen::first_step_msg(
-                    primitive_shared::ladder::FirstStep::Flake,
-                )),
+                Language::Russian.text(crate::ui::lang::Msg::StepStone),
             );
-            write(&format!("{out}/hud_first_step.png"), &p.into_vertices(), font);
+            write(&format!("{out}/hud_first_minute.png"), &p.into_vertices(), font);
         }
     }
 
@@ -484,6 +482,69 @@ fn ui_snapshot() {
             "touch_controls"
         };
         write(&format!("{out}/{name}.png"), &vertices, font);
+    }
+
+    // ---- every page of the pack, in both languages, with the worst
+    // content it can be asked to hold ----
+    //
+    // **Three tabs and only one of them had ever been drawn here.** The
+    // body page and the rucksack page are the two the player reported
+    // text running over things on, and neither was in this folder: the
+    // pack page was rendered twice, in two languages, and the other two
+    // not at all. A harness that draws one of three pages is a harness
+    // that says nothing about the screen.
+    //
+    // `a_stuffed_pack` is the content that breaks layouts rather than
+    // the content a tidy player has: every square full, counts in three
+    // digits, and the longest item names either language owns
+    // ("Кирпичная кладка на растворе" is twenty-eight characters, and
+    // the slot it sits in is about four wide).
+    {
+        use crate::ui::inventory_screen::Tab;
+        let stuffed = a_stuffed_pack();
+        let equipment = a_dressed_body();
+        let vitals = snapshot_vitals();
+        let scale = crate::ui::inventory_screen::grow_by(snapshot_layout());
+        // A player part way up: the copper age reached, bronze next, so
+        // the path page has lit rungs, dim rungs and a rung that wants
+        // something the player has never held -- which is every state a
+        // rung can be in, in one picture.
+        let knows = primitive_shared::discovery::Discovered::from_kinds([
+            primitive_shared::types::BLOCK_PEBBLE,
+            primitive_shared::types::BLOCK_FLINT_FLAKE,
+            primitive_shared::types::BLOCK_CAMPFIRE,
+            primitive_shared::types::BLOCK_KILN,
+            primitive_shared::types::BLOCK_COPPER_INGOT,
+            primitive_shared::types::BLOCK_VESSEL,
+        ]);
+        let keys = crate::ui::keybinds::Keybinds::default();
+        let learning = crate::ui::ladder_screen::Learning { discovered: &knows, keys: &keys };
+        for (tab, stem) in [
+            (Tab::Health, "pack_body"),
+            (Tab::Pack, "pack_things"),
+            (Tab::Backpack, "pack_rucksack"),
+            (Tab::Learn, "pack_path"),
+        ] {
+            for (language, tag) in [(Language::English, ""), (Language::Russian, "_ru")] {
+                let mut screen = InventoryScreen::new();
+                screen.open = true;
+                screen.sync(&stuffed);
+                screen.set_tab(tab);
+                let mut vertices = Vec::new();
+                screen.build_into(
+                    font,
+                    &layers,
+                    &stuffed,
+                    &equipment,
+                    &snapshot_wounds(),
+                    &vitals,
+                    learning,
+                    language,
+                    &mut vertices,
+                );
+                write_grown(&format!("{out}/{stem}{tag}.png"), &vertices, font, scale);
+            }
+        }
     }
 
     // ...and the pack, which is the screen a player is in most.
@@ -756,6 +817,93 @@ fn a_playing_pack() -> Inventory {
     pack.put_in_slot(14, Stack::new(BLOCK_CLAY, 7));
     pack.put_in_slot(23, Stack::new(BLOCK_COPPER_ORE, 18));
     pack
+}
+
+/// The pack that breaks layouts: every square full, three-digit counts,
+/// a worn rucksack with things in it, and the longest names either
+/// language has.
+///
+/// **Deliberately worse than a real pack.** The tidy fixture above is
+/// what an hour of play looks like and it is exactly the content a
+/// layout mistake hides behind: eleven full squares out of forty, no
+/// count over 128, and every name short. The player's complaint was
+/// about text running over things, and text only runs over things when
+/// there is text.
+fn a_stuffed_pack() -> Inventory {
+    use primitive_shared::types::*;
+    let mut pack = a_playing_pack();
+    // Long names first, in the belt, where the tooltip has the panel's
+    // own floor under it and the least room to open downwards.
+    pack.put_in_slot(5, Stack::new(BLOCK_BRICK_COURSES, 999));
+    pack.put_in_slot(7, Stack::new(BLOCK_PEGGED_BIRCH_PLANKS, 640));
+    pack.put_in_slot(8, Stack::worn(BLOCK_COPPER_PICKAXE, 1, 3));
+    // ...then everything else, so no square is empty: an empty square
+    // draws no count and no wear bar, and the squares that draw
+    // nothing are the ones a layout mistake hides in.
+    let filler = [
+        BLOCK_COBBLESTONE, BLOCK_LOG, BLOCK_PLANKS, BLOCK_COAL, BLOCK_CLAY,
+        BLOCK_FLINT, BLOCK_STICK, BLOCK_COPPER_ORE, BLOCK_SAND, BLOCK_VESSEL,
+    ];
+    for slot in 0..primitive_shared::inventory::SLOTS {
+        if pack.slots()[slot].is_none() {
+            let block = filler[slot % filler.len()];
+            pack.put_in_slot(slot, Stack::new(block, 100 + (slot as u32 * 37) % 800));
+        }
+    }
+    // The rucksack's squares, opened the way the server opens them, so
+    // the third tab has something on it.
+    pack.open_backpack();
+    for square in 0..primitive_shared::inventory::BACKPACK_SLOTS {
+        pack.put_in_slot(
+            primitive_shared::inventory::SLOTS + square,
+            Stack::new(filler[square % filler.len()], 7 + square as u32 * 61),
+        );
+    }
+    pack
+}
+
+/// A body with something on every square, for the pictures of the worn
+/// row: four ghosts is a picture of the empty case, which the tidy
+/// fixture already covers.
+fn a_dressed_body() -> primitive_shared::inventory::Equipment {
+    use primitive_shared::types::*;
+    let mut worn = primitive_shared::inventory::Equipment::new();
+    for block in [BLOCK_WOOL_TUNIC, BLOCK_RUCKSACK] {
+        worn.wear(Stack::new(block, 1));
+    }
+    worn
+}
+
+/// A body in the state the health page exists to describe: hurt, thirsty,
+/// tired, soaked, filthy, in a cold draughty hut with a hole in the roof.
+///
+/// Every row of the page reading something other than 100%, because a
+/// page of green hundreds is a picture in which no number is wide.
+fn snapshot_vitals() -> crate::ui::inventory_screen::Vitals {
+    crate::ui::inventory_screen::Vitals {
+        health: 0.34,
+        nourishment: 0.22,
+        stamina: 0.61,
+        body: crate::ui::hud::BodyGauges {
+            temperature_c: 24.0,
+            comfort: primitive_shared::body::Comfort::of(24.0),
+            hydration: 0.45,
+            fatigue: 0.82,
+            injuries: snapshot_wounds(),
+            wetness: 0.5,
+            grime: 0.65,
+            recovery: 0.72,
+            diet_groups: 2,
+            shelter: primitive_shared::shelter::Reading {
+                air_c: 4.0,
+                indoors: true,
+                draught: 0.5,
+                keeps_out: 0.55,
+                roof_open: true,
+            },
+            smoke: 0.3,
+        },
+    }
 }
 
 /// A kiln part way through a pour.
@@ -1099,23 +1247,23 @@ fn nav_snapshot() {
         write(&format!("{out}/nav_compass_and_sky{lang}{tag}.png"), &vertices, font);
     }
 
-    // **The first two minutes**, all three of them on one sheet: the line
-    // that sits over the belt telling a player who has just woken up what
-    // to do next (`hud::first_step_line`). One picture a step, because the
-    // thing to look at is the *length* -- the Russian and Polish wordings
-    // are half as long again as the English, and a line wider than the belt
-    // would be a line running out over the world on a phone.
-    for step in primitive_shared::ladder::FIRST_STEPS {
-        for (language, lang) in [(Language::English, ""), (Language::Russian, "_ru"), (Language::Polish, "_pl")] {
-            let mut p = Painter::onto(font, Vec::new());
-            crate::ui::hud::first_step_line(
-                &mut p,
-                language.text(crate::ui::ladder_screen::first_step_msg(step)),
-            );
-            let mut vertices = p.into_vertices();
-            scale_about(&mut vertices, anchor::BOTTOM(aspect), ui_scale());
-            write(&format!("{out}/nav_first_step_{step:?}{lang}{tag}.png").to_lowercase(), &vertices, font);
-        }
+    // **The first minute**: the one line that sits over the belt for a
+    // player who has nothing at all (`hud::first_minute_line`). One
+    // picture a language, because the thing to look at is the *length* --
+    // the Russian and Polish wordings are half as long again as the
+    // English, and a line wider than the belt would be a line running out
+    // over the world on a phone.
+    //
+    // **It was three pictures of three lines.** The other two are on the
+    // pack's path tab now and the prompt is one sentence; see
+    // `hud::first_minute_line` for why the other two stopped being shown
+    // over the belt at all.
+    for (language, lang) in [(Language::English, ""), (Language::Russian, "_ru"), (Language::Polish, "_pl")] {
+        let mut p = Painter::onto(font, Vec::new());
+        crate::ui::hud::first_minute_line(&mut p, language.text(crate::ui::lang::Msg::StepStone));
+        let mut vertices = p.into_vertices();
+        scale_about(&mut vertices, anchor::BOTTOM(aspect), ui_scale());
+        write(&format!("{out}/nav_first_minute{lang}{tag}.png").to_lowercase(), &vertices, font);
     }
 
     // The chat box asking a cairn's name, lifted over the keyboard the way
@@ -1238,27 +1386,9 @@ fn journal_snapshot() {
         write(&format!("{out}/journal_map_pinched{touch}.png"), &vertices, font);
     }
 
-    // The ladder page, at both ends of the ladder: the copper-age player
-    // above, who is being told that bronze wants tin, and a player who has
-    // just woken up, whose page is seven rows of dim ink with the bottom
-    // one lit. The second is the one worth looking at -- a page that reads
-    // as "you have done nothing" rather than as "here is the way up" would
-    // be the opposite of what it is for.
-    {
-        journal.toggle(Tab::Ladder);
-        for (language, tag) in [(Language::English, ""), (Language::Russian, "_ru")] {
-            let mut vertices = Vec::new();
-            journal.build_into(font, &layers, &pack, player, aspect, language, &mut vertices);
-            write(&format!("{out}/journal_ladder{tag}{touch}.png"), &vertices, font);
-        }
-        journal.set_discovered(Discovered::new());
-        for (language, tag) in [(Language::English, ""), (Language::Russian, "_ru")] {
-            let mut vertices = Vec::new();
-            journal.build_into(font, &layers, &Inventory::new(), player, aspect, language, &mut vertices);
-            write(&format!("{out}/journal_ladder_beginner{tag}{touch}.png"), &vertices, font);
-        }
-        journal.set_discovered(knowledge.clone());
-    }
+    // **The ladder page is not here any more**: it is the pack's `ПУТЬ`
+    // tab, and it is drawn with the rest of the pack's pages above. See
+    // `ui::ladder_screen` for the argument that moved it.
 
     journal.toggle(Tab::Recipes);
     let row = crate::ui::recipe_book::row_rect(3, body_rect(aspect));
@@ -2078,7 +2208,7 @@ fn stall_snapshot() {
 #[test]
 #[ignore = "a tool: writes PNGs of every screen for a person to look at"]
 fn ui_audit_snapshot() {
-    use crate::ui::inventory_screen::{Tab, Vitals};
+    use crate::ui::inventory_screen::Vitals;
     use crate::ui::station_screen::{jobs_of, StationScreen};
     use primitive_shared::minigame::{tolerance, Game};
     use primitive_shared::quality::Quality;
@@ -2137,7 +2267,12 @@ fn ui_audit_snapshot() {
         };
 
         // The pack's three pages, and a slot tooltip over the marked belt.
-        for (tab, name) in [(Tab::Health, "inv_health"), (Tab::Pack, "inv_pack"), (Tab::Backpack, "inv_rucksack")] {
+        for (tab, name) in [
+            (crate::ui::inventory_screen::Tab::Health, "inv_health"),
+            (crate::ui::inventory_screen::Tab::Pack, "inv_pack"),
+            (crate::ui::inventory_screen::Tab::Backpack, "inv_rucksack"),
+            (crate::ui::inventory_screen::Tab::Learn, "inv_path"),
+        ] {
             let mut screen = InventoryScreen::new();
             screen.open = true;
             screen.sync(&pack);
@@ -2145,7 +2280,17 @@ fn ui_audit_snapshot() {
             let hover = crate::ui::inventory_screen::slot_rect(4);
             screen.set_cursor(Some((hover.centre_x(), hover.centre_y())));
             let mut v = Vec::new();
-            screen.build_into(font, &layers, &pack, &primitive_shared::inventory::Equipment::new(), &snapshot_wounds(), &poorly, language, &mut v);
+            // Part way up the ladder, so the path page has lit rungs,
+            // dim ones and a rung wanting something never held.
+            let seen = primitive_shared::discovery::Discovered::from_kinds([
+                primitive_shared::types::BLOCK_PEBBLE,
+                primitive_shared::types::BLOCK_FLINT_FLAKE,
+                primitive_shared::types::BLOCK_CAMPFIRE,
+                primitive_shared::types::BLOCK_KILN,
+                primitive_shared::types::BLOCK_COPPER_INGOT,
+            ]);
+            let keys = crate::ui::keybinds::Keybinds::default();
+            screen.build_into(font, &layers, &pack, &primitive_shared::inventory::Equipment::new(), &snapshot_wounds(), &poorly, crate::ui::ladder_screen::Learning { discovered: &seen, keys: &keys }, language, &mut v);
             shot(name, &v, pack_scale);
         }
         {

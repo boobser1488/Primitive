@@ -49,12 +49,19 @@
 //! ## The first three things
 //!
 //! [`first_step`] is the other end of the same ladder: what a player who
-//! has *just* woken up should do in the next two minutes. Three steps, in
+//! has *just* woken up might do in the next two minutes. Three facts, in
 //! the order the world offers them -- a stone off the ground, fibre out of
-//! the grass, a flake off a flint -- and then it is never shown again. It
-//! is driven by the same `Discovered`, so it cannot disagree with the page,
-//! and a player who was handed a flake by a friend is not told to go and
-//! knap one.
+//! the grass, a flake off a flint. It is driven by the same `Discovered`,
+//! so it cannot disagree with the page, and a player who was handed a
+//! flake by a friend is not told to go and knap one.
+//!
+//! **Where those three are shown changed.** All three used to go over the
+//! belt, one after another, phrased as orders, and the player's verdict
+//! was "что за тупые подсказки". They live on the pack's path page now
+//! (`ui::ladder_screen`); over the belt there is one line, for a player
+//! who has held nothing *and* is carrying nothing, and it is a statement
+//! about the world rather than an instruction. See
+//! `ui::journal::Journal::first_minute`.
 
 use crate::discovery::Discovered;
 use crate::types::*;
@@ -257,14 +264,18 @@ impl FirstStep {
     }
 }
 
-/// What to point at, for a player who has not done all three yet.
+/// What to mention, for a player who has not met all three yet.
 ///
-/// **One at a time, and the first one not done.** Three lines at once is a
-/// tutorial, which the player asked for the opposite of; one line is a
-/// thing to do next. Out of order is fine and deliberate -- a player who
-/// starts by tearing grass is simply shown the stone instead, and one who
-/// was handed a flake is shown nothing at all, because the prompt is about
-/// what is *missing* and not about obedience.
+/// **One at a time, and the first one not met.** Three lines at once is a
+/// tutorial, which the player asked for the opposite of. Out of order is
+/// fine and deliberate -- a player who starts by tearing grass is simply
+/// shown the stone instead, and one who was handed a flake is shown
+/// nothing at all, because this is about what is *missing* and not about
+/// obedience.
+///
+/// The caller decides whether this is worth saying at all: the path page
+/// asks it only below the flint rung, and the line over the belt asks a
+/// stricter question of its own.
 pub fn first_step(held: &Discovered) -> Option<FirstStep> {
     FIRST_STEPS.into_iter().find(|step| !held.has_held(step.done_when_held()))
 }
