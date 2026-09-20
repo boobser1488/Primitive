@@ -53,6 +53,7 @@ pub mod fire;
 pub mod fishing;
 pub mod growth;
 pub mod items;
+pub mod lightning;
 #[cfg(feature = "mods")]
 #[cfg(feature = "mods")]
 pub mod mods;

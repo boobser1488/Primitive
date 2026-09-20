@@ -53,6 +53,15 @@
 //! * **Roofs** burn as what they are made of: a thatch is tinder, a roof of
 //!   branches is leaves, a plank step is boards. Tiles do not burn, which is
 //!   the reason to fire them. See [`fuel`].
+//! * **The undergrowth** ([`Fuel::Grass`]) -- every tuft, fern, crop and
+//!   bush -- goes in six seconds and leaves ash where it stood. It is the
+//!   floor of the world and it is continuous, which is what makes a
+//!   burning tree into a burning wood: the fire runs along the ground with
+//!   the wind and climbs the next trunk it reaches. **How fast it catches
+//!   is the year's answer** ([`seasoning`]): three fifths of the heat in
+//!   high summer, half again as much at midwinter. Green timber and
+//!   anything the rain has soaked take four times as long
+//!   ([`damp_factor`]), which is the reason a wet wall is worth building.
 //!
 //! Char does not burn again. Neither does a hearth, a chest, a tool or
 //! furniture: a table beside a fire is not what the player asked about, and
@@ -193,6 +202,18 @@ pub enum Fuel {
     /// A rotten board (`weathering::is_rotten`): wet punk that smoulders a
     /// long while before it takes, and then burns as a board does.
     Punk,
+    /// **Standing grass and the undergrowth**: a tuft, a fern, a crop, a
+    /// berry bush -- anything a knife cuts that stands in its cell as two
+    /// crossed planes.
+    ///
+    /// This is the one that makes a fire a *fire* rather than an accident
+    /// with a wall. Everything else that burns is something a player
+    /// built or a tree they walked under; grass is the floor of the
+    /// world, it is continuous, and once it is alight the wind decides
+    /// where the fire goes. It leaves ash where it stood, which is the
+    /// mark a burnt-over meadow carries for a season and the dressing a
+    /// field wants (`dressed`).
+    Grass,
 }
 
 impl Fuel {
@@ -212,6 +233,15 @@ impl Fuel {
             // A log's wait. Rot is soft, not dry: what has rotted a board
             // is the water still in it.
             Fuel::Punk => 150.0,
+            // **Six seconds**, and the fastest thing in the table on
+            // purpose. Dry grass is what a spark finds first: a campfire
+            // left in a meadow in high summer has the tuft beside it
+            // alight before a player has walked ten paces, which is the
+            // whole of the "untended fire" the player asked for. In
+            // midwinter the same tuft takes nearly three times as long
+            // (`seasoning`), and wet (`damp_factor`) it does not get
+            // there at all before whatever was licking it has burnt out.
+            Fuel::Grass => 6.0,
         }
     }
 
@@ -220,7 +250,7 @@ impl Fuel {
         match self {
             Fuel::Log => Some(LOG_BURN_SECONDS),
             Fuel::Boards | Fuel::Punk => Some(BOARDS_BURN_SECONDS),
-            Fuel::Leaves | Fuel::Tinder => None,
+            Fuel::Leaves | Fuel::Tinder | Fuel::Grass => None,
         }
     }
 }
@@ -286,8 +316,89 @@ pub fn fuel(block: BlockId) -> Option<Fuel> {
     if kind == BLOCK_WOOL || kind == crate::types::BLOCK_LEAF_LITTER {
         return Some(Fuel::Tinder);
     }
+    // **The undergrowth, by what it is**: work a knife does, standing in
+    // the cell as two crossed planes. That is every tuft, every fern,
+    // every standing crop and every berry bush there is or will be --
+    // and it is the floor a fire runs across, which is what turns a
+    // burning tree into a burning wood.
+    //
+    // **Except what stands in water** (`types::stands_in_water`): kelp,
+    // reeds in the shallows, a waterlily. They are the same two planes
+    // and a knife cuts them, and a burning lake is the one thing a fire
+    // must never be. The test for it is the sea's own, so a plant added
+    // to the shallows tomorrow is exempt without anybody remembering to
+    // exempt it.
+    if def.work == Work::Plant && def.shape == Shape::Cross && !crate::types::stands_in_water(block) {
+        return Some(Fuel::Grass);
+    }
     None
 }
+
+/// Does a cell of this fuel leave ash behind where it stood?
+///
+/// Only the undergrowth, and the reason is where the ash would land.
+/// Grass stands on the ground, so its ash lies on the ground -- a burnt
+/// meadow is grey for as long as nobody digs it in, which is both the
+/// scar a player reads and the dressing a field wants (`dressed`). A
+/// canopy's leaves are six blocks up over more leaves; ash hanging in
+/// the air there would be a grey block floating in a tree.
+#[inline]
+pub fn leaves_ash(fuel: Fuel) -> bool {
+    matches!(fuel, Fuel::Grass)
+}
+
+/// How much longer fuel takes to catch in the season the world is in.
+///
+/// **A multiplier on every threshold, and the reason a fire is a summer
+/// problem.** The same campfire in the same meadow is a fire hazard in
+/// August and a warm place to sit in March; a player who has learned
+/// that has learned something about the world rather than about a
+/// number. It reads the season off the world's own clock
+/// (`season::ambient_offset_c`) rather than rolling for a "dryness",
+/// because a dry spell that arrived on a coin is one nobody can plan
+/// around -- the same argument `pit` makes against firepit dice and
+/// `weather` makes against a season the sky rolls for.
+///
+/// Rejected: a wetness that falls with every shower and climbs back over
+/// days. It is the honest model and it is a second climate to keep, save
+/// and send, for a factor between two thirds and one and a half. The
+/// rain already puts fires out and wets what it falls on
+/// (`rained_on`); what was missing was the year, and the year is free.
+pub fn seasoning(world_days: f32) -> f32 {
+    // The offset runs from the winter trough to the summer peak; map it
+    // to the two ends and lerp. Summer needs three fifths of the heat
+    // that midwinter does, which is the difference between "the grass
+    // caught" and "the grass smoked and went out".
+    let offset = crate::season::ambient_offset_c(world_days);
+    let span = crate::season::SUMMER_PEAK_C - crate::season::WINTER_TROUGH_C;
+    let t = ((offset - crate::season::WINTER_TROUGH_C) / span).clamp(0.0, 1.0);
+    WET_SEASON + (DRY_SEASON - WET_SEASON) * t
+}
+
+/// What high summer takes of the heat a cell needs to catch.
+pub const DRY_SEASON: f32 = 0.6;
+/// ...and what midwinter asks instead.
+pub const WET_SEASON: f32 = 1.6;
+
+/// How much longer fuel that is *itself* wet takes to catch.
+///
+/// Green timber and anything the rain has soaked (`wood::is_green`,
+/// `wet::is_wet`): four times, which for a log is ten minutes of a
+/// campfire against it and in practice means it does not catch at all
+/// before the fire that was licking it has burnt out. It is the reason
+/// to build the wet wall and the reason a sodden roof is worth having --
+/// and it is the same fact the hearths already know, where green fuel
+/// smokes instead of burning clean (`SMOULDER_SMOKE`).
+pub fn damp_factor(block: BlockId) -> f32 {
+    if crate::wet::is_wet(block) || crate::wood::is_green(block) {
+        DAMP
+    } else {
+        1.0
+    }
+}
+
+/// See `damp_factor`.
+pub const DAMP: f32 = 4.0;
 
 /// What a cell of fuel becomes the moment it catches: the burning block, or
 /// air for what flashes away.
@@ -295,7 +406,7 @@ pub fn alight(block: BlockId) -> Option<BlockId> {
     Some(match fuel(block)? {
         Fuel::Log => oriented(BLOCK_BURNING_LOG, block_axis(block)),
         Fuel::Boards | Fuel::Punk => BLOCK_BURNING_PLANKS,
-        Fuel::Leaves | Fuel::Tinder => BLOCK_AIR,
+        Fuel::Leaves | Fuel::Tinder | Fuel::Grass => BLOCK_AIR,
     })
 }
 
@@ -1166,5 +1277,52 @@ mod tests {
         assert_eq!(dressed(field), None, "a field took ash twice");
         assert_eq!(dressed(BLOCK_DIRT), None);
         const { assert!(ASH_DRESSING_FACTOR < 1.0) };
+    }
+
+    #[test]
+    fn the_undergrowth_burns_and_the_lake_does_not() {
+        use crate::types::{BLOCK_DRY_GRASS, BLOCK_KELP, BLOCK_TALL_GRASS, BLOCK_WATER};
+        assert_eq!(fuel(BLOCK_TALL_GRASS), Some(Fuel::Grass));
+        assert_eq!(fuel(BLOCK_DRY_GRASS), Some(Fuel::Grass));
+        // The one thing a fire must never be.
+        assert_eq!(fuel(BLOCK_KELP), None, "the sea was kindling");
+        assert_eq!(fuel(BLOCK_WATER), None);
+        // Gone in a breath, and it leaves the ash a burnt meadow carries.
+        assert_eq!(Fuel::Grass.burn_seconds(), None);
+        assert_eq!(alight(BLOCK_TALL_GRASS), Some(crate::types::BLOCK_AIR));
+        assert!(leaves_ash(Fuel::Grass));
+        assert!(!leaves_ash(Fuel::Leaves), "ash was hung in a canopy");
+    }
+
+    #[test]
+    fn a_tuft_takes_before_a_plank_and_a_plank_before_a_log() {
+        // The order is the mechanic: a fire finds the grass, the grass
+        // finds the wall, and the player has the minute in between.
+        assert!(Fuel::Grass.catch_heat() < Fuel::Boards.catch_heat());
+        assert!(Fuel::Boards.catch_heat() < Fuel::Log.catch_heat());
+    }
+
+    #[test]
+    fn the_same_meadow_is_a_hazard_in_summer_and_is_not_in_winter() {
+        use crate::season::{MIDSUMMER_WORLD_TIME, YEAR_DAYS};
+        let summer = seasoning(MIDSUMMER_WORLD_TIME);
+        let winter = seasoning(MIDSUMMER_WORLD_TIME + YEAR_DAYS * 0.5);
+        assert!(summer < winter, "summer {summer} winter {winter}");
+        assert!((DRY_SEASON..=WET_SEASON).contains(&summer));
+        assert!((DRY_SEASON..=WET_SEASON).contains(&winter));
+        // A whole year and the factor never leaves its two ends: a
+        // threshold multiplied by nothing is fuel that catches instantly.
+        for day in 0..(YEAR_DAYS as i32 * 2) {
+            let f = seasoning(day as f32);
+            assert!((DRY_SEASON..=WET_SEASON).contains(&f), "day {day} gave {f}");
+        }
+    }
+
+    #[test]
+    fn wet_wood_and_green_wood_resist_what_dry_wood_takes() {
+        let green = crate::wood::green(BLOCK_LOG);
+        assert_eq!(damp_factor(green), DAMP, "green timber caught like seasoned");
+        assert_eq!(damp_factor(BLOCK_LOG), 1.0);
+        const { assert!(DAMP > 1.0) };
     }
 }

@@ -3805,6 +3805,8 @@ fn run(
                                 // ask about a roof over it.
                                 underground: 0.0,
                                 smoke: 0.0,
+                                // ...nor a bog behind a menu.
+                                mist: 0.0,
                                 health_fraction: 1.0,
                                 // Nobody is holding anything behind a menu.
                                 held: None,
@@ -4931,19 +4933,17 @@ fn run(
                         // winter (`season::seasonal_swing`), and rain in
                         // the tropics must not turn to snow when the server
                         // says the air is warm.
-                        let snowing = primitive_shared::season::falls_as_snow_with_swing(
-                            worldgen
-                                .climate_at(
-                                    player.position.x.floor() as i32,
-                                    player.position.y.floor() as i32,
-                                    player.position.z.floor() as i32,
-                                )
-                                .0,
-                            sky.world_days(),
-                            primitive_shared::season::seasonal_swing(
-                                worldgen.latitude_degrees(player.position.z.floor() as i32),
-                            ),
-                        );
+                        // **Snow is not the only other answer to rain.**
+                        // Hot dry country gets the same front as grit
+                        // (`weather::Precipitation`), which is the
+                        // player's «сделай погоду в биомах нормальной»:
+                        // one sky over the world, and what reaches the
+                        // ground decided by the column it reaches.
+                        // Worked out from the two numbers the client
+                        // already has for the leaf tint, so it costs
+                        // nothing and cannot disagree with the ground.
+                        let (falling, wetness) =
+                            falling_on(&worldgen, &sky, weather, player.position);
                         // **The rain falls in the world's own wind**, the
                         // one that moves the rafts
                         // (`raft::wind`) -- not a drift of its own.
@@ -4976,8 +4976,18 @@ fn run(
                             // **And only as much of it as the clouds have
                             // brought** (`Sky::rain_arrived`): the deck
                             // closes first and the rain follows it.
-                            weather.intensity() * (0.65 + 0.5 * wind.strength) * sky.rain_arrived(),
-                            snowing,
+                            //
+                            // **...and harder in wet country than in dry**
+                            // (`weather::local_intensity`): one spell of
+                            // rain is a downpour in a marsh and a thin
+                            // shower on the steppe, which is the monsoon
+                            // in one multiply and the rest of what the
+                            // player meant by weather that suits the
+                            // country it falls on.
+                            primitive_shared::weather::local_intensity(weather, wetness)
+                                * (0.65 + 0.5 * wind.strength)
+                                * sky.rain_arrived(),
+                            falling,
                             player.position.as_vec3(),
                             drift,
                             dt,
@@ -5705,6 +5715,22 @@ fn run(
                                 smoke_shown += (smoke - smoke_shown) * (dt * 1.5).min(1.0);
                                 smoke_shown
                             },
+                            // The humidity under their feet and the
+                            // hour, which is all a mist is made of. The
+                            // same field the leaf tint and the rain read
+                            // (`WorldGen::climate_at`), so a player
+                            // standing where the ground is black peat
+                            // gets the mist the ground says they should.
+                            mist: primitive_shared::weather::dawn_mist(
+                                worldgen
+                                    .climate_at(
+                                        player.position.x.floor() as i32,
+                                        player.position.y.floor() as i32,
+                                        player.position.z.floor() as i32,
+                                    )
+                                    .1,
+                                sky.time_of_day,
+                            ),
                             health_fraction: if max_health > 0.0 {
                                 health / max_health
                             } else {
@@ -5822,6 +5848,7 @@ fn run(
                         seed: world_seed,
                         nourishment,
                         weather: weather.name(),
+                        falling: falling_on(&worldgen, &sky, weather, player.position).0,
                         heat,
                         biome: worldgen
                             .biome_at(
@@ -7130,6 +7157,16 @@ struct Eye {
     /// How thick the smoke of a closed room is where the eye is, 0..1,
     /// already eased. See `Fog::fill_with_smoke`.
     smoke: f32,
+    /// How thick the dawn mist on this ground is, 0..1
+    /// (`weather::dawn_mist`).
+    ///
+    /// **A place rather than a sky**: it wants sodden ground and the
+    /// hour the ground is colder than the air, so it is worked out from
+    /// the humidity under the player's feet and the clock, and it owes
+    /// nothing to what the weather is doing. A bog at first light is the
+    /// one country in the game that is *harder to cross* than it looks,
+    /// and this is the whole of how a player is told.
+    mist: f32,
     health_fraction: f32,
     /// What is in the player's hand, so a lit torch can light the world
     /// around them. See `FrameParams::carried_light`.
@@ -7246,6 +7283,39 @@ fn bleeding_for_a_photograph() -> bool {
 /// which is a picture of the budget as well as of the effect.
 const BLEED_EVERY: f32 = 0.75;
 
+/// What is coming down on the column a player is standing in.
+///
+/// **One door**, because two callers need the same answer in the same
+/// frame -- what the particles draw and what the F3 line says -- and a
+/// second copy of the season's snow line is exactly the mistake
+/// `weather::SNOW_TEMPERATURE` is a monument to. Everything it reads is
+/// a pure function of the seed, the clock and the sky the server sent,
+/// so it costs four noise samples and nothing else.
+fn falling_on(
+    worldgen: &primitive_shared::worldgen::WorldGen,
+    sky: &Sky,
+    weather: primitive_shared::weather::Weather,
+    feet: glam::DVec3,
+) -> (primitive_shared::weather::Precipitation, f32) {
+    let (warmth, wetness) = worldgen.climate_at(
+        feet.x.floor() as i32,
+        feet.y.floor() as i32,
+        feet.z.floor() as i32,
+    );
+    // The season's snow line and the latitude's: a tropical winter is no
+    // winter, and rain in the tropics must not turn to snow because the
+    // calendar says January. See `season::falls_as_snow_with_swing`.
+    let snowing = primitive_shared::season::falls_as_snow_with_swing(
+        warmth,
+        sky.world_days(),
+        primitive_shared::season::seasonal_swing(worldgen.latitude_degrees(feet.z.floor() as i32)),
+    );
+    (
+        primitive_shared::weather::Precipitation::of(weather, snowing, warmth, wetness),
+        wetness,
+    )
+}
+
 fn frame_params(
     settings: &ClientSettings,
     sky: &Sky,
@@ -7259,7 +7329,7 @@ fn frame_params(
     render_origin: Vec3,
     eye: Eye,
 ) -> FrameParams {
-    let Eye { underwater, underground, smoke, health_fraction, held } = eye;
+    let Eye { underwater, underground, smoke, mist, health_fraction, held } = eye;
     // What distance looks like this frame, worked out in one place --
     // see `engine::fog`, which exists because the colour, the range and
     // the underwater case used to live in three files that each held a
@@ -7272,6 +7342,15 @@ fn frame_params(
     // which is the line round the edge of the world all over again.
     fog.go_underground(underground);
     fog.fill_with_smoke(smoke);
+    // ...and the mist over a bog at first light, on the same terms: it
+    // only ever pulls the fade in, and it is before the clamp for the
+    // clamp's reason.
+    //
+    // **Thinned by whatever is over the player's head**, which is the
+    // same number the cave fog is settled by: a mist lies on the ground
+    // under the open sky, and one that filled a mine under a marsh would
+    // be a cave that fogs up at dawn.
+    fog.lie_as_mist(mist * (1.0 - underground).clamp(0.0, 1.0));
     fog.clamp_to(loaded_radius);
 
     FrameParams {
@@ -9094,6 +9173,17 @@ fn drain_network(
 
             ServerMessage::WeatherSync { weather: new } => {
                 *weather = new;
+            }
+
+            // **A bolt: the light now, the noise when it gets here.**
+            // Two systems and one message, which is the whole of what
+            // makes a strike read as a distance rather than as an
+            // effect -- see `ServerMessage::Lightning` and
+            // `lightning::THUNDER_SPEED`. What the bolt *did* to the
+            // world arrives separately, as the block changes it made.
+            ServerMessage::Lightning { at } => {
+                sky.strike();
+                soundscape.lightning(glam::DVec3::new(at.0, at.1, at.2), player.position);
             }
 
             ServerMessage::Health { current, max } => {

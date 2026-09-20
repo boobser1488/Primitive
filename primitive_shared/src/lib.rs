@@ -69,6 +69,7 @@ pub mod injury;
 pub mod inventory;
 pub mod lean_to;
 pub mod lighting;
+pub mod lightning;
 pub mod load;
 pub mod minigame;
 pub mod moon;

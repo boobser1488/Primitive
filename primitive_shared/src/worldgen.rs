@@ -231,6 +231,36 @@ pub const CLIMATE_LAPSE_PER_BLOCK: f32 = (LAPSE_PER_BLOCK * 0.5) as f32;
 /// of every snowfield in it**.
 pub const CLIMATE_FREEZING: f32 = ((FREEZING + 1.0) * 0.5) as f32;
 
+/// Where the hot country begins, in the 0..1 units `climate_at` reports.
+///
+/// `HOT` in the other of the two scales this module speaks, derived for
+/// `CLIMATE_FREEZING`'s reason and after its lesson: the one threshold
+/// that was written out by hand in `weather` missed the generator's own
+/// line by four hundredths, and a quarter of every snowfield in the world
+/// was rained on.
+pub const CLIMATE_HOT: f32 = ((HOT + 1.0) * 0.5) as f32;
+
+/// How dry a column has to be for the sky over it to be a desert's sky,
+/// in the 0..1 units `climate_at` reports.
+///
+/// **The line `land_biome` draws the desert at**, in the other scale.
+/// Hot *and* drier than this is desert; the same dryness in cold country
+/// is tundra, which gets snow like everywhere else cold. So the weather
+/// asks the two questions the classifier asks, in the order it asks
+/// them, and dust falls exactly where the generator grew sand.
+pub const CLIMATE_DRY: f32 = ((DESERT_HUMIDITY + 1.0) * 0.5) as f32;
+
+/// Where country is wet enough to close into wood, bog or marsh, in the
+/// 0..1 units `climate_at` reports.
+///
+/// The wet end of the same span `CLIMATE_DRY` opens, and the line the
+/// classifier uses three times over (bog, steppe, forest). What the
+/// weather does with it is the other half of a desert's sky: rain in the
+/// wettest country falls harder than rain on a meadow, because a monsoon
+/// and a drizzle out of one enum would be a world where the climate
+/// decides what grows and nothing else.
+pub const CLIMATE_WET: f32 = ((WET + 1.0) * 0.5) as f32;
+
 /// Applies the lapse rate to a 0..1 temperature at a given height.
 ///
 /// Public so the client can take the four noise samples once per column
@@ -807,6 +837,20 @@ const FREEZING: f64 = -0.42;
 /// widened. The band tests went on measuring a hot band the map no
 /// longer had.
 const HOT: f64 = 0.07;
+
+/// How dry hot country has to be to be desert rather than savanna. See
+/// `land_biome`, which draws the line, for why it is this dry and not
+/// drier; named here so `CLIMATE_DRY` can be derived from it rather than
+/// copied, which is the mistake `CLIMATE_FREEZING` records.
+const DESERT_HUMIDITY: f64 = -0.22;
+
+/// How wet country has to be to close into wood, bog or marsh.
+///
+/// One line asked three times by `land_biome` -- a bog is a wet cold
+/// hollow, a steppe is a plain that is not this wet, a forest is temperate
+/// country that is -- and the comment there says so outright. Named for
+/// `DESERT_HUMIDITY`'s reason.
+const WET: f64 = 0.10;
 
 // ---- the sea floor ----
 //
@@ -1474,6 +1518,22 @@ impl Biome {
             Biome::Steppe => "steppe",
             Biome::Hills => "hills",
         }
+    }
+
+    /// A biome by the name `name` gives it, or `None`.
+    ///
+    /// **Spelled out of `ALL` rather than as a match**, so a biome added
+    /// to the enum is one `/biometp` can reach the day it exists -- a
+    /// second list here would be the third place a biome's name is
+    /// written and the one nobody would remember.
+    ///
+    /// Underscores count as spaces, because `snowy peaks` is two words
+    /// and a command argument is one: `/biometp snowy_peaks` is what a
+    /// player will type, and refusing it would be refusing the only
+    /// spelling that works.
+    pub fn parse(name: &str) -> Option<Biome> {
+        let wanted = name.trim().to_ascii_lowercase().replace('_', " ");
+        Biome::ALL.iter().copied().find(|biome| biome.name() == wanted)
     }
 
     /// Every biome, for tests and for anything that wants to enumerate
@@ -4376,7 +4436,7 @@ impl WorldGen {
             //
             // Then conifers where it is merely damp, and bare tundra
             // where it is not.
-            if humidity > 0.10 && height <= SEA_LEVEL + 4 {
+            if humidity > WET && height <= SEA_LEVEL + 4 {
                 return Biome::Bog;
             }
             return if humidity > -0.10 {
@@ -4417,7 +4477,7 @@ impl WorldGen {
             // holds that line at fifteen hundred. The cold band does not
             // move, so every step the hot line takes towards it is a
             // shorter walk from conifers to acacias.
-            return if humidity < -0.22 {
+            return if humidity < DESERT_HUMIDITY {
                 Biome::Desert
             } else {
                 Biome::Savanna
@@ -4436,10 +4496,10 @@ impl WorldGen {
         if hill > 0.5 && humidity > -0.26 && humidity <= HILL_WOOD_LINE {
             return Biome::Hills;
         }
-        if plain > 0.5 && humidity <= 0.10 && (humidity > -0.26 || !self.burnt(gx, gz)) {
+        if plain > 0.5 && humidity <= WET && (humidity > -0.26 || !self.burnt(gx, gz)) {
             return Biome::Steppe;
         }
-        if humidity > 0.10 {
+        if humidity > WET {
             // Wet temperate country, split once more by temperature.
             // Birch takes the cool half, which puts it between the oak
             // forest and the taiga -- so the walk from one to the other

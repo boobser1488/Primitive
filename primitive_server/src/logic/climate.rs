@@ -712,7 +712,16 @@ impl Ambient {
         //
         // Only if it can reach you. Rain in a cave is somebody else's
         // rain, and this is the same roof test the hour used.
-        let raining_on_me = weather.is_wet() && !shelter.has_roof();
+        //
+        // **What is falling *here*, not what the sky is doing.** The same
+        // front is a dust storm over hot dry country
+        // (`weather::Precipitation`), and dust neither soaks a player nor
+        // chills them -- a player caught in one in the desert is hot and
+        // gritty, which is the opposite of what a soaking costs them. The
+        // snow line is not asked, for `wildfire::rained_on`'s reason:
+        // snow and rain both wet, so it could not change the answer.
+        let falling = primitive_shared::weather::Precipitation::of(weather, false, warmth, humidity);
+        let raining_on_me = falling.wets() && !shelter.has_roof();
         if raining_on_me {
             degrees -= match weather {
                 Weather::Storm => STORM_CHILL_C,
@@ -1207,6 +1216,43 @@ mod tests {
             health_lost: crate::logic::survival::MAX_HEALTH - vitals.health(),
             survived: !vitals.is_dead(),
         }
+    }
+
+    #[test]
+    fn a_storm_over_the_desert_does_not_soak_the_player_and_a_storm_over_a_meadow_does() {
+        // «сделай погоду в биомах нормальной». One sky over the world,
+        // and what reaches the ground decided by the column it reaches:
+        // a player caught out in a desert storm is hot and gritty, not
+        // soaked and chilled. See `weather::Precipitation`.
+        let world = flat_world();
+        let fires = Fires::new();
+        let at = (0.5, ground(&world), 0.5);
+        let meadow = (0.5, 0.5);
+        let under = |climate: (f32, f32), weather| {
+            Ambient::of_in(&world, &fires, at, 0.5, weather, None, |_, _, _| climate).0
+        };
+
+        let soaked = under(meadow, Weather::Storm);
+        assert!(soaked.rained_on && soaked.getting_wet, "a storm over a meadow did not wet anybody");
+        let gritty = under(DESERT, Weather::Storm);
+        assert!(!gritty.rained_on && !gritty.getting_wet, "a dust storm soaked a player in the desert");
+
+        // ...and it does not chill them either: the chill is the water,
+        // so the desert under a storm is only as cool as the cloud over
+        // it makes it.
+        assert!(
+            gritty.temperature_c > soaked.temperature_c,
+            "the desert in a storm ({}) came out no warmer than the meadow ({})",
+            gritty.temperature_c,
+            soaked.temperature_c
+        );
+        assert!(
+            gritty.temperature_c > under(DESERT, Weather::Clear).temperature_c - 1.0,
+            "the dust storm chilled the desert as rain would"
+        );
+        // The sun is still behind the cloud, though: the sky is overcast
+        // in either country, and only what falls out of it differs.
+        assert_eq!(gritty.sun_c, 0.0, "the sun shone through a storm");
     }
 
     #[test]

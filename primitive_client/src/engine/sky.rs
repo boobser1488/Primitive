@@ -149,6 +149,21 @@ const FULL_MOON_SKY: f32 = 1.3;
 /// the command worked.
 const OVERCAST_RATE: f32 = 1.0 / 12.0;
 
+/// How much light a bolt of lightning adds at the top of its flash.
+///
+/// **More than a clear noon** (`sun_intensity` runs to one), because a
+/// bolt is brighter than the sun for the fifth of a second it lasts and
+/// because the flash has to read *through* the storm that darkened
+/// everything to half. Under that half-light this puts the world at
+/// something over full daylight and takes it away again -- which is the
+/// afterimage, and the reason a strike is noticed from indoors.
+const FLASH_LIGHT: f32 = 0.9;
+
+/// ...and how far a flash pulls the sky itself toward white. Less than
+/// the ground takes: the cloud deck lights up, it does not turn into
+/// daylight.
+const FLASH_SKY: f32 = 0.55;
+
 pub struct Sky {
     /// The world's age in days at the last sync, hour in the fraction.
     /// The season is read off this plus whatever the hour has done since
@@ -175,6 +190,17 @@ pub struct Sky {
     /// weather touches -- the light, the sky colour, the cloud deck --
     /// reads this rather than the enum.
     overcast: f32,
+    /// Seconds of flash left off a bolt of lightning, counting down from
+    /// `lightning::FLASH_SECONDS`.
+    ///
+    /// **The bolt is drawn as light rather than as a shape**, which is
+    /// the whole of it: a mesh of a forked line needs a pass, a shape
+    /// that reads from every angle and a place in the draw order, and
+    /// what a player actually registers is that the world went white for
+    /// an instant -- including the walls of the cave they were standing
+    /// in the mouth of, which a bolt drawn in the sky would not light at
+    /// all. See `flash`.
+    flash: f32,
     /// Seconds since this sky was made.
     ///
     /// The cloud layer is the only thing that reads it, and it has to:
@@ -234,6 +260,7 @@ impl Sky {
             // clears a moment later.
             weather: primitive_shared::weather::Weather::Clear,
             overcast: 0.0,
+            flash: 0.0,
             elapsed: 0.0,
             cloud_drift: glam::Vec2::ZERO,
         }
@@ -282,8 +309,32 @@ impl Sky {
         let delta = shortest_way_round(self.target_time - self.time_of_day);
         self.time_of_day = (self.time_of_day + delta * (dt * 2.0).min(1.0)).rem_euclid(1.0);
         self.target_time = (self.target_time + dt / self.day_length_seconds).rem_euclid(1.0);
+        self.flash = (self.flash - dt.max(0.0)).max(0.0);
         self.step_the_weather(dt);
         self.blow_the_clouds(dt);
+    }
+
+    /// A bolt came down. See `flash`.
+    ///
+    /// **Wherever it came down.** The flash is not aimed: a bolt behind
+    /// a player lights the wall in front of them, which is the thing
+    /// that makes one at the edge of sight worth having. Where it fell
+    /// is carried by the sound instead (`Soundscape::lightning`), which
+    /// is where a player's sense of direction and distance actually
+    /// comes from.
+    pub fn strike(&mut self) {
+        self.flash = primitive_shared::lightning::FLASH_SECONDS;
+    }
+
+    /// How much of the flash is left, 0..1, eased so it goes out rather
+    /// than switching off.
+    ///
+    /// Squared on the way down: the light of a bolt is gone almost at
+    /// once and leaves the afterimage, and a linear fade over two
+    /// hundred milliseconds reads as a lamp being turned up.
+    pub fn flash(&self) -> f32 {
+        let t = (self.flash / primitive_shared::lightning::FLASH_SECONDS).clamp(0.0, 1.0);
+        t * t
     }
 
     /// Moves the deck on with the world's wind.
@@ -449,8 +500,13 @@ impl Sky {
     /// the sky says otherwise. It is here now, on the eased figure, so
     /// the world darkens as the front arrives rather than at the moment
     /// the packet lands.
+    /// **...and the bolt, which is the one thing that makes it brighter.**
+    /// A storm at noon leaves about half the light (`daylight_under`);
+    /// for a fifth of a second a bolt puts the whole of it back and a
+    /// good deal more, which is why a strike at night is the only time a
+    /// player sees the far side of the valley.
     pub fn sun_intensity(&self) -> f32 {
-        self.clear_sun_intensity() * self.daylight_factor()
+        self.clear_sun_intensity() * self.daylight_factor() + FLASH_LIGHT * self.flash()
     }
 
     /// What the weather leaves of the daylight, from the eased overcast
@@ -563,10 +619,15 @@ impl Sky {
         // makes weather in most games read as dusk arriving early.
         const OVERCAST: Vec3 = Vec3::new(0.42, 0.44, 0.48);
         let clear = self.clear_sky_color();
-        clear.lerp(
+        let weathered = clear.lerp(
             OVERCAST * self.clear_sun_intensity().max(0.25),
             1.0 - self.daylight_factor(),
-        )
+        );
+        // ...and the cloud that the bolt is inside lights up with it.
+        // Toward white rather than brighter: what a player sees is the
+        // deck itself go pale for an instant, which is what tells them
+        // the storm is overhead rather than over the next valley.
+        weathered.lerp(Vec3::ONE, FLASH_SKY * self.flash())
     }
 
     /// The sky the weather is drawn over: what it would look like with
@@ -1459,6 +1520,39 @@ mod tests {
         assert!(
             source.contains("let drift = vec2<f32>(globals.glow_dir.y, globals.glow_dir.w);"),
             "the deck no longer drifts on the wind the CPU integrates"
+        );
+    }
+
+    #[test]
+    fn a_bolt_lights_the_world_for_an_instant_and_then_leaves_it_as_dark_as_it_was() {
+        // The flash is the whole of how a bolt is drawn -- no mesh, no
+        // pass, no shape in the sky. See `Sky::strike`.
+        let mut sky = Sky::new(0.5, 900.0);
+        sky.set_weather(primitive_shared::weather::Weather::Storm);
+        // Let the front arrive, so the comparison is storm against storm.
+        for _ in 0..600 {
+            sky.tick(0.05);
+        }
+        let dark = sky.sun_intensity();
+        let grey = sky.sky_color();
+        sky.strike();
+        assert!(sky.flash() > 0.9, "the flash did not start at full");
+        assert!(sky.sun_intensity() > dark, "a bolt did not light the ground");
+        assert!(
+            sky.sky_color().length() > grey.length(),
+            "the cloud the bolt was inside did not light up"
+        );
+        // ...and it is gone in a fifth of a second, not a second.
+        sky.tick(primitive_shared::lightning::FLASH_SECONDS * 0.5);
+        assert!(sky.flash() < 0.3, "the flash held its brightness: {}", sky.flash());
+        sky.tick(primitive_shared::lightning::FLASH_SECONDS);
+        assert_eq!(sky.flash(), 0.0);
+        // Back to the storm's own light -- near enough, because the sun
+        // itself has moved a fraction of a degree in the meantime.
+        assert!(
+            (sky.sun_intensity() - dark).abs() < 0.01,
+            "the world stayed brighter after the bolt: {} against {dark}",
+            sky.sun_intensity()
         );
     }
 }

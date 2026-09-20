@@ -421,6 +421,23 @@ pub trait BlockWorld {
     fn biome(&self, _gx: i32, _gz: i32) -> Option<primitive_shared::worldgen::Biome> {
         None
     }
+
+    /// How warm and how wet this cell is, 0..1, if this world can say.
+    ///
+    /// **Only the wildfire asks**, and it asks one question of it: is the
+    /// weather over this fire water or is it a desert's dust
+    /// (`weather::Precipitation`). A storm that put out a fire in the
+    /// middle of the sand because a shower was falling in a marsh forty
+    /// chunks away is the bug this exists to prevent.
+    ///
+    /// A default method for `biome`'s reason -- a closure threaded
+    /// through every test world and every mod's host, for a question
+    /// asked of a cell that is already on fire. `None` is temperate: the
+    /// answer every test world gives and the one that keeps the rain
+    /// behaving as it always did.
+    fn climate(&self, _gx: i32, _gy: i32, _gz: i32) -> Option<(f32, f32)> {
+        None
+    }
 }
 
 /// A block in mid-air.
@@ -1189,6 +1206,10 @@ pub(crate) mod tests {
         /// What every column answers to `BlockWorld::biome`: nothing, as a
         /// world that cannot say, until a test sets a country.
         biome: std::cell::Cell<Option<primitive_shared::worldgen::Biome>>,
+        /// ...and the same for `BlockWorld::climate`, which is what the
+        /// wildfire asks to find out whether the weather over a fire is
+        /// water or a desert's dust.
+        climate: std::cell::Cell<Option<(f32, f32)>>,
     }
 
     impl TestWorld {
@@ -1197,6 +1218,12 @@ pub(crate) mod tests {
         /// blocks stay what the test put there.
         pub fn set_biome(&self, biome: Option<primitive_shared::worldgen::Biome>) {
             self.biome.set(biome);
+        }
+        /// How warm and how wet every column of this world is, 0..1 --
+        /// or `None` for a world that cannot say, which every test world
+        /// is until it says otherwise and which reads as temperate.
+        pub fn set_climate(&self, climate: Option<(f32, f32)>) {
+            self.climate.set(climate);
         }
         pub fn put(&self, gx: i32, gy: i32, gz: i32, id: BlockId) {
             self.blocks.borrow_mut().insert((gx, gy, gz), id);
@@ -1233,6 +1260,9 @@ pub(crate) mod tests {
         }
         fn biome(&self, _gx: i32, _gz: i32) -> Option<primitive_shared::worldgen::Biome> {
             self.biome.get()
+        }
+        fn climate(&self, _gx: i32, _gy: i32, _gz: i32) -> Option<(f32, f32)> {
+            self.climate.get()
         }
     }
 

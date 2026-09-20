@@ -190,7 +190,7 @@ fn timeline(chunks: &ChunkManager) -> Particles {
         if frame == at(SHOT_AT - 0.25) {
             particles.blood(EYE - Vec3::Y * 0.35);
         }
-        particles.weather(0.18, false, FEET, wind, dt);
+        particles.weather(0.18, primitive_shared::weather::Precipitation::Rain, FEET, wind, dt);
         particles.fires(chunks, FEET, dt);
         particles.update(chunks, dt);
     }

@@ -2840,3 +2840,140 @@ fn a_computer_that_slept_wakes_up_still_in_the_world() {
 
     came_back_to_the_same_world(&s, feet, &ground);
 }
+
+// ------------------------------------------------------------- the storm
+
+/// A lone tree standing on the field: four logs and a crown over them.
+///
+/// Planted rather than found, for the reason the huts and the anvils in
+/// these scenarios are: what is being tested is what a bolt does to a
+/// tree, and a scenario that had to go and look for one would fail for
+/// the wrong reason on a seed that grew none in sight.
+fn plant_a_tree(s: &mut Scenario, x: i32, z: i32) -> (i32, i32, i32) {
+    let trunk_top = (x, GROUND + 4, z);
+    for y in GROUND + 1..=trunk_top.1 {
+        s.server().place_block(x, y, z, t::BLOCK_LOG);
+    }
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            s.server().place_block(x + dx, GROUND + 5, z + dz, t::BLOCK_LEAVES);
+        }
+    }
+    s.seconds(0.5);
+    trunk_top
+}
+
+#[test]
+fn a_bolt_out_of_a_storm_sets_a_lone_tree_alight_and_the_client_sees_the_flash() {
+    // «добавь грозу с молниями». A storm was a darker shower with an
+    // ambience track of thunder over it, and nothing in the world ever
+    // happened. What a bolt does is here: it finds the tallest thing, it
+    // lights it, and the wildfire takes it from there.
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    let tree = plant_a_tree(&mut s, x0 + 6, z);
+    s.server().console_command("/weather storm");
+    s.seconds(0.5);
+
+    let said = s.server().console_command(&format!("/lightning {} {}", tree.0, tree.2));
+    assert!(said.iter().any(|line| line.contains("struck")), "the bolt was refused: {said:?}");
+
+    // **The crown flashes and the trunk burns.** A bolt that lit only the
+    // leaves would be a tree struck by lightning that did not burn, which
+    // is the one thing everybody knows lightning does -- see `strike`.
+    let alight = s.until(3.0, |s| s.block(tree).map(t::block_kind) == Some(t::BLOCK_BURNING_LOG));
+    assert!(alight, "the tree did not catch: {:?}", s.block(tree).map(t::block_name));
+
+    // ...and the client was told, so the sky flashed and the crack is on
+    // its way (`ServerMessage::Lightning`).
+    assert!(
+        s.heard_any(|m| matches!(m, ServerMessage::Lightning { .. })),
+        "the client never heard the bolt it was standing under"
+    );
+    no_corrections(&s);
+}
+
+#[test]
+fn the_rain_puts_out_the_fire_a_bolt_started() {
+    // «сделай горение лесов»: a fire that could not be stopped would be
+    // a disaster rather than a risk, and what stops one is water falling
+    // on it. The other half of the rule -- that a storm over the desert
+    // brings no water and stops nothing -- is
+    // `a_storm_over_the_desert_does_not_put_the_fire_out`, where it can
+    // be stated against a climate a test can choose.
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    let tree = plant_a_tree(&mut s, x0 + 6, z);
+    s.server().console_command("/weather clear");
+    s.server().console_command(&format!("/lightning {} {}", tree.0, tree.2));
+    let alight = s.until(3.0, |s| s.block(tree).map(t::block_kind) == Some(t::BLOCK_BURNING_LOG));
+    assert!(alight, "the tree did not catch under a clear sky");
+
+    // The sky opens, and the tree under it is out as char long before its
+    // three minutes are up.
+    s.server().console_command("/weather rain");
+    let out = s.until(8.0, |s| s.block(tree).map(t::block_kind) == Some(t::BLOCK_CHARRED_LOG));
+    assert!(out, "the rain did not put the fire out: {:?}", s.block(tree).map(t::block_name));
+    no_corrections(&s);
+}
+
+#[test]
+fn biometp_steppe_puts_the_player_on_solid_ground_in_the_steppe() {
+    // «сделай /biometp». Finding a biome used to be twenty minutes of
+    // walking, or a world generated over and over until one turned up
+    // under the spawn point -- and a scenario cannot walk at all. See
+    // `Command::BiomeTeleport`.
+    use primitive_shared::worldgen::Biome;
+    let mut s = Scenario::with(primitive_server::settings::ServerSettings {
+        world_preset: primitive_shared::worldgen::Preset::Normal,
+        ..scenario_settings()
+    });
+    s.seconds(0.5);
+    let from = cell_of(s.feet());
+    // **Typed into the chat, the way a player types it**, and not run at
+    // the console: the console is not standing anywhere, so it is the
+    // one caller this command refuses. A world of your own makes you its
+    // operator (`commands::permission_for`), which is what lets the
+    // scenario ask at all.
+    s.send(ClientMessage::Chat("/biometp steppe".to_string()));
+
+    // Long enough for the search and the teleport.
+    s.seconds(2.0);
+    assert_ne!(cell_of(s.feet()), from, "the command moved nobody");
+    // **Asked of the server, not of the client**, and that is not a
+    // dodge: a teleport a kilometre and a half away lands in country
+    // nobody has streamed, and where the client *thinks* it is while the
+    // chunks are still arriving is a question about the loading screen
+    // rather than about the command.
+    let landed = s.server().position_of("scenario").expect("the scenario is online");
+    let feet = cell_of(DVec3::new(landed.0, landed.1, landed.2));
+    assert_eq!(
+        s.server().biome_at(feet.0, feet.2),
+        Biome::Steppe,
+        "the player landed somewhere that is not a steppe"
+    );
+
+    // **On the ground**: there is something under the soles, and they
+    // are resting on it rather than falling through country nobody has
+    // loaded. Asserted as "they stopped" rather than as a cell being
+    // solid, because a player standing on a turf lip stands at the
+    // *middle* of a cell and the cell under their feet is the lip --
+    // which reads as "inside the ground" to anything that only looks at
+    // whole blocks, and is the ordinary way to stand on the downs.
+    let under = cell_of(DVec3::new(landed.0, landed.1 - 0.6, landed.2));
+    assert!(
+        s.server().block_at(under.0, under.1, under.2).is_some_and(t::is_collidable),
+        "the player landed over a hole: {:?}",
+        s.server().block_at(under.0, under.1, under.2).map(t::block_name)
+    );
+    s.seconds(2.0);
+    let rested = s.server().position_of("scenario").expect("the scenario is online");
+    assert!(
+        (rested.1 - landed.1).abs() < 0.2,
+        "the player was still moving two seconds after landing: {} then {}",
+        landed.1,
+        rested.1
+    );
+}
