@@ -338,6 +338,15 @@ pub struct Water {
     sheet: Vec<Cell>,
     sheet_seen: HashSet<Cell>,
     sheet_depths: Vec<u8>,
+    /// What those depths were before `fluid::level_sheet` moved anything,
+    /// so the writes can be narrowed to the cells that actually changed.
+    ///
+    /// Kept here rather than cloned per call for the reason `search` is
+    /// kept: `level_one` runs a few times a step and every spill in the
+    /// game pays for it, and a `Vec` of up to `SHEET_MAX` bytes allocated
+    /// and dropped that often is a cost for something that is never read
+    /// between calls.
+    sheet_before: Vec<u8>,
     /// Whether a thin film the flow leaves behind soaks away. Off in `new`,
     /// which every test of conservation builds on; on in `soaking`, which
     /// is what the server runs. See `SOAK_SECONDS`.
@@ -635,7 +644,9 @@ impl Water {
         for cell in &sheet {
             self.unlevelled_set.remove(cell);
         }
-        let before = depths.clone();
+        let mut before = std::mem::take(&mut self.sheet_before);
+        before.clear();
+        before.extend_from_slice(&depths);
         if fluid::level_sheet(&mut depths) {
             for (i, &cell) in sheet.iter().enumerate() {
                 if depths[i] != before[i] {
@@ -654,6 +665,7 @@ impl Water {
         }
         self.sheet = sheet;
         self.sheet_depths = depths;
+        self.sheet_before = before;
     }
 
     /// Should this film of water soak away now?

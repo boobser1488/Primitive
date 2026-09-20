@@ -3955,7 +3955,7 @@ pub fn build_mesh(
                 let turf_sides = primitive_shared::ground::turf_may_wrap(id, above);
 
                 #[cfg(test)]
-                let faces_started = std::time::Instant::now();
+                let faces_started = phase_clock::started();
                 for (face_index, face) in face_defs.iter().enumerate() {
                     // **Moss is a picture, not a wash.** The face wears the
                     // block's own side with moss grown over it
@@ -4497,7 +4497,7 @@ pub fn build_mesh(
                     }
                 }
                 #[cfg(test)]
-                phase_clock::add(3, faces_started.elapsed());
+                phase_clock::add(3, faces_started);
             }
         }
     }
@@ -4893,10 +4893,34 @@ pub(crate) mod phase_clock {
 
     thread_local! {
         static NS: [Cell<u64>; NAMES.len()] = const { [const { Cell::new(0) }; NAMES.len()] };
+        /// Whether this thread is taking the clock at all.
+        ///
+        /// **Off unless a test asks for it, and this is not a nicety.**
+        /// The face-loop phase is timed *per cell*, so with the clock
+        /// always on a test build paid two `Instant::now()` calls on
+        /// every one of a chunk's 16,384 cells -- and on Windows that is
+        /// a `QueryPerformanceCounter` each, tens of nanoseconds apiece.
+        /// Every mesher measurement in this file is taken from a test
+        /// binary, so `how_long_meshing_takes` and `measure_real_terrain`
+        /// were reporting the mesher *plus* the stopwatch watching it,
+        /// and a change that made the mesher faster moved a number that
+        /// was part clock. `what_the_mesher_spends_its_time_on` turns it
+        /// on for itself, which is the only place the breakdown is read.
+        pub static ENABLED: Cell<bool> = const { Cell::new(false) };
     }
 
-    pub fn add(phase: usize, taken: std::time::Duration) {
-        NS.with(|ns| ns[phase].set(ns[phase].get() + taken.as_nanos() as u64));
+    /// Now, if this thread is timing; `None` if it is not. The call sites
+    /// keep the `Instant::now()` itself behind this.
+    #[inline(always)]
+    pub fn started() -> Option<std::time::Instant> {
+        ENABLED.with(Cell::get).then(std::time::Instant::now)
+    }
+
+    pub fn add(phase: usize, started: Option<std::time::Instant>) {
+        if let Some(started) = started {
+            let taken = started.elapsed();
+            NS.with(|ns| ns[phase].set(ns[phase].get() + taken.as_nanos() as u64));
+        }
     }
 
     /// The counts so far, and zero them for the next round.
@@ -4947,7 +4971,7 @@ fn emit_merged(
     // side of it is a different green, or a different direction: see
     // `split_t_junctions`.
     #[cfg(test)]
-    let greedy_started = std::time::Instant::now();
+    let greedy_started = phase_clock::started();
     let mut plane_start = 0usize;
     while plane_start < faces_left.len() {
         let plane_head = faces_left[plane_start];
@@ -5027,7 +5051,7 @@ fn emit_merged(
     }
 
     #[cfg(test)]
-    phase_clock::add(0, greedy_started.elapsed());
+    phase_clock::add(0, greedy_started);
 
     // **The T-junctions, closed before anything is drawn.** Every
     // corner in the chunk goes into one lattice; each rectangle then
@@ -5035,10 +5059,10 @@ fn emit_merged(
     // with those as vertices. See `t_points` and
     // `triangulate_edged_rect`.
     #[cfg(test)]
-    let corners_started = std::time::Instant::now();
+    let corners_started = phase_clock::started();
     mark_corners(&rects, &mut lattice, &face_defs, extra_corners);
     #[cfg(test)]
-    phase_clock::add(1, corners_started.elapsed());
+    phase_clock::add(1, corners_started);
     let mut points = EdgePoints::default();
 
     // Whether each face's corner order runs counter-clockwise in its own
@@ -5056,7 +5080,7 @@ fn emit_merged(
     });
 
     #[cfg(test)]
-    let emitting_started = std::time::Instant::now();
+    let emitting_started = phase_clock::started();
     for rect in &rects {
         let face_index = rect.face as usize;
         let face = &face_defs[face_index];
@@ -5157,7 +5181,7 @@ fn emit_merged(
         triangulate_edged_rect(&points, named, first_point, winding_ccw[face_index], target);
     }
     #[cfg(test)]
-    phase_clock::add(2, emitting_started.elapsed());
+    phase_clock::add(2, emitting_started);
 }
 
 /// How many cells of liquid stand at this cell and below it, capped.
@@ -13740,6 +13764,15 @@ mod bench {
         // Everything not named below is the face loop, which is why the
         // total is measured the same way and the remainder is printed as
         // one line rather than assumed.
+        //
+        // **The clock is on for this test and this test only**, and the
+        // total below is therefore the mesher *plus* the stopwatch: two
+        // `Instant::now()` calls a cell. That is the price of a breakdown
+        // and it is paid here on purpose; the tests that report a plain
+        // ms-a-chunk figure (`how_long_meshing_takes`,
+        // `measure_real_terrain`) leave it off so that what they time is
+        // the mesher. See `phase_clock::ENABLED`.
+        phase_clock::ENABLED.with(|on| on.set(true));
         const ROUNDS: usize = 200;
         let blocks = terrain();
         let world = World(blocks.clone());
@@ -13802,6 +13835,9 @@ mod bench {
         }
         let _ = phase_clock::take();
         println!("  {:<24} {best_flat:.3} ms  ({} vertices)", "...the same, lit flat", out.vertices.len());
+        // Put back: the harness hands this thread the next test, and a
+        // stopwatch left running would be charged to it.
+        phase_clock::ENABLED.with(|on| on.set(false));
     }
 
     #[test]
