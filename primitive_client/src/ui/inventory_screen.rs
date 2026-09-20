@@ -2114,7 +2114,7 @@ fn recipe_lines(
     heat: primitive_shared::crafting::Heat,
 ) -> Vec<(String, [f32; 4])> {
     use primitive_shared::crafting::{
-        feasibility, missing_ingredient, possible_crafts, Feasibility,
+        feasibility, possible_crafts, Feasibility,
     };
     use crate::ui::names;
 
@@ -2168,13 +2168,24 @@ fn recipe_lines(
             };
             (language.text(line).to_string(), TOOLTIP_BAD)
         }
-        Feasibility::MissingIngredients => match missing_ingredient(inventory, r) {
-            Some((block, short)) => (
-                format!("{} {short}x {}", language.text(Msg::Need), names::block(block, language)),
-                TOOLTIP_DIM,
-            ),
-            None => (language.text(Msg::No).to_string(), TOOLTIP_DIM),
-        },
+        // **Everything missing, and not the first thing missing.** It used
+        // to be `missing_ingredient`, which names one -- so a player short
+        // of the ore *and* the charcoal fetched the ore, came back, and was
+        // told about the charcoal. Worse, a row refused for want of a
+        // *tool* has no missing ingredient at all and fell to the `None`
+        // arm, which said "no": the menu knew exactly what was wrong and
+        // answered with a word. See `crafting::shortfall`.
+        Feasibility::MissingIngredients => {
+            let short = primitive_shared::crafting::shortfall(inventory, r, heat);
+            let said = short
+                .iter()
+                .filter(|s| !matches!(s, primitive_shared::crafting::Shortfall::Station(_)))
+                .map(|&s| crate::ui::recipe_book::shortfall_text(s, language))
+                .collect::<Vec<_>>()
+                .join("   ");
+            let text = if said.is_empty() { language.text(Msg::No).to_string() } else { said };
+            (format!("{} {text}", language.text(Msg::Need)), TOOLTIP_DIM)
+        }
     });
     lines
 }

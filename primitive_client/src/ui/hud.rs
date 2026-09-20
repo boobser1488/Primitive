@@ -1548,6 +1548,52 @@ pub fn sky_hint(painter: &mut Painter, text: &str) {
     painter.text_centred(text, 0.0, SKY_HINT_TOP, SKY_HINT_SCALE, widgets::TEXT);
 }
 
+const FIRST_STEP_SCALE: f32 = 0.8;
+/// Air between the notice's plate and this one.
+const FIRST_STEP_CLEARANCE: f32 = 0.022;
+/// **One thing to do next, for a player who has just woken up.**
+///
+/// The player said the progression was completely unclear, and the worst
+/// of that is the first two minutes: a meadow, empty hands, and no reason
+/// to touch anything in particular. So three prompts, one at a time, and
+/// then never again -- see `ladder::first_step` for why one and why it
+/// does not come back. A line over the belt and not a modal: a box that
+/// has to be dismissed is a tutorial, and a tutorial was the thing asked
+/// against.
+///
+/// Drawn in the belt's own ink on the belt's own plate, because that is
+/// where the answer to the line is: the stone it tells you to pick up
+/// lands in the slot underneath it.
+pub fn first_step_line(painter: &mut Painter, text: &str) {
+    let ink = widgets::ink_width(text, FIRST_STEP_SCALE);
+    let cell = widgets::cell_height(FIRST_STEP_SCALE);
+    painter.quad(
+        Rect::new(-ink / 2.0 - 0.014, FIRST_STEP_TOP - cell - 0.004, ink / 2.0 + 0.014, FIRST_STEP_TOP + 0.012),
+        SAIL_DIAL_BG,
+    );
+    painter.text_centred(text, 0.0, FIRST_STEP_TOP, FIRST_STEP_SCALE, widgets::TEXT);
+}
+
+/// The top of the first two minutes' line, which is what `Painter::text`
+/// takes: the glyphs hang *below* it by a whole cell, descenders and all
+/// (`font::CAP_HEIGHT` against `GLYPH_HEIGHT`), which is why a whole cell
+/// and the plate's own lip are added here -- `отщепы` hangs a good way
+/// further than `flakes` does.
+///
+/// **Above the notice, which is above the gauges** -- derived from both
+/// rather than chosen, for the reason `NOTICE_Y` gives at length. It was
+/// `hotbar::TOP + 0.055` first, a number picked by eye as "just over the
+/// belt", and the snapshot of the HUD showed it printed straight across
+/// the stamina strip and the breath gauge: the strip nothing else uses is
+/// not over the belt, because three gauges live there. The notice and this
+/// can be up at once -- a refusal while a new player is being prompted --
+/// so this clears the plate rather than sharing its row.
+const FIRST_STEP_TOP: f32 = NOTICE_Y
+    + NOTICE_HALF_HEIGHT
+    + widgets::cell_height(FIRST_STEP_SCALE)
+    + 0.004
+    + FIRST_STEP_CLEARANCE;
+
 /// The dark half of every pair. Near-black, and the same behind a
 /// frame, a letter and the stick's ring.
 const EDGE_DARK: [f32; 4] = [0.03, 0.03, 0.04, 0.92];
@@ -3650,6 +3696,30 @@ mod tests {
             plate > STACK_TOP,
             "the notice starts at {plate}, over gauges reaching {STACK_TOP}",
         );
+    }
+
+    /// **...and neither is the first two minutes' line**, which is the
+    /// same mistake made again one row up.
+    ///
+    /// It was placed "just over the belt" -- `hotbar::TOP + 0.055` -- and
+    /// the HUD snapshot showed it printed straight across the stamina
+    /// strip and the breath gauge, because the strip nothing else uses is
+    /// not over the belt. Measured on what is drawn, against the notice's
+    /// plate as well as the gauges: the two can be up at once, and a
+    /// refusal while a new player is being told to pick up a stone must
+    /// not land on the same row.
+    #[test]
+    fn the_first_two_minutes_line_clears_both_the_gauges_and_the_notice() {
+        let mut p = painter();
+        first_step_line(&mut p, "найдите кремень и отбейте от него отщепы");
+        let (low, high) = vertical_extent(&p.vertices);
+        assert!(low > STACK_TOP, "the prompt starts at {low}, over gauges reaching {STACK_TOP}");
+        assert!(
+            low > NOTICE_Y + NOTICE_HALF_HEIGHT,
+            "the prompt starts at {low}, on the notice's plate which reaches {}",
+            NOTICE_Y + NOTICE_HALF_HEIGHT,
+        );
+        assert!(high < 0.0, "the prompt reaches the crosshair");
     }
 
     #[test]

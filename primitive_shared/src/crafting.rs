@@ -4786,6 +4786,103 @@ pub fn missing_ingredient(inventory: &Inventory, recipe: &Recipe) -> Option<(Blo
     })
 }
 
+/// One thing standing between a pack and a recipe.
+///
+/// **Every one of them, and not the first.** `feasibility` answers "may
+/// this run", which is one word, and `missing_ingredient` answers "name
+/// one thing", which is what a tooltip a player reads in half a second
+/// has room for. Neither answers the question a player stuck on the
+/// ladder is actually asking -- *what would it take* -- and the honest
+/// answer to that is a list: two ores, a kiln, and a chisel you have not
+/// made. A screen that named the ore, sent the player for ore and then
+/// named the kiln is a screen that lied twice by omission.
+///
+/// The tool is its own answer rather than another ingredient because it
+/// is not spent and because *any rung of its ladder will do* -- a flint
+/// chisel and a bronze one are the same answer to "what is missing", and
+/// counting the named one would tell a player with a bronze chisel to go
+/// and knap a flint one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shortfall {
+    /// The pack holds `have` of this and the row wants `need`.
+    Ingredient { block: BlockId, have: u32, need: u32 },
+    /// The row is worked with a tool of this kind or a better one
+    /// (`used_tool`, `other_tools`), and the pack holds none at all.
+    Tool(BlockId),
+    /// The row works a thing over, and the pack holds nothing for it to
+    /// work: a hone with every tool of that kind already sharp. See
+    /// `worked_slot`.
+    NothingToWork(BlockId),
+    /// It is done at this station, and the player is not at one.
+    Station(Station),
+    /// Everything is here and the result has nowhere to go.
+    NoRoom,
+}
+
+/// Everything standing between this pack, standing in this heat, and this
+/// recipe. Empty exactly when [`feasibility`] says `Ready` -- there is a
+/// test that says so, because the two drifting apart is a menu that
+/// offers a craft it will then refuse, or refuses one with nothing to
+/// name.
+///
+/// In the order a player can act on: what to go and get, what to make,
+/// where to stand, and last the pack they can empty on the spot.
+pub fn shortfall(inventory: &Inventory, recipe: &Recipe, heat: Heat) -> Vec<Shortfall> {
+    let mut short = Vec::new();
+    let tool = used_tool(recipe);
+    for &(block, amount) in recipe.inputs {
+        let have = count_for(inventory, recipe, block);
+        if tool == Some(block) {
+            // Present at any rung is present: `count_for` already counts
+            // the better ones for a tool row.
+            if tool_slot(inventory, recipe).is_none() {
+                short.push(Shortfall::Tool(block));
+            }
+            continue;
+        }
+        if have < amount {
+            short.push(Shortfall::Ingredient { block, have, need: amount });
+        }
+    }
+    // ...and a rework with everything in hand can still have nothing to
+    // work on, which no count of ingredients shows: the whetstone and the
+    // tool are both there and every tool of that kind is sharp.
+    if let Some(kind) = worked_kind(recipe) {
+        if has_ingredients(inventory, recipe) && worked_slot(inventory, recipe).is_none() {
+            short.push(Shortfall::NothingToWork(kind));
+        }
+    }
+    if !heat.allows(recipe.station) {
+        short.push(Shortfall::Station(recipe.station));
+    }
+    // Asked last and only when nothing else is wrong: "no room" against a
+    // pack that is also short of two ores is a true sentence about a
+    // situation the player is not in yet, and it would be the loudest
+    // line on the screen.
+    if short.is_empty() && feasibility(inventory, recipe, heat) == Feasibility::NoRoom {
+        short.push(Shortfall::NoRoom);
+    }
+    short
+}
+
+/// Every row this thing goes into, with its index in `RECIPES`.
+///
+/// **The book read backwards.** A recipe answers "what does this take";
+/// this answers "what is this *for*", which is the question a player
+/// holding their first flint actually has, and the one a crafting menu
+/// ordered by output can never answer. Flint asks it best: three rows
+/// take one, and none of them is called flint.
+///
+/// By kind, so a lit kiln in the hand finds the rows a cold one is in,
+/// and a worn chisel finds the rows a new one is in.
+pub fn uses(block: BlockId) -> impl Iterator<Item = (usize, &'static Recipe)> {
+    let kind = crate::types::block_kind(block);
+    RECIPES
+        .iter()
+        .enumerate()
+        .filter(move |(_, recipe)| recipe.inputs.iter().any(|&(b, _)| crate::types::block_kind(b) == kind))
+}
+
 /// Boards of each wood in the pack, in `wood::WOODS` order.
 fn planks_by_wood(inventory: &Inventory) -> Vec<u32> {
     crate::wood::WOODS.iter().map(|wood| inventory.count(wood.planks) + inventory.count(wood.pegged)).collect()
@@ -5017,6 +5114,117 @@ mod tests {
     /// `Attempt::Fails`.
     fn made(pack: &mut Inventory, recipe: &Recipe, heat: Heat) -> bool {
         craft(pack, recipe, heat, Attempt::Succeeds).is_made()
+    }
+
+    /// Standing at every hearth and every workshop at once: what a row
+    /// asks for is never the station.
+    const ANYWHERE: Heat = Heat { fire: true, kiln: true, bloomery: true, workshops: 0b1111 };
+
+    /// A chest loaded with everything a row asks for, twice over -- twice
+    /// because a rework wants one of the thing it works *and* the thing it
+    /// works it with, and the second copy is what stops the two fighting.
+    fn everything_for(recipe: &Recipe) -> Inventory {
+        let mut pack = Inventory::chest();
+        for &(block, amount) in recipe.inputs {
+            pack.add(block, amount * 2);
+        }
+        pack
+    }
+
+    /// **Nothing to say is the one answer a refusal may never give.** The
+    /// player's complaint that started this was that the ladder is
+    /// invisible, and a row that is greyed out for a reason the screen
+    /// does not name is the ladder at its most invisible: the menu knows
+    /// exactly why and keeps it.
+    #[test]
+    fn every_recipe_that_cannot_be_made_names_what_is_missing() {
+        for recipe in RECIPES {
+            let empty = Inventory::new();
+            let short = shortfall(&empty, recipe, Heat::NONE);
+            assert!(!short.is_empty(), "{} refuses an empty-handed player silently", recipe.name);
+            // ...and it names a *thing*, not only a place to stand: told
+            // only "go to the kiln", a player walks to the kiln and is
+            // refused again for the ore they never had.
+            assert!(
+                short.iter().any(|s| !matches!(s, Shortfall::Station(_) | Shortfall::NoRoom)),
+                "{} tells an empty-handed player where to stand and never what to bring",
+                recipe.name,
+            );
+        }
+    }
+
+    /// The list and the verdict are one thing said twice, so they have to
+    /// agree everywhere -- a row with nothing missing that is then refused
+    /// is a menu that lies, and a row that is offered with something still
+    /// named is a menu that nags.
+    #[test]
+    fn a_recipe_is_short_of_nothing_exactly_when_it_can_be_made() {
+        for recipe in RECIPES {
+            for (heat, where_) in [(Heat::NONE, "in a field"), (ANYWHERE, "at every fire")] {
+                for (pack, what) in [(Inventory::new(), "empty-handed"), (everything_for(recipe), "loaded")] {
+                    let ready = feasibility(&pack, recipe, heat).is_ready();
+                    let short = shortfall(&pack, recipe, heat);
+                    assert_eq!(
+                        ready,
+                        short.is_empty(),
+                        "{} {what} {where_}: ready is {ready} and the list is {short:?}",
+                        recipe.name,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Take one thing away and that is the one thing named -- with the
+    /// count, because "you need flint" to somebody holding one flint of
+    /// the two a row wants is a sentence that reads as a lie.
+    #[test]
+    fn taking_one_ingredient_out_of_the_pack_names_that_ingredient_and_how_many() {
+        let planks = RECIPES.iter().find(|r| r.name == "planks").expect("planks");
+        let (log, need) = planks.inputs[0];
+        let mut pack = Inventory::new();
+        pack.add(log, need);
+        assert!(shortfall(&pack, planks, ANYWHERE).is_empty(), "a loaded pack was short of something");
+        pack.take_exact(log, need);
+        assert_eq!(
+            shortfall(&pack, planks, ANYWHERE),
+            vec![Shortfall::Ingredient { block: log, have: 0, need }],
+        );
+    }
+
+    /// A row done at a kiln says so *as well as* naming the ore, because
+    /// the two are different walks. See `Feasibility::NeedsForge`.
+    #[test]
+    fn a_hearth_row_in_a_meadow_names_the_hearth_as_well_as_what_is_short() {
+        let copper = RECIPES
+            .iter()
+            .find(|r| r.station == Station::Forge && !r.inputs.is_empty())
+            .expect("a forge row");
+        let short = shortfall(&Inventory::new(), copper, Heat::NONE);
+        assert!(short.contains(&Shortfall::Station(Station::Forge)), "{short:?}");
+        assert!(short.iter().any(|s| matches!(s, Shortfall::Ingredient { .. })), "{short:?}");
+        // ...and standing at the kiln takes that line away and leaves the
+        // ore: the player has done the half they were told to do.
+        let at_the_kiln = Heat { kiln: true, ..Heat::NONE };
+        assert!(!shortfall(&Inventory::new(), copper, at_the_kiln).iter().any(|s| matches!(s, Shortfall::Station(_))));
+    }
+
+    /// **"What is this for" is a question the table can answer.** A player
+    /// holding their first flint is not looking for a recipe called flint;
+    /// there is none. See [`uses`].
+    #[test]
+    fn a_thing_in_the_hand_can_be_asked_what_it_is_for() {
+        let rows: Vec<&str> = uses(BLOCK_FLINT).map(|(_, r)| r.name).collect();
+        assert!(rows.len() >= 2, "flint goes into {rows:?} and should go into more than that");
+        assert!(rows.contains(&"flint flakes"), "knapping is not among what flint is for: {rows:?}");
+        // ...and every row it names really does take one, by kind: a lit
+        // kiln in the hand finds the rows a cold one is in.
+        for (index, recipe) in uses(BLOCK_KILN) {
+            assert_eq!(RECIPES[index].name, recipe.name);
+            assert!(recipe.inputs.iter().any(|&(b, _)| crate::types::block_kind(b) == BLOCK_KILN));
+        }
+        // A thing nothing is made of is an honest empty answer, not a panic.
+        assert_eq!(uses(crate::types::KIND_MASK).count(), 0);
     }
 
     #[test]

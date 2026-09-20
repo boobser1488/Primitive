@@ -316,7 +316,16 @@ impl Scenario {
         for &((x, y, z), block) in cells {
             self.server().place_block(x, y, z, block);
         }
-        let all_there = self.until(5.0, |s| {
+        // **Twenty seconds of wall clock, and it is not a guess about the
+        // world.** What is waited for is the server's own edit coming back
+        // down the wire and through chunk integration -- which is rationed
+        // by the frame (`streaming_budget`) and therefore paced by how busy
+        // this machine is, not by anything the test is asserting. At five
+        // it failed about one run in three on a machine with half a dozen
+        // builds on it, in whichever scenario happened to be unlucky; a run
+        // where the blocks arrive costs the same either way, because
+        // `until` returns the moment they do.
+        let all_there = self.until(20.0, |s| {
             cells.iter().all(|&((x, y, z), block)| s.chunks.block_at(x, y, z) == Some(block))
         });
         let missing = cells.iter().find(|&&((x, y, z), block)| self.chunks.block_at(x, y, z) != Some(block));

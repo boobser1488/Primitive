@@ -1,13 +1,15 @@
-//! The journal: the map, the recipe book and the give menu, one screen
-//! with three tabs.
+//! The journal: the map, the ladder, the recipe book and the give menu,
+//! one screen with four tabs.
 //!
 //! ## Why one screen with tabs
 //!
-//! Because the first two are read together. The book says bronze wants a
-//! second metal; the map says where the hills are. A player who has to
-//! close one screen and remember a second key to open the other reads one
-//! of them. It is also one button on a phone rather than two, and the
-//! thumb controls have no room to give (see `settings::TouchLayout`).
+//! Because the first three are read together, and they answer one question
+//! between them. The ladder says there is a rung above this one and it
+//! wants a second metal; the book says what that costs; the map says where
+//! the hills are. A player who has to close one screen and remember a
+//! second key to open the next reads one of them. It is also one button on
+//! a phone rather than three, and the thumb controls have no room to give
+//! (see `settings::TouchLayout`).
 //!
 //! ## ...and why the give menu is the third one
 //!
@@ -64,6 +66,7 @@ use crate::platform::{TouchId, TouchPhase};
 use crate::ui::hotbar::HotbarVertex;
 use crate::ui::give_screen::{self, GiveScreen};
 use crate::ui::lang::{by_input, Language, Msg};
+use crate::ui::ladder_screen::LadderScreen;
 use crate::ui::map_screen::{self, MapView, Pinch, PlayerMark};
 use crate::ui::recipe_book::{self, RecipeBook};
 use crate::ui::widgets::{self, Painter, Rect};
@@ -72,6 +75,11 @@ use crate::ui::widgets::{self, Painter, Rect};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Map,
+    /// The seven ages, and which of them these hands have climbed. See
+    /// [`crate::ui::ladder_screen`], and why it sits between the map and
+    /// the book: the ladder says *what* to go for, the map says where, and
+    /// the book says what it costs.
+    Ladder,
     Recipes,
     /// The give menu. See [`crate::ui::give_screen`], and below for why
     /// it is a page of this screen rather than one of its own.
@@ -91,8 +99,9 @@ pub enum Header {
     Tab(Tab),
 }
 
-const HEADERS: [Header; 3] = [
+const HEADERS: [Header; 4] = [
     Header::Tab(Tab::Map),
+    Header::Tab(Tab::Ladder),
     Header::Tab(Tab::Recipes),
     Header::Tab(Tab::Give),
 ];
@@ -134,19 +143,22 @@ fn header_height() -> f32 {
 
 /// Where a header button is.
 ///
-/// Laid left to right, each as wide as its own word needs -- so a third
+/// Laid left to right, each as wide as its own word needs -- so another
 /// tab costs the width of one word and nothing else moves. `GIVE` is
-/// last because it is the one page of the three that is not part of
-/// playing: the map and the book are read while walking, and this is
-/// reached on purpose.
+/// last because it is the one page of the four that is not part of
+/// playing: the map, the ladder and the book are read while walking, and
+/// this is reached on purpose. The ladder is second because it is read
+/// before the book: what to go for, then what it costs.
 pub fn header_rect(header: Header, aspect: f32) -> Rect {
     let panel = panel_rect(aspect);
     let h = header_height();
     let top = panel.y1 - 0.015;
     let map = Rect::new(panel.x0 + 0.015, top - h, panel.x0 + 0.015 + 0.36, top);
-    let recipes = Rect::new(map.x1 + 0.015, top - h, map.x1 + 0.015 + 0.46, top);
+    let ladder = Rect::new(map.x1 + 0.015, top - h, map.x1 + 0.015 + 0.40, top);
+    let recipes = Rect::new(ladder.x1 + 0.015, top - h, ladder.x1 + 0.015 + 0.46, top);
     match header {
         Header::Tab(Tab::Map) => map,
+        Header::Tab(Tab::Ladder) => ladder,
         Header::Tab(Tab::Recipes) => recipes,
         Header::Tab(Tab::Give) => Rect::new(recipes.x1 + 0.015, top - h, recipes.x1 + 0.015 + 0.42, top),
     }
@@ -192,10 +204,20 @@ struct Drag {
 #[derive(Default)]
 pub struct Journal {
     pub explored: ExploredMap,
-    pub discovered: Discovered,
+    discovered: Discovered,
+    /// Whether the server has said what this player has held yet.
+    ///
+    /// **An empty list and no list are different things**, and exactly one
+    /// thing tells them apart: a brand new player has held nothing, and so
+    /// has a veteran whose list is still in flight. The line over the belt
+    /// (`ladder::first_step`) is drawn from this knowledge, so without the
+    /// flag every returning player would be told to go and pick up a stone
+    /// for however long the join takes.
+    knowledge_arrived: bool,
     pub landmarks: Landmarks,
     open: Option<Tab>,
     map: MapView,
+    ladder: LadderScreen,
     book: RecipeBook,
     give: GiveScreen,
     /// Whether the server said this player is an operator, which is the
@@ -251,6 +273,18 @@ impl Journal {
 
     pub fn is_open(&self) -> bool {
         self.open.is_some()
+    }
+
+    /// The server said what this player has held. See [`Journal::discovered`].
+    pub fn set_discovered(&mut self, discovered: Discovered) {
+        self.discovered = discovered;
+        self.knowledge_arrived = true;
+    }
+
+    /// The next of the first three things to do, while there is one and
+    /// while the answer is known to be true. See the field's note.
+    pub fn first_step(&self) -> Option<primitive_shared::ladder::FirstStep> {
+        self.knowledge_arrived.then(|| primitive_shared::ladder::first_step(&self.discovered)).flatten()
     }
 
     /// Opens a tab, or shuts the journal if that tab is already showing --
@@ -316,7 +350,8 @@ impl Journal {
     /// would be a page a keyboard could not get to.
     pub fn switch_tab(&mut self) {
         self.open = match self.open {
-            Some(Tab::Map) => Some(Tab::Recipes),
+            Some(Tab::Map) => Some(Tab::Ladder),
+            Some(Tab::Ladder) => Some(Tab::Recipes),
             // ...and past the give page for anybody who has not got one,
             // or Tab would land on a blank page and appear to be stuck.
             Some(Tab::Recipes) if self.operator => Some(Tab::Give),
@@ -442,7 +477,10 @@ impl Journal {
                 let rows = if lines < 0.0 { 1 } else { -1 };
                 self.give.scroll_by(rows, body);
             }
-            None => {}
+            // The ladder is seven rows and seven rows always fit: a page
+            // with nothing below the fold has nothing to scroll, and a
+            // wheel that moved it would move it off the screen.
+            Some(Tab::Ladder) | None => {}
         }
     }
 
@@ -521,7 +559,8 @@ impl Journal {
                             self.give.scroll_by(rows as i32, body_rect(aspect));
                         }
                     }
-                    None => {}
+                    // Nothing below the fold on the ladder -- see `wheel`.
+                    Some(Tab::Ladder) | None => {}
                 }
                 Outcome::Changed
             }
@@ -635,6 +674,7 @@ impl Journal {
                 self.map.press(control, body, player);
                 true
             }
+            (Some(Tab::Ladder), _) => self.ladder.click(at, body),
             (Some(Tab::Recipes), _) => self.book.click(at, &self.discovered, body),
             (Some(Tab::Give), _) => self.give.click(at, body),
             _ => false,
@@ -663,7 +703,7 @@ impl Journal {
         };
         let body = body_rect(aspect);
         self.cursor
-            .map(|at| (header_at(at, aspect), map_screen::control_at(at, body), recipe_book::row_at(at, body), recipe_book::filter_at(at, body)))
+            .map(|at| (header_at(at, aspect), map_screen::control_at(at, body), recipe_book::row_at(at, body), recipe_book::filter_at(at, body), crate::ui::ladder_screen::row_at(at, body)))
             .hash(&mut h);
         // The give page's own three things under the pointer, which
         // nothing above answers: a cell, a section chip, an amount chip.
@@ -674,6 +714,10 @@ impl Journal {
                 .hash(&mut h);
         }
         match tab {
+            Tab::Ladder => {
+                self.ladder.key().hash(&mut h);
+                self.discovered.kinds().hash(&mut h);
+            }
             Tab::Map => {
                 self.map.key().hash(&mut h);
                 self.explored.revision().hash(&mut h);
@@ -719,6 +763,7 @@ impl Journal {
             let hovered = self.cursor.is_some_and(|(x, y)| rect.contains(x, y));
             let label = language.text(match this {
                 Tab::Map => Msg::MapTab,
+                Tab::Ladder => Msg::LadderTab,
                 Tab::Recipes => Msg::RecipesTab,
                 Tab::Give => Msg::GiveTab,
             });
@@ -752,6 +797,11 @@ impl Journal {
                 let help = language.text(by_input(Msg::MapHelp, Msg::MapHelpTouch));
                 let width = widgets::measure(help, help_scale);
                 p.text(help, body.x1 - width, footer_middle + cap / 2.0, help_scale, widgets::TEXT_DIM);
+            }
+            Tab::Ladder => {
+                self.ladder.paint(&mut p, layers, &self.discovered, body, self.cursor, language);
+                let help = language.text(by_input(Msg::LadderHelp, Msg::LadderHelpTouch));
+                p.text(help, body.x0, footer_middle + cap / 2.0, help_scale, widgets::TEXT_DIM);
             }
             Tab::Recipes => {
                 self.book.paint(&mut p, layers, inventory, &self.discovered, body, self.cursor, language);
@@ -1121,6 +1171,29 @@ mod tests {
         journal.type_char('x');
         journal.backspace();
         assert_eq!(journal.book.query(), "a");
+    }
+
+    /// **A veteran is not told to pick up a stone while their list is in
+    /// the post.** An empty `Discovered` is both "this player has held
+    /// nothing" and "the server has not said yet", and only the flag tells
+    /// the two apart -- without it, every returning player would get the
+    /// first evening's prompt for as long as the join took.
+    #[test]
+    fn the_first_step_line_waits_until_the_server_has_said_what_was_held() {
+        use primitive_shared::discovery::Discovered;
+        use primitive_shared::ladder::FirstStep;
+        use primitive_shared::types::{BLOCK_FIBER, BLOCK_FLINT_FLAKE, BLOCK_PEBBLE};
+
+        let mut journal = Journal::new();
+        assert_eq!(journal.first_step(), None, "prompted before the server had said anything");
+        journal.set_discovered(Discovered::new());
+        assert_eq!(journal.first_step(), Some(FirstStep::Stone), "a new player was told nothing");
+        journal.set_discovered(Discovered::from_kinds([BLOCK_PEBBLE, BLOCK_FIBER, BLOCK_FLINT_FLAKE]));
+        assert_eq!(journal.first_step(), None, "a knapper was still being prompted");
+        // ...and leaving the world puts it back to knowing nothing, so the
+        // next world's list is waited for too rather than inherited.
+        journal.end_session();
+        assert_eq!(journal.first_step(), None);
     }
 
     #[test]

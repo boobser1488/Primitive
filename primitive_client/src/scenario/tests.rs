@@ -2335,7 +2335,14 @@ fn a_swimmer_beside_a_cut_in_a_pond_is_carried_toward_it() {
     // ticks behind a busy machine and the same pour takes longer to arrive:
     // the property is that the water takes the swimmer, not how fast this
     // machine is today.
-    let taken = s.until(20.0, |s| s.feet().x - before > 0.5);
+    //
+    // Twenty was still not enough, and the numbers say why: a run that
+    // passes takes six seconds and one that fails spends the whole budget
+    // and gets a third of the way, which is a server tick being starved
+    // rather than water that does not run. Measured at one in three on a
+    // machine with half a dozen builds on it. The wait costs nothing when
+    // the water arrives, because `until` returns the moment it does.
+    let taken = s.until(60.0, |s| s.feet().x - before > 0.5);
     let carried = s.feet().x - before;
     s.shot("carried_to_the_cut");
     assert!(taken, "the pond poured out beside the swimmer and carried them {carried:.2} blocks");
@@ -3342,5 +3349,152 @@ fn a_monkey_that_reaches_a_player_holding_food_takes_one_and_the_player_is_told(
         "the monkey took {} apples",
         3 - s.inventory.count(t::BLOCK_APPLE)
     );
+    no_corrections(&s);
+}
+
+// ---------------------------------------------------------------- the first two minutes
+
+/// What the client's journal knows, rebuilt from the last list the server
+/// sent -- which is exactly how `lib.rs` rebuilds it
+/// (`ServerMessage::Discovered`). Read through the wire rather than off the
+/// server's own state, because the line over the belt is drawn from the
+/// client's copy and a client that never got the list would show the wrong
+/// prompt forever.
+fn knowledge(s: &Scenario) -> primitive_shared::discovery::Discovered {
+    s.heard
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            ServerMessage::Discovered { kinds } => {
+                Some(primitive_shared::discovery::Discovered::from_kinds(kinds.iter().copied()))
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Breaks whatever is at `cell` with bare hands, the way a player does:
+/// look at it, hold the button, and wait for it to go.
+fn break_by_hand(s: &mut Scenario, cell: (i32, i32, i32)) {
+    // **Aimed until it is actually aimed at.** A pebble and a tuft of grass
+    // are sprites that stand on the floor of their cell, so the middle of
+    // the cell is over the top of them and the ray goes through -- which is
+    // a player squinting at the ground, and the same three heights a player
+    // would try.
+    let found = [0.12f64, 0.35, 0.6].into_iter().any(|up| {
+        s.look_at(DVec3::new(cell.0 as f64 + 0.5, cell.1 as f64 + up, cell.2 as f64 + 0.5));
+        s.frame();
+        s.aimed().map(|(at, _)| at) == Some(cell)
+    });
+    assert!(found, "{:?} could not be aimed at", s.block(cell).map(t::block_name));
+    s.input.breaking = true;
+    let gone = s.until(8.0, |s| s.block(cell).is_none_or(|b| b == t::BLOCK_AIR));
+    s.input.breaking = false;
+    s.seconds(0.2);
+    assert!(gone, "{:?} would not break by hand", s.block(cell).map(t::block_name));
+}
+
+/// Breaks what is at `cell` from two steps away and then walks over the
+/// spot to pick it up.
+///
+/// **The walk is not a formality.** A break leaves the thing lying on the
+/// ground as an item (`spawn_block_drop`); nothing goes straight into the
+/// pack. A test that skipped the walk would be testing a game this is not.
+fn take_by_hand(s: &mut Scenario, cell: (i32, i32, i32)) {
+    s.stand_at((cell.0 as f64 + 2.5, cell.1 as f64, cell.2 as f64 + 0.5));
+    s.seconds(0.3);
+    break_by_hand(s, cell);
+    s.stand_at((cell.0 as f64 + 0.5, cell.1 as f64, cell.2 as f64 + 0.5));
+    s.seconds(0.8);
+}
+
+/// **A new player is told the first three things and does them.**
+///
+/// The player's complaint was that the progression is completely unclear,
+/// and its sharpest end is the first two minutes: a meadow, empty hands,
+/// and nothing saying which of the ten thousand blocks in sight is the one
+/// to touch. The answer is one line over the belt at a time
+/// (`ladder::first_step`), and this is that line driven the whole way
+/// through the real server -- mined, dropped, learned, sent over the wire
+/// and read back off the client's own copy of the knowledge.
+///
+/// The prompt has to *stop*, which is the second half of the test: a line
+/// that is still telling a knapper to pick up a stone is a line every
+/// player learns to look past, and then the next one is wasted too.
+#[test]
+fn a_player_who_has_just_woken_up_is_shown_three_things_to_do_and_then_left_alone() {
+    use primitive_shared::ladder::{first_step, FirstStep};
+
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let g = GROUND;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(0.5);
+    assert_eq!(first_step(&knowledge(&s)), Some(FirstStep::Stone), "an empty-handed player was told nothing");
+
+    // A stone on the grass, two steps away, and picked up.
+    let stone = (x0 + 2, g + 1, z);
+    s.build(&[(stone, t::BLOCK_PEBBLE)]);
+    s.seconds(0.3);
+    take_by_hand(&mut s, stone);
+    assert!(s.until(3.0, |s| s.inventory.count(t::BLOCK_PEBBLE) >= 1), "the stone did not come up");
+    assert!(
+        s.until(3.0, |s| first_step(&knowledge(s)) == Some(FirstStep::Fibre)),
+        "the stone was in the pack and the game was still asking for a stone",
+    );
+
+    // Tall grass, torn until it gives fibre: a tuft does not always, which
+    // is the game and not the test being unlucky.
+    let mut tufts = Vec::new();
+    for step in 0..8 {
+        tufts.push(((x0 + 2, g + 1, z + 1 + step), t::BLOCK_TALL_GRASS));
+    }
+    s.build(&tufts);
+    s.seconds(0.3);
+    for &(cell, _) in &tufts {
+        if s.inventory.count(t::BLOCK_FIBER) > 0 {
+            break;
+        }
+        take_by_hand(&mut s, cell);
+    }
+    assert!(s.inventory.count(t::BLOCK_FIBER) > 0, "eight tufts of grass gave no fibre at all");
+    assert!(
+        s.until(3.0, |s| first_step(&knowledge(s)) == Some(FirstStep::Flake)),
+        "fibre was in the pack and the game was still asking for grass",
+    );
+
+    // A flint off the gravel, knapped: a third of the strikes shatter the
+    // nodule, so there are several of them, exactly as there would be on a
+    // riverbank.
+    let flints: Vec<_> = (0..6).map(|n| ((x0 + 3, g + 1, z + 1 + n), t::BLOCK_FLINT)).collect();
+    s.build(&flints);
+    s.seconds(0.3);
+    for &(cell, _) in &flints {
+        take_by_hand(&mut s, cell);
+    }
+    assert!(s.until(3.0, |s| s.inventory.count(t::BLOCK_FLINT) >= 4), "the flint did not come up");
+    for _ in 0..6 {
+        if s.inventory.count(t::BLOCK_FLINT_FLAKE) > 0 {
+            break;
+        }
+        craft(&mut s, "flint flakes");
+        s.seconds(0.4);
+    }
+    assert!(s.inventory.count(t::BLOCK_FLINT_FLAKE) > 0, "six nodules and not one flake");
+    assert!(
+        s.until(3.0, |s| first_step(&knowledge(s)).is_none()),
+        "all three were done and the game was still prompting: {:?}",
+        first_step(&knowledge(&s)),
+    );
+
+    // ...and the ladder page agrees with the belt: the stone age is behind
+    // this player and the page says what is above it.
+    let held = knowledge(&s);
+    assert_eq!(
+        primitive_shared::ladder::standing_on(&held).map(|r| r.age),
+        Some(primitive_shared::ladder::Age::Flint),
+        "a knapper's ladder page did not mark the flint age",
+    );
+    s.shot("first_three_things_done");
     no_corrections(&s);
 }

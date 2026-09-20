@@ -67,6 +67,7 @@ pub mod hearth;
 pub mod horse;
 pub mod injury;
 pub mod inventory;
+pub mod ladder;
 pub mod lean_to;
 pub mod lighting;
 pub mod lightning;
