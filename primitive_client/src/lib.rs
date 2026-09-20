@@ -7405,6 +7405,9 @@ fn frame_params(
         time_of_day: sky.time_of_day,
         cloudiness: settings.cloudiness,
         overcast: sky.overcast(),
+        // What the ground is wet by: rain that has actually arrived, not a
+        // deck that has only just closed. See `FrameParams::rain`.
+        rain: sky.rain_arrived(),
         render_origin,
         hurt: hurt_from(health_fraction),
         elapsed_seconds: sky.elapsed(),

@@ -247,6 +247,15 @@ pub struct FrameParams {
     /// `Sky::moon_uniform` -- nought by day, and nought in every tool that
     /// never heard of a moon, which is the night as it was.
     pub moon: [f32; 4],
+    /// How much of the weather's rain has reached the ground, 0..1 --
+    /// `Sky::rain_arrived`, and not `overcast`.
+    ///
+    /// **What the ground is wet by.** A wet surface is much darker than the
+    /// same surface dry, and the cloud arrives well before the first drop
+    /// does, so a deck that has only just closed must not have already
+    /// soaked the meadow under it. Nought in every tool that never heard of
+    /// weather, which is the dry world as it was.
+    pub rain: f32,
 }
 
 impl Default for FrameParams {
@@ -279,6 +288,7 @@ impl Default for FrameParams {
             elapsed_seconds: 0.0,
             cloud_drift: glam::Vec2::ZERO,
             moon: [0.0, 1.0, 0.0, 0.0],
+            rain: 0.0,
         }
     }
 }
@@ -353,6 +363,10 @@ struct Globals {
     /// The moon, as `FrameParams::moon` carries it. Appended, for the reason
     /// `anim` gives.
     moon: [f32; 4],
+    /// x: how much of the weather's rain has reached the ground, 0..1
+    /// (`FrameParams::rain`); y..w spare. Appended, for the reason `anim`
+    /// gives.
+    weather: [f32; 4],
 }
 
 /// The sun's compass bearing for `glow_lobe`: toward the sun, flattened
@@ -3445,6 +3459,7 @@ impl GraphicsState {
                 bearing
             },
             moon: params.moon,
+            weather: [params.rain.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
@@ -15500,6 +15515,7 @@ pub(crate) mod offscreen_repro {
             0.0,
             sky.overcast(),
         ];
+        globals.weather = [sky.rain_arrived(), 0.0, 0.0, 0.0];
         globals.glow_dir = {
             let mut bearing = glow_dir(sky.sun_direction());
             bearing[1] = sky.cloud_drift().x;
@@ -22368,6 +22384,12 @@ mod atlas_split_repro;
 #[cfg(test)]
 #[path = "view_distance_repro.rs"]
 mod view_distance_repro;
+
+/// Why the picture reads as plastic: the world at four hours from four
+/// bearings, through the real passes. A child for the reason `lod_repro` is.
+#[cfg(test)]
+#[path = "look_repro.rs"]
+mod look_repro;
 
 /// The eye swept through a whole y, for lines level with it while jumping.
 #[cfg(test)]
