@@ -8991,8 +8991,17 @@ fn bait_from_the_ground(broken: u16, at: (i32, i32, i32)) -> Option<primitive_sh
     h ^= h >> 30;
     h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h ^= h >> 27;
-    // Bits 20 and 21, well clear of the fibre's ninth.
-    ((h >> 20) & 3 == 0).then_some(bait)
+    // **A worm in one cell of soil in eight, a grub in one tuft in
+    // sixteen**, both well clear of the fibre's ninth bit.
+    //
+    // It was one in four for both, and a player pulling grass for cord --
+    // which is the first thing anybody does, over and over -- came away
+    // with a pocketful of larvae they could not even eat ("личинки падают
+    // слишком часто"). Grass is pulled by the armful and soil is dug by
+    // the block, so the tuft is the rarer of the two: bait should be a
+    // small find, not the yield of the meadow.
+    let mask = if bait == BLOCK_GRUB { 15 } else { 7 };
+    ((h >> 20) & mask == 0).then_some(bait)
 }
 
 /// Did this tuft of grass give fibre?

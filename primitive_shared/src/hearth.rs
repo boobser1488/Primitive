@@ -504,6 +504,9 @@ pub fn needs_degrees(recipe: &Recipe) -> Option<f32> {
         // ...and the shore's two, on the same embers as the fish.
         | BLOCK_COOKED_MUSSELS
         | BLOCK_COOKED_CRAB
+        // ...and a handful of grubs on a hot stone, which is the same
+        // embers and the first thing many players will cook on them.
+        | BLOCK_ROASTED_GRUBS
         | BLOCK_ROAST_HUMAN_FLESH
         | BLOCK_MILLET_PORRIDGE
         | BLOCK_STEW

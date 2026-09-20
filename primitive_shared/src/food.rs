@@ -385,6 +385,13 @@ pub fn nutrition(block: BlockId) -> Option<f32> {
         // chase that could end in a charge. Over the hare, because getting
         // one means being in the water with your breath running out, which
         // is its own price.
+        // **A handful of grubs, raw and roasted.** The meadow's first food,
+        // worth a berry raw and a little over two roasted: below the fish
+        // and far below a haunch, because what it costs is pulling grass,
+        // which a player does anyway for cord. The reason to cook them is
+        // in `sickness_seconds`, not here.
+        crate::types::BLOCK_GRUB => Some(1.0),
+        crate::types::BLOCK_ROASTED_GRUBS => Some(3.0),
         crate::types::BLOCK_RAW_FISH => Some(2.0),
         crate::types::BLOCK_COOKED_FISH => Some(8.0),
         // **A handful of mussels is half a fish, and the bed holds four of
@@ -835,6 +842,11 @@ pub fn sickness_seconds(block: BlockId) -> f32 {
         // Raw flesh, of anything.
         BLOCK_RAW_MEAT | BLOCK_HARE_MEAT | BLOCK_WOLF_MEAT | BLOCK_BEAR_MEAT
         | BLOCK_FOWL_MEAT | BLOCK_RIBS | BLOCK_EGG | BLOCK_RAW_FISH => 45.0,
+        // **A live grub, swallowed.** Half a minute of queasiness: less
+        // than raw flesh, because it is one mouthful of something small,
+        // and not nothing, because the fire is right there and this is the
+        // meadow teaching a beginner to build one.
+        BLOCK_GRUB => 30.0,
         // **Raw shellfish, and it is the worst raw thing here that is not a
         // poison.** Two minutes against raw flesh's three quarters of one,
         // and the reason is the shape of the temptation rather than the
@@ -1001,6 +1013,17 @@ pub fn worth_eating(have: f32, block: BlockId) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_grub_is_a_mouthful_raw_and_a_meal_roasted_and_costs_a_queasy_half_minute_raw() {
+        use crate::types::{BLOCK_GRUB, BLOCK_ROASTED_GRUBS};
+        let raw = nutrition(BLOCK_GRUB).expect("a grub is food");
+        let roast = nutrition(BLOCK_ROASTED_GRUBS).expect("roasted grubs are food");
+        assert!(roast > raw, "the fire did nothing for them");
+        assert!(roast < nutrition(crate::types::BLOCK_COOKED_FISH).unwrap(), "a handful of insects beats a fish");
+        assert!(sickness_seconds(BLOCK_GRUB) > 0.0, "eating a live grub costs nothing");
+        assert_eq!(sickness_seconds(BLOCK_ROASTED_GRUBS), 0.0, "the fire did not make them safe");
+    }
     use super::*;
     use crate::types::{BLOCK_COBBLESTONE, BLOCK_STONE_PICKAXE};
 

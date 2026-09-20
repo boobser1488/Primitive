@@ -566,6 +566,7 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "fishing_rod", en: "Fishing rod", simple: "Fishing rod", ru: "Удочка", pl: "Wędka" },
     Name { id: "worm", en: "Worm", simple: "Worm", ru: "Червь", pl: "Robak" },
     Name { id: "grub", en: "Grub", simple: "Bug", ru: "Личинка", pl: "Larwa" },
+    Name { id: "roasted grubs", en: "Roasted grubs", simple: "Cooked bugs", ru: "Жареные личинки", pl: "Pieczone larwy" },
     Name { id: "fishing_fly", en: "Fishing fly", simple: "Fly lure", ru: "Мушка", pl: "Mucha wędkarska" },
     Name { id: "copper_hook", en: "Copper hook", simple: "Fish hook", ru: "Медный крючок", pl: "Miedziany haczyk" },
     Name { id: "rotten", en: "Rotten food", simple: "Rotten food", ru: "Гниль", pl: "Zgnilizna" },

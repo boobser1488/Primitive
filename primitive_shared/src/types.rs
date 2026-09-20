@@ -3522,6 +3522,19 @@ pub const BLOCK_MUSSEL_BED: BlockId = 300;
 /// ...and the rock with the last of them off it. See `BLOCK_MUSSEL_BED`.
 pub const BLOCK_MUSSEL_ROCK: BlockId = 306;
 /// **Mussels**, a handful of them, as they come off the rock. Food, and food
+/// **Grubs roasted on a stone by the fire**: a handful of the fat white
+/// larvae out of a tuft of grass, turned on the heat until they crisp.
+///
+/// **Food that is there before anything else is.** A player with no fire,
+/// no spear and no hook still turns up grubs while pulling grass for cord,
+/// and until now they could only go on a hook (`fishing::Bait::Grub`) --
+/// which is a fine second use for a thing a hungry beginner is holding and
+/// a strange only one. Raw they are a mouthful with a price
+/// (`food::sickness_seconds`); over a fire they are the first cooked meal
+/// the meadow gives, and still a poor one beside a haunch, because a
+/// handful of insects is what it is.
+pub const BLOCK_ROASTED_GRUBS: BlockId = 36;
+
 /// that has to be cooked: see `food::sickness_seconds`.
 pub const BLOCK_MUSSELS: BlockId = 301;
 /// ...and the same handful opened over a fire.

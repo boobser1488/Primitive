@@ -109,6 +109,7 @@ stick = "plants/stick.png"
 # See `fishing::Bait`.
 worm = "plants/worm.png"
 grub = "plants/grub.png"
+roasted_grubs = "plants/roasted_grubs.png"
 fishing_fly = "plants/fishing_fly.png"
 
 cactus = { top = "plants/cactus_top.png", bottom = "plants/cactus_top.png", side = "plants/cactus.png" }

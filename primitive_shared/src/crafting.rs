@@ -1358,6 +1358,17 @@ pub const RECIPES: &[Recipe] = &[
         returns: &[],
         failure: 0.0,
     },
+    // **Three grubs make a handful.** One larva on a stone is not a meal
+    // and would make the fire a formality; three is what a tuft or two of
+    // grass gives, which is the walk this food is worth.
+    Recipe {
+        name: "roast grubs",
+        inputs: &[(crate::types::BLOCK_GRUB, 3)],
+        output: (crate::types::BLOCK_ROASTED_GRUBS, 1),
+        station: Station::Heat,
+        returns: &[],
+        failure: 0.0,
+    },
     Recipe {
         name: "cook fish",
         inputs: &[(crate::types::BLOCK_RAW_FISH, 1)],
