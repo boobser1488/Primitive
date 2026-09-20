@@ -4747,6 +4747,7 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     // ...and what goes on the hook. See `fishing::Bait`.
     (BLOCK_WORM, "worm"),
     (BLOCK_GRUB, "grub"),
+    (BLOCK_ROASTED_GRUBS, "roasted grubs"),
     (BLOCK_FISHING_FLY, "fishing_fly"),
     (BLOCK_ROTTEN, "rotten"),
     (BLOCK_DUNG, "dung"),
