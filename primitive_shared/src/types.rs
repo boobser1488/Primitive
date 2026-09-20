@@ -4747,6 +4747,11 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     // ...and what goes on the hook. See `fishing::Bait`.
     (BLOCK_WORM, "worm"),
     (BLOCK_GRUB, "grub"),
+    // ...and the handful crisped on the fire, which is a thing in the pack
+    // like any other cooked food. Left out when the grubs were added, which
+    // took the texture out of the atlas, the name out of the interface and
+    // the item out of the give menu all at once.
+    (BLOCK_ROASTED_GRUBS, "roasted_grubs"),
     (BLOCK_FISHING_FLY, "fishing_fly"),
     (BLOCK_ROTTEN, "rotten"),
     (BLOCK_DUNG, "dung"),

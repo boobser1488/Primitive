@@ -61,6 +61,7 @@ pub const TEXTURES: &[(&str, &[u8])] = &[
     ("plants/stick.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/plants/stick.png"))),
     ("plants/worm.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/plants/worm.png"))),
     ("plants/grub.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/plants/grub.png"))),
+    ("plants/roasted_grubs.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/plants/roasted_grubs.png"))),
     ("plants/fishing_fly.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/plants/fishing_fly.png"))),
     ("plants/fiber.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/plants/fiber.png"))),
     ("plants/moss_patch.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/plants/moss_patch.png"))),
