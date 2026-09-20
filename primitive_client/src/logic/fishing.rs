@@ -146,10 +146,13 @@ impl Notice {
             Notice::TrapEmpty => Msg::FishTrapEmpty,
             Notice::TrapDry => Msg::FishTrapDry,
             Notice::NoWater => Msg::FishingNoWater,
-            Notice::SnareEmpty => Msg::SnareEmpty,
-            Notice::PanDrying => Msg::PanDrying,
-            Notice::PanWantsSea => Msg::PanWantsSea,
-            Notice::PanFreshWater => Msg::PanFreshWater,
+            // The server refuses these four as well, and says the same
+            // words (`notice::Notice`). One row for both, rather than the
+            // client's copy drifting from the server's.
+            Notice::SnareEmpty => Msg::Notice(primitive_shared::notice::Notice::SnareEmpty),
+            Notice::PanDrying => Msg::Notice(primitive_shared::notice::Notice::PanDrying),
+            Notice::PanWantsSea => Msg::Notice(primitive_shared::notice::Notice::PanWantsSea),
+            Notice::PanFreshWater => Msg::Notice(primitive_shared::notice::Notice::PanFreshWater),
         }
     }
 }

@@ -114,6 +114,27 @@ pub enum Notice {
     /// **A monkey has taken what was in your hand.** Appended, like every
     /// notice before it, because the index is on the wire.
     MonkeyTakesIt,
+    // ---- the last six English sentences the server was sending ----
+    //
+    // These were `ServerMessage::Error(String)` with the words written into
+    // the server in English, which is a Russian player being answered in a
+    // language they did not choose. Four of them the client could already
+    // say in four languages -- it refuses the same gestures itself, before
+    // asking (`logic::fishing::Notice`) -- and it only ever saw the English
+    // when its guess and the server's disagreed, which is exactly the
+    // moment nobody is looking for a translation bug.
+    /// A snare that is set and has caught nothing.
+    SnareEmpty,
+    /// A salt pan of sea water that has not finished drying.
+    PanDrying,
+    /// An empty salt pan, and no jug of water in the hand.
+    PanWantsSea,
+    /// An empty salt pan, and a jug of fresh water in the hand.
+    PanFreshWater,
+    /// **Said once, at the swallow.** Drinking from the sea.
+    SeaWaterIsSalt,
+    /// The same, for standing water.
+    StaleWater,
 }
 
 impl Notice {
@@ -187,6 +208,12 @@ impl Notice {
         Notice::SetDownOnSolidGround,
         Notice::RaftNeedsOpenWater,
         Notice::MonkeyTakesIt,
+        Notice::SnareEmpty,
+        Notice::PanDrying,
+        Notice::PanWantsSea,
+        Notice::PanFreshWater,
+        Notice::SeaWaterIsSalt,
+        Notice::StaleWater,
     ];
 
     /// Whether this is news rather than a refusal: said the same way, but
@@ -202,6 +229,11 @@ impl Notice {
                 // News, and the worst news the shore has: nothing was
                 // refused, something was taken.
                 | Notice::MonkeyTakesIt
+                // Nothing was refused: the water went down. What these say
+                // is what it will cost, said at the swallow rather than an
+                // hour later when the sickness starts.
+                | Notice::SeaWaterIsSalt
+                | Notice::StaleWater
         )
     }
 }
@@ -215,8 +247,11 @@ mod tests {
     #[test]
     fn every_notice_is_in_the_list_the_translations_are_checked_against() {
         // The last variant's index is the count: the list must be as long,
-        // and hold no notice twice.
-        assert_eq!(Notice::ALL.len(), Notice::MonkeyTakesIt as usize + 1);
+        // and hold no notice twice. **Name the last one here when you
+        // append one** -- that is the whole check, and a notice appended
+        // to the enum and forgotten in `ALL` is a notice the client is
+        // never asked to have words for.
+        assert_eq!(Notice::ALL.len(), Notice::StaleWater as usize + 1);
         for (i, notice) in Notice::ALL.iter().enumerate() {
             assert_eq!(*notice as usize, i, "{notice:?} is out of place in `ALL`");
         }

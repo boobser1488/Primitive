@@ -334,21 +334,43 @@ const DEATHS: &[Name] = &[
 ];
 
 /// Conditions, keyed by the English the rules print.
+///
+/// **Nothing here is an adjective in Russian or Polish**, and that is the
+/// whole design of the table. A condition is printed in brackets after
+/// whatever the stack is called -- "Медная кирка (…)", "Форма для слитка
+/// (…)", "Сосновое бревно (…)" -- and one row has to serve all of them.
+/// These used to be adjectives agreed with nothing: `затуплен` is
+/// masculine, and half the blades in this game are feminine (кирка, пила,
+/// стамеска) or neuter (копьё); `сырая` is feminine, and it was printed
+/// after `Сырой кирпич` and after `Сосновое бревно`. Polish had the same
+/// hole, with `stępiony` over `piła` and `łopata`.
+///
+/// So an edge says what is wrong with *the edge* (`заточка села`, `ostrze
+/// tępe`), and a stage of drying is said impersonally (`сыро`, `mokro`) --
+/// forms that do not decline and are therefore right after any noun. The
+/// alternative considered and rejected was three columns a language, one
+/// per gender: it would be sixty more strings to keep in step and it would
+/// still be wrong for a plural like `Доски`.
 const CONDITIONS: &[Name] = &[
     Name { id: "clean water", en: "clean water", simple: "clean water", ru: "чистая вода", pl: "czysta woda" },
     Name { id: "pond water", en: "pond water", simple: "still water", ru: "стоячая вода", pl: "stojąca woda" },
     Name { id: "sea water", en: "sea water", simple: "salt water", ru: "морская вода", pl: "morska woda" },
-    Name { id: "dulled", en: "dulled", simple: "a little blunt", ru: "чуть затуплен", pl: "lekko stępiony" },
-    Name { id: "dull", en: "dull", simple: "blunt", ru: "затуплен", pl: "stępiony" },
-    Name { id: "blunt", en: "blunt", simple: "very blunt", ru: "тупой", pl: "tępy" },
-    Name { id: "steeled", en: "steeled", simple: "hardened", ru: "закалён", pl: "hartowany" },
-    Name { id: "steeled, dulled", en: "steeled, dulled", simple: "hardened, a little blunt", ru: "закалён, чуть затуплен", pl: "hartowany, lekko stępiony" },
-    Name { id: "steeled, dull", en: "steeled, dull", simple: "hardened, blunt", ru: "закалён, затуплен", pl: "hartowany, stępiony" },
-    Name { id: "steeled, blunt", en: "steeled, blunt", simple: "hardened, very blunt", ru: "закалён, тупой", pl: "hartowany, tępy" },
-    Name { id: "wet", en: "wet", simple: "still wet", ru: "сырая", pl: "mokra" },
-    Name { id: "leather-hard", en: "leather-hard", simple: "half dry", ru: "подсохшая", pl: "podeschnięta" },
-    Name { id: "bone-dry", en: "bone-dry", simple: "dry, ready to fire", ru: "сухая", pl: "sucha" },
-    Name { id: "green", en: "green", simple: "fresh cut, wet", ru: "сырое", pl: "surowe" },
+    Name { id: "dulled", en: "dulled", simple: "a little blunt", ru: "заточка села", pl: "ostrze przytępione" },
+    Name { id: "dull", en: "dull", simple: "blunt", ru: "нужна заточка", pl: "ostrze tępe" },
+    Name { id: "blunt", en: "blunt", simple: "very blunt", ru: "заточки нет", pl: "ostrze całkiem tępe" },
+    Name { id: "steeled", en: "steeled", simple: "hardened", ru: "закалка", pl: "ostrze hartowane" },
+    Name { id: "steeled, dulled", en: "steeled, dulled", simple: "hardened, a little blunt", ru: "закалка, заточка села", pl: "ostrze hartowane, przytępione" },
+    Name { id: "steeled, dull", en: "steeled, dull", simple: "hardened, blunt", ru: "закалка, нужна заточка", pl: "ostrze hartowane, tępe" },
+    Name { id: "steeled, blunt", en: "steeled, blunt", simple: "hardened, very blunt", ru: "закалка, заточки нет", pl: "ostrze hartowane, całkiem tępe" },
+    // One row, and it has to fit both clay that has not dried and firewood
+    // that has been rained on: `clay::label` and `wet::label` both print
+    // "wet", so there is only ever one row for it. There used to be two --
+    // `сырая` and `мокрое` -- and `find` took the first, which meant the
+    // second was dead and every wet log in the game was feminine.
+    Name { id: "wet", en: "wet", simple: "still wet", ru: "сыро", pl: "mokro" },
+    Name { id: "leather-hard", en: "leather-hard", simple: "half dry", ru: "почти сухо", pl: "prawie sucho" },
+    Name { id: "bone-dry", en: "bone-dry", simple: "dry, ready to fire", ru: "сухо", pl: "sucho" },
+    Name { id: "green", en: "green", simple: "fresh cut, wet", ru: "свежий спил", pl: "świeże drewno" },
     Name { id: "seasoning", en: "seasoning", simple: "drying out", ru: "подсыхает", pl: "schnie" },
     // A young cheese and a jug of must, by how far along they are
     // (`ferment::label`). Both nouns are masculine in Russian and Polish
@@ -356,7 +378,6 @@ const CONDITIONS: &[Name] = &[
     Name { id: "fresh", en: "fresh", simple: "just made", ru: "свежий", pl: "świeży" },
     Name { id: "working", en: "working", simple: "ripening", ru: "зреет", pl: "dojrzewa" },
     Name { id: "nearly done", en: "nearly done", simple: "almost ready", ru: "почти готов", pl: "prawie gotowy" },
-    Name { id: "wet", en: "wet", simple: "wet, dry it first", ru: "мокрое", pl: "mokre" },
 ];
 
 /// Every block and item, in `ALL_BLOCK_IDS`'s order so a new row has an
@@ -445,8 +466,8 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "dough", en: "Dough", simple: "Dough", ru: "Тесто", pl: "Ciasto" },
     Name { id: "bread", en: "Bread", simple: "Bread", ru: "Хлеб", pl: "Chleb" },
     Name { id: "native_copper", en: "Native copper", simple: "Copper nugget", ru: "Самородная медь", pl: "Miedź rodzima" },
-    Name { id: "vessel_raw", en: "Unfired crucible", simple: "Wet clay pot", ru: "Сырой горшок", pl: "Surowy tygiel" },
-    Name { id: "vessel", en: "Crucible", simple: "Melting pot", ru: "Горшок", pl: "Tygiel" },
+    Name { id: "vessel_raw", en: "Unfired crucible", simple: "Wet clay pot", ru: "Сырой тигель", pl: "Surowy tygiel" },
+    Name { id: "vessel", en: "Crucible", simple: "Melting pot", ru: "Тигель", pl: "Tygiel" },
     Name { id: "mould_raw", en: "Unfired mould", simple: "Wet clay mould", ru: "Сырая форма", pl: "Surowa forma" },
     Name { id: "mould", en: "Ingot mould", simple: "Bar mould", ru: "Форма для слитка", pl: "Forma na sztabkę" },
     Name { id: "bloomery", en: "Bloomery", simple: "Iron furnace", ru: "Домница", pl: "Dymarka" },
@@ -509,7 +530,7 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "dried_meat", en: "Dried meat", simple: "Dried meat", ru: "Вяленое мясо", pl: "Suszone mięso" },
     Name { id: "planter", en: "Planter", simple: "Pot of earth", ru: "Горшок с землёй", pl: "Donica" },
     Name { id: "prop", en: "Pit prop", simple: "Roof post", ru: "Подпорка", pl: "Stempel" },
-    Name { id: "stake", en: "Stake", simple: "Sharpened pole", ru: "Кол", pl: "Kołek" },
+    Name { id: "stake", en: "Stake", simple: "Sharpened pole", ru: "Кол", pl: "Palik" },
     Name { id: "window_lattice", en: "Window lattice", simple: "Window grid", ru: "Оконная решётка", pl: "Krata okienna" },
     Name { id: "salt", en: "Salt", simple: "Salt", ru: "Соль", pl: "Sól" },
     Name { id: "salted_meat", en: "Salted meat", simple: "Meat in salt", ru: "Солёное мясо", pl: "Solone mięso" },
@@ -566,7 +587,7 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "fishing_rod", en: "Fishing rod", simple: "Fishing rod", ru: "Удочка", pl: "Wędka" },
     Name { id: "worm", en: "Worm", simple: "Worm", ru: "Червь", pl: "Robak" },
     Name { id: "grub", en: "Grub", simple: "Bug", ru: "Личинка", pl: "Larwa" },
-    Name { id: "roasted grubs", en: "Roasted grubs", simple: "Cooked bugs", ru: "Жареные личинки", pl: "Pieczone larwy" },
+    Name { id: "roasted_grubs", en: "Roasted grubs", simple: "Cooked bugs", ru: "Жареные личинки", pl: "Pieczone larwy" },
     Name { id: "fishing_fly", en: "Fishing fly", simple: "Fly lure", ru: "Мушка", pl: "Mucha wędkarska" },
     Name { id: "copper_hook", en: "Copper hook", simple: "Fish hook", ru: "Медный крючок", pl: "Miedziany haczyk" },
     Name { id: "rotten", en: "Rotten food", simple: "Rotten food", ru: "Гниль", pl: "Zgnilizna" },
@@ -615,7 +636,7 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "workbench", en: "Workbench", simple: "Work table", ru: "Верстак", pl: "Warsztat" },
     Name { id: "mason_block", en: "Mason's block", simple: "Stone work block", ru: "Колода каменотёса", pl: "Blok kamieniarski" },
     Name { id: "potters_wheel", en: "Potter's wheel", simple: "Clay wheel", ru: "Гончарный круг", pl: "Koło garncarskie" },
-    Name { id: "leather_bench", en: "Leather bench", simple: "Leather table", ru: "Скорняжный стол", pl: "Stół rymarski" },
+    Name { id: "leather_bench", en: "Leather bench", simple: "Leather table", ru: "Кожевенный стол", pl: "Stół rymarski" },
     Name { id: "stall", en: "Barter stall", simple: "Trading table", ru: "Меновой прилавок", pl: "Stragan wymienny" },
     Name { id: "anvil", en: "Anvil", simple: "Anvil", ru: "Наковальня", pl: "Kowadło" },
     Name { id: "stone_hammer", en: "Stone hammer", simple: "Stone hammer", ru: "Каменный молот", pl: "Kamienny młot" },
@@ -628,7 +649,7 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "iron_saw", en: "Iron saw", simple: "Iron saw", ru: "Железная пила", pl: "Żelazna piła" },
     Name { id: "sawhorse", en: "Sawhorse", simple: "Sawing trestle", ru: "Козлы", pl: "Kozioł stolarski" },
     Name { id: "lean_to", en: "Lean-to", simple: "Leaf hut for one night", ru: "Шалаш", pl: "Szałas" },
-    Name { id: "honing_stone", en: "Honing stone", simple: "Big sharpening stone", ru: "Точильная колода", pl: "Kamień szlifierski" },
+    Name { id: "honing_stone", en: "Honing stone", simple: "Big sharpening stone", ru: "Точило", pl: "Kamień szlifierski" },
     Name { id: "curd", en: "Young cheese", simple: "New cheese, not ripe", ru: "Молодой сыр", pl: "Młody ser" },
     Name { id: "cheese", en: "Cheese", simple: "Ripe cheese", ru: "Сыр", pl: "Ser" },
     Name { id: "jug_must", en: "Jug of must", simple: "Jug of honey water, working", ru: "Кувшин сусла", pl: "Dzban nastawu" },
@@ -654,7 +675,7 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "thatch_roof", en: "Thatched roof", simple: "Grass roof", ru: "Соломенная крыша", pl: "Dach kryty strzechą" },
     Name { id: "thatch_slab", en: "Thatch", simple: "Grass roof", ru: "Соломенная кровля", pl: "Strzecha" },
     Name { id: "branch_roof", en: "Branch roof", simple: "Stick roof", ru: "Крыша из веток", pl: "Dach z gałęzi" },
-    Name { id: "branch_slab", en: "Branch roofing", simple: "Sticks and leaves roof", ru: "Кровля из веток", pl: "Dach z gałęzi" },
+    Name { id: "branch_slab", en: "Branch roofing", simple: "Sticks and leaves roof", ru: "Кровля из веток", pl: "Poszycie z gałęzi" },
     Name { id: "door", en: "Door", simple: "Door", ru: "Дверь", pl: "Drzwi" },
     Name { id: "door_top", en: "Top of a door", simple: "Top of a door", ru: "Верх двери", pl: "Górna część drzwi" },
     Name { id: "bush_leaves", en: "Bush leaves", simple: "Bush", ru: "Листва кустарника", pl: "Liście krzewu" },
@@ -747,7 +768,7 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "nettle", en: "Nettle", simple: "Nettle", ru: "Крапива", pl: "Pokrzywa" },
     Name { id: "bracken", en: "Bracken", simple: "Tall fern", ru: "Орляк", pl: "Orlica" },
     Name { id: "arundo", en: "Giant reed", simple: "Tall reed", ru: "Арундо", pl: "Arundo" },
-    Name { id: "cane", en: "Cane", simple: "Reed cane", ru: "Трость", pl: "Trzcina" },
+    Name { id: "cane", en: "Cane", simple: "Tall reed", ru: "Тростник", pl: "Trzcina" },
     Name { id: "bilberry", en: "Bilberry", simple: "Bilberry bush", ru: "Черника", pl: "Borówka" },
     Name { id: "bilberry_bare", en: "Picked bilberry", simple: "Bilberry with no berries", ru: "Обобранная черника", pl: "Obrana borówka" },
     Name { id: "strawberry", en: "Wild strawberry", simple: "Wild strawberry", ru: "Земляника", pl: "Poziomka" },
@@ -824,7 +845,7 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "tuff_gravel", en: "Tuff gravel", simple: "Tuff gravel", ru: "Туфовый гравий", pl: "Tufowy żwir" },
     Name { id: "tuff_sand", en: "Tuff sand", simple: "Tuff sand", ru: "Туфовый песок", pl: "Tufowy piasek" },
     Name { id: "tuff_pebble", en: "Tuff pebble", simple: "Tuff small stone", ru: "Туфовый камушек", pl: "Tufowy kamyk" },
-    Name { id: "loam", en: "Loam", simple: "Brown earth", ru: "Суглинок", pl: "Glina" },
+    Name { id: "loam", en: "Loam", simple: "Brown earth", ru: "Суглинок", pl: "Gleba gliniasta" },
     Name { id: "chernozem", en: "Chernozem", simple: "Black earth", ru: "Чернозём", pl: "Czarnoziem" },
     Name { id: "podzol", en: "Podzol", simple: "Ashy earth", ru: "Подзол", pl: "Bielica" },
     Name { id: "laterite", en: "Laterite", simple: "Red hard earth", ru: "Латерит", pl: "Lateryt" },
@@ -904,9 +925,9 @@ pub const RECIPES: &[Name] = &[
     Name { id: "flint knife", en: "Flint knife", simple: "Flint knife", ru: "Кремнёвый нож", pl: "Krzemienny nóż" },
     Name { id: "torch", en: "Torch", simple: "Torch", ru: "Факел", pl: "Pochodnia" },
     Name { id: "haft torch", en: "Haft torch", simple: "Torch on a shaped stick", ru: "Факел на древке", pl: "Pochodnia na drzewcu" },
-    Name { id: "rewad torch", en: "Rewad torch", simple: "New grass on a torch", ru: "Новая обмотка факела", pl: "Nowa owijka pochodni" },
+    Name { id: "rewad torch", en: "Rewrap a torch", simple: "New grass on a torch", ru: "Новая обмотка факела", pl: "Nowa owijka pochodni" },
     Name { id: "fungus torch", en: "Fungus torch", simple: "Tree fungus torch", ru: "Факел с трутовиком", pl: "Pochodnia z hubą" },
-    Name { id: "fungus rewad", en: "Fungus rewad", simple: "New fungus on a torch", ru: "Обмотка трутовиком", pl: "Owijka z huby" },
+    Name { id: "fungus rewad", en: "Rewrap with fungus", simple: "New fungus on a torch", ru: "Обмотка трутовиком", pl: "Owijka z huby" },
     Name { id: "stone axe", en: "Stone axe", simple: "Stone axe", ru: "Каменный топор", pl: "Kamienny topór" },
     Name { id: "sinewed axe", en: "Sinewed axe", simple: "Axe tied with animal string", ru: "Топор на жиле", pl: "Topór na ścięgnie" },
     Name { id: "sinewed pick", en: "Sinewed pick", simple: "Pick tied with animal string", ru: "Кирка на жиле", pl: "Kilof na ścięgnie" },
@@ -917,10 +938,10 @@ pub const RECIPES: &[Name] = &[
     Name { id: "wedged pick", en: "Wedged pick", simple: "Strong stone pick", ru: "Расклиненная кирка", pl: "Kilof klinowany" },
     Name { id: "flint spear", en: "Flint spear", simple: "Flint spear", ru: "Кремнёвое копьё", pl: "Włócznia krzemienna" },
     Name { id: "poison spear", en: "Poison spear", simple: "Poison on a flint spear", ru: "Отравленное копьё", pl: "Zatruta włócznia" },
-    Name { id: "poison bone", en: "Poison bone spear", simple: "Poison on a bone spear", ru: "Отравленное костяное", pl: "Zatruta kościana" },
-    Name { id: "poison copper", en: "Poison copper spear", simple: "Poison on a copper spear", ru: "Отравленное медное", pl: "Zatruta miedziana" },
-    Name { id: "poison bronze", en: "Poison bronze spear", simple: "Poison on a bronze spear", ru: "Отравленное бронзовое", pl: "Zatruta z brązu" },
-    Name { id: "poison iron", en: "Poison iron spear", simple: "Poison on an iron spear", ru: "Отравленное железное", pl: "Zatruta żelazna" },
+    Name { id: "poison bone", en: "Poison bone spear", simple: "Poison on a bone spear", ru: "Костяное копьё с ядом", pl: "Zatruta kościana" },
+    Name { id: "poison copper", en: "Poison copper spear", simple: "Poison on a copper spear", ru: "Медное копьё с ядом", pl: "Zatruta miedziana" },
+    Name { id: "poison bronze", en: "Poison bronze spear", simple: "Poison on a bronze spear", ru: "Бронзовое копьё с ядом", pl: "Zatruta z brązu" },
+    Name { id: "poison iron", en: "Poison iron spear", simple: "Poison on an iron spear", ru: "Железное копьё с ядом", pl: "Zatruta żelazna" },
     Name { id: "bone spear", en: "Bone spear", simple: "Bone spear", ru: "Костяное копьё", pl: "Włócznia kościana" },
     Name { id: "copper spear", en: "Copper spear", simple: "Copper spear", ru: "Медное копьё", pl: "Włócznia miedziana" },
     Name { id: "bronze spear", en: "Bronze spear", simple: "Bronze spear", ru: "Бронзовое копьё", pl: "Włócznia z brązu" },
@@ -946,6 +967,7 @@ pub const RECIPES: &[Name] = &[
     Name { id: "roast grubs", en: "Roast grubs", simple: "Cook bugs", ru: "Пожарить личинок", pl: "Upiec larwy" },
     Name { id: "cook mussels", en: "Cooked mussels", simple: "Cooked mussels", ru: "Печёные мидии", pl: "Pieczone omułki" },
     Name { id: "cook crab", en: "Cooked crab", simple: "Cooked crab", ru: "Печёный краб", pl: "Pieczony krab" },
+    Name { id: "roast grubs", en: "Roast grubs", simple: "Cook the bugs", ru: "Пожарить личинок", pl: "Upiec larwy" },
     Name { id: "planter", en: "Planter", simple: "Pot of earth", ru: "Горшок с землёй", pl: "Donica" },
     Name { id: "pit prop", en: "Pit prop", simple: "Roof post", ru: "Подпорка", pl: "Stempel" },
     Name { id: "stakes", en: "Stakes", simple: "Sharpened poles", ru: "Колья", pl: "Kołki" },
@@ -962,7 +984,7 @@ pub const RECIPES: &[Name] = &[
     Name { id: "pared table", en: "Chiselled table", simple: "Table with a chisel", ru: "Стол стамеской", pl: "Stół dłutem" },
     Name { id: "pared bed", en: "Chiselled bed", simple: "Bed with a chisel", ru: "Кровать стамеской", pl: "Łóżko dłutem" },
     Name { id: "dressed ashlar", en: "Dressed ashlar", simple: "Better stone blocks", ru: "Тёсаный камень", pl: "Ciosany kamień" },
-    Name { id: "struck hones", en: "Struck hones", simple: "More sharpening stones", ru: "Колотые точильные камни", pl: "Odbite osełki" },
+    Name { id: "struck hones", en: "Struck hones", simple: "More sharpening stones", ru: "Отбитые точильные камни", pl: "Odbite osełki" },
     Name { id: "fishing fly", en: "Fishing fly", simple: "Fly lure", ru: "Мушка", pl: "Mucha wędkarska" },
     Name { id: "boil salt", en: "Boil salt", simple: "Salt from sea water", ru: "Выпарить соль", pl: "Wywarzyć sól" },
     Name { id: "salt meat", en: "Salt meat", simple: "Meat in salt", ru: "Засолить мясо", pl: "Zasolić mięso" },
@@ -970,7 +992,7 @@ pub const RECIPES: &[Name] = &[
     Name { id: "roast ribs", en: "Roast ribs", simple: "Cooked ribs", ru: "Жареные рёбра", pl: "Pieczone żeberka" },
     Name { id: "standing torch", en: "Standing torch", simple: "Torch on a pole", ru: "Факел на шесте", pl: "Pochodnia na tyczce" },
     Name { id: "fat torch", en: "Fat torch", simple: "Torch with fat", ru: "Факел с жиром", pl: "Pochodnia z łojem" },
-    Name { id: "fat rewad", en: "Fat rewad", simple: "New fat on a torch", ru: "Обмотка с жиром", pl: "Owijka z łojem" },
+    Name { id: "fat rewad", en: "Rewrap with fat", simple: "New fat on a torch", ru: "Обмотка с жиром", pl: "Owijka z łojem" },
     Name { id: "copper knife", en: "Copper knife", simple: "Copper knife", ru: "Медный нож", pl: "Miedziany nóż" },
     Name { id: "hoe casting", en: "Hoe casting", simple: "Poured hoe blade", ru: "Отливка мотыги", pl: "Odlew motyki" },
     Name { id: "shovel casting", en: "Shovel casting", simple: "Poured shovel blade", ru: "Отливка лопаты", pl: "Odlew łopaty" },
@@ -996,8 +1018,8 @@ pub const RECIPES: &[Name] = &[
     Name { id: "grind grain", en: "Ground grain", simple: "Flour", ru: "Помол зерна", pl: "Mielenie ziarna" },
     Name { id: "dough", en: "Dough", simple: "Dough", ru: "Тесто", pl: "Ciasto" },
     Name { id: "bread", en: "Bread", simple: "Bread", ru: "Хлеб", pl: "Chleb" },
-    Name { id: "clay vessel", en: "Clay crucible", simple: "Wet clay pot", ru: "Сырой горшок", pl: "Gliniany tygiel" },
-    Name { id: "fire vessel", en: "Fired crucible", simple: "Baked melting pot", ru: "Обжиг горшка", pl: "Wypalanie tygla" },
+    Name { id: "clay vessel", en: "Clay crucible", simple: "Wet clay pot", ru: "Сырой тигель", pl: "Gliniany tygiel" },
+    Name { id: "fire vessel", en: "Fired crucible", simple: "Baked melting pot", ru: "Обжиг тигля", pl: "Wypalanie tygla" },
     Name { id: "ingot mould", en: "Ingot mould", simple: "Bar mould", ru: "Форма для слитка", pl: "Forma na sztabkę" },
     Name { id: "fire mould", en: "Fired mould", simple: "Baked bar mould", ru: "Обжиг формы", pl: "Wypalanie formy" },
     Name { id: "bloomery", en: "Bloomery", simple: "Iron furnace", ru: "Домница", pl: "Dymarka" },
@@ -1071,7 +1093,7 @@ pub const RECIPES: &[Name] = &[
     Name { id: "sawn willow", en: "Sawn willow", simple: "Willow boards cut with a saw", ru: "Пилёная ива", pl: "Piłowana wierzba" },
     Name { id: "sawhorse", en: "Sawhorse", simple: "Sawing trestle", ru: "Козлы", pl: "Kozioł stolarski" },
     Name { id: "lean-to", en: "Lean-to", simple: "Leaf hut for one night", ru: "Шалаш", pl: "Szałas" },
-    Name { id: "honing stone", en: "Honing stone", simple: "Big sharpening stone", ru: "Точильная колода", pl: "Kamień szlifierski" },
+    Name { id: "honing stone", en: "Honing stone", simple: "Big sharpening stone", ru: "Точило", pl: "Kamień szlifierski" },
     Name { id: "press cheese", en: "Press cheese", simple: "Make cheese from milk", ru: "Отжать сыр", pl: "Odcisnąć ser" },
     Name { id: "set mead", en: "Set mead", simple: "Mix honey and water to brew", ru: "Поставить медовуху", pl: "Nastawić miód pitny" },
     Name { id: "pemmican", en: "Pemmican", simple: "Dried meat pounded with fat", ru: "Пеммикан", pl: "Pemikan" },
@@ -1094,11 +1116,11 @@ pub const RECIPES: &[Name] = &[
     Name { id: "workbench", en: "Workbench", simple: "Work table", ru: "Верстак", pl: "Warsztat" },
     Name { id: "mason block", en: "Mason's block", simple: "Stone work block", ru: "Колода каменотёса", pl: "Blok kamieniarski" },
     Name { id: "potter's wheel", en: "Potter's wheel", simple: "Clay wheel", ru: "Гончарный круг", pl: "Koło garncarskie" },
-    Name { id: "leather bench", en: "Leather bench", simple: "Leather table", ru: "Скорняжный стол", pl: "Stół rymarski" },
+    Name { id: "leather bench", en: "Leather bench", simple: "Leather table", ru: "Кожевенный стол", pl: "Stół rymarski" },
     Name { id: "bench frame", en: "Bench frame", simple: "Frame without flint", ru: "Рама на верстаке", pl: "Rama przy warsztacie" },
     Name { id: "quern flour", en: "Quern flour", simple: "Flour ground on stone", ru: "Мука с зернотёрки", pl: "Mąka z żaren" },
     Name { id: "ashlar", en: "Ashlar", simple: "Cut stone bricks", ru: "Тёсаный камень", pl: "Ciosy" },
-    Name { id: "split hones", en: "Split hones", simple: "Three whetstones", ru: "Колотые оселки", pl: "Łupane osełki" },
+    Name { id: "split hones", en: "Split hones", simple: "Three whetstones", ru: "Колотые точильные камни", pl: "Łupane osełki" },
     Name { id: "thrown vessel", en: "Thrown crucible", simple: "Wheel-made melting pot", ru: "Тигель на круге", pl: "Tygiel z koła" },
     Name { id: "thrown jug", en: "Thrown jug", simple: "Wheel-made jug", ru: "Кувшин на круге", pl: "Dzban z koła" },
     Name { id: "pinched bowl", en: "Pinched bowl", simple: "Clay bowl by hand", ru: "Лепная миска", pl: "Lepiona miska" },
@@ -1115,7 +1137,7 @@ pub const RECIPES: &[Name] = &[
     Name { id: "tiled roof", en: "Tiled roof", simple: "Clay roof", ru: "Черепичная крыша", pl: "Dach z dachówki" },
     Name { id: "thatch roof", en: "Thatch roof", simple: "Grass roof", ru: "Соломенная кровля", pl: "Strzecha" },
     Name { id: "thatched roof", en: "Thatched roof", simple: "Grass roof", ru: "Соломенная крыша", pl: "Dach kryty strzechą" },
-    Name { id: "branch roofing", en: "Branch roofing", simple: "Sticks and leaves roof", ru: "Кровля из веток", pl: "Dach z gałęzi" },
+    Name { id: "branch roofing", en: "Branch roofing", simple: "Sticks and leaves roof", ru: "Кровля из веток", pl: "Poszycie z gałęzi" },
     Name { id: "branch roof", en: "Branch roof", simple: "Stick roof", ru: "Крыша из веток", pl: "Dach z gałęzi" },
     Name { id: "saxaul planks", en: "Saxaul planks", simple: "Desert tree boards", ru: "Доски саксаула", pl: "Deski z saksaułu" },
     Name { id: "saxaul beam", en: "Saxaul beam", simple: "Desert tree log", ru: "Брус саксаула", pl: "Belka z saksaułu" },
@@ -1138,7 +1160,7 @@ pub const RECIPES: &[Name] = &[
     Name { id: "pack sand", en: "Pack sand", simple: "Sand block", ru: "Сгрести песок", pl: "Zgarnąć piasek" },
     Name { id: "pack gravel", en: "Pack gravel", simple: "Gravel block", ru: "Сгрести гравий", pl: "Zgarnąć żwir" },
     Name { id: "pack clay", en: "Pack clay", simple: "Clay block", ru: "Скатать глину", pl: "Ugnieść glinę" },
-    Name { id: "heap chips", en: "Heap chips", simple: "Stone heap", ru: "Ссыпать щебень", pl: "Usypać kamienie" },
+    Name { id: "heap chips", en: "Heap chips", simple: "Stone heap", ru: "Ссыпать крошку", pl: "Usypać kamienie" },
     Name { id: "burn limestone", en: "Burn limestone", simple: "Lime from limestone", ru: "Обжечь известняк", pl: "Wypalić wapień" },
     Name { id: "burn chalk", en: "Burn chalk", simple: "Lime from chalk", ru: "Обжечь мел", pl: "Wypalić kredę" },
     Name { id: "lime mortar", en: "Lime mortar", simple: "Strong brick glue", ru: "Известковый раствор", pl: "Zaprawa wapienna" },
@@ -1148,10 +1170,10 @@ pub const RECIPES: &[Name] = &[
     Name { id: "saddlebags", en: "Saddlebags", simple: "Horse bags", ru: "Перемётные сумы", pl: "Juki" },
     Name { id: "rough saddle", en: "Rough saddle", simple: "Horse seat by hand", ru: "Грубое седло", pl: "Proste siodło" },
     Name { id: "rough bags", en: "Rough bags", simple: "Horse bags by hand", ru: "Грубые сумы", pl: "Proste juki" },
-    Name { id: "cane frame", en: "Cane frame", simple: "Frame from reed cane", ru: "Рама из трости", pl: "Rama z trzciny" },
+    Name { id: "cane frame", en: "Cane frame", simple: "Frame from reed cane", ru: "Рама из тростника", pl: "Rama z trzciny" },
     Name { id: "wax torch", en: "Wax torch", simple: "Torch with wax", ru: "Факел с воском", pl: "Pochodnia z woskiem" },
-    Name { id: "wax rewad", en: "Wax rewad", simple: "New wax on a torch", ru: "Обмотка с воском", pl: "Owijka z woskiem" },
-    Name { id: "cane rod", en: "Cane rod", simple: "Fishing rod from reed cane", ru: "Удочка из трости", pl: "Wędka z trzciny" },
+    Name { id: "wax rewad", en: "Rewrap with wax", simple: "New wax on a torch", ru: "Обмотка с воском", pl: "Owijka z woskiem" },
+    Name { id: "cane rod", en: "Cane rod", simple: "Fishing rod from reed cane", ru: "Удочка из тростника", pl: "Wędka z trzciny" },
 ];
 
 #[cfg(test)]
@@ -1257,6 +1279,22 @@ mod tests {
         }
         missing.dedup();
         assert!(missing.is_empty(), "no name in `ui::names::RECIPES` for {missing:?}");
+    }
+
+    /// **A block's name is a lookup key, so it cannot hold a space.**
+    /// `blocks.toml` is keyed by it and so is the relief table; `/give`
+    /// takes it as one argument and a command splits on spaces. One block
+    /// was written `"roasted grubs"` -- the only one of five hundred --
+    /// and it drew the magenta placeholder, because the picture was filed
+    /// under `roasted_grubs` and nothing ever asked for that.
+    #[test]
+    fn a_block_identifier_is_one_word_because_everything_looks_it_up_by_it() {
+        for &(_, id) in ALL_BLOCK_IDS {
+            assert!(
+                !id.contains(char::is_whitespace),
+                "the block {id:?} has a space in its name: `blocks.toml` and `/give` cannot spell it"
+            );
+        }
     }
 
     /// A row for a block that no longer exists is a translation somebody

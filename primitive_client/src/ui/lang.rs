@@ -844,10 +844,6 @@ pub enum Msg {
     // client from the block, as the fish trap's are (`logic::fishing`), so
     // they are said in the player's language.
     WoundBarked,
-    SnareEmpty,
-    PanDrying,
-    PanWantsSea,
-    PanFreshWater,
     /// What the server tells a player, as a code (`notice`): one row per
     /// notice, checked against `Notice::ALL`.
     Notice(primitive_shared::notice::Notice),
@@ -905,7 +901,7 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::Back,         en: "BACK",         simple: "GO BACK",    ru: "НАЗАД", pl: "WSTECZ" },
     Line { msg: Msg::WorldsHelp,   en: "up/down select   enter play   N new   del remove", simple: "up/down choose   enter play   N make one   del throw away", ru: "вверх/вниз выбрать   ввод играть   N создать   del удалить", pl: "góra/dół wybór   enter graj   N nowy   del usuń" },
     Line { msg: Msg::NewWorld,     en: "NEW WORLD",    simple: "A NEW WORLD", ru: "НОВЫЙ МИР", pl: "NOWY ŚWIAT" },
-    Line { msg: Msg::Seed,         en: "SEED",         simple: "WORLD NUMBER", ru: "ЗЕРНО", pl: "ZIARNO" },
+    Line { msg: Msg::Seed,         en: "SEED",         simple: "WORLD NUMBER", ru: "СИД", pl: "ZIARNO" },
     Line { msg: Msg::Name,         en: "NAME",         simple: "NAME",       ru: "ИМЯ", pl: "NAZWA" },
     Line { msg: Msg::Create,       en: "CREATE",       simple: "MAKE IT",    ru: "СОЗДАТЬ", pl: "UTWÓRZ" },
     Line { msg: Msg::Cancel,       en: "CANCEL",       simple: "NEVER MIND", ru: "ОТМЕНА", pl: "ANULUJ" },
@@ -914,7 +910,7 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::PresetNormal, en: "NORMAL",       simple: "THE USUAL ONE", ru: "ОБЫЧНЫЙ", pl: "ZWYKŁY" },
     Line { msg: Msg::PresetTest,   en: "TEST",         simple: "A WORLD TO TRY THINGS IN", ru: "ТЕСТОВЫЙ", pl: "TESTOWY" },
     Line { msg: Msg::PresetNormalHelp, en: "oceans, mountains, rivers and caves -- the game", simple: "seas, hills, rivers and caves -- the real game", ru: "океаны, горы, реки и пещеры -- обычная игра", pl: "oceany, góry, rzeki i jaskinie -- zwykła gra" },
-    Line { msg: Msg::PresetTestHelp, en: "a flat field with one of everything already built on it", simple: "flat ground with one of everything already made", ru: "ровное поле, на котором уже построено всё по разу", pl: "płaskie pole, na którym wszystko już stoi" },
+    Line { msg: Msg::PresetTestHelp, en: "a flat field with one of everything already built on it", simple: "flat ground with one of everything already made", ru: "ровное поле, где всего уже построено по одному", pl: "płaskie pole, na którym wszystko już stoi" },
     // **A place, not a property of the world.** The row used to say
     // "climate", which was true about living there and silent about what
     // the choice now is: one seed is one planet, and this picks the corner
@@ -980,15 +976,15 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::RackEmpty,    en: "nothing on the frame", simple: "nothing on it", ru: "на раме пусто", pl: "rama pusta" },
     Line { msg: Msg::RackFull,     en: "the tray is full", simple: "no room for more leather", ru: "лоток полон", pl: "taca pełna" },
     Line { msg: Msg::MinutesLeft,  en: "min left",     simple: "min to go",  ru: "мин осталось", pl: "min zostało" },
-    Line { msg: Msg::SeedHelp,     en: "the seed decides the terrain -- leave it empty for a new one", simple: "this number shapes the land -- leave it empty for a surprise", ru: "зерно определяет рельеф -- пустое даст новый мир", pl: "ziarno decyduje o terenie -- puste da nowy świat" },
+    Line { msg: Msg::SeedHelp,     en: "the seed decides the terrain -- leave it empty for a new one", simple: "this number shapes the land -- leave it empty for a surprise", ru: "сид задаёт рельеф -- оставьте пустым, и будет новый", pl: "ziarno decyduje o terenie -- puste da nowy świat" },
     Line { msg: Msg::SeedRandom,   en: "random",       simple: "any",          ru: "случайное",    pl: "losowe" },
-    Line { msg: Msg::RollSeed,     en: "ROLL",         simple: "PICK",         ru: "БРОСИТЬ",      pl: "LOSUJ" },
+    Line { msg: Msg::RollSeed,     en: "ROLL",         simple: "PICK",         ru: "НАУГАД",       pl: "LOSUJ" },
     Line { msg: Msg::WorldFormHelp, en: "tab switches field   enter creates   esc cancels", simple: "tab moves   enter makes it   esc goes back", ru: "tab переключает поле   ввод создаёт   esc отменяет", pl: "tab zmienia pole   enter tworzy   esc anuluje" },
     Line { msg: Msg::NeverPlayed,  en: "never played",  simple: "never played", ru: "не играли", pl: "nigdy nie grano" },
     Line { msg: Msg::JustNow,      en: "just now",      simple: "just now",  ru: "только что", pl: "przed chwilą" },
     Line { msg: Msg::MinutesAgo,   en: "min ago",       simple: "min ago",   ru: "мин назад", pl: "min temu" },
     Line { msg: Msg::HoursAgo,     en: "h ago",         simple: "h ago",     ru: "ч назад", pl: "godz. temu" },
-    Line { msg: Msg::DaysAgo,      en: "d ago",         simple: "d ago",     ru: "д назад", pl: "dni temu" },
+    Line { msg: Msg::DaysAgo,      en: "d ago",         simple: "d ago",     ru: "дн. назад", pl: "dni temu" },
 
     Line { msg: Msg::CannotBeUndone, en: "this cannot be undone", simple: "there is no way back", ru: "это нельзя отменить", pl: "tego nie można cofnąć" },
     Line { msg: Msg::ConfirmHelp,  en: "Y confirms   N or esc cancels", simple: "Y means yes   N or esc means no", ru: "Y подтвердить   N или esc отменить", pl: "Y potwierdza   N lub esc anuluje" },
@@ -1046,7 +1042,7 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::LightingQuality, en: "LIGHTING QUALITY", simple: "WARM LIGHT AND SUNSETS", ru: "КАЧЕСТВО ОСВЕЩЕНИЯ", pl: "JAKOŚĆ OŚWIETLENIA" },
     Line { msg: Msg::DetailDistance, en: "GRASS & STONE DISTANCE", simple: "HOW FAR DETAILS SHOW", ru: "ДАЛЬНОСТЬ ТРАВЫ И КАМНЕЙ", pl: "ZASIĘG TRAWY I KAMIENI" },
     Line { msg: Msg::ReliefDistance, en: "3D STONES DISTANCE", simple: "HOW FAR STONES LOOK 3D", ru: "ДАЛЬНОСТЬ ОБЪЁМНЫХ КАМНЕЙ", pl: "ZASIĘG KAMIENI 3D" },
-    Line { msg: Msg::LodDistance, en: "SIMPLE TERRAIN FROM", simple: "FAR LAND IS CHUNKY", ru: "УПРОЩАТЬ ЗЕМЛЮ С", pl: "UPROSZCZONY TEREN OD" },
+    Line { msg: Msg::LodDistance, en: "SIMPLE TERRAIN FROM", simple: "FAR LAND IS CHUNKY", ru: "УПРОЩАТЬ РЕЛЬЕФ С", pl: "UPROSZCZONY TEREN OD" },
     Line { msg: Msg::LodQuality,  en: "SIMPLIFICATION",     simple: "HOW CHUNKY",         ru: "УПРОЩЕНИЕ",       pl: "UPROSZCZENIE" },
     Line { msg: Msg::LodFine,     en: "GENTLE",             simple: "BARELY",             ru: "МЯГКОЕ",          pl: "ŁAGODNE" },
     Line { msg: Msg::LodNormal,   en: "NORMAL",             simple: "NORMAL",             ru: "ОБЫЧНОЕ",         pl: "ZWYKŁE" },
@@ -1060,12 +1056,16 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::ScenePlains,  en: "PLAINS",       simple: "OPEN FIELD", ru: "РАВНИНА", pl: "RÓWNINA" },
     Line { msg: Msg::SceneCave,    en: "CAVE",         simple: "UNDERGROUND", ru: "ПЕЩЕРА", pl: "JASKINIA" },
     Line { msg: Msg::Chunks,       en: "chunks",       simple: "chunks",     ru: "чанков", pl: "chunków" },
-    Line { msg: Msg::Degrees,      en: "deg",          simple: "deg",        ru: "град", pl: "stopni" },
+    // The sign, not the word. "deg" was a stub of a word, Polish's
+    // "stopni" was wrong after 1, 2, 3 and 4, and Russian's "град" is
+    // also the Russian for hail. `°` is none of those things in any
+    // language and is a glyph the font carries (`font::ORDER`).
+    Line { msg: Msg::Degrees,      en: "°",            simple: "°",          ru: "°", pl: "°" },
     Line { msg: Msg::Toggle,       en: "TOGGLE",       simple: "ON/OFF",     ru: "ВКЛ/ВЫКЛ", pl: "PRZEŁĄCZ" },
     Line { msg: Msg::Controls,     en: "CONTROLS",     simple: "KEYS",       ru: "УПРАВЛЕНИЕ", pl: "STEROWANIE" },
     Line { msg: Msg::ArrangeControls, en: "BUTTONS",  simple: "BUTTONS",    ru: "КНОПКИ",     pl: "PRZYCISKI" },
     Line { msg: Msg::ResetControls, en: "RESET",      simple: "RESET",      ru: "СБРОС",      pl: "RESET" },
-    Line { msg: Msg::DragToArrange, en: "drag a control where your thumb wants it", simple: "drag a button where you want it", ru: "перетащите кнопку туда, где её ждёт большой палец", pl: "przeciagnij przycisk tam, gdzie chce go kciuk" },
+    Line { msg: Msg::DragToArrange, en: "drag a control where your thumb wants it", simple: "drag a button where you want it", ru: "перетащите кнопку туда, где её ждёт большой палец", pl: "przeciągnij przycisk tam, gdzie chce go kciuk" },
     Line { msg: Msg::Done,         en: "DONE",         simple: "DONE",       ru: "ГОТОВО", pl: "GOTOWE" },
     Line { msg: Msg::SettingsHelp, en: "changes apply at once and are saved when you leave", simple: "changes happen right away and are kept when you leave", ru: "изменения применяются сразу и сохраняются при выходе", pl: "zmiany działają od razu i zapisują się przy wyjściu" },
 
@@ -1097,8 +1097,12 @@ pub const STRINGS: &[Line] = &[
     // same word, and the tab looked like the page it was already on.
     Line { msg: Msg::Inventory,    en: "INVENTORY",    simple: "WHAT YOU CARRY", ru: "ИНВЕНТАРЬ", pl: "EKWIPUNEK" },
     Line { msg: Msg::Crafting,     en: "CRAFTING",     simple: "MAKING THINGS", ru: "СОЗДАНИЕ", pl: "WYTWARZANIE" },
-    // Short in every language: the column is one slot wide. See `Msg::Worn`.
-    Line { msg: Msg::Worn,         en: "WORN",         simple: "ON YOU",     ru: "ТЕЛО", pl: "NA SOBIE" },
+    // Short in every language: the column is one slot wide. **Not `ТЕЛО`**,
+    // which it was: `ТЕЛО` is what the game calls a dead player's body
+    // (`Msg::Corpse`) and what the body tab is called (`Msg::TabHealth`),
+    // so one word stood over three unrelated things. `НА СЕБЕ` is what the
+    // English and the Polish already said.
+    Line { msg: Msg::Worn,         en: "WORN",         simple: "ON YOU",     ru: "НА СЕБЕ", pl: "NA SOBIE" },
     Line { msg: Msg::Paused,       en: "PAUSED",       simple: "STOPPED",    ru: "ПАУЗА", pl: "PAUZA" },
     Line { msg: Msg::Resume,       en: "RESUME",       simple: "CARRY ON",   ru: "ПРОДОЛЖИТЬ", pl: "WRÓĆ DO GRY" },
     Line { msg: Msg::Respawn,      en: "RESPAWN",      simple: "START AGAIN", ru: "ВОЗРОДИТЬСЯ", pl: "ODRODŹ SIĘ" },
@@ -1120,7 +1124,7 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::NeedBench, en: "needs a workbench", simple: "needs a work table", ru: "нужен верстак", pl: "potrzebny warsztat" },
     Line { msg: Msg::NeedMason, en: "needs a mason's block", simple: "needs a stone work block", ru: "нужна колода каменотёса", pl: "potrzebny kamieniarski blok" },
     Line { msg: Msg::NeedWheel, en: "needs a potter's wheel", simple: "needs a clay wheel", ru: "нужен гончарный круг", pl: "potrzebne koło garncarskie" },
-    Line { msg: Msg::NeedLeatherBench, en: "needs a leather bench", simple: "needs a leather table", ru: "нужен скорняжный стол", pl: "potrzebny stół rymarski" },
+    Line { msg: Msg::NeedLeatherBench, en: "needs a leather bench", simple: "needs a leather table", ru: "нужен кожевенный стол", pl: "potrzebny stół rymarski" },
     Line { msg: Msg::Nourishment,  en: "FED",          simple: "FOOD",       ru: "СЫТОСТЬ", pl: "SYTOŚĆ" },
     Line { msg: Msg::WeatherLabel, en: "SKY",          simple: "SKY",        ru: "НЕБО", pl: "NIEBO" },
     Line { msg: Msg::WeatherClear, en: "clear",        simple: "clear",      ru: "ясно", pl: "czysto" },
@@ -1154,8 +1158,11 @@ pub const STRINGS: &[Line] = &[
     // Not "РЮКЗАК" in Russian and not "PLECAK" in Polish: both are
     // already the word this game uses for the pack you are carrying (see
     // Msg::Inventory and Msg::Pack), and a heading that says the same
-    // thing as the grid under it says nothing.
-    Line { msg: Msg::Backpack,     en: "BACKPACK",     simple: "WHAT THEY LEFT", ru: "ПОЖИТКИ", pl: "SAKWA" },
+    // thing as the grid under it says nothing. **And not "ПОЖИТКИ"**,
+    // which it was until somebody noticed that is `Msg::TabPack` -- the
+    // tab for your own things -- so a player opening a dead stranger's
+    // pack was told they were looking at their own.
+    Line { msg: Msg::Backpack,     en: "BACKPACK",     simple: "WHAT THEY LEFT", ru: "КОТОМКА", pl: "SAKWA" },
     // The body and the bones. Not "ТРУП" in Russian: the word a player
     // needs here is the one for *their own* body, and the heading is read
     // by the person it belonged to.
@@ -1168,16 +1175,17 @@ pub const STRINGS: &[Line] = &[
     // Head, chest, legs, feet -- the whole word now, because it is read
     // in a note beside the pointer rather than printed inside a square
     // one slot wide. `ТОРС` rather than `ТЕЛО` for the chest: `ТЕЛО` is
-    // already the heading over the whole column (`Msg::Worn`), and a
-    // column and one of its four squares called the same thing is a
-    // screen that answers "which of these is it" with "both".
+    // the body tab (`Msg::TabHealth`) and a dead player's own body
+    // (`Msg::Corpse`), and a page and one of its four squares called the
+    // same thing is a screen that answers "which of these is it" with
+    // "both".
     Line { msg: Msg::SlotHead,     en: "HEAD",         simple: "HEAD",       ru: "ГОЛОВА", pl: "GŁOWA" },
     Line { msg: Msg::SlotChest,    en: "CHEST",        simple: "BODY",       ru: "ТОРС", pl: "TUŁÓW" },
     Line { msg: Msg::SlotLegs,     en: "LEGS",         simple: "LEGS",       ru: "НОГИ", pl: "NOGI" },
     Line { msg: Msg::SlotFeet,     en: "FEET",         simple: "FEET",       ru: "СТУПНИ", pl: "STOPY" },
     Line { msg: Msg::SlotBack,     en: "BACK",         simple: "YOUR BACK",  ru: "СПИНА", pl: "PLECY" },
     // The three tabs across the top of the pack screen.
-    Line { msg: Msg::TabHealth,    en: "BODY",         simple: "HOW YOU ARE", ru: "ЗДОРОВЬЕ", pl: "ZDROWIE" },
+    Line { msg: Msg::TabHealth,    en: "BODY",         simple: "HOW YOU ARE", ru: "ТЕЛО", pl: "CIAŁO" },
     Line { msg: Msg::TabPack,      en: "PACK",         simple: "WHAT YOU CARRY", ru: "ПОЖИТКИ", pl: "TORBA" },
     Line { msg: Msg::TabBackpack,  en: "RUCKSACK",     simple: "BAG ON YOUR BACK", ru: "РЮКЗАК", pl: "PLECAK" },
     // ...and the health page under the first of them. Sentence case, not
@@ -1221,7 +1229,7 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::WorldFormHelpTouch, en: "tap a field to fill it   CREATE when you are done", simple: "tap a box   then CREATE", ru: "коснитесь поля   потом СОЗДАТЬ", pl: "dotknij pola   potem UTWÓRZ" },
     Line { msg: Msg::ConfirmHelpTouch, en: "tap YES or NO", simple: "tap YES or NO", ru: "коснитесь ДА или НЕТ", pl: "dotknij TAK lub NIE" },
     Line { msg: Msg::ServerFormHelpTouch, en: "tap a field to fill it   SAVE when you are done", simple: "tap a box   then SAVE", ru: "коснитесь поля   потом СОХРАНИТЬ", pl: "dotknij pola   potem ZAPISZ" },
-    Line { msg: Msg::DeathHelpTouch, en: "TAP RESPAWN", simple: "TAP START AGAIN", ru: "КОСНИТЕСЬ ВОЗРОДИТЬСЯ", pl: "DOTKNIJ ODRODŹ SIĘ" },
+    Line { msg: Msg::DeathHelpTouch, en: "TAP RESPAWN", simple: "TAP START AGAIN", ru: "КОСНИТЕСЬ, ЧТОБЫ ВОЗРОДИТЬСЯ", pl: "DOTKNIJ, BY SIĘ ODRODZIĆ" },
     Line { msg: Msg::ChestHint2Touch, en: "hold to send it across  |  tap outside to close", simple: "hold to send it over  |  tap outside to close", ru: "удержание шлёт на другую сторону  |  касание вне закрывает", pl: "przytrzymaj by przesłać  |  dotknij poza by zamknąć" },
     Line { msg: Msg::ChestHint2,   en: "shift click sends it across  |  esc closes", simple: "shift click sends it over  |  esc closes", ru: "shift+клик шлёт на другую сторону  |  esc выход", pl: "shift+klik śle na drugą stronę  |  esc zamyka" },
     // The rest of the keyboard-only lines, in the version a phone can
@@ -1297,7 +1305,7 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::MapHelpTouch, en: "drag to look around   pinch or + and - zoom", simple: "drag to look around   pinch or + and - zoom", ru: "тащите карту   щипок или + и - масштаб", pl: "przeciągnij mapę   szczypanie lub + i - skala" },
     Line { msg: Msg::RecipesAll,   en: "ALL",          simple: "ALL",        ru: "ВСЕ", pl: "WSZYSTKO" },
     Line { msg: Msg::RecipesHands, en: "HANDS",        simple: "BY HAND",    ru: "РУКИ", pl: "RĘCE" },
-    Line { msg: Msg::RecipesWorkshops, en: "WORKSHOP",  simple: "TABLES",     ru: "СТАНКИ", pl: "WARSZTAT" },
+    Line { msg: Msg::RecipesWorkshops, en: "WORKSHOP",  simple: "TABLES",     ru: "МАСТЕРСКАЯ", pl: "WARSZTAT" },
     Line { msg: Msg::RecipesSearch, en: "type to search", simple: "type to find one", ru: "печатайте для поиска", pl: "pisz, aby szukać" },
     Line { msg: Msg::RecipesEmpty, en: "nothing known yet -- pick things up and the book fills", simple: "you know nothing yet -- pick things up and it fills in", ru: "пока пусто -- берите вещи в руки, и книга пополнится", pl: "na razie pusto -- podnoś rzeczy, a księga się zapełni" },
     Line { msg: Msg::RecipesNoMatch, en: "nothing matches", simple: "nothing found", ru: "ничего не нашлось", pl: "nic nie pasuje" },
@@ -1323,14 +1331,14 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::RecipeWhere,  en: "WHERE",        simple: "WHERE",      ru: "ГДЕ", pl: "GDZIE" },
     Line { msg: Msg::RecipeByHand, en: "by hand, anywhere", simple: "with your hands, anywhere", ru: "руками, где угодно", pl: "rękami, gdziekolwiek" },
     Line { msg: Msg::RecipeAtFire, en: "in any lit fire", simple: "in a fire that is burning", ru: "в любом горящем огне", pl: "w każdym płonącym ogniu" },
-    Line { msg: Msg::RecipeAtKiln, en: "in a lit kiln", simple: "in a burning kiln", ru: "в горящей печи", pl: "w rozpalonym piecu" },
-    Line { msg: Msg::RecipeAtBloomery, en: "in a lit bloomery", simple: "in a burning iron furnace", ru: "в горящей сыродутной печи", pl: "w rozpalonej dymarce" },
+    Line { msg: Msg::RecipeAtKiln, en: "in a lit kiln", simple: "in a burning kiln", ru: "в горящем горне", pl: "w rozpalonym piecu" },
+    Line { msg: Msg::RecipeAtBloomery, en: "in a lit bloomery", simple: "in a burning iron furnace", ru: "в горящей домнице", pl: "w rozpalonej dymarce" },
     Line { msg: Msg::RecipeAtBench, en: "beside a workbench", simple: "next to a work table", ru: "у верстака", pl: "przy warsztacie" },
     Line { msg: Msg::RecipeAtMason, en: "beside a mason's block", simple: "next to a stone work block", ru: "у колоды каменотёса", pl: "przy bloku kamieniarskim" },
     Line { msg: Msg::RecipeAtWheel, en: "beside a potter's wheel", simple: "next to a clay wheel", ru: "у гончарного круга", pl: "przy kole garncarskim" },
-    Line { msg: Msg::RecipeAtLeatherBench, en: "beside a leather bench", simple: "next to a leather table", ru: "у скорняжного стола", pl: "przy stole rymarskim" },
+    Line { msg: Msg::RecipeAtLeatherBench, en: "beside a leather bench", simple: "next to a leather table", ru: "у кожевенного стола", pl: "przy stole rymarskim" },
     Line { msg: Msg::RecipeKept,   en: "KEPT AFTERWARDS", simple: "YOU GET BACK", ru: "ОСТАЁТСЯ", pl: "ZOSTAJE" },
-    Line { msg: Msg::RecipeLead,   en: "one thing in it you have never held", simple: "you have not found one of these yet", ru: "одного из этого вы ещё не держали в руках", pl: "jednej z tych rzeczy jeszcze nie miałeś w rękach" },
+    Line { msg: Msg::RecipeLead,   en: "one thing in it you have never held", simple: "you have not found one of these yet", ru: "здесь есть то, чего вы ещё не держали в руках", pl: "jest tu coś, czego jeszcze nie miałeś w rękach" },
     Line { msg: Msg::RecipeNotFound, en: "not found yet", simple: "not found yet", ru: "ещё не найдено", pl: "jeszcze nie znalezione" },
     Line { msg: Msg::RecipeMayFail, en: "can go wrong", simple: "does not always work", ru: "может не выйти", pl: "może się nie udać" },
     // The body in the pack. See the note on `Msg::Wounds`.
@@ -1364,7 +1372,7 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::WheelTitle,   en: "POTTER'S WHEEL", simple: "CLAY WHEEL", ru: "ГОНЧАРНЫЙ КРУГ", pl: "KOŁO GARNCARSKIE" },
     Line { msg: Msg::StationPickJob, en: "pick what to make", simple: "choose what to make", ru: "выберите, что делать", pl: "wybierz, co zrobić" },
     Line { msg: Msg::StationStrike, en: "click or space on the mark", simple: "click or space on the mark", ru: "бейте мышью или пробелом по метке", pl: "kliknij lub spacja na znaku" },
-    Line { msg: Msg::StationStrikeTouch, en: "tap on the mark", simple: "tap on the mark", ru: "касайтесь на метке", pl: "dotknij na znaku" },
+    Line { msg: Msg::StationStrikeTouch, en: "tap on the mark", simple: "tap on the mark", ru: "бейте по метке", pl: "dotknij znaku" },
     Line { msg: Msg::RunFine,      en: "struck true - more out of the same", simple: "well struck - you got more", ru: "точно - вышло больше", pl: "celnie - wyszło więcej" },
     Line { msg: Msg::RunFair,      en: "serviceable",  simple: "good enough", ru: "сойдёт", pl: "ujdzie" },
     Line { msg: Msg::RunRuined,    en: "spoiled - the piece is lost", simple: "ruined - you lost it", ru: "испорчено - заготовка пропала", pl: "zepsute - sztuka stracona" },
@@ -1393,7 +1401,7 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::StallTrade,   en: "TRADE",        simple: "SWAP",       ru: "ОБМЕН", pl: "WYMIEŃ" },
     Line { msg: Msg::StallClear,   en: "REMOVE",       simple: "REMOVE",     ru: "УБРАТЬ", pl: "USUŃ" },
     Line { msg: Msg::StallLeft,    en: "left",         simple: "left",       ru: "в наличии", pl: "zostało" },
-    Line { msg: Msg::StallHintOwner, en: "hold a thing, tap a square to price it", simple: "pick up a thing, tap a square to ask for it", ru: "возьмите вещь и нажмите клетку цены", pl: "weź rzecz i stuknij pole ceny" },
+    Line { msg: Msg::StallHintOwner, en: "hold a thing, tap a square to price it", simple: "pick up a thing, tap a square to ask for it", ru: "возьмите вещь и нажмите на клетку цены", pl: "weź rzecz i stuknij pole ceny" },
     Line { msg: Msg::StallHintBuyer, en: "TRADE gives the price for the goods", simple: "SWAP gives what is asked for what is shown", ru: "ОБМЕН отдаёт цену за товар", pl: "WYMIEŃ oddaje cenę za towar" },
     Line { msg: Msg::StallNotYours, en: "this stall is not yours", simple: "this is somebody else's table", ru: "это чужой прилавок", pl: "to nie twój stragan" },
     Line { msg: Msg::StallNoOffer, en: "nothing is offered there", simple: "nothing to swap there", ru: "там ничего не предлагают", pl: "nic tam nie ma w ofercie" },
@@ -1404,73 +1412,77 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::StallTillFull, en: "the takings are full - the owner must empty them", simple: "the table is full of payments - the owner must take them", ru: "выручке нет места - хозяину пора её забрать", pl: "utarg pełny - właściciel musi go zabrać" },
     Line { msg: Msg::StallBadOffer, en: "that is not a price", simple: "that swap cannot be", ru: "такой цены быть не может", pl: "to nie jest cena" },
     Line { msg: Msg::SawhorseTitle, en: "SAWHORSE", simple: "SAWING TRESTLE", ru: "КОЗЛЫ", pl: "KOZIOŁ STOLARSKI" },
-    Line { msg: Msg::HoningTitle, en: "HONING STONE", simple: "SHARPENING STONE", ru: "ТОЧИЛЬНАЯ КОЛОДА", pl: "KAMIEŃ SZLIFIERSKI" },
+    Line { msg: Msg::HoningTitle, en: "HONING STONE", simple: "SHARPENING STONE", ru: "ТОЧИЛО", pl: "KAMIEŃ SZLIFIERSKI" },
     Line { msg: Msg::WoundBarked, en: "bound with willow bark, going down", simple: "willow bark on it, getting better fast", ru: "под ивовой корой, спадает", pl: "pod korą wierzby, schodzi" },
-    Line { msg: Msg::SnareEmpty, en: "nothing has come to the snare yet", simple: "no hare in the snare yet -- come back later", ru: "в силок ещё никто не попался", pl: "nic jeszcze nie wpadło w sidła" },
-    Line { msg: Msg::PanDrying, en: "the pan is still drying: it wants sun and no rain", simple: "the salt is not ready -- it needs sun, and rain undoes it", ru: "соль ещё выпаривается: нужно солнце и ни капли дождя", pl: "panew jeszcze paruje: trzeba słońca i żadnego deszczu" },
-    Line { msg: Msg::PanWantsSea, en: "a salt pan is filled from a jug of the sea", simple: "pour a jug of sea water into it", ru: "солеварню наполняют кувшином морской воды", pl: "panew napełnia się dzbanem morskiej wody" },
-    Line { msg: Msg::PanFreshWater, en: "that is fresh water: it dries to nothing", simple: "that water has no salt in it", ru: "это пресная вода: от неё ничего не останется", pl: "to słodka woda: nic z niej nie zostanie" },
     // What the server tells a player (`ServerMessage::Notice`): its refusals and
     // its news, which were English sentences on the wire. See `notice`.
-    Line { msg: Msg::Notice(Notice::NothingInHand), en: "you have nothing in your hand", simple: "your hand is empty", ru: "у тебя ничего нет в руке", pl: "nie masz nic w ręce" },
+    //
+    // **Russian here says "вы", like the rest of the interface.** These
+    // were written as "ты" -- "у тебя ничего нет в руке", "сначала
+    // приручи" -- while every other line the game prints says "вы"
+    // ("коснитесь поля", "перевяжите рану"). Both land in the same banner
+    // in the same second, so a player was addressed two ways by one
+    // program. Better still is no pronoun at all, which is what most of
+    // these now do: "в руке ничего нет" is shorter than either.
+    Line { msg: Msg::Notice(Notice::NothingInHand), en: "you have nothing in your hand", simple: "your hand is empty", ru: "в руке ничего нет", pl: "nie masz nic w ręce" },
     Line { msg: Msg::Notice(Notice::AnimalGone), en: "it is gone", simple: "it is not there any more", ru: "его уже нет", pl: "już go nie ma" },
     Line { msg: Msg::Notice(Notice::TooFarAway), en: "too far away", simple: "too far away", ru: "слишком далеко", pl: "za daleko" },
     Line { msg: Msg::Notice(Notice::CannotBeKept), en: "that animal cannot be kept", simple: "you cannot keep that animal", ru: "это животное не приручить", pl: "tego zwierzęcia nie da się oswoić" },
     Line { msg: Msg::Notice(Notice::NothingToShear), en: "there is nothing on it to shear", simple: "it has no wool to cut", ru: "с него нечего стричь", pl: "nie ma z niego czego strzyc" },
-    Line { msg: Msg::Notice(Notice::TameItFirst), en: "it will not stand for the knife: tame it first", simple: "it will not let you cut it - tame it first", ru: "не даётся под нож: сначала приручи", pl: "nie da się ostrzyc: najpierw ją oswój" },
+    Line { msg: Msg::Notice(Notice::TameItFirst), en: "it will not stand for the knife: tame it first", simple: "it will not let you cut it - tame it first", ru: "не даётся под нож: сначала приручите", pl: "nie da się ostrzyc: najpierw ją oswój" },
     Line { msg: Msg::Notice(Notice::FleeceNotGrown), en: "the fleece has not grown back yet", simple: "the wool has not grown back yet", ru: "шерсть ещё не отросла", pl: "runo jeszcze nie odrosło" },
     Line { msg: Msg::Notice(Notice::OnlyEweGivesMilk), en: "only a tame ewe with a lamb gives milk", simple: "only a tame mother sheep with a lamb gives milk", ru: "молоко даёт только ручная овца с ягнёнком", pl: "mleko daje tylko oswojona owca z jagnięciem" },
     Line { msg: Msg::Notice(Notice::NoMilkYet), en: "she has no milk to give yet", simple: "she has no milk yet", ru: "у неё пока нет молока", pl: "nie ma jeszcze mleka" },
-    Line { msg: Msg::Notice(Notice::ShiesAway), en: "it shies away from you: come at it slowly", simple: "it is afraid - walk up to it slowly", ru: "шарахается от тебя: подходи медленно", pl: "płoszy się: podchodź powoli" },
+    Line { msg: Msg::Notice(Notice::ShiesAway), en: "it shies away from you: come at it slowly", simple: "it is afraid - walk up to it slowly", ru: "шарахается: подходите медленно", pl: "płoszy się: podchodź powoli" },
     Line { msg: Msg::Notice(Notice::NotHungry), en: "it is not hungry yet", simple: "it is not hungry yet", ru: "оно ещё не голодно", pl: "nie jest jeszcze głodne" },
     Line { msg: Msg::Notice(Notice::DoesNotEatThat), en: "it does not eat that", simple: "it will not eat that", ru: "оно такое не ест", pl: "tego nie je" },
     Line { msg: Msg::Notice(Notice::GoesOnAHorse), en: "that goes on a horse", simple: "that is for a horse", ru: "это надевают на лошадь", pl: "to zakłada się koniowi" },
-    Line { msg: Msg::Notice(Notice::BreakItFirst), en: "it will not stand for that: break it first", simple: "it will not let you - ride it in first", ru: "не даётся: сначала объезди", pl: "nie pozwoli: najpierw go ujeźdź" },
-    Line { msg: Msg::Notice(Notice::TooYoungToCarry), en: "it is too young to carry anything", simple: "it is too young to carry things", ru: "слишком молод, чтобы что-то нести", pl: "jest za młody, żeby coś nieść" },
+    Line { msg: Msg::Notice(Notice::BreakItFirst), en: "it will not stand for that: break it first", simple: "it will not let you - ride it in first", ru: "не даётся: сначала объездите", pl: "nie pozwoli: najpierw go ujeźdź" },
+    Line { msg: Msg::Notice(Notice::TooYoungToCarry), en: "it is too young to carry anything", simple: "it is too young to carry things", ru: "молодняк не навьючивают", pl: "jest za młody, żeby coś nieść" },
     Line { msg: Msg::Notice(Notice::AlreadySaddled), en: "it already wears a saddle", simple: "it has a saddle on already", ru: "седло на нём уже есть", pl: "już ma siodło" },
     Line { msg: Msg::Notice(Notice::AlreadyBagged), en: "it already carries saddlebags", simple: "it has bags on already", ru: "перемётные сумы на нём уже есть", pl: "już ma juki" },
-    Line { msg: Msg::Notice(Notice::AlreadyRiding), en: "you are already riding", simple: "you are already riding", ru: "ты уже в седле", pl: "już jedziesz wierzchem" },
-    Line { msg: Msg::Notice(Notice::CannotRideThat), en: "you cannot ride that", simple: "you cannot ride that", ru: "на этом не поездишь", pl: "na tym nie pojedziesz" },
+    Line { msg: Msg::Notice(Notice::AlreadyRiding), en: "you are already riding", simple: "you are already riding", ru: "вы уже в седле", pl: "już jedziesz wierzchem" },
+    Line { msg: Msg::Notice(Notice::CannotRideThat), en: "you cannot ride that", simple: "you cannot ride that", ru: "на этом не поездить", pl: "na tym nie pojedziesz" },
     Line { msg: Msg::Notice(Notice::SomebodyOnIt), en: "somebody is already on it", simple: "somebody is riding it", ru: "на нём уже кто-то сидит", pl: "ktoś już na nim siedzi" },
-    Line { msg: Msg::Notice(Notice::TooYoungToRide), en: "it is too young to carry anybody", simple: "it is too young to ride", ru: "слишком молод, чтобы нести седока", pl: "jest za młody, żeby kogoś nieść" },
-    Line { msg: Msg::Notice(Notice::GentleItFirst), en: "it will not let you near its back: gentle it with food first", simple: "it will not let you on - feed it first", ru: "не подпускает к спине: сначала прикорми", pl: "nie da ci wsiąść: najpierw go dokarm" },
-    Line { msg: Msg::Notice(Notice::LetItSettle), en: "it is still wild-eyed from the last time: let it settle", simple: "it is still scared from last time - wait a little", ru: "ещё не успокоилась после прошлого раза: дай ей время", pl: "jeszcze się nie uspokoił: daj mu chwilę" },
-    Line { msg: Msg::Notice(Notice::HorseThrowsYou), en: "the horse throws you: let it settle, and try again", simple: "the horse threw you off - wait, then try again", ru: "лошадь сбросила тебя: дай ей успокоиться и попробуй снова", pl: "koń cię zrzucił: daj mu się uspokoić i spróbuj znowu" },
-    Line { msg: Msg::Notice(Notice::HorseIsYours), en: "the horse stands for you: it is yours now, and home is here", simple: "the horse lets you ride - it is yours now, and this is its home", ru: "лошадь стоит смирно: теперь она твоя, и её дом здесь", pl: "koń stoi spokojnie: jest teraz twój, a jego dom jest tutaj" },
+    Line { msg: Msg::Notice(Notice::TooYoungToRide), en: "it is too young to carry anybody", simple: "it is too young to ride", ru: "на молодняк не садятся", pl: "jest za młody, żeby kogoś nieść" },
+    Line { msg: Msg::Notice(Notice::GentleItFirst), en: "it will not let you near its back: gentle it with food first", simple: "it will not let you on - feed it first", ru: "не подпускает к спине: сначала прикормите", pl: "nie da ci wsiąść: najpierw go dokarm" },
+    Line { msg: Msg::Notice(Notice::LetItSettle), en: "it is still wild-eyed from the last time: let it settle", simple: "it is still scared from last time - wait a little", ru: "ещё не успокоилась после прошлого раза: дайте ей время", pl: "jeszcze się nie uspokoił: daj mu chwilę" },
+    Line { msg: Msg::Notice(Notice::HorseThrowsYou), en: "the horse throws you: let it settle, and try again", simple: "the horse threw you off - wait, then try again", ru: "лошадь сбросила вас: дайте ей успокоиться и попробуйте снова", pl: "koń cię zrzucił: daj mu się uspokoić i spróbuj znowu" },
+    Line { msg: Msg::Notice(Notice::HorseIsYours), en: "the horse stands for you: it is yours now, and home is here", simple: "the horse lets you ride - it is yours now, and this is its home", ru: "лошадь стоит смирно: теперь она ваша, и её дом здесь", pl: "koń stoi spokojnie: jest teraz twój, a jego dom jest tutaj" },
     Line { msg: Msg::Notice(Notice::HorseTakesFood), en: "the horse takes it from your hand: it may let you on its back now", simple: "the horse eats from your hand - you can try to ride it now", ru: "лошадь берёт с руки: теперь можно попробовать сесть верхом", pl: "koń je z ręki: możesz spróbować go dosiąść" },
     Line { msg: Msg::Notice(Notice::MonkeyTakesIt), en: "a monkey snatches it out of your hand and is up the tree", simple: "a monkey took the food from your hand", ru: "обезьяна выхватывает еду из руки и уносит на дерево", pl: "małpa wyrywa ci jedzenie z ręki i ucieka na drzewo" },
     Line { msg: Msg::Notice(Notice::NoBagsInReach), en: "there are no saddlebags within reach", simple: "there are no horse bags near you", ru: "рядом нет перемётных сум", pl: "w pobliżu nie ma juków" },
-    Line { msg: Msg::Notice(Notice::HorseGone), en: "your horse is gone", simple: "your horse is gone", ru: "твоей лошади больше нет", pl: "twojego konia już nie ma" },
+    Line { msg: Msg::Notice(Notice::HorseGone), en: "your horse is gone", simple: "your horse is gone", ru: "вашей лошади больше нет", pl: "twojego konia już nie ma" },
     Line { msg: Msg::Notice(Notice::NothingToUnbuckle), en: "it wears nothing to take off", simple: "there is nothing on it to take off", ru: "снимать с неё нечего", pl: "nie ma z niego czego zdjąć" },
     Line { msg: Msg::Notice(Notice::PackCannotTakeBags), en: "your pack cannot take the saddlebags and their load", simple: "your bag has no room for the horse bags and what is in them", ru: "в рюкзак не влезут сумы с поклажей", pl: "juki z ładunkiem nie zmieszczą się w plecaku" },
-    Line { msg: Msg::Notice(Notice::WoodWet), en: "the wood is wet: dry it by a fire or in the sun first", simple: "the wood is wet - dry it by a fire or in the sun", ru: "дрова сырые: сначала просуши их у огня или на солнце", pl: "drewno jest mokre: najpierw wysusz je przy ogniu lub na słońcu" },
-    Line { msg: Msg::Notice(Notice::FuelWet), en: "the fuel is wet: dry it by a fire or in the sun first", simple: "the fuel is wet - dry it by a fire or in the sun", ru: "топливо сырое: сначала просуши его у огня или на солнце", pl: "opał jest mokry: najpierw wysusz go przy ogniu lub na słońcu" },
-    Line { msg: Msg::Notice(Notice::TorchWet), en: "the torch is wet: dry it by a fire or in the sun first", simple: "the torch is wet - dry it by a fire or in the sun", ru: "факел сырой: сначала просуши его у огня или на солнце", pl: "pochodnia jest mokra: najpierw wysusz ją przy ogniu lub na słońcu" },
+    Line { msg: Msg::Notice(Notice::WoodWet), en: "the wood is wet: dry it by a fire or in the sun first", simple: "the wood is wet - dry it by a fire or in the sun", ru: "дрова сырые: просушите их у огня или на солнце", pl: "drewno jest mokre: najpierw wysusz je przy ogniu lub na słońcu" },
+    Line { msg: Msg::Notice(Notice::FuelWet), en: "the fuel is wet: dry it by a fire or in the sun first", simple: "the fuel is wet - dry it by a fire or in the sun", ru: "топливо сырое: просушите его у огня или на солнце", pl: "opał jest mokry: najpierw wysusz go przy ogniu lub na słońcu" },
+    Line { msg: Msg::Notice(Notice::TorchWet), en: "the torch is wet: dry it by a fire or in the sun first", simple: "the torch is wet - dry it by a fire or in the sun", ru: "факел сырой: просушите его у огня или на солнце", pl: "pochodnia jest mokra: najpierw wysusz ją przy ogniu lub na słońcu" },
     Line { msg: Msg::Notice(Notice::PackFull), en: "your pack is full", simple: "your bag is full", ru: "рюкзак полон", pl: "plecak jest pełny" },
     Line { msg: Msg::Notice(Notice::JugNotEmpty), en: "the jug has something in it", simple: "the jug is not empty", ru: "в кувшине что-то есть", pl: "w dzbanie coś jest" },
     Line { msg: Msg::Notice(Notice::BarrelFull), en: "the barrel is full", simple: "the barrel is full", ru: "бочка полна", pl: "beczka jest pełna" },
     Line { msg: Msg::Notice(Notice::BarrelEmpty), en: "the barrel is empty", simple: "the barrel is empty", ru: "бочка пуста", pl: "beczka jest pusta" },
-    Line { msg: Msg::Notice(Notice::EmptyRucksackFirst), en: "empty the rucksack first", simple: "take everything out of the rucksack first", ru: "сначала освободи рюкзак", pl: "najpierw opróżnij plecak" },
+    Line { msg: Msg::Notice(Notice::EmptyRucksackFirst), en: "empty the rucksack first", simple: "take everything out of the rucksack first", ru: "сначала освободите рюкзак", pl: "najpierw opróżnij plecak" },
     Line { msg: Msg::Notice(Notice::NowhereForBowl), en: "nowhere to put the bowl", simple: "there is no room for the bowl", ru: "миску некуда деть", pl: "nie ma gdzie odłożyć miski" },
     Line { msg: Msg::Notice(Notice::ToolBroke), en: "your tool broke", simple: "your tool broke", ru: "инструмент сломался", pl: "narzędzie się złamało" },
     Line { msg: Msg::Notice(Notice::NeedsAKnife), en: "it needs a knife", simple: "you need a knife for that", ru: "тут нужен нож", pl: "potrzebny jest nóż" },
     Line { msg: Msg::Notice(Notice::NeedHammerAtAnvil), en: "you need a hammer to work at an anvil", simple: "you need a hammer to use the anvil", ru: "чтобы работать на наковальне, нужен молот", pl: "do pracy na kowadle potrzebny jest młot" },
     Line { msg: Msg::Notice(Notice::NeedSawAtSawhorse), en: "you need a saw to work at a sawhorse", simple: "you need a saw to use the trestle", ru: "чтобы работать на козлах, нужна пила", pl: "do pracy na koźle potrzebna jest piła" },
-    Line { msg: Msg::Notice(Notice::HoldBladeToSharpen), en: "hold the blade you want to sharpen", simple: "hold the blade you want to sharpen", ru: "возьми в руку клинок, который хочешь наточить", pl: "weź do ręki ostrze, które chcesz naostrzyć" },
-    Line { msg: Msg::Notice(Notice::NotAtStation), en: "you are not at that station", simple: "you are not at that work place", ru: "ты не у этого верстака", pl: "nie jesteś przy tym stanowisku" },
-    Line { msg: Msg::Notice(Notice::NotARun), en: "that is not a run", simple: "that is not something you can make here", ru: "это здесь не сделать", pl: "tego się tu nie zrobi" },
+    Line { msg: Msg::Notice(Notice::HoldBladeToSharpen), en: "hold the blade you want to sharpen", simple: "hold the blade you want to sharpen", ru: "возьмите в руку клинок, который хотите наточить", pl: "weź do ręki ostrze, które chcesz naostrzyć" },
+    Line { msg: Msg::Notice(Notice::NotAtStation), en: "you are not at that station", simple: "you are not at that work place", ru: "вы не у этого верстака", pl: "nie jesteś przy tym stanowisku" },
+    Line { msg: Msg::Notice(Notice::NotARun), en: "that is not a run", simple: "that is not something you can make here", ru: "этого здесь не сделать", pl: "tego się tu nie zrobi" },
     Line { msg: Msg::Notice(Notice::NothingOnAnvil), en: "there is nothing on the anvil", simple: "the anvil is empty", ru: "на наковальне ничего нет", pl: "na kowadle nic nie ma" },
     Line { msg: Msg::Notice(Notice::PieceWentCold), en: "the piece went cold", simple: "the metal went cold", ru: "заготовка остыла", pl: "odkuwka ostygła" },
     Line { msg: Msg::Notice(Notice::FurrowHasAsh), en: "this furrow already has ash in it", simple: "this row already has ash in it", ru: "в этой борозде уже есть зола", pl: "w tej bruździe już jest popiół" },
     Line { msg: Msg::Notice(Notice::AshDugIn), en: "ash dug into the furrow: the next crop here grows a third faster", simple: "ash is in the soil - the next crop here grows a third faster", ru: "зола в борозде: следующий урожай здесь вырастет на треть быстрее", pl: "popiół w bruździe: następny plon wyrośnie tu o jedną trzecią szybciej" },
-    Line { msg: Msg::Notice(Notice::AlreadyAsleep), en: "you are already asleep", simple: "you are already asleep", ru: "ты уже спишь", pl: "już śpisz" },
-    Line { msg: Msg::Notice(Notice::HurtCannotSleep), en: "you cannot sleep while something is hurting you", simple: "you cannot sleep while you are being hurt", ru: "нельзя уснуть, пока тебя ранят", pl: "nie zaśniesz, kiedy coś cię rani" },
-    Line { msg: Msg::Notice(Notice::TooHungryToSleep), en: "you are too hungry to sleep", simple: "you are too hungry to sleep", ru: "слишком голоден, чтобы уснуть", pl: "jesteś zbyt głodny, żeby zasnąć" },
+    Line { msg: Msg::Notice(Notice::AlreadyAsleep), en: "you are already asleep", simple: "you are already asleep", ru: "вы уже спите", pl: "już śpisz" },
+    Line { msg: Msg::Notice(Notice::HurtCannotSleep), en: "you cannot sleep while something is hurting you", simple: "you cannot sleep while you are being hurt", ru: "нельзя уснуть, пока вас ранят", pl: "nie zaśniesz, kiedy coś cię rani" },
+    Line { msg: Msg::Notice(Notice::TooHungryToSleep), en: "you are too hungry to sleep", simple: "you are too hungry to sleep", ru: "слишком голодны, чтобы уснуть", pl: "jesteś zbyt głodny, żeby zasnąć" },
     Line { msg: Msg::Notice(Notice::TooThirstyToSleep), en: "you are too thirsty to sleep", simple: "you are too thirsty to sleep", ru: "слишком хочется пить, чтобы уснуть", pl: "jesteś zbyt spragniony, żeby zasnąć" },
     Line { msg: Msg::Notice(Notice::BedTaken), en: "somebody is already asleep there", simple: "somebody is already sleeping there", ru: "там уже кто-то спит", pl: "ktoś już tam śpi" },
     Line { msg: Msg::Notice(Notice::SeatTaken), en: "somebody is already sitting there", simple: "somebody is already sitting there", ru: "там уже кто-то сидит", pl: "ktoś już tam siedzi" },
     Line { msg: Msg::Notice(Notice::NoRoomToSit), en: "there is no room to sit there", simple: "there is no room to sit there", ru: "там негде сесть", pl: "nie ma tam miejsca, żeby usiąść" },
-    Line { msg: Msg::Notice(Notice::StepAboardForOars), en: "step aboard to take the oars", simple: "get on the raft to row", ru: "чтобы грести, встань на плот", pl: "wejdź na tratwę, żeby wiosłować" },
+    Line { msg: Msg::Notice(Notice::StepAboardForOars), en: "step aboard to take the oars", simple: "get on the raft to row", ru: "чтобы грести, встаньте на плот", pl: "wejdź na tratwę, żeby wiosłować" },
     Line { msg: Msg::Notice(Notice::RaftAlreadyThere), en: "there is already a raft there", simple: "there is a raft there already", ru: "там уже есть плот", pl: "tam już jest tratwa" },
     Line { msg: Msg::Notice(Notice::TrapEmpty), en: "nothing has gone into the trap yet", simple: "the trap is still empty", ru: "в ловушку пока ничего не попало", pl: "w pułapkę jeszcze nic nie wpadło" },
     Line { msg: Msg::Notice(Notice::LineParted), en: "the line parted: the rod is done", simple: "the line broke - the rod is finished", ru: "леска лопнула: удочке конец", pl: "żyłka pękła: wędka się skończyła" },
@@ -1478,6 +1490,12 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::Notice(Notice::NoRoomToTakeOff), en: "no room to take that off", simple: "no room in your bag to take that off", ru: "некуда это снять", pl: "nie ma gdzie tego zdjąć" },
     Line { msg: Msg::Notice(Notice::TooMuchLyingAround), en: "too much is already lying around to drop that", simple: "too many things are on the ground here already", ru: "здесь и так слишком много всего валяется", pl: "za dużo już tu leży, żeby to upuścić" },
     Line { msg: Msg::Notice(Notice::SetDownOnSolidGround), en: "that is set down on top of solid ground, in an empty place", simple: "put that on solid ground, where nothing else is", ru: "это ставят на твёрдую землю, в пустое место", pl: "to stawia się na twardym gruncie, w pustym miejscu" },
+    Line { msg: Msg::Notice(Notice::SnareEmpty), en: "nothing has come to the snare yet", simple: "no hare in the snare yet -- come back later", ru: "в силок ещё никто не попался", pl: "nic jeszcze nie wpadło w sidła" },
+    Line { msg: Msg::Notice(Notice::PanDrying), en: "the pan is still drying: it wants sun and no rain", simple: "the salt is not ready -- it needs sun, and rain undoes it", ru: "соль ещё выпаривается: нужно солнце и ни капли дождя", pl: "panew jeszcze paruje: trzeba słońca i żadnego deszczu" },
+    Line { msg: Msg::Notice(Notice::PanWantsSea), en: "a salt pan is filled from a jug of the sea", simple: "pour a jug of sea water into it", ru: "солеварню наполняют кувшином морской воды", pl: "panew napełnia się dzbanem morskiej wody" },
+    Line { msg: Msg::Notice(Notice::PanFreshWater), en: "that is fresh water: it dries to nothing", simple: "that water has no salt in it", ru: "это пресная вода: от неё ничего не останется", pl: "to słodka woda: nic z niej nie zostanie" },
+    Line { msg: Msg::Notice(Notice::SeaWaterIsSalt), en: "the sea is salt, and you are thirstier for it", simple: "sea water makes you more thirsty, not less", ru: "море солёное -- от него пить хочется сильнее", pl: "morze jest słone -- po nim pragnienie jest większe" },
+    Line { msg: Msg::Notice(Notice::StaleWater), en: "the water is stale, and it sits badly", simple: "this water is old -- it will make you ill", ru: "вода затхлая, и она ещё аукнется", pl: "woda jest zastała i odbije się czkawką" },
     Line { msg: Msg::Notice(Notice::RaftNeedsOpenWater), en: "a raft needs open water: three blocks long, two wide, and deep enough to float", simple: "a raft needs open water - three blocks long, two wide, and deep enough", ru: "плоту нужна чистая вода: три блока в длину, два в ширину и достаточно глубоко", pl: "tratwa potrzebuje otwartej wody: trzy bloki długości, dwa szerokości i dość głęboko" },
 ];
 
@@ -1492,6 +1510,74 @@ pub const STRINGS: &[Line] = &[
 /// thing its table has no row for yet.
 pub fn readable(name: &str) -> String {
     name.replace('_', " ")
+}
+
+/// A word that follows a number, in the form that number puts it in.
+///
+/// **English has two forms and hides one of them.** "chunks" is right
+/// after every number but one, so a row that writes `{n} {word}` is
+/// correct in English by luck and wrong in Russian and Polish for a
+/// quarter of the numbers a player can dial in. The render distance row
+/// said "2 чанков" and "3 чанков", the shadow row said "1 блоков", and a
+/// chest with three things in it said "3 предметов" -- the genitive
+/// plural stuck on everything, which is what a machine does and what a
+/// person notices immediately.
+///
+/// Three forms a language, because that is how many the two Slavic
+/// languages here need, and a fourth column for a language that needs
+/// four can be added the day one arrives. English and simple English
+/// take their one word from `STRINGS` as they always did: a row here is
+/// not needed unless a language declines.
+pub struct Counted {
+    pub msg: Msg,
+    /// 1, then 2--4, then the rest: `1 чанк`, `2 чанка`, `5 чанков`.
+    pub ru: [&'static str; 3],
+    /// The same three slots, filled by Polish's own rule: `1 chunk`,
+    /// `2 chunki`, `5 chunków`.
+    pub pl: [&'static str; 3],
+}
+
+/// Every word this game ever prints a number in front of.
+#[rustfmt::skip]
+pub const COUNTED: &[Counted] = &[
+    Counted { msg: Msg::Chunks,    ru: ["чанк", "чанка", "чанков"],             pl: ["chunk", "chunki", "chunków"] },
+    Counted { msg: Msg::Blocks,    ru: ["блок", "блока", "блоков"],             pl: ["blok", "bloki", "bloków"] },
+    Counted { msg: Msg::ItemsWord, ru: ["предмет", "предмета", "предметов"],    pl: ["przedmiot", "przedmioty", "przedmiotów"] },
+];
+
+/// Which of the three forms `n` calls for.
+///
+/// Russian and Polish agree about 2--4 and about the teens being an
+/// exception to it, and disagree about 21: Russian says "21 чанк" and
+/// Polish says "21 chunków". That one difference is the whole reason
+/// this is not one rule.
+fn form_of(language: Language, n: u64) -> usize {
+    let last_two = n % 100;
+    let last = n % 10;
+    let few = (2..=4).contains(&last) && !(12..=14).contains(&last_two);
+    match language {
+        Language::Russian if last == 1 && last_two != 11 => 0,
+        Language::Polish if n == 1 => 0,
+        _ if few => 1,
+        _ => 2,
+    }
+}
+
+/// `msg` in the form `n` of it takes, for a row that prints `{n} {word}`.
+///
+/// Falls back to the plain row for a language with no forms and for a
+/// `Msg` with no row here, so a call site can use this for every counted
+/// word and a word that turns out not to decline costs nothing.
+pub fn counted(language: Language, n: u64, msg: Msg) -> &'static str {
+    let Some(row) = COUNTED.iter().find(|row| row.msg == msg) else {
+        return language.text(msg);
+    };
+    let forms = match language {
+        Language::Russian => &row.ru,
+        Language::Polish => &row.pl,
+        Language::English | Language::SimpleEnglish => return language.text(msg),
+    };
+    forms[form_of(language, n)]
 }
 
 #[cfg(test)]
@@ -1562,6 +1648,52 @@ mod tests {
                 "{:?} appears twice",
                 line.msg
             );
+        }
+    }
+
+    /// The numbers a settings row can actually be dialled to, and the
+    /// three that used to come out wrong in both Slavic languages.
+    #[test]
+    fn counting_in_russian_and_polish_uses_the_form_the_number_calls_for() {
+        use Language::{English, Polish, Russian};
+        for (n, ru, pl) in [
+            (1_u64, "чанк", "chunk"),
+            (2, "чанка", "chunki"),
+            (4, "чанка", "chunki"),
+            (5, "чанков", "chunków"),
+            // The teens are the exception both languages make.
+            (11, "чанков", "chunków"),
+            (12, "чанков", "chunków"),
+            (14, "чанков", "chunków"),
+            (15, "чанков", "chunków"),
+            // ...and 21 is where the two rules part company.
+            (21, "чанк", "chunków"),
+            (22, "чанка", "chunki"),
+            (25, "чанков", "chunków"),
+            (100, "чанков", "chunków"),
+        ] {
+            assert_eq!(counted(Russian, n, Msg::Chunks), ru, "{n} in Russian");
+            assert_eq!(counted(Polish, n, Msg::Chunks), pl, "{n} in Polish");
+        }
+        // English takes the row it always took, and a word with no forms
+        // of its own falls back to the row as well.
+        assert_eq!(counted(English, 1, Msg::Chunks), English.text(Msg::Chunks));
+        assert_eq!(counted(Russian, 3, Msg::Paused), Russian.text(Msg::Paused));
+    }
+
+    /// Every form a counted word has is a word the font can draw. The
+    /// glyph test above walks `STRINGS`, which these are not in.
+    #[test]
+    fn every_form_of_a_counted_word_has_a_glyph() {
+        for row in COUNTED {
+            for form in row.ru.iter().chain(row.pl.iter()) {
+                for c in form.chars() {
+                    assert!(
+                        crate::engine::texture::GLYPHS.contains(c),
+                        "{form:?} needs a glyph for {c:?}, which the font has not got"
+                    );
+                }
+            }
         }
     }
 

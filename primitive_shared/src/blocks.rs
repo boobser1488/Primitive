@@ -9649,9 +9649,16 @@ pub const BLOCKS: &[BlockDef] = &[
         propped: false,
     },
     // ...and the same handful crisped on the fire (`types::BLOCK_ROASTED_GRUBS`).
+    //
+    // **`roasted_grubs`, with the underscore.** It was written with a
+    // space, the only name in five hundred that was, and a name is a
+    // lookup key: `blocks.toml` spells it `roasted_grubs`, so the face
+    // found no row and the item drew the magenta placeholder. The
+    // underscore is also what `/give` needs, since a command splits on
+    // spaces.
     BlockDef {
         id: BLOCK_ROASTED_GRUBS,
-        name: "roasted grubs",
+        name: "roasted_grubs",
         shape: Shape::Item,
         thickness: LAYERS_PER_BLOCK,
         matter: Matter::Solid,
