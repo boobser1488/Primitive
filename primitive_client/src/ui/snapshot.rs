@@ -366,6 +366,7 @@ fn ui_snapshot() {
                 // shows whether they all fit above its floor.
                 shelter: primitive_shared::shelter::Reading { air_c: 4.0, indoors: true, draught: 0.5, keeps_out: 0.55, roof_open: true },
                 smoke: 0.3,
+                downed: None,
             },
             &belt,
             // **A refusal, drawn.** The notice was never in this
@@ -902,6 +903,7 @@ fn snapshot_vitals() -> crate::ui::inventory_screen::Vitals {
                 roof_open: true,
             },
             smoke: 0.3,
+            downed: None,
         },
     }
 }

@@ -22,6 +22,7 @@
 pub mod chat;
 pub mod chest_screen;
 pub mod death;
+pub mod downed;
 pub mod debug;
 pub mod field;
 pub mod give_screen;

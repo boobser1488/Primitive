@@ -443,6 +443,29 @@ pub struct Vitals {
     /// `comfort::goes_now`. Not saved: the worst a relog does is put the
     /// next pat off by a day's food.
     dung_owed: f32,
+    /// On the ground and not yet dead. See `primitive_shared::downed`.
+    ///
+    /// **Here, beside `dead`, and not a flag on it**, because a downed body
+    /// is alive to every rule that asks: it is hungry, it is cold, it can be
+    /// fed and bandaged and bitten. What it cannot do is heal (see
+    /// `regenerate`), and what it has instead of health is a clock.
+    ///
+    /// **Not saved.** A player who leaves while down dies on the way out
+    /// (the teardown in `net::connection` calls `give_up`), because the
+    /// alternatives were both worse: a clock that stopped while they were
+    /// away is a free pause at the worst moment of a fight, and one that
+    /// kept running is a death nobody was there for -- and the pack would
+    /// have had to lie somewhere for it.
+    downed: Option<primitive_shared::downed::Down>,
+    /// The server's words for what put the body down: what the death screen
+    /// says if the clock runs out.
+    downed_words: String,
+    /// The act that raises the body happened (a bandage, a mouthful, a
+    /// drink), and the next step of the clock gets it up. See `offer`.
+    rescued: bool,
+    /// The client's copy of `downed` is out of date: it went down, it got
+    /// up, or something took time off the clock. See `take_downed_report`.
+    downed_dirty: bool,
 }
 
 /// The ramp both tiredness costs share.
@@ -513,6 +536,10 @@ impl Vitals {
             // anywhere, and the first surveys settle it.
             comfort_level: 0.0,
             dung_owed: 0.0,
+            downed: None,
+            downed_words: String::new(),
+            rescued: false,
+            downed_dirty: false,
         }
     }
 
@@ -586,6 +613,9 @@ impl Vitals {
             MAX_HEALTH
         };
         self.dead = false;
+        // A heal that lands on a downed body gets it up: the mod that hands
+        // out health is a rescue the body did not have to crawl for.
+        self.stand(false);
         self.last_reported = self.health;
         self.clear_fall();
     }
@@ -701,21 +731,144 @@ impl Vitals {
     /// Both halves end in the same place, so a death by either is one
     /// `Outcome::Died` down the one reporting path.
     fn lose(&mut self, amount: f32, cause: &str, struck: bool) -> Outcome {
-        if self.dead || amount <= 0.0 {
+        use primitive_shared::downed::{Cause, Down, OVERKILL};
+        if self.dead || amount.is_nan() || amount <= 0.0 {
             return Outcome::Unchanged;
         }
-        self.health = (self.health - amount).max(0.0);
         if struck {
             self.last_damage = Instant::now();
         }
+        let kind = Cause::of(cause);
+        // **Already down: the clock pays, not the health.** What the clock
+        // is already counting costs nothing more; anything else takes time
+        // off it, and what kills outright still does. See
+        // `downed::Cause::shares_the_bill` for which is which.
+        if let Some(down) = self.downed.as_mut() {
+            if kind.profile().is_none() || amount >= OVERKILL {
+                return self.die(cause);
+            }
+            if kind.shares_the_bill(down.cause) {
+                return Outcome::Unchanged;
+            }
+            self.downed_dirty = true;
+            if down.take(amount) {
+                return self.die(cause);
+            }
+            return Outcome::Unchanged;
+        }
+        let before = self.health;
+        self.health = (before - amount).max(0.0);
         if self.health <= 0.0 {
-            self.dead = true;
-            self.fall_peak_y = None;
-            return Outcome::Died {
-                cause: cause.to_string(),
-            };
+            // **Down rather than dead**, unless the cause has no crawl in it
+            // or the blow went a whole bar past the last point. See
+            // `primitive_shared::downed`.
+            match Down::new(kind).filter(|_| amount - before < OVERKILL) {
+                Some(down) => {
+                    self.downed = Some(down);
+                    self.downed_words = cause.to_string();
+                    self.rescued = false;
+                    self.downed_dirty = true;
+                    // The fall that downed the body is over; a crawl off a
+                    // ledge afterwards is a fall of its own.
+                    self.fall_peak_y = None;
+                }
+                None => return self.die(cause),
+            }
         }
         Outcome::Changed
+    }
+
+    /// The end, by `cause`: the one place `dead` is set.
+    fn die(&mut self, cause: &str) -> Outcome {
+        self.health = 0.0;
+        self.dead = true;
+        self.fall_peak_y = None;
+        if self.downed.take().is_some() {
+            self.downed_dirty = true;
+        }
+        self.rescued = false;
+        self.downed_words.clear();
+        Outcome::Died {
+            cause: cause.to_string(),
+        }
+    }
+
+    // ---- downed ----
+
+    /// On the ground, and why, and how long is left. `None` standing or
+    /// dead.
+    pub fn downed(&self) -> Option<primitive_shared::downed::Down> {
+        self.downed
+    }
+
+    pub fn is_downed(&self) -> bool {
+        self.downed.is_some()
+    }
+
+    /// Whether the client has to be told about `downed`, and marks it told.
+    pub fn take_downed_report(&mut self) -> bool {
+        std::mem::take(&mut self.downed_dirty)
+    }
+
+    /// The act that `rescue` is has just been done to this body. Raises it
+    /// on the next `step_downed` if it is the act the body was waiting for;
+    /// anything else -- a bandage on a body downed by the cold -- is only
+    /// what it always was.
+    ///
+    /// **On the next step rather than here**, so every rescue, an act or a
+    /// state, gets up through the one door and is reported the one way.
+    pub fn offer(&mut self, rescue: primitive_shared::downed::Rescue) {
+        if self.downed.is_some_and(|down| down.rescue() == rescue) {
+            self.rescued = true;
+        }
+    }
+
+    /// One tick of lying on the ground: raised if what saves the body has
+    /// happened or is true, dead if the clock has run out.
+    pub fn step_downed(&mut self, dt: f32) -> Outcome {
+        let Some(mut down) = self.downed else {
+            return Outcome::Unchanged;
+        };
+        let met = self.rescued || down.rescue().met_by(self.body_c, self.breath >= BREATH_SECONDS);
+        if met {
+            self.stand(true);
+            return Outcome::Changed;
+        }
+        let out = down.tick(dt);
+        self.downed = Some(down);
+        if out {
+            let words = std::mem::take(&mut self.downed_words);
+            return self.die(&words);
+        }
+        Outcome::Unchanged
+    }
+
+    /// Lets a downed body die now, rather than wait for the clock: the
+    /// respawn key while on the ground. Nothing for a body that is not down.
+    pub fn give_up(&mut self) -> Outcome {
+        if self.downed.is_none() {
+            return Outcome::Unchanged;
+        }
+        let words = std::mem::take(&mut self.downed_words);
+        self.die(&words)
+    }
+
+    /// Up off the ground. With `raised`, on `downed::RAISED_HEALTH` -- the
+    /// rescue -- and otherwise at whatever health the caller is about to
+    /// set (a respawn, a heal, a profile).
+    fn stand(&mut self, raised: bool) {
+        if self.downed.take().is_none() {
+            return;
+        }
+        self.downed_dirty = true;
+        self.rescued = false;
+        self.downed_words.clear();
+        if raised {
+            self.health = self.health.max(primitive_shared::downed::RAISED_HEALTH);
+            // A body just off the ground does not start mending at once: the
+            // same quiet time a blow buys (`REGEN_DELAY_SECS`).
+            self.last_damage = Instant::now();
+        }
     }
 
     /// Heals over time, once the player has been left alone long enough.
@@ -823,7 +976,10 @@ impl Vitals {
     }
 
     pub fn regenerate(&mut self, dt: f32) -> Outcome {
-        if self.dead || self.health >= MAX_HEALTH {
+        // **A downed body does not mend.** Health creeping back from nought
+        // would be a body that got up on its own by lying still long enough,
+        // and the whole of being down is that it does not.
+        if self.dead || self.downed.is_some() || self.health >= MAX_HEALTH {
             return Outcome::Unchanged;
         }
         if self.last_damage.elapsed().as_secs_f32() < REGEN_DELAY_SECS {
@@ -947,7 +1103,35 @@ impl Vitals {
         if self.dead {
             return Err(injury::Refusal::NothingItHelps);
         }
-        self.injuries.treat(part, block)
+        // **On a downed body, the rescue it is waiting for is never
+        // refused.** The dressing goes on the part asked for if it suits it,
+        // on any part it suits if not -- a player lying in the grass is not
+        // aiming at the mannequin -- and if nothing on the body suits it at
+        // all, it is spent binding what put them down. A bandage refused to a
+        // body bleeding out because the bite was a bruise would be the game
+        // arguing with somebody who has twenty seconds left.
+        let rescue = self.downed.map(|down| down.rescue());
+        let rescues = injury::Treatment::of(block)
+            .zip(rescue)
+            .is_some_and(|(treatment, rescue)| rescue.by_treatment(treatment));
+        if !rescues {
+            return self.injuries.treat(part, block);
+        }
+        let treated = self.injuries.treat(part, block).or_else(|refused| {
+            injury::Part::ALL
+                .iter()
+                .find_map(|&other| self.injuries.treat(other, block).ok())
+                .ok_or(refused)
+        });
+        let kind = treated.unwrap_or_else(|_| {
+            injury::Treatment::of(block)
+                .and_then(|treatment| treatment.suits().first().copied())
+                .unwrap_or(injury::Kind::Cut)
+        });
+        if let Some(rescue) = rescue {
+            self.offer(rescue);
+        }
+        Ok(kind)
     }
 
     /// One tick of wounds bleeding and mending.
@@ -1338,6 +1522,9 @@ impl Vitals {
         if let Some(warmth) = food::warmth_in(block) {
             self.warm_by(warmth);
         }
+        // Anything that went down raises a body downed by hunger -- even the
+        // toadstool, whose harm below comes out of the body it raised.
+        self.offer(primitive_shared::downed::Rescue::Food);
         if let Some(harm) = food::harm(block) {
             return self.hurt(harm.health, "ate something they should not have");
         }
@@ -1601,6 +1788,10 @@ impl Vitals {
             return false;
         }
         self.hydration = (self.hydration + amount).min(body::MAX_HYDRATION);
+        // A drink raises a body downed by thirst or by a bad stomach. Here,
+        // in the one function every drink passes through -- a jug, a river,
+        // a coconut -- and never the sea, which does not reach it.
+        self.offer(primitive_shared::downed::Rescue::Water);
         true
     }
 
@@ -1814,6 +2005,7 @@ impl Vitals {
         self.brewing = 0.0;
         self.brewing_in = 0.0;
         self.dead = false;
+        self.stand(false);
         self.clear_fall();
         // Deliberately *not* setting `last_reported`: the client has to
         // be told about the restored health, and pretending it already
@@ -2144,8 +2336,14 @@ mod hunger_tests {
         let mut cause = None;
         // An hour at 20 Hz: the rolls are chance, so long enough for any
         // seed. See `food::STARVATION_ROLL_SECONDS`.
+        // ...and the clock on the ground after it, which is where a starving
+        // body dies now (`downed`).
         for _ in 0..72_000 {
-            if let Outcome::Died { cause: why } = vitals.digest(Effort::IDLE, 0.05) {
+            let outcome = match vitals.digest(Effort::IDLE, 0.05) {
+                Outcome::Died { cause } => Outcome::Died { cause },
+                _ => vitals.step_downed(0.05),
+            };
+            if let Outcome::Died { cause: why } = outcome {
                 cause = Some(why);
                 break;
             }
@@ -2166,6 +2364,7 @@ mod hunger_tests {
             let mut seconds = 0.0;
             while !vitals.is_dead() && seconds < 3600.0 {
                 vitals.digest(Effort::IDLE, 0.05);
+                vitals.step_downed(0.05);
                 seconds += 0.05;
             }
             assert!(seconds > 180.0, "seed {seed}: starved to death in {seconds}s");
@@ -2339,19 +2538,18 @@ mod hunger_tests {
         assert!(vitals.nourishment() < 12.0, "a bad mushroom fed somebody");
 
         // ...and on somebody already nearly gone it is the last thing
-        // they do, reported as a death rather than as a scratch.
+        // they can take: it puts them on the ground (`downed`), reported
+        // as a change rather than swallowed as a scratch.
         let mut dying = Vitals::new();
         dying.set_health(2.0);
-        assert!(matches!(
-            dying.eat(primitive_shared::types::BLOCK_TOADSTOOL),
-            Outcome::Died { .. }
-        ));
+        assert_eq!(dying.eat(primitive_shared::types::BLOCK_TOADSTOOL), Outcome::Changed);
+        assert!(dying.is_downed(), "a toadstool on the last two points left the eater standing");
     }
 
     #[test]
     fn the_dead_neither_starve_nor_eat() {
         let mut vitals = Vitals::new();
-        vitals.hurt(MAX_HEALTH, "killed");
+        vitals.hurt(f32::MAX, "killed");
         vitals.set_nourishment(0.0);
         assert_eq!(vitals.digest(Effort::IDLE, 10.0), Outcome::Unchanged);
         assert_eq!(vitals.eat(BLOCK_COOKED_MEAT), Outcome::Unchanged);
@@ -2368,6 +2566,7 @@ mod hunger_tests {
         vitals.set_nourishment(0.0);
         while !vitals.is_dead() {
             vitals.digest(Effort::IDLE, 1.0);
+            vitals.step_downed(1.0);
         }
         vitals.respawn();
         assert_eq!(vitals.nourishment_fraction(), 1.0);
@@ -2421,7 +2620,7 @@ mod tests {
         wounds.inflict(injury::Part::Torso, injury::Kind::Cut, 0.8);
         vitals.set_injuries(wounds);
         vitals.set_fatigue(1.0);
-        vitals.hurt(MAX_HEALTH, "fell from a great height");
+        vitals.hurt(f32::MAX, "fell from a great height");
         assert!(vitals.is_dead());
 
         vitals.respawn();
@@ -2561,9 +2760,15 @@ mod tests {
             wounds.inflict(part, injury::Kind::Cut, 1.0);
         }
         vitals.set_injuries(wounds);
+        // Down first and dead when the clock runs out (`downed`), with the
+        // words of the bleeding either way.
         let mut died = None;
-        for _ in 0..600 {
-            if let Outcome::Died { cause } = vitals.mend(0.05, false) {
+        for _ in 0..1200 {
+            let outcome = match vitals.mend(0.05, false) {
+                Outcome::Died { cause } => Outcome::Died { cause },
+                _ => vitals.step_downed(0.05),
+            };
+            if let Outcome::Died { cause } = outcome {
                 died = Some(cause);
                 break;
             }
@@ -3013,7 +3218,7 @@ mod tests {
     }
 
     #[test]
-    fn carrying_a_load_turns_a_survivable_fall_into_a_fatal_one() {
+    fn carrying_a_load_turns_a_survivable_fall_into_one_that_puts_you_on_the_ground() {
         // The point of the whole mechanic: the trip down a shaft is
         // survivable empty-handed and a decision with a full pack.
         // Thirteen blocks is thirteen and a half points empty-handed and
@@ -3024,10 +3229,14 @@ mod tests {
         assert_eq!(take_a_fall(&mut empty, drop, 0.0), Outcome::Changed);
         assert!(!empty.is_dead(), "the empty-handed fall should be survivable");
 
+        // Down with broken legs rather than dead: the fall that "kills" by a
+        // few points is the fall `downed` gives ninety seconds and a splint.
         let mut laden = Vitals::new();
         laden.set_carried_weight(primitive_shared::load::CARRY_CAPACITY_KG);
-        assert!(
-            matches!(take_a_fall(&mut laden, drop, 0.0), Outcome::Died { .. }),
+        take_a_fall(&mut laden, drop, 0.0);
+        assert_eq!(
+            laden.downed().map(|down| down.cause),
+            Some(primitive_shared::downed::Cause::Fall),
             "the same fall with a full pack should not be"
         );
     }
@@ -3179,7 +3388,8 @@ mod tests {
     #[test]
     fn enough_damage_kills_and_death_is_reported_once() {
         let mut vitals = Vitals::new();
-        let outcome = vitals.hurt(MAX_HEALTH + 5.0, "crushed");
+        // Two bars and a bit: past `downed::OVERKILL`, so dead at once.
+        let outcome = vitals.hurt(MAX_HEALTH * 2.0 + 5.0, "crushed");
         assert!(matches!(outcome, Outcome::Died { .. }));
         assert!(vitals.is_dead());
         assert_eq!(vitals.health(), 0.0);
@@ -3190,7 +3400,7 @@ mod tests {
     #[test]
     fn the_dead_do_not_take_fall_damage() {
         let mut vitals = Vitals::new();
-        vitals.hurt(MAX_HEALTH, "killed");
+        vitals.hurt(f32::MAX, "killed");
         let outcome = take_a_fall(&mut vitals, 60.0, 0.0);
         assert_eq!(outcome, Outcome::Unchanged);
     }
@@ -3198,7 +3408,7 @@ mod tests {
     #[test]
     fn respawning_restores_everything() {
         let mut vitals = Vitals::new();
-        vitals.hurt(MAX_HEALTH, "killed");
+        vitals.hurt(f32::MAX, "killed");
         vitals.respawn();
         assert!(!vitals.is_dead());
         assert_eq!(vitals.health(), MAX_HEALTH);
@@ -3217,7 +3427,8 @@ mod tests {
         vitals.set_health(0.01);
         let mut died = false;
         for _ in 0..10_000 {
-            if matches!(vitals.sicken(0.05), Outcome::Died { .. }) {
+            let sick = vitals.sicken(0.05);
+            if matches!(sick, Outcome::Died { .. }) || matches!(vitals.step_downed(0.05), Outcome::Died { .. }) {
                 died = true;
                 break;
             }
@@ -3441,7 +3652,7 @@ mod tests {
         assert_eq!(vitals.regenerate(10.0), Outcome::Unchanged);
         assert_eq!(vitals.health(), MAX_HEALTH);
 
-        vitals.hurt(MAX_HEALTH, "killed");
+        vitals.hurt(f32::MAX, "killed");
         vitals.last_damage = Instant::now()
             - std::time::Duration::from_secs_f32(REGEN_DELAY_SECS + 1.0);
         assert_eq!(vitals.regenerate(100.0), Outcome::Unchanged);
@@ -3463,5 +3674,155 @@ mod tests {
             - std::time::Duration::from_secs_f32(REGEN_DELAY_SECS + 1.0);
         vitals.regenerate(0.01);
         assert!(!vitals.needs_report(), "reporting noise-level changes");
+    }
+}
+
+#[cfg(test)]
+mod downed_tests {
+    use super::*;
+    use primitive_shared::downed::{Cause, OVERKILL, RAISED_HEALTH, SECONDS_PER_HEALTH};
+    use primitive_shared::types::{BLOCK_BANDAGE, BLOCK_BREAD, BLOCK_SPLINT};
+
+    /// Runs a downed body's clock at 20 Hz until it gets up, dies, or
+    /// `seconds` pass. Answers the outcome that ended it, if one did.
+    fn lie_for(vitals: &mut Vitals, seconds: f32) -> Outcome {
+        let mut t = 0.0;
+        while t < seconds {
+            let outcome = vitals.step_downed(0.05);
+            if outcome != Outcome::Unchanged {
+                return outcome;
+            }
+            t += 0.05;
+        }
+        Outcome::Unchanged
+    }
+
+    #[test]
+    fn the_overkill_line_is_one_whole_bar_of_health() {
+        assert_eq!(OVERKILL, MAX_HEALTH, "downed::OVERKILL has drifted from the server's bar");
+    }
+
+    #[test]
+    fn a_body_that_gives_out_goes_down_and_is_not_dead() {
+        let mut vitals = Vitals::new();
+        assert_eq!(vitals.hurt(MAX_HEALTH, "was pulled down by a wolf"), Outcome::Changed);
+        assert!(!vitals.is_dead());
+        let down = vitals.downed().expect("not down");
+        assert_eq!(down.cause, Cause::Wound);
+        assert_eq!(vitals.health(), 0.0);
+        assert!(vitals.take_downed_report(), "the client was never told it was down");
+        assert!(!vitals.take_downed_report(), "told twice");
+    }
+
+    #[test]
+    fn drowning_a_tree_and_a_blow_a_bar_past_zero_still_kill_at_once() {
+        let mut drowned = Vitals::new();
+        assert!(matches!(drowned.hurt(MAX_HEALTH, "drowned"), Outcome::Died { .. }));
+        let mut crushed = Vitals::new();
+        assert!(matches!(crushed.hurt(f32::MAX, "was crushed by a falling tree"), Outcome::Died { .. }));
+        let mut cliff = Vitals::new();
+        assert!(matches!(cliff.hurt(MAX_HEALTH * 2.0 + 1.0, "fell from a great height"), Outcome::Died { .. }));
+        assert!(cliff.is_dead() && cliff.downed().is_none());
+    }
+
+    #[test]
+    fn a_downed_body_left_alone_dies_when_the_clock_runs_out_with_the_words_that_downed_it() {
+        let mut vitals = Vitals::new();
+        vitals.hurt(MAX_HEALTH, "fell from a great height");
+        let of = vitals.downed().unwrap().of;
+        assert_eq!(lie_for(&mut vitals, of - 1.0), Outcome::Unchanged, "died before the clock ran out");
+        assert_eq!(
+            lie_for(&mut vitals, 2.0),
+            Outcome::Died { cause: "fell from a great height".to_string() }
+        );
+        assert!(vitals.is_dead());
+    }
+
+    #[test]
+    fn an_animal_still_biting_a_downed_body_finishes_it_sooner() {
+        let mut vitals = Vitals::new();
+        vitals.hurt(MAX_HEALTH, "was pulled down by a wolf");
+        let before = vitals.downed().unwrap().left;
+        assert_eq!(vitals.hurt(5.0, "was pulled down by a wolf"), Outcome::Unchanged);
+        let after = vitals.downed().unwrap().left;
+        assert!((before - after - 5.0 * SECONDS_PER_HEALTH).abs() < 1e-3, "a bite took {} s", before - after);
+        let mut bites = 0;
+        while !vitals.is_dead() {
+            vitals.hurt(5.0, "was pulled down by a wolf");
+            bites += 1;
+            assert!(bites < 10, "a wolf never finished a downed player");
+        }
+    }
+
+    #[test]
+    fn the_hunger_that_downed_a_body_is_not_billed_twice_but_a_fall_on_top_of_it_is() {
+        let mut vitals = Vitals::new();
+        vitals.hurt(MAX_HEALTH, "starved");
+        let left = vitals.downed().unwrap().left;
+        vitals.hurt(1.0, "starved");
+        assert_eq!(vitals.downed().unwrap().left, left, "the hunger that was the clock took from the clock");
+        vitals.hurt(2.0, "fell from a great height");
+        assert!(vitals.downed().unwrap().left < left, "a fall onto a starving body cost nothing");
+    }
+
+    #[test]
+    fn a_starving_body_on_the_ground_is_raised_by_a_mouthful() {
+        let mut vitals = Vitals::new();
+        vitals.set_nourishment(0.0);
+        vitals.hurt(MAX_HEALTH, "starved");
+        assert!(!matches!(vitals.eat(BLOCK_BREAD), Outcome::Unchanged), "the bread was refused");
+        assert_eq!(vitals.step_downed(0.05), Outcome::Changed);
+        assert!(vitals.downed().is_none());
+        assert_eq!(vitals.health(), RAISED_HEALTH);
+        assert!(!vitals.is_dead());
+    }
+
+    #[test]
+    fn a_bandage_raises_a_bitten_body_even_where_the_bite_left_only_a_bruise() {
+        let mut vitals = Vitals::new();
+        vitals.hurt(MAX_HEALTH, "was gored by a boar");
+        assert!(vitals.treat(injury::Part::Head, BLOCK_BANDAGE).is_ok(), "the bandage was refused to a downed body");
+        assert_eq!(vitals.step_downed(0.05), Outcome::Changed);
+        assert!(vitals.downed().is_none());
+    }
+
+    #[test]
+    fn the_wrong_help_is_no_help() {
+        // A bandage on a body the cold put down, and bread on a broken one.
+        let mut cold = Vitals::new();
+        cold.set_warmth(body::FREEZING - 5.0, 0.0);
+        cold.hurt(MAX_HEALTH, "froze to death");
+        assert!(cold.treat(injury::Part::Head, BLOCK_BANDAGE).is_err());
+        assert_eq!(cold.step_downed(0.05), Outcome::Unchanged);
+        let mut fallen = Vitals::new();
+        fallen.set_nourishment(5.0);
+        fallen.hurt(MAX_HEALTH, "fell from a great height");
+        fallen.eat(BLOCK_BREAD);
+        assert_eq!(fallen.step_downed(0.05), Outcome::Unchanged, "bread set a broken leg");
+        assert!(fallen.treat(injury::Part::Torso, BLOCK_SPLINT).is_ok());
+        assert_eq!(fallen.step_downed(0.05), Outcome::Changed);
+    }
+
+    #[test]
+    fn a_freezing_body_is_raised_by_the_fire_it_crawled_to() {
+        let mut vitals = Vitals::new();
+        vitals.set_warmth(body::FREEZING - 4.0, 0.0);
+        vitals.hurt(MAX_HEALTH, "froze to death");
+        assert_eq!(vitals.step_downed(0.05), Outcome::Unchanged);
+        vitals.warm_by(8.0);
+        assert_eq!(vitals.step_downed(0.05), Outcome::Changed, "warm again at {}", vitals.temperature());
+    }
+
+    #[test]
+    fn a_downed_body_does_not_mend_and_letting_go_is_dying_now() {
+        let mut vitals = Vitals::new();
+        vitals.hurt(MAX_HEALTH, "was pulled down by a wolf");
+        vitals.last_damage = Instant::now() - std::time::Duration::from_secs(3600);
+        assert_eq!(vitals.regenerate(100.0), Outcome::Unchanged);
+        assert_eq!(vitals.health(), 0.0);
+        assert_eq!(vitals.give_up(), Outcome::Died { cause: "was pulled down by a wolf".to_string() });
+        vitals.respawn();
+        assert!(vitals.downed().is_none() && !vitals.is_dead());
+        assert_eq!(vitals.give_up(), Outcome::Unchanged, "a standing player gave up");
     }
 }

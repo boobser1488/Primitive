@@ -948,15 +948,28 @@ impl RemotePlayers {
     /// under them is solid already.
     pub fn iter_positions(&self) -> impl Iterator<Item = glam::DVec3> + '_ {
         // ...and not the dead, for the same reason: a body lies on the ground.
+        // Nor the downed, who are crawling on it -- and who somebody is about
+        // to kneel over to help up, which a pillar would stop them reaching.
         self.players
             .values()
             .filter(|p| {
                 !matches!(
                     p.posture,
-                    primitive_shared::protocol::Posture::Lying | primitive_shared::protocol::Posture::Fallen
+                    primitive_shared::protocol::Posture::Lying
+                        | primitive_shared::protocol::Posture::Fallen
+                        | primitive_shared::protocol::Posture::Crawling
                 )
             })
             .map(|p| p.interpolated_pos)
+    }
+
+    /// Whether this player is on the ground and not yet dead, as the last
+    /// snapshot said -- the one a right click can help up
+    /// (`ClientMessage::HelpUp`).
+    pub fn is_down(&self, id: PlayerId) -> bool {
+        self.players
+            .get(&id)
+            .is_some_and(|p| p.posture == primitive_shared::protocol::Posture::Crawling)
     }
 
     /// Everyone, whole. `iter_positions` is kept beside this because

@@ -73,6 +73,9 @@ impl Resting {
             // Never sent for the player's own body either (`Posture::Swimming`):
             // the client's own physics knows when it swims.
             Posture::Swimming => Resting::Standing,
+            // ...nor `Posture::Crawling`: a client learns it is on the ground
+            // from `ServerMessage::Downed`, and the eye goes low off that.
+            Posture::Crawling => Resting::Standing,
             // A rider sits, and with no front of their own to be turned to:
             // the horse turns under them and the view goes with the reins
             // (`horseback`), not with a chair.

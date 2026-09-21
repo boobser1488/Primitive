@@ -632,6 +632,34 @@ pub enum Msg {
     SleepGetUp,
     SleepWaiting,
     SleepMorning,
+    // ---- on the ground ----
+    //
+    // Said over the red of a body that has given out and is not yet dead
+    // (`ui::downed`): what put it there, what gets it up, and how to let go.
+    // One line per cause and per rescue rather than one sentence with a
+    // blank in it, because "the ____ has taken your legs" does not decline
+    // in Russian or Polish, and a sentence that only reads in English is a
+    // sentence the other three languages would carry broken.
+    DownedTitle,
+    DownedWound,
+    DownedBleeding,
+    DownedFall,
+    DownedBurn,
+    DownedCold,
+    DownedHeat,
+    DownedHunger,
+    DownedThirst,
+    DownedSickness,
+    DownedSmoke,
+    SavedByDressing,
+    SavedBySplint,
+    SavedByWarmth,
+    SavedByCooling,
+    SavedByFood,
+    SavedByWater,
+    SavedByAir,
+    DownedGiveUp,
+    DownedGiveUpTouch,
     // ---- fishing ----
     //
     // Said in place of a cast or a reach into a trap that would take nothing
@@ -1376,6 +1404,27 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::SleepGetUp,   en: "walk or jump to get up", simple: "walk or jump to get out of bed", ru: "идите или прыгните, чтобы встать", pl: "idź albo skocz, aby wstać" },
     Line { msg: Msg::SleepWaiting, en: "the night passes once everyone is asleep", simple: "morning comes when everybody is asleep", ru: "ночь пройдёт, когда уснут все", pl: "noc minie, gdy wszyscy zasną" },
     Line { msg: Msg::SleepMorning, en: "morning -- walk or jump to get up", simple: "it is morning -- walk or jump to get out of bed", ru: "утро -- идите или прыгните, чтобы встать", pl: "rano -- idź albo skocz, aby wstać" },
+
+    Line { msg: Msg::DownedTitle,     en: "YOU ARE DOWN", simple: "YOU CANNOT STAND UP", ru: "ВЫ ПРИ СМЕРТИ", pl: "OSTATKIEM SIŁ" },
+    Line { msg: Msg::DownedWound,     en: "a wound has put you on the ground", simple: "you are badly hurt", ru: "рана свалила вас с ног", pl: "rana powaliła cię na ziemię" },
+    Line { msg: Msg::DownedBleeding,  en: "you have lost too much blood to stand", simple: "you lost too much blood", ru: "вы потеряли слишком много крови", pl: "za mało krwi, by ustać na nogach" },
+    Line { msg: Msg::DownedFall,      en: "the fall has broken your legs", simple: "the fall broke your legs", ru: "падение переломало вам ноги", pl: "upadek połamał ci nogi" },
+    Line { msg: Msg::DownedBurn,      en: "the fire has burned you to the ground", simple: "the fire burned you badly", ru: "огонь сжёг вас до земли", pl: "ogień powalił cię na ziemię" },
+    Line { msg: Msg::DownedCold,      en: "the cold has taken your legs", simple: "you are too cold to stand", ru: "холод отнял у вас ноги", pl: "zimno odebrało ci nogi" },
+    Line { msg: Msg::DownedHeat,      en: "the heat has struck you down", simple: "you are too hot to stand", ru: "жара свалила вас с ног", pl: "upał powalił cię na ziemię" },
+    Line { msg: Msg::DownedHunger,    en: "hunger has taken your strength", simple: "you are too hungry to stand", ru: "голод отнял у вас силы", pl: "głód odebrał ci siły" },
+    Line { msg: Msg::DownedThirst,    en: "thirst has taken your strength", simple: "you are too thirsty to stand", ru: "жажда отняла у вас силы", pl: "pragnienie odebrało ci siły" },
+    Line { msg: Msg::DownedSickness,  en: "the sickness has emptied you", simple: "you are too sick to stand", ru: "болезнь опустошила вас", pl: "choroba cię wyczerpała" },
+    Line { msg: Msg::DownedSmoke,     en: "the smoke has taken your breath", simple: "the smoke took your breath", ru: "дым отнял у вас дыхание", pl: "dym odebrał ci oddech" },
+    Line { msg: Msg::SavedByDressing, en: "a bandage or a poultice will get you up", simple: "put on a bandage to get up", ru: "встать поможет повязка или припарка", pl: "wstaniesz z bandażem albo okładem" },
+    Line { msg: Msg::SavedBySplint,   en: "a splint will get you up -- or crawl home to one", simple: "put on a splint to get up", ru: "встать поможет шина -- или доползите до неё", pl: "wstaniesz z szyną -- albo doczołgaj się do niej" },
+    Line { msg: Msg::SavedByWarmth,   en: "crawl to a fire -- warmth will get you up", simple: "get warm by a fire to get up", ru: "ползите к огню -- тепло поднимет вас", pl: "czołgaj się do ognia -- ciepło cię podniesie" },
+    Line { msg: Msg::SavedByCooling,  en: "crawl into shade or water and cool down", simple: "get into shade or water to get up", ru: "ползите в тень или в воду, чтобы остыть", pl: "czołgaj się w cień albo do wody, aby ochłonąć" },
+    Line { msg: Msg::SavedByFood,     en: "eat anything to get up", simple: "eat something to get up", ru: "съешьте что-нибудь, чтобы встать", pl: "zjedz cokolwiek, aby wstać" },
+    Line { msg: Msg::SavedByWater,    en: "drink to get up", simple: "drink some water to get up", ru: "попейте, чтобы встать", pl: "napij się, aby wstać" },
+    Line { msg: Msg::SavedByAir,      en: "crawl out into clean air", simple: "get out of the smoke to get up", ru: "выползите на чистый воздух", pl: "wyczołgaj się na czyste powietrze" },
+    Line { msg: Msg::DownedGiveUp,    en: "R GIVE UP", simple: "R GIVE UP", ru: "R СДАТЬСЯ", pl: "R PODDAJ SIĘ" },
+    Line { msg: Msg::DownedGiveUpTouch, en: "somebody can still help you up", simple: "a friend can still help you up", ru: "вас ещё могут поднять", pl: "ktoś jeszcze może cię podnieść" },
 
     Line { msg: Msg::FishingTooSmall,   en: "no fish live in water this small", simple: "this water is too small for fish", ru: "в такой маленькой воде рыба не живёт", pl: "w tak małej wodzie nie ma ryb" },
     Line { msg: Msg::FishingTooShallow, en: "too shallow: the float would lie on the bottom", simple: "too shallow to fish here -- find deeper water", ru: "слишком мелко: поплавок ляжет на дно", pl: "za płytko: spławik leżałby na dnie" },
