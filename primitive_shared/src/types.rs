@@ -7025,6 +7025,46 @@ pub fn rest_drop(lying: BlockId, ground: BlockId) -> f32 {
     coating_rests_at(ground).map_or(0.0, |top| 1.0 - top)
 }
 
+/// **How far below the floor of its own cell a thing set down by hand on
+/// `ground` lies** (`BLOCK_SET_DOWN`), or `None` where there is no flat top
+/// for it to lie on at all.
+///
+/// A knife, a bowl or a loaf is not a torch: it has no foot to hang over a
+/// gap, only an underside that wants a level surface somewhere in the cell
+/// below. So it asks for *a* flat top, not a whole one -- a turf lip or a
+/// floor dug down at the bite's height (`coating_rests_at`), a slab at its
+/// half, and a step on its
+/// tread, half a cell down ([`crate::geometry::set_down_rest`] moves it onto
+/// the tread's half of the cell).
+///
+/// **It asked `has_full_top` once, and that was a floor almost nowhere**:
+/// every generated slope is lipped (`worldgen::lips`), every stair and slab a
+/// player builds is short of a whole top, and a player with Shift held and a
+/// knife in hand found the only places it would go down were bare cubes.
+/// Still refused: whatever has no single level top the width of a thing --
+/// a block bitten from a side (a ledge with its far edge gone), a lattice, a
+/// pit prop, a hive, a standing torch, a door or a frame of poles, a pile of
+/// logs short of full, water and air -- and the furniture and the fires,
+/// below.
+pub fn set_down_drop(ground: BlockId) -> Option<f32> {
+    if has_full_top(ground) {
+        return Some(0.0);
+    }
+    if is_step(ground) {
+        return Some(1.0 - 0.5);
+    }
+    if let Some(top) = coating_rests_at(ground) {
+        return Some(1.0 - top);
+    }
+    // A slab is a level half, drawn at its height. Named rather than read
+    // off "a collider the width of the cell short of the top": that rule,
+    // tried first, also took a campfire, a table, a barrel, a carcass and a
+    // bed, whose rows are a box round a drawing that is anything but level at
+    // the box's top -- a knife on the logs of a fire, a loaf floating over a
+    // boar -- and each of those is a decision of its own, not this one.
+    matches!(block_kind(ground), BLOCK_TILE_SLAB | BLOCK_THATCH_SLAB | BLOCK_BRANCH_SLAB).then(|| 1.0 - block_height(ground))
+}
+
 /// **How far below the floor of its own cell anything that stands on the
 /// block under it is drawn, aimed at and cracked**: a flat thing by
 /// [`rest_drop`], and a plant -- a tuft, a flower, a sapling, a mushroom,
@@ -7420,17 +7460,26 @@ pub fn is_covering_flat(id: BlockId) -> bool {
 /// leaves with the ground showing between them. Hiding the face under it
 /// the way ash does left those gaps looking into the block below -- the
 /// grass "vanished under the leaves". So litter keeps ash's zero inset and
-/// is drawn a fiftieth above a floor that is still there.
+/// lies flush on a floor that is still drawn.
 #[inline]
 pub fn hides_the_floor(id: BlockId) -> bool {
     // **Leaf litter hides it again, and its picture is why.** It was here
     // as an exception, because the leaves were drawn with holes and the
     // grass had to show through them -- and the price of that was the
     // fiftieth of a block it had to be lifted by, which the player saw as
-    // leaves hanging over the ground. The holes are painted earth now, so
-    // the litter is a coating like ash: on the floor of its cell, with the
-    // face under it not drawn at all.
-    is_covering_flat(id)
+    // leaves hanging over the ground. The holes were painted earth for a
+    // while, so the litter was a coating like ash: on the floor of its cell,
+    // with the face under it not drawn at all.
+    //
+    // **...and not any more: "опавшую листву сделай прозрачной".** A floor
+    // of painted earth is a brown carpet, and the ground a wood grows on --
+    // the turf, the moss, the mud -- was gone under every crown. The holes
+    // are holes again and the face under them is drawn; what keeps the
+    // litter off the fiftieth that read as hovering is that it is not
+    // lifted at all (`flat_lift`), and what keeps it from fighting the face
+    // it lies flush on is a nudge of its depth toward the eye in the vertex
+    // shader (`mesh::DECAL_TINT`) -- the comparison moved, not the leaves.
+    is_covering_flat(id) && block_kind(id) != BLOCK_LEAF_LITTER
 }
 
 /// How far a flat thing floats above the floor of its cell.
@@ -7447,7 +7496,10 @@ pub fn hides_the_floor(id: BlockId) -> bool {
 /// flickered between them as the camera moved.
 #[inline]
 pub fn flat_lift(id: BlockId) -> f32 {
-    if hides_the_floor(id) {
+    // Every coating, and not only the ones that hide the floor: leaf litter
+    // lies flush on a floor that is still drawn, and wins the depth test by
+    // a bias rather than by a height (`hides_the_floor`).
+    if is_covering_flat(id) {
         0.0
     } else {
         0.02
@@ -8531,9 +8583,11 @@ pub fn can_grow_on(plant: BlockId, ground: BlockId) -> bool {
         // ...and a starfish, which lies on the bed as the shell does.
         BLOCK_STICK | BLOCK_PEBBLE | BLOCK_FLINT | BLOCK_FLINT_FLAKE | BLOCK_ASH | BLOCK_NATIVE_COPPER
         | BLOCK_SHELL | BLOCK_STREAM_TIN | BLOCK_STARFISH => full_floor,
-        // ...and anything a hand sets down, on the pebble's terms: a whole
-        // floor, never a drift or the top of a fence post.
-        BLOCK_SET_DOWN => full_floor,
+        // ...and anything a hand sets down, on any flat top at its real
+        // height (`set_down_drop`): a lip, a slab, a step's tread. Never the
+        // top of a fence post, a lattice or a riser, which is no top at all.
+        // The whole id, because a lip of loam is not loam's whole block.
+        BLOCK_SET_DOWN => set_down_drop(whole).is_some(),
         // Fallen leaves on the earth of a wood's floor: turf, bare earth and
         // a swamp's mud, never stone or sand, where no crown stands.
         BLOCK_LEAF_LITTER => matches!(ground, BLOCK_GRASS | BLOCK_DIRT | BLOCK_MUD) && full_floor,
@@ -10868,6 +10922,12 @@ mod depth_tests {
                 if is_flat(id) && rest_drop(id, ground) > 0.0 {
                     continue;
                 }
+                // ...and a thing set down by hand, which is drawn on the slab,
+                // the lip or the step's tread at its real height
+                // (`geometry::set_down_rest`), not from its own cell's floor.
+                if is_set_down(id) && set_down_drop(ground).is_some_and(|drop| drop > 0.0) {
+                    continue;
+                }
                 if can_grow_on(id, ground) {
                     wrong.push(format!("{} ({id}) on {} ({ground})", block_name(id), block_name(ground)));
                 }
@@ -11447,7 +11507,7 @@ mod set_down_tests {
     }
 
     #[test]
-    fn a_thing_set_down_is_walked_through_holds_nothing_up_and_needs_a_whole_floor() {
+    fn a_thing_set_down_is_walked_through_holds_nothing_up_and_needs_a_floor_under_it() {
         let lying = faced(BLOCK_SET_DOWN, Facing::East);
         assert!(is_known_block(lying), "a thing set down facing east is an invented id");
         assert_eq!(block_facing(lying), Facing::East, "the facing did not survive the id");
@@ -11460,6 +11520,50 @@ mod set_down_tests {
         assert!(!can_be_displaced_by_falling(lying), "sand falling on a knife deletes it");
         let (low, high) = crate::geometry::block_target_box(lying, 0, 0, 0).expect("a knife nobody can aim at");
         assert!(high[0] - low[0] < 1.0 && high[1] - low[1] <= 0.125, "a knife is aimed at across its whole cell");
+    }
+
+    /// **"через шифт можно ставить только на полные блоки".** Setting down
+    /// asked `has_full_top`, and once that said no to every partial top a
+    /// player could only lay a knife on a bare cube: not on the lip every
+    /// slope is edged with, not on a slab, not on a stair. A thing with no
+    /// foot lies on any level top at that top's height -- and still not on a
+    /// riser, a lattice or a stake, which have no level top at all.
+    #[test]
+    fn a_set_down_item_on_a_lip_lies_at_the_lips_top() {
+        let air = |_: i32, _: i32, _: i32| BLOCK_AIR;
+        let lying = faced(BLOCK_SET_DOWN, Facing::North);
+        for quarters in 1..=3u8 {
+            let lip = crate::dig::lowered(BLOCK_GRASS, quarters);
+            let top = crate::dig::left(lip);
+            assert!(can_grow_on(lying, lip), "a knife is refused a lip {quarters} quarters down");
+            let rest = crate::geometry::set_down_rest(lip, air).expect("a lip is no floor");
+            assert_eq!(rest, [0.0, top - 1.0, 0.0], "a knife on {quarters} quarters of lip is not on its top");
+            // Aimed at where it lies: the box starts on the lip's top.
+            let near = |_: i32, dy: i32, _: i32| if dy == -1 { lip } else { BLOCK_AIR };
+            let (min, _) = crate::geometry::block_box_for_aim_near(lying, 0, 1, 0, false, near).expect("unaimable");
+            assert!((min[1] - top).abs() < 1e-6, "a knife on a lip is aimed at {} over a top at {top}", min[1]);
+        }
+        for slab in [BLOCK_TILE_SLAB, BLOCK_THATCH_SLAB, BLOCK_BRANCH_SLAB] {
+            assert!(can_grow_on(lying, slab), "a knife is refused a {}", block_name(slab));
+            assert_eq!(crate::geometry::set_down_rest(slab, air), Some([0.0, -0.5, 0.0]), "{}", block_name(slab));
+        }
+        // A step: half a cell down and onto the front half, whichever way it
+        // faces -- the tread, never the riser behind it.
+        for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+            let step = faced(BLOCK_PLANK_STAIRS, facing);
+            assert!(can_grow_on(lying, step), "a knife is refused a stair facing {facing:?}");
+            let [dx, dy, dz] = crate::geometry::set_down_rest(step, air).expect("a stair is no floor");
+            assert_eq!(dy, -0.5, "a knife on a stair is not on its tread");
+            let (x, z) = (0.5 + dx, 0.5 + dz);
+            let on_riser = crate::geometry::step_boxes(step, air)
+                .iter()
+                .any(|(min, max)| min[1] >= 0.5 && (min[0]..max[0]).contains(&x) && (min[2]..max[2]).contains(&z));
+            assert!(!on_riser, "a knife on a stair facing {facing:?} lies in its riser at ({x}, {z})");
+        }
+        for nothing in [BLOCK_STAKE, BLOCK_WINDOW_LATTICE, BLOCK_AIR, BLOCK_WATER, BLOCK_CAMPFIRE, BLOCK_TABLE] {
+            assert!(!can_grow_on(lying, nothing), "a knife lies on a {}", block_name(nothing));
+            assert!(set_down_drop(nothing).is_none(), "a knife lies on a {}", block_name(nothing));
+        }
     }
 }
 

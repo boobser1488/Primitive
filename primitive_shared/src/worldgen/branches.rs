@@ -192,6 +192,45 @@ impl Grower {
     }
 }
 
+thread_local! {
+    /// **Whether the masses are torn the way they were before they held on
+    /// to their wood** (`blob`), and a fork with no arms stops bare
+    /// (`branch_tree_cells`). Set for the length of a chunk by
+    /// [`OldCrowns`], for a world drawn at a scale older than the landforms.
+    ///
+    /// **An old world's new chunks are the old generator's to the block**
+    /// (`landforms_tests::an_old_worlds_new_chunks_are_the_old_generators_to_the_block`):
+    /// a crown that straddles the edge of the explored country would
+    /// otherwise be half one tree and half another, with the old half's loose
+    /// leaves beside the new half's whole mass. A flag for the chunk rather
+    /// than an argument down every builder, because the builders are called
+    /// from a dozen places and only the generator knows its scale; the server
+    /// growing a sapling asks the builders with it clear, which is the crown
+    /// as it is drawn now.
+    static TORN_CROWNS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Holds [`TORN_CROWNS`] for as long as it lives, and puts back what was
+/// there, so a thread that drew an old world's chunk and then grows a
+/// sapling does not grow it torn.
+pub(super) struct OldCrowns(bool);
+
+impl OldCrowns {
+    pub(super) fn when(old: bool) -> OldCrowns {
+        OldCrowns(TORN_CROWNS.with(|torn| torn.replace(old)))
+    }
+}
+
+impl Drop for OldCrowns {
+    fn drop(&mut self) {
+        TORN_CROWNS.with(|torn| torn.set(self.0));
+    }
+}
+
+fn torn_crowns() -> bool {
+    TORN_CROWNS.with(std::cell::Cell::get)
+}
+
 /// A mass of leaves round `centre`: an ellipsoid `across` wide each way from
 /// the middle and `up` high, with a ragged skin and a few holes in it.
 ///
@@ -203,9 +242,40 @@ impl Grower {
 /// gap here and there inside. One in three of the outer half goes missing and
 /// one in eleven of the inner, hashed from the offset and `salt` so both
 /// chunks a mass straddles leave out the same leaves.
-fn blob(out: &mut Vec<Cell>, (cx, cy, cz): (i32, i32, i32), across: i32, up: i32, salt: u32, leaves: BlockId) {
+///
+/// **The tearing never lets go of the wood.** "у деревьев проблема с
+/// креплением листвы на ветки": the rolls were made leaf by leaf with no
+/// regard for what held what, and a mass is centred on the wood it hangs
+/// from -- a limb's tip, a leader, the cell under a birch's tip. So the six
+/// leaves round the middle could all go, and the tip stood bare with its
+/// leaves a cell off in the air; and an outer leaf whose inner neighbours
+/// had gone was a leaf by itself, joined to nothing, hanging beside the
+/// crown (`tree_tests::every_leaf_of_a_generated_tree_holds_on_to_its_wood`
+/// counted one in every two or three trees). The middle and the six round it
+/// are kept now, and a leaf is kept only if it is joined through faces to the
+/// middle by leaves that are kept: the holes a crown shows are the same kind
+/// of hole, and none of them is a leaf cut loose.
+fn blob(out: &mut Vec<Cell>, centre: (i32, i32, i32), across: i32, up: i32, salt: u32, leaves: BlockId) {
+    hung_blob(out, centre, (0, 0, 0), across, up, salt, leaves);
+}
+
+/// [`blob`], held by the wood at `anchor` (an offset from the middle) rather
+/// than at the middle: a birch's masses hang *under* the tip that holds them,
+/// and with the middle kept and the tip one over it the tip still stood bare
+/// whenever its four sides and its top were torn away.
+fn hung_blob(
+    out: &mut Vec<Cell>,
+    (cx, cy, cz): (i32, i32, i32),
+    anchor: (i32, i32, i32),
+    across: i32,
+    up: i32,
+    salt: u32,
+    leaves: BlockId,
+) {
     let (a, u) = (across.max(1), up.max(1));
     let limit = a * a * u * u;
+    let torn = torn_crowns();
+    let mut kept: HashSet<(i32, i32, i32)> = HashSet::new();
     for dy in -u..=u {
         for dz in -a..=a {
             for dx in -a..=a {
@@ -218,10 +288,33 @@ fn blob(out: &mut Vec<Cell>, (cx, cy, cz): (i32, i32, i32), across: i32, up: i32
                 }
                 let roll = hash2(dx * 7 + dy * 31, dz * 13 - dy * 3, salt);
                 let outer = reach * 2 > limit;
-                if (outer && roll.is_multiple_of(3)) || (!outer && roll.is_multiple_of(11)) {
+                let holds = !torn
+                    && (dx - anchor.0).abs() + (dy - anchor.1).abs() + (dz - anchor.2).abs() <= 1;
+                if !holds && ((outer && roll.is_multiple_of(3)) || (!outer && roll.is_multiple_of(11))) {
                     continue;
                 }
-                out.push(((cx + dx, cy + dy, cz + dz), leaves));
+                kept.insert((dx, dy, dz));
+            }
+        }
+    }
+    // What is joined to the middle, walked out from it through faces --
+    // in the order the rolls were made, so the cells come out as they did.
+    let mut joined = HashSet::from([(0, 0, 0), anchor]);
+    let mut stack = vec![(0, 0, 0), anchor];
+    while let Some((x, y, z)) = stack.pop() {
+        for (dx, dy, dz) in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
+            let n = (x + dx, y + dy, z + dz);
+            if kept.contains(&n) && joined.insert(n) {
+                stack.push(n);
+            }
+        }
+    }
+    for dy in -u..=u {
+        for dz in -a..=a {
+            for dx in -a..=a {
+                if joined.contains(&(dx, dy, dz)) || (torn && kept.contains(&(dx, dy, dz))) {
+                    out.push(((cx + dx, cy + dy, cz + dz), leaves));
+                }
             }
         }
     }
@@ -310,6 +403,24 @@ pub(super) fn branch_tree_cells(
                 let mut last = side;
                 for level in at + 1..=height + 1 {
                     let up = (lx, level, lz);
+                    let width = if level > height { 4 } else { trunk_width(level, height) };
+                    if !tree.grow(up, Some(last), width) {
+                        break;
+                    }
+                    last = up;
+                }
+                leaders.push(last);
+            }
+            // **A fork with neither arm is a stem that goes on.** In a close
+            // wood both arms can be refused (`NEIGHBOUR_REACH`), and the
+            // trunk stopped at the fork with no leader and no mass over it:
+            // a bare pole three blocks under the crown it should have held,
+            // the tip of the tree ending in air. It grows on as an unforked
+            // trunk does, to its top and a leader out of it.
+            if leaders.is_empty() && !torn_crowns() {
+                let mut last = (0, at, 0);
+                for level in at + 1..=height + 1 {
+                    let up = (0, level, 0);
                     let width = if level > height { 4 } else { trunk_width(level, height) };
                     if !tree.grow(up, Some(last), width) {
                         break;
@@ -465,7 +576,7 @@ pub(super) fn birch_tree_cells(
         tree.grow((0, level, 0), parent, birch_trunk_width(level, height));
     }
     tree.grow((0, height + 1, 0), Some((0, height, 0)), 4);
-    blob(&mut crown, (0, height, 0), 1, 2, variant ^ 0xB1C4, leaves);
+    hung_blob(&mut crown, (0, height, 0), (0, 1, 0), 1, 2, variant ^ 0xB1C4, leaves);
 
     let limbs = 5 + ((variant >> 3) & 3) as usize;
     let first = (variant >> 5) as usize;
@@ -492,7 +603,7 @@ pub(super) fn birch_tree_cells(
         if (last.0, last.2) == (0, 0) {
             continue;
         }
-        blob(&mut crown, (last.0, last.1 - 1, last.2), 1, 2, variant ^ (0xB12C * (i as u32 + 1)), leaves);
+        hung_blob(&mut crown, (last.0, last.1 - 1, last.2), (0, 1, 0), 1, 2, variant ^ (0xB12C * (i as u32 + 1)), leaves);
     }
     crown.extend(tree.wood);
     crown

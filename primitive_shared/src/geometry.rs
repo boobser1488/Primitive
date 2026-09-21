@@ -413,6 +413,38 @@ fn palm_extent(block: BlockId, near: impl Fn(i32, i32, i32) -> BlockId) -> Optio
     })
 }
 
+/// **Where a thing set down lies**, as an offset from the middle of its own
+/// cell's floor: down by [`crate::types::set_down_drop`] of `ground`, the
+/// cell under it, and -- on a step -- across onto the tread. `None` where it
+/// cannot lie at all. `near` is asked by offset from the *ground* cell, which
+/// is what a step's shape is read from.
+///
+/// **A step's tread is the front half of its cell**, half a cell down; the
+/// back half is the riser, whose top is the cell's own top. Lowered and left
+/// in the middle, a knife lay half in the riser. So it goes to the middle of
+/// the front half -- and round an inside corner, where the second riser takes
+/// one side of the front half too, to the quarter that is left. A drawing
+/// 0.45 across fits a quarter of a cell. Rejected: *laying it on the riser's
+/// top*, which is the cell's own top and so needs no drop: a hand reaching
+/// down a staircase puts a thing on the stair it can see, the tread, and the
+/// riser's top is a sixteenth-deep lip nobody aims at.
+pub fn set_down_rest(ground: BlockId, near: impl Fn(i32, i32, i32) -> BlockId) -> Option<[f32; 3]> {
+    let drop = crate::types::set_down_drop(ground)?;
+    if !crate::types::is_step(ground) {
+        return Some([0.0, -drop, 0.0]);
+    }
+    // In the step's written pose the riser is toward +z and the tread is
+    // z in 0..STEP_TREAD; an inside corner's second riser stands on one side
+    // of that strip (`step_pose_boxes`).
+    let across = match step_shape(ground, near) {
+        StepShape::Inside(StepSide::Minus) => 0.75,
+        StepShape::Inside(StepSide::Plus) => 0.25,
+        _ => 0.5,
+    };
+    let (x, z) = step_pose_to_cell(block_facing(ground).quarters(), across, STEP_TREAD * 0.5);
+    Some([x - 0.5, -drop, z - 0.5])
+}
+
 /// `block_box_for_aim`, for a caller that can see the world round the block.
 ///
 /// **A leaning palm is aimed at where it leans.** One box round the cell's
@@ -458,6 +490,26 @@ pub fn block_box_for_aim_near(
         }
         let (x, y, z) = (bx as f32, by as f32, bz as f32);
         return Some(([x + min[0], y + min[1], z + min[2]], [x + max[0], y + max[1], z + max[2]]));
+    }
+    // **A thing set down is aimed at where it lies** (`set_down_rest`): on a
+    // lip, a slab or a step's tread, and not a wafer of air over it that a
+    // ray at the knife passed under.
+    if crate::types::is_set_down(block) {
+        let rest = set_down_rest(near(0, -1, 0), |dx, dy, dz| near(dx, dy - 1, dz)).unwrap_or([0.0; 3]);
+        let (mut min, mut max) = block_box_for_aim(block, bx, by, bz, include_liquid)?;
+        // Kept in its column: moved onto a tread, the box a little wider than
+        // the drawing would lean a twentieth into the next cell, which the
+        // ray walking cells never asks this one about.
+        let corner = [bx as f32, by as f32, bz as f32];
+        for axis in 0..3 {
+            min[axis] += rest[axis];
+            max[axis] += rest[axis];
+            if axis != 1 {
+                min[axis] = min[axis].max(corner[axis]);
+                max[axis] = max[axis].min(corner[axis] + 1.0);
+            }
+        }
+        return Some((min, max));
     }
     // **Snow on a lip is aimed at on the lip**, where it is drawn
     // (`types::rest_drop`): the box of its own cell's floor was a wafer of

@@ -584,6 +584,34 @@ pub const TIRED_FURROW_TINT: u32 = SURFACE_TINT_BASE + 10;
 // climate tint on some other block.
 const _: () = assert!(TIRED_FURROW_TINT <= 255);
 
+/// **A quad that lies flush on a face that is drawn under it**: untinted, and
+/// pulled toward the eye in depth by the vertex shader (`DECAL_DEPTH` in
+/// `shader.wgsl`) so it wins the depth test against the face it lies on
+/// without being lifted off it. Leaf litter, whose holes show the turf under
+/// it ("опавшую листву сделай прозрачной").
+///
+/// **Three ways to keep two coplanar surfaces from fighting were weighed:**
+///
+/// * *A lift* -- the fiftieth of a block the litter had once, and the
+///   pebble has. It is a height, and a height is seen: the litter read as a
+///   sheet hovering over the ground, which is why its holes were painted
+///   over and the face under it dropped. Smaller does not help, because the
+///   depth buffer's grain grows with the square of the distance: what is
+///   invisible up close is not enough at forty blocks.
+/// * *A depth bias on the pipeline* (`DepthBiasState`), as the cracks have.
+///   The litter is drawn by the same draw as the leaves and the tufts -- one
+///   range of the chunk's indices, one indirect draw -- and a bias there
+///   would pull every leaf and blade toward the eye too, or split every
+///   chunk's cut-out draw in two to spare them.
+/// * **A nudge in the vertex shader, chosen**: the clip-space depth of these
+///   vertices only, by a fixed share of the depth range -- the unit a
+///   polygon offset works in, so it is the same number of the buffer's steps
+///   at every distance -- asked for by a code in the tint byte, which had
+///   room (`SURFACE_TINT_BASE`) and which litter never needed: its wood is
+///   in its picture (`texture::wood_icon`), not in a tint.
+pub const DECAL_TINT: u32 = 255;
+const _: () = assert!(DECAL_TINT > TIRED_FURROW_TINT);
+
 /// Packs a climate into the byte the shader turns into a colour.
 ///
 /// Zero means "not foliage, do not tint", which is why the two axes get
@@ -7517,8 +7545,9 @@ pub(crate) enum Material {
     /// simplified chest wears it -- and a layer is the one thing the atlas
     /// runs out of.
     Chest,
-    /// A heap of fallen leaves: the leaf litter's own picture
-    /// (`plants/leaf_litter.png`), which is what a lean-to is thatched and
+    /// A heap of fallen leaves: the leaf litter's picture with the earth
+    /// between the leaves painted in (`plants/pit_cover.png`, the pit
+    /// cover's row), which is what a lean-to is thatched and
     /// bedded with. The litter rather than the green handful, because what a
     /// traveller rakes up for a roof is last year's leaves off the floor of a
     /// wood, and the litter's row is already in the atlas.
@@ -7593,7 +7622,11 @@ impl Material {
             // Face 2, a side: the row's north is the front picture with the
             // hasp painted on, for the far chest that has no hasp box.
             Material::Chest => textures.layer_for_face(primitive_shared::types::BLOCK_CHEST, 2),
-            Material::Leaves => textures.layer_for_face(primitive_shared::types::BLOCK_LEAF_LITTER, 0),
+            // The heap's picture, the litter with the earth between its
+            // leaves painted in (the pit cover's): the ground's own litter
+            // has holes in it now, and a thatch with daylight through it
+            // would be no roof.
+            Material::Leaves => textures.layer_for_face(primitive_shared::types::BLOCK_PIT_COVER, 0),
         }
     }
 
@@ -8741,10 +8774,17 @@ fn flat_block(
     let turn = (cell_hash(cell[0], cell[1], cell[2]) & 3) as usize;
     const UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
 
+    // A coating that lets the floor under it be drawn lies flush on it and
+    // is told apart from it by depth alone: see `DECAL_TINT`.
+    let tint = if primitive_shared::types::is_covering_flat(block) && !primitive_shared::types::hides_the_floor(block) {
+        DECAL_TINT
+    } else {
+        0
+    };
     let base = vertices.len() as u32;
     // The corners come from `flat_quad`, shared with the mining overlay.
     for (corner, position) in flat_quad(at, block).into_iter().enumerate() {
-        vertices.push(Vertex::new(position, UVS[(corner + turn) % 4], layer, packed));
+        vertices.push(Vertex::tinted(position, UVS[(corner + turn) % 4], layer, packed, tint));
     }
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
@@ -9096,6 +9136,62 @@ mod tests {
     }
 
     #[test]
+    fn litter_draws_no_texel_coplanar_with_the_ground_it_lies_on_without_a_depth_bias() {
+        // **"опавшую листву сделай прозрачной".** Litter has holes, so the
+        // face under it is drawn, and it lies flush on that face -- a lift of
+        // a fiftieth read as leaves hovering over the ground. Two surfaces in
+        // one plane fight for every pixel unless one of them is told to win:
+        // every corner of the litter lying on a drawn face asks the shader
+        // for its nudge (`DECAL_TINT`), on whole turf, bare earth, mud and a
+        // lip of every depth, and the face under it is still there to show
+        // through the holes. `litter_repro` is what measured the nudge.
+        use primitive_shared::dig;
+        use primitive_shared::types::{in_wood, BLOCK_DIRT, BLOCK_GRASS, BLOCK_LEAF_LITTER, BLOCK_MUD};
+        use super::transparency_tests::{cache_of, mesh_of};
+        const AT: (i32, i32, i32) = (8, 4, 8);
+        let grounds = [(BLOCK_GRASS, 1.0), (BLOCK_DIRT, 1.0), (BLOCK_MUD, 1.0)]
+            .into_iter()
+            .chain((1..dig::SLICES).map(|q| (dig::lowered(BLOCK_GRASS, q), f32::from(q) / f32::from(dig::SLICES))));
+        for (ground, height) in grounds {
+            for wood in 0..primitive_shared::wood::WOODS.len() {
+                let litter = in_wood(BLOCK_LEAF_LITTER, wood);
+                let over = (AT.0, AT.1 + 1, AT.2);
+                let meshed = |on: BlockId| {
+                    mesh_of(&cache_of(|x, y, z| match (x, y, z) {
+                        c if c == AT => ground,
+                        c if c == over => on,
+                        _ => BLOCK_AIR,
+                    }))
+                };
+                let (bare, mesh) = (meshed(BLOCK_AIR), meshed(litter));
+                let top = AT.1 as f32 + height;
+                let on_top = |mesh: &MeshBuffers, decal: bool| {
+                    mesh.vertices
+                        .iter()
+                        .filter(|v| (v.position[1] - top).abs() < 1e-4 && (v.tint() == DECAL_TINT) == decal)
+                        .count()
+                };
+                assert_eq!(
+                    on_top(&mesh, false),
+                    on_top(&bare, false),
+                    "the face under litter {wood} on {ground:#x} is not drawn, or litter lies on it unnudged"
+                );
+                assert_eq!(on_top(&mesh, true), 4, "litter {wood} on {ground:#x} is not drawn flush on its top");
+                assert_eq!(on_top(&bare, true), 0, "the ground {ground:#x} asks for a nudge of its own");
+            }
+        }
+        // ...and the shader has a nudge to give.
+        let source = include_str!("shader.wgsl");
+        for name in ["DECAL_DEPTH", "DECAL_SLOPE"] {
+            let needle = format!("const {name}: f32 = ");
+            let at = source.find(&needle).unwrap_or_else(|| panic!("shader.wgsl declares no {name}")) + needle.len();
+            let number: String = source[at..].chars().take_while(|c| *c != ';').collect();
+            let value: f32 = number.trim().parse().unwrap_or_else(|_| panic!("{name} is not a number"));
+            assert!(value > 0.0, "the shader's {name} is {value}: litter would fight the ground under it");
+        }
+    }
+
+    #[test]
     fn the_shader_unpacks_the_vertex_with_the_numbers_that_packed_it() {
         let source = include_str!("shader.wgsl");
         let declared = |name: &str| -> u32 {
@@ -9118,6 +9214,7 @@ mod tests {
             ("TINT_SHIFT", TINT_SHIFT),
             ("TINT_LEVELS", TINT_LEVELS),
             ("SURFACE_TINT_BASE", SURFACE_TINT_BASE),
+            ("DECAL_TINT", DECAL_TINT),
             ("LIGHT_MASK", LIGHT_MASK),
             ("V_SHIFT", V_SHIFT),
             ("UV_MASK", UV_MASK),

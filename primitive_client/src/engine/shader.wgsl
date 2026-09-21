@@ -207,6 +207,27 @@ const TINT_LEVELS: u32 = 15u;
 // Where a surface tint starts -- soot, ash on a furrow; must match
 // `SURFACE_TINT_BASE` in mesh.rs, which says what they are.
 const SURFACE_TINT_BASE: u32 = 226u;
+// A quad lying flush on a face drawn under it -- leaf litter -- is pulled
+// toward the eye by `DECAL_DEPTH` and wears no tint. Must match `DECAL_TINT`
+// in mesh.rs, which weighs it against a lift and a pipeline bias.
+const DECAL_TINT: u32 = 255u;
+// How far, as a share of the depth range: sixteen steps of a 32-bit float
+// buffer where the ground is (depth past a half, where a step is 2^-24) --
+// and more the more edge-on the eye sees the face, which is the polygon
+// offset's slope term done by hand: the error two triangles of one plane
+// disagree by grows with how fast depth changes across a pixel, and for a
+// floor that is the camera's height over it, whatever the distance (depth
+// per pixel is near * pixel angle / height). Measured by `litter_repro`
+// (`how_litter_lies_on_the_ground`): with no nudge the turf came through
+// half the litter from every eye; with the constant alone, none from a
+// standing player's eyes (1.62 over the floor) or higher, and a fifth of the
+// litter a lying body sees an arm's length off (0.25 over it); with the
+// slope term as well, none from any eye the tool looks from. Sixteen steps
+// are a hundredth of a block at ten blocks away and a fifth of one at a
+// hundred -- a sliver of litter a pixel high showing through the foot of a
+// trunk, where a lift was a sheet hovering over the whole floor.
+const DECAL_DEPTH: f32 = 9.5e-7;
+const DECAL_SLOPE: f32 = 6.0e-7;
 // The light word is still the bottom fourteen bits of `packed`. Above it
 // sit the block-face flag and the layer's ninth bit -- see `uv_cells`,
 // which took the texture coordinate out of this word and freed them.
@@ -1232,7 +1253,19 @@ fn terrain_vertex(in: VertexInput) -> VertexOutput {
     // The byte is a foliage tint. It used to carry a texture crop above
     // 225 as well; a small face carries a real place in the picture now
     // (`FINE_UV_BIT` above), so the byte has one reading on a solid face.
-    let code = in.packed >> TINT_SHIFT;
+    let raw_code = in.packed >> TINT_SHIFT;
+    // A decal is untinted and nudged toward the eye (`DECAL_TINT`). Not for
+    // water, whose byte is a depth.
+    let decal = out.translucent == 0u && raw_code == DECAL_TINT;
+    let code = select(raw_code, 0u, decal);
+    if (decal) {
+        // A decal lies on an upward face (`flat_block`), so the eye's height
+        // over it is how edge-on it is seen. Never under a twentieth, or a
+        // floor level with the eye -- a line on the screen -- would be pulled
+        // through everything in front of it.
+        let over = max(abs(globals.camera_pos.y - world.y), 0.05);
+        out.clip_position.z = out.clip_position.z - (DECAL_DEPTH + DECAL_SLOPE / over) * out.clip_position.w;
+    }
     if (out.translucent != 0u) {
         // The byte's second reading, and the translucent bit is what
         // picks it: water is not foliage, so the two cannot meet. See the

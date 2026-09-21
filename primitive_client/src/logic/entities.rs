@@ -1743,10 +1743,12 @@ pub(crate) fn set_down_yaw(block: BlockId) -> f32 {
 /// another is two knives. What is not a stack of anything -- the cell -- is
 /// drawn by the mesher as nothing.
 ///
-/// `things` is `ChunkManager::set_down_items`: cell, the cell's id, the item.
+/// `things` is `ChunkManager::set_down_laid`: cell, the cell's id, the item,
+/// and where in the cell it lies (`geometry::set_down_rest`) -- on a lip or a
+/// slab it lies on that top, not on the floor of its own cell over it.
 #[allow(clippy::too_many_arguments)]
 pub fn build_set_down_into(
-    things: impl Iterator<Item = ((i32, i32, i32), BlockId, BlockId)>,
+    things: impl Iterator<Item = ((i32, i32, i32), BlockId, BlockId, [f32; 3])>,
     origin: Vec3,
     layers: &FaceLayers,
     light: &LightMap,
@@ -1756,14 +1758,18 @@ pub fn build_set_down_into(
     item_vertices: &mut Vec<ItemVertex>,
     item_indices: &mut Vec<u32>,
 ) {
-    for (cell, block, item) in things {
+    for (cell, block, item, rest) in things {
         let yaw = set_down_yaw(block);
-        let floor = DVec3::new(f64::from(cell.0) + 0.5, f64::from(cell.1), f64::from(cell.2) + 0.5);
+        // Lit by its own cell, which is air, and not by where it lies: half
+        // a cell down on a slab is inside the slab's cell, whose light is the
+        // dark of a solid block.
+        let own = DVec3::new(f64::from(cell.0) + 0.5, f64::from(cell.1), f64::from(cell.2) + 0.5);
+        let floor = own + DVec3::new(f64::from(rest[0]), f64::from(rest[1]), f64::from(rest[2]));
         match models.and_then(|models| models.item_model(item)) {
             Some(model) => {
                 // Lit by the cell it lies in, as a dropped one is; drawn a
                 // hair over the floor, the settled stack's own height.
-                let (sky, block_light) = sampled_light(floor, light);
+                let (sky, block_light) = sampled_light(own, light);
                 // **Wet clay lying out is drawn darker** (`clay::shade`), and
                 // by the light it is given rather than by a tint: an item
                 // vertex has a layer and a light word and no colour, and a
@@ -2460,7 +2466,7 @@ mod tests {
         let (mut v, mut i, mut iv, mut ii) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let lying = faced(BLOCK_SET_DOWN, Facing::South);
         build_set_down_into(
-            [((4, 20, -3), lying, BLOCK_BREAD)].into_iter(),
+            [((4, 20, -3), lying, BLOCK_BREAD, [0.0; 3])].into_iter(),
             Vec3::ZERO,
             &layers,
             &light,
