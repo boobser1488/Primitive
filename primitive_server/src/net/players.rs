@@ -532,6 +532,12 @@ impl PlayerHandle {
             // tick that saw both would rather draw the bed.
             posture: if state.vitals.is_dead() {
                 primitive_shared::protocol::Posture::Fallen
+            } else if state.vitals.is_downed() {
+                // On the ground and still moving: see `Posture::Crawling`.
+                // Before the water, too -- a downed body that crawled into a
+                // pond is still a body on its belly, and drawing it swimming
+                // would say it had got up.
+                primitive_shared::protocol::Posture::Crawling
             } else if state.sleeping_in.is_some() {
                 primitive_shared::protocol::Posture::Lying
             } else if state.riding.is_some() {

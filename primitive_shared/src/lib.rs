@@ -52,6 +52,7 @@ pub mod comfort;
 pub mod crafting;
 pub mod dig;
 pub mod discovery;
+pub mod downed;
 pub mod dripstone;
 pub mod spikes;
 pub mod equipment;

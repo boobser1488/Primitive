@@ -558,6 +558,9 @@ pub type PlayerId = u64;
 /// ...and winter feed and home: hay and the haystack at ids 672-673
 /// (`types::BLOCK_HAY`), the haystack's row at the end of `RECIPES`, and
 /// `Notice::SleptAtHome` appended. 57 still, which no release speaks.
+/// ...and going down before dying: `ServerMessage::Downed` back,
+/// `ClientMessage::HelpUp` out and `Posture::Crawling`, all appended, and a
+/// `downed::Cause` on the wire by its place in the list. 57 still.
 pub const PROTOCOL_VERSION: u32 = 57;
 
 /// What kind of container a screen is showing.
@@ -955,6 +958,16 @@ pub enum Posture {
     /// shadow agree. The byte after `Swimming`, so an older client draws a
     /// rider standing on the saddle, which is wrong and harmless.
     Mounted,
+    /// **Down and crawling**: health gone, not yet dead (`downed`). Face
+    /// down and flat, pulling along on the arms.
+    ///
+    /// Only ever in `PlayerState`, like `Fallen`: a client learns it is down
+    /// from `ServerMessage::Downed`. Not `Fallen`, which is a body that has
+    /// stopped -- a downed player on another screen has to read as somebody
+    /// who can still be reached in time, or nobody would run to help. The
+    /// byte after `Mounted`, so an older client draws them standing, which is
+    /// wrong and harmless.
+    Crawling,
 }
 
 impl From<u8> for Posture {
@@ -965,6 +978,7 @@ impl From<u8> for Posture {
             3 => Posture::Fallen,
             4 => Posture::Swimming,
             5 => Posture::Mounted,
+            6 => Posture::Crawling,
             _ => Posture::Standing,
         }
     }
@@ -2005,6 +2019,15 @@ pub enum ClientMessage {
     OpenBags {
         horse: EntityId,
     },
+    /// **Get that player up off the ground**, with what is in this hand: a
+    /// dressing, a splint, food or a jug (`downed::Rescue::can_be_helped`).
+    /// Named by the player, as `Attack` is, and judged by the server against
+    /// its own reach and its own idea of what the helper is holding and what
+    /// the downed body needs -- a client that could name the rescue could
+    /// raise anybody with an empty hand.
+    HelpUp {
+        target: PlayerId,
+    },
 }
 
 /// Messages the server sends to the client.
@@ -2722,6 +2745,18 @@ pub enum ServerMessage {
     /// Appended, so it rides fifty-seven's bump.
     Lightning {
         at: (f64, f64, f64),
+    },
+    /// **You are on the ground**, and why, and how long is left -- or, with
+    /// `None`, you are not any more (raised; the death that ends it is
+    /// `Died`, which clears it too).
+    ///
+    /// Sent when a body goes down, when it is raised, and when something
+    /// takes time off the clock -- never for the clock simply running, which
+    /// the client counts down itself from the last reading. A clock sent
+    /// twenty times a second would be twenty packets a second to say what
+    /// subtraction already knows. See `downed`.
+    Downed {
+        down: Option<crate::downed::Down>,
     },
 }
 

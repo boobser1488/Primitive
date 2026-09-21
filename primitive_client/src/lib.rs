@@ -2299,6 +2299,17 @@ fn run(
                                         net.send(ClientMessage::Respawn);
                                     }
                                 }
+                                // ...and on the ground the same key lets go:
+                                // the server takes it as giving up (see its
+                                // `Respawn` arm), and the death screen that
+                                // follows has its own respawn on it.
+                                (_, Some(keybinds::Action::Respawn))
+                                    if body.downed.is_some() =>
+                                {
+                                    if let Some(net) = net.as_ref() {
+                                        net.send(ClientMessage::Respawn);
+                                    }
+                                }
                                 // The death screen's buttons, from the
                                 // keyboard. Every other screen in the
                                 // game can be driven without the mouse,
@@ -2938,6 +2949,52 @@ fn run(
                     // skipped; normally is not a guarantee, and the cost
                     // of the exception is one silently lost action.
                     } else if button == MouseButton::Right {
+                        // **On the ground the right click is a hand to your
+                        // own body**, and a hand to the world only for the
+                        // river and the hearth beside you. A dressing in the
+                        // hand goes on (`downed::part_to_dress` picks where);
+                        // food and a jug go through the ordinary eat and
+                        // drink below; everything else -- building, opening
+                        // a door, climbing into a bed -- is not something a
+                        // body with a clock on it does, and the server
+                        // refuses it anyway (`barred_while_downed`).
+                        //
+                        // **Standing, a click on somebody lying on the ground
+                        // is a hand to them** (`ClientMessage::HelpUp`), with
+                        // whatever is in it; the server decides whether it is
+                        // what they need.
+                        if body.downed.is_some() {
+                            let held = inventory.block_in(input.hotbar_slot);
+                            if let Some((net, treatment)) =
+                                net.as_ref().zip(held.and_then(primitive_shared::injury::Treatment::of))
+                            {
+                                let part = primitive_shared::downed::part_to_dress(&body.injuries, treatment);
+                                net.send(ClientMessage::TreatInjury {
+                                    slot: input.hotbar_slot as u8,
+                                    part: part.index() as u8,
+                                });
+                                debug_stats.network_messages_out_this_second += 1;
+                                return;
+                            }
+                            let aimed = aimed_block(&chunks, &camera);
+                            if !matches!(
+                                use_gesture(aimed.map(|(_, block)| block), held),
+                                UseGesture::Eat | UseGesture::Water | UseGesture::Hearth
+                            ) {
+                                return;
+                            }
+                        } else if let Some(net) = net.as_ref() {
+                            let held = inventory.block_in(input.hotbar_slot);
+                            if let Some(target) = player_under_crosshair(&remote_players, &chunks, &camera, None)
+                                .filter(|&id| remote_players.is_down(id))
+                            {
+                                if held.is_some() {
+                                    net.send(ClientMessage::HelpUp { target });
+                                    debug_stats.network_messages_out_this_second += 1;
+                                }
+                                return;
+                            }
+                        }
                         // A block you can *open* takes the right click
                         // before a block you could place does. Otherwise
                         // the only way to use a chest with something in
@@ -4746,7 +4803,12 @@ fn run(
                             // ...and a broken leg, set or not: a splint
                             // is what lets it knit, not a leg to walk on.
                             // See `Injuries::speed_factor`.
-                            * body.injuries.speed_factor()
+                            //
+                            // **On the ground it is the crawl instead**, not
+                            // as well: a body on its belly is not favouring
+                            // a leg, and the crawl in `downed` is already the
+                            // whole of how fast it goes.
+                            * body.downed.map_or(body.injuries.speed_factor(), |down| down.crawl())
                             // How hard a thumb is pushing, and 1.0 on
                             // anything with a keyboard. It belongs in
                             // the same multiplier that weight and
@@ -4794,8 +4856,10 @@ fn run(
                         // will not, and the jump stays -- see
                         // `Injuries::may_sprint` for why the one goes and
                         // not the other.
-                        let sprinting =
-                            wants_sprint && stamina.can_sprint() && body.injuries.may_sprint();
+                        let sprinting = wants_sprint
+                            && stamina.can_sprint()
+                            && body.injuries.may_sprint()
+                            && body.downed.is_none();
                         // **Up on jump, down on sprint** -- the two keys
                         // a hand is already on, and neither of them does
                         // anything else while flying: there is no ground
@@ -4840,7 +4904,13 @@ fn run(
                         // `Stamina::climb_cost`). And nobody jumps at all
                         // under more than they can carry (`load::can_jump`).
                         let climbing = player.footing_is_a_tree(&chunks);
+                        // ...and nobody jumps off the ground they are lying
+                        // on. The held key still swims a downed body up in
+                        // water: that is a stroke, not a jump, and a body
+                        // that could not surface would drown in the first
+                        // pond it crawled into rather than choose to.
                         let may_jump = primitive_shared::load::can_jump(carried)
+                            && body.downed.is_none()
                             && if climbing { stamina.can_climb(carried) } else { stamina.can_jump() };
                         // The river the player is in, once a frame: a
                         // current changes over metres, not over the slices
@@ -5245,6 +5315,17 @@ fn run(
                     // moves -- the aim still comes from `eye_position`,
                     // the point the server measures reach from.
                     camera.position = resting.eye(player.position);
+                    // **On the ground the eye is on the ground**, a little
+                    // under half a block up (`downed::CRAWL_EYE`), which is
+                    // the first thing that says to a player that something
+                    // has changed -- before the red, before the words. The
+                    // clock the screen draws is counted here, off the last
+                    // reading the server sent (see `ServerMessage::Downed`).
+                    if let Some(down) = body.downed.as_mut() {
+                        camera.position = player.position
+                            + glam::DVec3::new(0.0, f64::from(primitive_shared::downed::CRAWL_EYE), 0.0);
+                        down.tick(dt);
+                    }
                     match resting.look_on_lying_down() {
                         Some((yaw, pitch)) if !looked_along_bed => {
                             camera.yaw = yaw;
@@ -5384,9 +5465,14 @@ fn run(
                     // the yard from the stern would also be swinging at the
                     // planks under the rower, and five of those break the
                     // raft (`raft::HITS_TO_BREAK`).
+                    // ...and a body on the ground has hands for itself and
+                    // nothing else: no pick, no blow (the server refuses
+                    // both anyway -- `barred_while_downed` -- and a crack
+                    // that grew on a block nobody could break would be a lie).
                     let can_mine = world_ready
                         && !paused
                         && !death.is_open()
+                        && body.downed.is_none()
                         && input.mouse_grabbed
                         && trimming.is_none();
 
@@ -6039,7 +6125,10 @@ fn run(
                         || death.is_animating()
                         || debug_panel_shown
                         // A meter that is killing the player flashes.
-                        || hud::alarming(nourishment, breath, body);
+                        || hud::alarming(nourishment, breath, body)
+                        // ...and so does the red of a body on the ground,
+                        // whose clock is counting down on it.
+                        || body.downed.is_some();
                     // **A running bar every frame, not at the animation
                     // rate.** The marker is what a blow is timed against,
                     // and one drawn a thirtieth of a second stale is a
@@ -6075,6 +6164,19 @@ fn run(
                             settings.language,
                             ui_aspect,
                             ui_scale,
+                            &mut ui_vertices,
+                        );
+                        // ...and the red at the edges of a body on the
+                        // ground, under the gauges for the sleep's reason:
+                        // the health bar and the pack's belt are what the
+                        // player is reaching for. See `ui::downed`.
+                        ui::downed::build_into(
+                            graphics.textures.font,
+                            body.downed,
+                            settings.language,
+                            ui_aspect,
+                            ui_scale,
+                            now,
                             &mut ui_vertices,
                         );
                         let hud_from = ui_vertices.len();
@@ -9275,7 +9377,23 @@ fn drain_network(
                 particles.spray(Vec3::new(at.0 as f32, at.1 as f32, at.2 as f32), usize::from(drops));
             }
 
+            // On the ground, or up off it. The clock is counted down here
+            // from this reading (`camera.position`'s neighbour in the frame);
+            // the server sends another only when something changes it.
+            ServerMessage::Downed { down } => {
+                // Whatever was half-mined is not half-mined any more. The
+                // sound of going down is the health bar's (`on_hurt`): the
+                // death's own sound is kept for the death.
+                if down.is_some() {
+                    mining.reset();
+                }
+                body.downed = down;
+            }
+
             ServerMessage::Died { cause } => {
+                // Off the ground: dead is not downed, and the screen's red
+                // gives way to the death screen.
+                body.downed = None;
                 // Dead is not seated: the server lets go of a seat and a bed
                 // at the respawn without a word, and a camera left at seat
                 // height would come back into the world at the spawn point
@@ -9313,6 +9431,7 @@ fn drain_network(
                 // bled to death. Cleared here, the whole body that arrives
                 // is no change at all.
                 body.injuries = primitive_shared::injury::Injuries::default();
+                body.downed = None;
             }
 
             // Neither of these is a reason to close the game. They

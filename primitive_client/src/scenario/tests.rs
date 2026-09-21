@@ -3640,3 +3640,94 @@ fn hay_built_into_a_stack_by_the_pen_keeps_a_ewe_through_a_winter_week_and_the_e
     no_corrections(&s);
 }
 
+// ---------------------------------------------------------------- downed
+
+/// How far the feet go across the ground in `seconds` of holding forward.
+fn crawled(s: &mut Scenario, seconds: f32, sprint: bool) -> f64 {
+    let from = s.feet();
+    s.face(0.0);
+    s.hold(Action::Forward);
+    if sprint {
+        s.hold(Action::Sprint);
+    }
+    s.seconds(seconds);
+    s.release_all();
+    let to = s.feet();
+    ((to.x - from.x).powi(2) + (to.z - from.z).powi(2)).sqrt()
+}
+
+/// **A fall that used to kill breaks you instead**: twenty blocks onto the
+/// meadow puts the player on the ground with the eye at the grass, crawling
+/// at a tenth of a walk whatever they hold down, and -- left there -- dead
+/// when the clock runs out, of the fall, with the pack in a corpse.
+///
+/// The clock is ninety seconds, and a scenario runs on the wall's time, so
+/// most of it is taken off by blows the way a wolf would take it (two
+/// seconds a point, `downed::SECONDS_PER_HEALTH`) -- what is asserted is
+/// that the last few seconds run out on their own and not faster.
+#[test]
+fn a_player_who_falls_from_a_height_is_downed_crawls_slowly_and_dies_when_the_time_runs_out() {
+    use primitive_shared::downed::{Cause, CRAWL_EYE};
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at((x0 as f64 + 0.5, (GROUND + 21) as f64, z as f64 + 0.5));
+    assert!(s.until(10.0, |s| s.downed.is_some() || s.dead.is_some()), "a twenty-block fall did nothing");
+    assert!(s.dead.is_none(), "a twenty-block fall killed outright: {:?}", s.dead);
+    assert_eq!(s.downed.map(|d| d.cause), Some(Cause::Fall));
+    s.seconds(0.5);
+    let eye = s.camera.position.y - s.feet().y;
+    assert!((eye - f64::from(CRAWL_EYE)).abs() < 0.01, "the eye stayed at {eye} over the feet");
+
+    // The crawl, measured: three seconds of forward, then the same with the
+    // sprint key held, which a body on the ground does not have.
+    let walk = f64::from(crate::settings::ClientSettings::default().move_speed);
+    let slow = crawled(&mut s, 3.0, false) / 3.0;
+    let sprinting = crawled(&mut s, 3.0, true) / 3.0;
+    assert!(slow > walk * 0.03, "a downed player could not crawl at all: {slow} blocks/s");
+    assert!(slow < walk * 0.2, "a broken body crawled at {slow} blocks/s against a walk of {walk}");
+    assert!(sprinting < walk * 0.2, "the sprint key ran a downed player at {sprinting} blocks/s");
+
+    // Most of the clock taken off by blows, then the last seconds left alone.
+    let left = s.server().player_downed().expect("the server lost the downed body").left;
+    let leave = 5.0;
+    // In bites under a bar each: one blow of a bar or more on a downed body
+    // is `downed::OVERKILL`, which is a death and not a clock.
+    let mut owed = (left - leave) / primitive_shared::downed::SECONDS_PER_HEALTH;
+    while owed > 0.0 {
+        let bite = owed.min(10.0);
+        s.server().hurt_player(bite, "was pulled down by a wolf");
+        owed -= bite;
+    }
+    assert!(s.until(2.0, |s| s.downed.is_some_and(|d| d.left < leave + 1.0)), "the blow never reached the client's clock");
+    s.seconds(leave - 2.0);
+    assert!(s.dead.is_none(), "died before the clock ran out");
+    assert!(s.until(6.0, |s| s.dead.is_some()), "the clock ran out and nobody died");
+    assert!(s.dead.as_deref().is_some_and(|c| c.contains("fell")), "died of {:?}", s.dead);
+    assert!(s.downed.is_none());
+    no_corrections(&s);
+}
+
+/// **A starving player on the ground eats and gets up**: the bread in the
+/// pack is the whole rescue, and afterwards they walk at a walk.
+#[test]
+fn a_player_downed_by_hunger_who_eats_gets_up_and_walks() {
+    use primitive_shared::downed::{Cause, RAISED_HEALTH};
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.give(t::BLOCK_BREAD, 2);
+    s.server().set_player_nourishment(0.0);
+    s.server().hurt_player(30.0, "starved");
+    assert!(s.until(3.0, |s| s.downed.is_some()), "a starving body at nought never went down");
+    assert_eq!(s.downed.map(|d| d.cause), Some(Cause::Hunger));
+    let crawl = crawled(&mut s, 1.5, false) / 1.5;
+
+    let slot = slot_of(&s, t::BLOCK_BREAD).expect("the bread");
+    s.send(ClientMessage::Eat { slot: slot as u8 });
+    assert!(s.until(3.0, |s| s.downed.is_none()), "the bread went down and the body stayed down");
+    assert!(s.dead.is_none());
+    assert!(s.until(2.0, |s| s.health * 20.0 >= RAISED_HEALTH - 0.01), "raised on {} of a bar", s.health);
+    let walk = crawled(&mut s, 1.5, false) / 1.5;
+    assert!(walk > crawl * 2.5, "up again, and still crawling: {walk} against {crawl}");
+    no_corrections(&s);
+}

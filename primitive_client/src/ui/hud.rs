@@ -1085,6 +1085,14 @@ pub struct BodyGauges {
     /// well as in the fog so the same page can say what it is doing to
     /// the room.
     pub smoke: f32,
+    /// On the ground, and the clock, as the server last said
+    /// (`ServerMessage::Downed`) and counted down since by the frame.
+    ///
+    /// Here for the reason the wounds are: it arrives about the body and is
+    /// read by everything the body is -- the pace the client predicts, the
+    /// eye's height, what the hands may do, and the red at the edges of the
+    /// screen (`ui::downed`).
+    pub downed: Option<primitive_shared::downed::Down>,
 }
 
 impl Default for BodyGauges {
@@ -1104,6 +1112,7 @@ impl Default for BodyGauges {
                 ..Default::default()
             },
             smoke: 0.0,
+            downed: None,
         }
     }
 }
@@ -3099,6 +3108,7 @@ mod tests {
             diet_groups: 0,
             shelter: Default::default(),
             smoke: 0.0,
+            downed: None,
         }
     }
 
@@ -3158,6 +3168,7 @@ mod tests {
                 diet_groups: 0,
                 shelter: Default::default(),
                 smoke: 0.0,
+                downed: None,
             },
             &Inventory::new(),
             None,
@@ -3239,6 +3250,7 @@ mod tests {
             diet_groups: 0,
             shelter: Default::default(),
             smoke: 0.0,
+            downed: None,
         };
         for (name, reading) in [
             ("air running out", (0.3f32, 1.0f32, all_well())),
@@ -3432,6 +3444,7 @@ mod tests {
                 diet_groups: 0,
                 shelter: Default::default(),
                 smoke: 0.0,
+                downed: None,
             },
             &Inventory::new(),
             None,
@@ -3571,6 +3584,7 @@ mod tests {
             diet_groups: 0,
             shelter: Default::default(),
             smoke: 0.0,
+            downed: None,
         };
         let everything = stack_at(
             &mut Attention::default(),
@@ -3643,6 +3657,7 @@ mod tests {
                 diet_groups: 0,
                 shelter: Default::default(),
                 smoke: 0.0,
+                downed: None,
             },
         );
         let right = BAR_LEFT - ICON_GAP;

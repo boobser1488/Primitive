@@ -126,6 +126,9 @@ pub struct Scenario {
     pub injuries: primitive_shared::injury::Injuries,
     pub health: f32,
     pub dead: Option<String>,
+    /// On the ground, as the server last said -- the frame's own
+    /// `BodyGauges::downed`, and read by `step_body` the way `run` reads it.
+    pub downed: Option<primitive_shared::downed::Down>,
     pub chest_screen: ChestScreen,
     pub station_screen: StationScreen,
 
@@ -282,6 +285,7 @@ impl Scenario {
             injuries: Default::default(),
             health: 1.0,
             dead: None,
+            downed: None,
             chest_screen: ChestScreen::new(),
             station_screen: StationScreen::new(),
             corrections: Vec::new(),
@@ -588,7 +592,10 @@ impl Scenario {
 
         if self.world_ready && self.dead.is_none() {
             self.step_body();
-            self.step_hands();
+            // No pick on the ground: `run`'s `can_mine`.
+            if self.downed.is_none() {
+                self.step_hands();
+            }
         }
 
         crate::maybe_send_transform(
@@ -656,13 +663,17 @@ impl Scenario {
             return;
         }
         let carried = self.inventory.total_weight() + self.equipment.weight();
+        // The crawl in place of the limp, as `run` has it.
         self.player.speed_scale = primitive_shared::load::speed_scale(carried)
             * self.equipment.worn().mobility()
-            * self.injuries.speed_factor();
+            * self.downed.map_or(self.injuries.speed_factor(), |down| down.crawl());
         self.player.snowshoes = self.equipment.snowshoes();
         self.player.buoyancy = primitive_shared::load::buoyancy(carried);
         self.player.treading = frozen;
-        let sprinting = !frozen && self.input.action_down(&self.binds, Action::Sprint) && self.injuries.may_sprint();
+        let sprinting = !frozen
+            && self.input.action_down(&self.binds, Action::Sprint)
+            && self.injuries.may_sprint()
+            && self.downed.is_none();
         let wish = if frozen {
             Vec3::ZERO
         } else {
@@ -670,10 +681,16 @@ impl Scenario {
         };
         let jump_pressed = !frozen
             && primitive_shared::load::can_jump(carried)
+            && self.downed.is_none()
             && (self.jump_edge || self.input.action_pressed(&self.binds, Action::Jump));
         let jump_held = !frozen && self.input.action_down(&self.binds, Action::Jump);
         self.player.update(&self.chunks, &[], wish, self.camera.forward(), jump_pressed, jump_held, sprinting, FRAME);
         self.camera.position = self.player.eye_position();
+        if let Some(down) = self.downed.as_mut() {
+            self.camera.position = self.player.position
+                + DVec3::new(0.0, f64::from(primitive_shared::downed::CRAWL_EYE), 0.0);
+            down.tick(FRAME);
+        }
     }
 
     fn step_hands(&mut self) {
@@ -761,9 +778,14 @@ impl Scenario {
                 ServerMessage::Health { current, max } => {
                     self.health = if *max > 0.0 { current / max } else { 0.0 };
                 }
-                ServerMessage::Died { cause } => self.dead = Some(format!("{cause:?}")),
+                ServerMessage::Downed { down } => self.downed = *down,
+                ServerMessage::Died { cause } => {
+                    self.downed = None;
+                    self.dead = Some(format!("{cause:?}"));
+                }
                 ServerMessage::Respawned { x, y, z } => {
                     self.dead = None;
+                    self.downed = None;
                     self.player.teleport(DVec3::new(*x, *y, *z));
                     crate::respawn_gate(&self.chunks, *x, *z, &mut self.world_ready);
                 }

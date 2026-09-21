@@ -1204,6 +1204,11 @@ mod tests {
                 coldest_air = coldest_air.min(ambient.temperature_c);
             }
             vitals.warm(ambient.exposure(), 0.0, 0.0, 0.0, TICK);
+            // ...and the clock on the ground, as the tick loop runs it: the
+            // cold puts a body down before it kills it (`downed`), and a
+            // night that only put it down and stopped there would read as
+            // survived.
+            let _ = vitals.step_downed(TICK);
             coldest = coldest.min(vitals.temperature());
             if tick == sunrise {
                 at_sunrise = vitals.temperature();
@@ -1214,7 +1219,11 @@ mod tests {
             coldest_air_c: coldest_air,
             at_sunrise_c: at_sunrise,
             health_lost: crate::logic::survival::MAX_HEALTH - vitals.health(),
-            survived: !vitals.is_dead(),
+            // Down in the cold at dawn is not surviving the night: the body
+            // is on the ground with a minute's clock and nothing to warm it,
+            // and where the night ends is where this measurement stops, not
+            // where the clock would have.
+            survived: !vitals.is_dead() && !vitals.is_downed(),
         }
     }
 

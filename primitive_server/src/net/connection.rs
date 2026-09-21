@@ -406,6 +406,12 @@ async fn run_connection(
     // the saddle came back standing in the middle of their own horse, a
     // metre and a half up.
     crate::horses::dismount(&ctx, &handle, None);
+    // **A player who leaves while on the ground dies as they go**, before
+    // the profile is written: the pack goes into a corpse where they lay
+    // and the profile is a dead one, which the next join brings back at the
+    // spawn. See `survival::Vitals::downed` for the two alternatives and
+    // why each was worse.
+    crate::give_up(&ctx, &handle);
     crate::store_profile(&ctx, &handle);
     // ...and off the oars of any raft, which would otherwise keep a rower
     // nobody can reach: nobody else could take them until the raft broke.
@@ -499,6 +505,22 @@ async fn read_loop(
                 drop(state);
                 handle.request_kick(DisconnectReason::AntiCheat(reason));
                 return Ok(());
+            }
+        }
+
+        // **A body on the ground has hands and nothing else.** It can eat,
+        // drink, dress a wound, get into its pack and a chest beside it,
+        // put a coat on and strike a spark -- what the crawl is for. It
+        // cannot dig, build, fight, fish, ride or work at a bench. Refused
+        // here, once, rather than by forty handlers each asking; see
+        // `barred_while_downed` for the list and why it is a whole match.
+        if barred_while_downed(&msg) {
+            let downed = {
+                let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.vitals.is_downed()
+            };
+            if downed {
+                continue;
             }
         }
 
@@ -1842,12 +1864,20 @@ async fn read_loop(
             ClientMessage::Respawn => {
                 // Ignored unless they are actually dead, so a client
                 // cannot use this as a free teleport home.
-                let dead = {
+                //
+                // **...or down**, where the same key is letting go: dead now,
+                // with the words of whatever put them there, and the death
+                // screen's own respawn after it. The key a player already
+                // reaches for at the end, rather than a new one to learn for
+                // a moment nobody practises.
+                let (dead, downed) = {
                     let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-                    state.vitals.is_dead()
+                    (state.vitals.is_dead(), state.vitals.is_downed())
                 };
                 if dead {
                     crate::respawn_player(&ctx, &handle);
+                } else if downed {
+                    crate::give_up(&ctx, &handle);
                 }
             }
 
@@ -1876,8 +1906,94 @@ async fn read_loop(
                 build_in_place(&ctx, &handle, (global_x, global_y, global_z), along_x);
             }
 
+            ClientMessage::HelpUp { target } => {
+                crate::help_up(&ctx, &handle, target);
+            }
+
             ClientMessage::Disconnect => return Ok(()),
         }
+    }
+}
+
+/// What a downed body may not ask for. See the refusal in `read_loop`.
+///
+/// **Every message by name, and no `_` arm**, for `Species::death_cause`'s
+/// reason: a message added tomorrow is a compile error here, and whoever
+/// adds it decides whether a body on the ground can do it -- rather than a
+/// new gesture that a downed player can use because nobody thought to ask.
+fn barred_while_downed(msg: &ClientMessage) -> bool {
+    match msg {
+        // Keeping the connection and the world alive.
+        ClientMessage::Hello { .. }
+        | ClientMessage::RequestChunk(_)
+        | ClientMessage::RequestChunks(_)
+        | ClientMessage::UpdateTransform { .. }
+        | ClientMessage::AmIAnOperator
+        | ClientMessage::Chat(_)
+        | ClientMessage::RequestExtensions
+        | ClientMessage::Pong { .. }
+        | ClientMessage::Disconnect
+        // The pack, and a chest or a corpse within reach: the bandage is
+        // somewhere in there, and so is the coat. Crafting too -- a bandage
+        // torn from cloth with twenty seconds left is the decision this
+        // whole state exists to ask.
+        | ClientMessage::SelectSlot { .. }
+        | ClientMessage::MoveSlots { .. }
+        | ClientMessage::SplitSlot { .. }
+        | ClientMessage::QuickMoveSlot { .. }
+        | ClientMessage::SortInventory
+        | ClientMessage::SortChest
+        | ClientMessage::DropSlot { .. }
+        | ClientMessage::Craft { .. }
+        | ClientMessage::OpenChest { .. }
+        | ClientMessage::CloseChest
+        | ClientMessage::ChestMove { .. }
+        | ClientMessage::ChestQuickMove { .. }
+        | ClientMessage::ChestMoveKind { .. }
+        | ClientMessage::ChestBulkMove { .. }
+        | ClientMessage::Equip { .. }
+        | ClientMessage::Unequip { .. }
+        | ClientMessage::PourIntoJug { .. }
+        | ClientMessage::EmptyJug { .. }
+        | ClientMessage::TakeFromJug { .. }
+        // What saves a body is put into it or onto it.
+        | ClientMessage::Eat { .. }
+        | ClientMessage::TreatInjury { .. }
+        // A river to drink from, a spark for the hearth beside them. Beds
+        // and seats are refused in `use_block` itself.
+        | ClientMessage::UseBlock { .. }
+        // Letting go.
+        | ClientMessage::Respawn => false,
+        ClientMessage::SetBlock { .. }
+        | ClientMessage::Dig { .. }
+        | ClientMessage::Build { .. }
+        | ClientMessage::PileLog { .. }
+        | ClientMessage::SetDown { .. }
+        | ClientMessage::Attack { .. }
+        | ClientMessage::AttackEntity { .. }
+        | ClientMessage::Digging { .. }
+        | ClientMessage::OpenStation { .. }
+        | ClientMessage::StationBegin { .. }
+        | ClientMessage::StationRun { .. }
+        | ClientMessage::CloseStation
+        | ClientMessage::CastLine { .. }
+        | ClientMessage::Strike
+        | ClientMessage::Reel { .. }
+        | ClientMessage::ReelIn
+        | ClientMessage::StandUp
+        | ClientMessage::UseRaft { .. }
+        | ClientMessage::Row { .. }
+        | ClientMessage::Trim { .. }
+        | ClientMessage::Deck { .. }
+        | ClientMessage::Mount { .. }
+        | ClientMessage::Dismount
+        | ClientMessage::Rein { .. }
+        | ClientMessage::OpenBags { .. }
+        | ClientMessage::TendAnimal { .. }
+        | ClientMessage::StallOffer { .. }
+        | ClientMessage::StallBuy { .. }
+        // Nobody on the ground lifts anybody else off it.
+        | ClientMessage::HelpUp { .. } => true,
     }
 }
 

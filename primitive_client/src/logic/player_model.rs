@@ -820,6 +820,10 @@ const SWIM_LIFT: f32 = 22.0;
 /// a stride, because an arm pulls further than a leg steps.
 const STROKES_PER_BLOCK: f32 = 0.45;
 
+/// How many pulls a crawler makes a block: an arm on the ground reaches a
+/// third of a block, not the length of a stroke through water.
+const CRAWLS_PER_BLOCK: f32 = 1.5;
+
 /// A point of the figure after its posture, before it is turned to its
 /// yaw, in model units.
 ///
@@ -844,6 +848,11 @@ fn postured(posture: Posture, unit: Vec3) -> Vec3 {
         // goes to front (-z) and the face goes down -- face down in the water,
         // head first the way they are swimming, the hips over the feet.
         Posture::Swimming => Vec3::new(unit.x, unit.z + SWIM_LIFT, -unit.y + LYING_MIDDLE),
+        // The swimmer's turn, on the ground: face down, head first the way
+        // they are crawling, lifted by half the head's depth -- the lying
+        // figure's lift, for its reason -- so the face is on the grass and not
+        // in it.
+        Posture::Crawling => Vec3::new(unit.x, unit.z + LYING_LIFT, -unit.y + LYING_MIDDLE),
     }
 }
 
@@ -944,6 +953,22 @@ pub fn joint_angle(joint: Joint, pose: &Pose) -> f32 {
         // round opposite each other from overhead (pi, which the quarter turn
         // makes ahead of the swimmer) to the hip (nought); the legs flutter;
         // the head is lifted to look where it is going.
+        // **A crawl on the ground**: the arms reach ahead in turn and pull,
+        // and the legs trail -- they are what is broken, frozen or spent, and
+        // a body kicking them would be a body that could have stood. From the
+        // ground covered and nothing else, so a downed figure lying still is
+        // still, which is the difference a helper running up needs to see.
+        (Posture::Crawling, _) => {
+            let pull = (pose.walked * CRAWLS_PER_BLOCK) * std::f32::consts::TAU;
+            let ahead = std::f32::consts::PI * 0.8;
+            return match joint {
+                Joint::Fixed => 0.0,
+                Joint::Head => -0.9,
+                Joint::ArmRight => ahead + 0.35 * pull.sin(),
+                Joint::ArmLeft => ahead - 0.35 * pull.sin(),
+                Joint::LegRight | Joint::LegLeft => 0.05,
+            };
+        }
         (Posture::Swimming, _) => {
             let stroke = (pose.walked * STROKES_PER_BLOCK + pose.age * 0.35) * std::f32::consts::TAU;
             let half = std::f32::consts::FRAC_PI_2;

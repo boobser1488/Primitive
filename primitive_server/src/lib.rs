@@ -1044,6 +1044,29 @@ impl Server {
         Some(state.vitals.temperature())
     }
 
+    /// Takes `amount` of health off the one connected player, as `cause`,
+    /// down the real path: `Vitals::hurt` and `report_vitals`, so a player
+    /// this puts on the ground is told so and one it kills leaves a corpse.
+    ///
+    /// A door for the scenarios, for the reason the others are: starving a
+    /// player to the ground for real is minutes of rolls
+    /// (`food::STARVATION_ROLL_SECONDS`), and the question a scenario asks
+    /// is what happens *after*.
+    pub fn hurt_player(&self, amount: f32, cause: &str) {
+        if let Some(handle) = self.ctx.registry.handles().into_iter().next() {
+            let outcome = handle.state.lock().unwrap_or_else(|e| e.into_inner()).vitals.hurt(amount, cause);
+            report_vitals(&self.ctx, &handle, outcome);
+            send_downed(&handle);
+        }
+    }
+
+    /// The one connected player's clock on the ground, as the server has it.
+    pub fn player_downed(&self) -> Option<primitive_shared::downed::Down> {
+        let handle = self.ctx.registry.handles().into_iter().next()?;
+        let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.vitals.downed()
+    }
+
     /// Sets the one player's body temperature, as a cold night would have.
     pub fn chill_player(&self, body_c: f32) {
         if let Some(handle) = self.ctx.registry.handles().into_iter().next() {
@@ -3465,6 +3488,22 @@ async fn tick_loop(ctx: Arc<Context>) {
                         _ => {}
                     }
                     send_injuries(handle);
+                }
+
+                // **A downed body's clock**, after everything this tick that
+                // could have saved it -- the fire's warmth, the breath, the
+                // bandage the connection task put on a moment ago -- and
+                // before the next tick can take any more from it. Raised is
+                // a `Changed` (the bar has three points on it again) and the
+                // clock running out is a `Died`, down the one reporting path
+                // every death takes. See `primitive_shared::downed`.
+                {
+                    let outcome = {
+                        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+                        state.vitals.step_downed(tick_duration.as_secs_f32())
+                    };
+                    report_vitals(&ctx, handle, outcome);
+                    send_downed(handle);
                 }
 
                 // Whatever the block above decided, the client is told
@@ -6086,6 +6125,18 @@ pub(crate) fn use_block(
         return;
     }
 
+    // **Not from the ground.** A downed body can drink from the river and
+    // strike a spark into the hearth beside it -- those are what the crawl
+    // is for -- but it cannot climb into a bed or onto a chair, and letting
+    // it would put a body with a clock on it into the one posture that
+    // passes the night.
+    if (primitive_shared::body::Rest::of(block).is_some() || primitive_shared::types::is_seat(block)) && {
+        let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.vitals.is_downed()
+    } {
+        return;
+    }
+
     // **Lying down**, which needs nothing in hand and belongs up here
     // with the other empty-handed gestures for exactly that reason.
     if let Some(rest) = primitive_shared::body::Rest::of(block) {
@@ -8170,6 +8221,159 @@ pub(crate) fn send_injuries(handle: &Arc<players::PlayerHandle>) {
         now
     };
     handle.send(ServerMessage::Injuries { injuries });
+}
+
+/// Tells a player they are on the ground, or up off it, when that changed
+/// -- or when something took time off the clock. See
+/// `ServerMessage::Downed` for why the clock itself is not sent.
+pub(crate) fn send_downed(handle: &Arc<players::PlayerHandle>) {
+    let down = {
+        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.vitals.take_downed_report() {
+            return;
+        }
+        state.vitals.downed()
+    };
+    handle.send(ServerMessage::Downed { down });
+}
+
+/// A downed player lets go: dead now, down the ordinary path, with the
+/// words of whatever put them on the ground. The respawn key while down,
+/// and a connection closing on a body that is down (see the field note on
+/// `survival::Vitals::downed` for why leaving is dying). Nothing for
+/// anybody who is not down.
+pub(crate) fn give_up(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>) {
+    let outcome = {
+        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.vitals.give_up()
+    };
+    report_vitals(ctx, handle, outcome);
+    send_downed(handle);
+}
+
+/// **Another player's hands on a downed body**: `ClientMessage::HelpUp`.
+///
+/// What the helper is holding has to be what the body is waiting for
+/// (`downed::Rescue::can_be_helped`): a dressing on a bite, a splint on a
+/// fall, something to eat for the starving and a jug for the parched or
+/// the sick. It is spent from the *helper's* pack and done to the *downed*
+/// body through the same `Vitals` calls the body would have made itself --
+/// `treat`, `eat`, `drink_water` -- so a mouthful given is billed and
+/// credited exactly as a mouthful taken, and the raise comes on the downed
+/// player's next tick through `step_downed`, the one door every rescue uses.
+///
+/// Rejected: **helping up with an empty hand.** It would make a second
+/// player a free rescue from anything, and the table in `downed` is a
+/// table of *what saves you*; a friend is somebody who brought it, not a
+/// substitute for it. The states -- warmth, cool, clean air -- cannot be
+/// handed over at all, and nothing carries a player to them; a friend can
+/// still build the fire where the body lies, which is the same rescue
+/// arrived at by the world.
+///
+/// **Three locks, never two at once**, as `melee_attack` takes them: two
+/// players helping each other on two connection tasks would otherwise be a
+/// deadlock. The item is taken out first and put back if the body turns
+/// out not to want it after all (dead in between, or raised by somebody
+/// else), so nothing is spent on nothing.
+pub(crate) fn help_up(ctx: &Arc<Context>, helper: &Arc<players::PlayerHandle>, target: PlayerId) {
+    use primitive_shared::downed::Rescue;
+    use primitive_shared::injury::{Part, Treatment};
+    if target == helper.id {
+        return;
+    }
+    let Some(downed) = ctx.registry.get(target) else {
+        return;
+    };
+    let (from, slot, held) = {
+        let state = helper.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.vitals.is_dead() || state.vitals.is_downed() {
+            return;
+        }
+        (state.position, state.selected_slot, state.inventory.block_in(state.selected_slot))
+    };
+    let Some(held) = held else {
+        return;
+    };
+    let rescue = {
+        let state = downed.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !primitive_shared::combat::within_reach(from, state.position, None) {
+            return;
+        }
+        match state.vitals.downed() {
+            Some(down) => down.rescue(),
+            None => return,
+        }
+    };
+    // What the hand holds, as the rescue it is. A food that comes in a bowl
+    // is the downed player's own to eat: handing somebody stew leaves the
+    // question of whose pack the bowl goes back into, and the answer
+    // "nobody's" is a bowl that stopped existing.
+    let fits = match rescue {
+        Rescue::Dressing | Rescue::Splint => Treatment::of(held).is_some_and(|t| rescue.by_treatment(t)),
+        Rescue::Food => {
+            primitive_shared::food::is_food(held) && primitive_shared::food::served_in(held).is_none()
+        }
+        Rescue::Water => primitive_shared::types::emptied_vessel(held).is_some(),
+        Rescue::Warmth | Rescue::Cooling | Rescue::Air => false,
+    };
+    if !fits {
+        return;
+    }
+    // Out of the helper's hand...
+    {
+        let mut state = helper.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.inventory.block_in(slot) != Some(held) {
+            return;
+        }
+        // Room for the empty jug before the full one goes, on
+        // `drink_from_slot`'s rule: the last one in a slot leaves its own
+        // room, and anything else has to find some.
+        if let Some(empty) = primitive_shared::types::emptied_vessel(held) {
+            if state.inventory.count_in(slot) > 1 && !state.inventory.has_room_for(empty, 1) {
+                return;
+            }
+        }
+        if state.inventory.take_from(slot, 1) == 0 {
+            return;
+        }
+        state.inventory_dirty = true;
+    }
+    // ...onto the body...
+    let done = {
+        let mut state = downed.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.vitals.is_downed()
+            && match rescue {
+                Rescue::Dressing | Rescue::Splint => state.vitals.treat(Part::Torso, held).is_ok(),
+                Rescue::Food => !matches!(state.vitals.eat(held), survival::Outcome::Unchanged),
+                Rescue::Water => state.vitals.drink_water(
+                    primitive_shared::types::vessel_water(held),
+                    primitive_shared::body::JUG_HYDRATION,
+                ),
+                Rescue::Warmth | Rescue::Cooling | Rescue::Air => false,
+            }
+    };
+    // ...and what comes back, or the thing itself if it was not wanted.
+    {
+        let mut state = helper.state.lock().unwrap_or_else(|e| e.into_inner());
+        let back = if done { primitive_shared::types::emptied_vessel(held) } else { Some(held) };
+        if let Some(back) = back {
+            // Room was made for it above: the thing itself goes back where it
+            // came from, and the jug's room was asked for before it was taken.
+            let left = state.inventory.add(back, 1);
+            debug_assert_eq!(left, 0, "what the helper held had nowhere to go back to");
+            state.inventory_dirty = true;
+        }
+    }
+    send_inventory(helper);
+    refresh_carried_weight(helper);
+    if done {
+        send_injuries(&downed);
+        send_nourishment(&downed);
+        send_body(&downed);
+        if ctx.options.logging {
+            println!("[survival] {} helps {} up", helper.username, downed.username);
+        }
+    }
 }
 
 /// Puts what is in a slot of the pack on a part of the body.
@@ -20500,5 +20704,85 @@ mod stall_tests {
         assert_eq!(stall.owner, "player1");
         assert_eq!(stall.offer(0), Some(FLINT_FOR_HIDE));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod downed_help_tests {
+    use super::butchering_tests::{a_hunter, hold, FLOOR};
+    use super::*;
+    use primitive_shared::inventory::Stack;
+    use primitive_shared::types::{BLOCK_BANDAGE, BLOCK_BREAD, BLOCK_CORPSE, BLOCK_IRON_INGOT};
+
+    /// The hunter of `a_hunter`, and a friend beside them, both in the
+    /// registry so `help_up` can find one from the other.
+    fn two_of_them() -> (Arc<Context>, Arc<players::PlayerHandle>, Arc<players::PlayerHandle>) {
+        let (ctx, hunter, rx) = a_hunter();
+        std::mem::forget(rx);
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        std::mem::forget(rx);
+        let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(8);
+        std::mem::forget(chunk_rx);
+        let feet = (1.5, f64::from(FLOOR) + 1.0, 2.5);
+        let friend = Arc::new(players::PlayerHandle::new(
+            2,
+            "friend".to_string(),
+            "127.0.0.1:2".parse().unwrap(),
+            tx,
+            chunk_tx,
+            10_000,
+            feet,
+            crate::logic::anticheat::AntiCheat::new(crate::settings::AntiCheatSettings::default(), 8, feet),
+        ));
+        assert!(ctx.registry.insert_unique(Arc::clone(&hunter)));
+        assert!(ctx.registry.insert_unique(Arc::clone(&friend)));
+        (ctx, hunter, friend)
+    }
+
+    fn down_by_a_wolf(handle: &Arc<players::PlayerHandle>) {
+        let mut state = handle.state.lock().unwrap();
+        let _ = state.vitals.hurt(survival::MAX_HEALTH, "was pulled down by a wolf");
+        assert!(state.vitals.is_downed());
+    }
+
+    #[test]
+    fn a_friend_with_a_bandage_gets_a_bitten_player_up_and_it_is_the_friends_bandage_that_is_spent() {
+        let (ctx, hunter, friend) = two_of_them();
+        down_by_a_wolf(&hunter);
+        hold(&friend, Some(Stack::new(BLOCK_BANDAGE, 2)));
+        help_up(&ctx, &friend, hunter.id);
+        assert_eq!(friend.state.lock().unwrap().inventory.count(BLOCK_BANDAGE), 1, "the friend's bandage was not spent");
+        let outcome = hunter.state.lock().unwrap().vitals.step_downed(0.05);
+        assert_eq!(outcome, survival::Outcome::Changed, "the bandage went on and the body stayed down");
+        assert!(!hunter.state.lock().unwrap().vitals.is_downed());
+    }
+
+    #[test]
+    fn a_friend_holding_the_wrong_thing_spends_nothing_and_raises_nobody() {
+        let (ctx, hunter, friend) = two_of_them();
+        down_by_a_wolf(&hunter);
+        hold(&friend, Some(Stack::new(BLOCK_BREAD, 3)));
+        help_up(&ctx, &friend, hunter.id);
+        assert_eq!(friend.state.lock().unwrap().inventory.count(BLOCK_BREAD), 3, "bread was spent on a bite");
+        assert_eq!(hunter.state.lock().unwrap().vitals.step_downed(0.05), survival::Outcome::Unchanged);
+        // ...and nobody helps a body up with an empty hand.
+        hold(&friend, None);
+        help_up(&ctx, &friend, hunter.id);
+        assert!(hunter.state.lock().unwrap().vitals.is_downed());
+    }
+
+    #[test]
+    fn giving_up_on_the_ground_is_a_death_with_the_pack_in_a_corpse() {
+        let (ctx, hunter, _friend) = two_of_them();
+        hunter.state.lock().unwrap().inventory.put_in_slot(1, Stack::new(BLOCK_IRON_INGOT, 3));
+        down_by_a_wolf(&hunter);
+        give_up(&ctx, &hunter);
+        let state = hunter.state.lock().unwrap();
+        assert!(state.vitals.is_dead(), "giving up left the body alive");
+        assert!(state.inventory.is_empty(), "the pack went on into the next life");
+        let at = *state.bags.last().expect("no body was left");
+        drop(state);
+        assert_eq!(ctx.world.cached_block(at.0, at.1, at.2), Some(BLOCK_CORPSE));
+        assert_eq!(ctx.chests.lock().unwrap().contents(at).count(BLOCK_IRON_INGOT), 3);
     }
 }
