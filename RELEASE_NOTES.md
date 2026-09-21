@@ -40,7 +40,9 @@
 
 - `primitive_win64.zip` — Windows, 64 бита.
 - `primitive_linux64.tar.gz` — Linux, 64 бита.
+- `primitive-1.5.0-android-arm64.apk` — Android 64 бита (arm64). Ставится
+  поверх прошлой версии без потери миров.
 
-Распакуйте и запустите `primitive_client`. Руководство игрока — `GUIDE.md`
+На компьютере распакуйте и запустите `primitive_client`. Руководство игрока — `GUIDE.md`
 в архиве. Полная история изменений с замерами — `CHANGELOG.md` в
 репозитории.
