@@ -2982,14 +2982,25 @@ async fn tick_loop(ctx: Arc<Context>) {
             // decided for itself whether its own head was under water
             // would be a client that never drowns.
             for handle in &handles {
-                let (position, dead) = {
+                let (position, dead, downed) = {
                     let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-                    (state.position, state.vitals.is_dead())
+                    (state.position, state.vitals.is_dead(), state.vitals.is_downed())
                 };
                 if !dead {
+                    // **A body on the ground breathes at the ground.** The
+                    // standing eye height here let a downed player lie in
+                    // knee-deep water with the underwater view on their
+                    // screen and never lose a breath, because the server
+                    // was asking about a head a block above the one the
+                    // client was drawing from. See `downed::CRAWL_EYE`.
+                    let eye_height = if downed {
+                        primitive_shared::downed::CRAWL_EYE
+                    } else {
+                        primitive_shared::geometry::EYE_HEIGHT
+                    };
                     let eye = (
                         position.0,
-                        position.1 + f64::from(primitive_shared::geometry::EYE_HEIGHT),
+                        position.1 + f64::from(eye_height),
                         position.2,
                     );
                     // How deep the cell at eye level actually is, not
@@ -3018,7 +3029,7 @@ async fn tick_loop(ctx: Arc<Context>) {
                     // the top of a full cell is exactly the sort of
                     // duplicate that took a player drowning on the sea
                     // floor to find the first time.
-                    let head_under = head_under_water(&ctx, primitive_shared::geometry::narrow(position));
+                    let head_under = head_under_water_at(&ctx, primitive_shared::geometry::narrow(position), eye_height);
                     // ...and whether the water is past the waist, which is
                     // what everybody else draws them by. See
                     // `Posture::Swimming`.
@@ -5912,11 +5923,14 @@ impl Crafts {
 /// it -- which is the part that took a player drowning on the sea floor
 /// to find. See `fluid::covers_with_above`.
 pub(crate) fn head_under_water(ctx: &Arc<Context>, feet: (f32, f32, f32)) -> bool {
-    let eye = (
-        feet.0,
-        feet.1 + primitive_shared::geometry::EYE_HEIGHT,
-        feet.2,
-    );
+    head_under_water_at(ctx, feet, primitive_shared::geometry::EYE_HEIGHT)
+}
+
+/// `head_under_water` for a head `eye_height` over the feet: a crawling
+/// body's is `downed::CRAWL_EYE`, and asking at a standing one is how a
+/// downed player lay in shallow water without drowning.
+pub(crate) fn head_under_water_at(ctx: &Arc<Context>, feet: (f32, f32, f32), eye_height: f32) -> bool {
+    let eye = (feet.0, feet.1 + eye_height, feet.2);
     let cell = (
         eye.0.floor() as i32,
         eye.1.floor() as i32,

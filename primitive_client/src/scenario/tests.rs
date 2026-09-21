@@ -3737,6 +3737,34 @@ fn a_player_downed_by_hunger_who_eats_gets_up_and_walks() {
     no_corrections(&s);
 }
 
+/// **A body on the ground breathes at the ground.** Knee-deep water, which
+/// a standing player wades through without a thought, closes over the face
+/// of one who is down in it: the server used to ask about the standing
+/// head, a block up in the air, and the downed player lay under the water
+/// line on their own screen and never lost a breath.
+#[test]
+fn a_player_downed_in_knee_deep_water_runs_out_of_breath_and_one_standing_in_it_does_not() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let g = GROUND;
+    s.stand_at(feet_on(x0, z));
+    s.fill((x0 - 2, g, z - 2), (x0 + 2, g, z + 2), t::BLOCK_WATER);
+    // The field's own turf dug out and filled: the feet on the bed a
+    // block down, the water up to the knee.
+    s.stand_at((x0 as f64 + 0.5, g as f64, z as f64 + 0.5));
+    s.seconds(3.0);
+    assert!(
+        !s.heard_any(|m| matches!(m, ServerMessage::Breath { .. })),
+        "standing in water to the knee took the breath"
+    );
+    s.server().hurt_player(30.0, "starved");
+    assert!(s.until(3.0, |s| s.downed.is_some()), "the blow never put the body down");
+    assert!(
+        s.until(5.0, |s| s.heard_any(|m| matches!(m, ServerMessage::Breath { fraction } if *fraction < 1.0))),
+        "a face down in knee-deep water was never short of air"
+    );
+}
+
 /// The age the ladder page says this player stands on, off the client's own
 /// copy of what they have held.
 fn age_of(s: &Scenario) -> Option<primitive_shared::ladder::Age> {
