@@ -71,6 +71,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Only for RELEASE_NOTES.md. The archives come from the package job;
+      # the checkout is here because the notes live in the tagged tree,
+      # next to the code they describe, rather than in a form on GitHub
+      # that nobody reviews with the diff.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: RELEASE_NOTES.md
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -80,4 +88,8 @@ jobs:
           # The tag's own notes, written by hand from the CHANGELOG.
           # Generating them from commit subjects produces a list of
           # commit subjects, which is not what the CHANGELOG is for.
+          # Not the CHANGELOG itself either: its release section is
+          # thousands of lines of mechanism for whoever works on the game,
+          # and the release page is read by whoever is about to play it.
+          body_path: RELEASE_NOTES.md
           draft: true
