@@ -56,8 +56,8 @@
 //! flake by a friend is not told to go and knap one.
 //!
 //! **Where those three are shown changed.** All three used to go over the
-//! belt, one after another, phrased as orders, and the player's verdict
-//! was "что за тупые подсказки". They live on the pack's path page now
+//! belt, one after another, phrased as orders, and they read as
+//! condescending. They live on the pack's path page now
 //! (`ui::ladder_screen`); over the belt there is one line, for a player
 //! who has held nothing *and* is carrying nothing, and it is a statement
 //! about the world rather than an instruction. See

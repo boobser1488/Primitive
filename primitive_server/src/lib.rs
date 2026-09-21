@@ -14823,7 +14823,7 @@ fn lie_down(
         if already {
             // Silently: the player pressed the key and saw themselves stand.
             // A chat line saying so was the game narrating its own
-            // animation, and "не пиши всякую херню в чат" was the answer.
+            // animation, which is noise in a chat, not news.
             stand_up(ctx, handle, None);
             return;
         }

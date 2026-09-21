@@ -381,7 +381,7 @@ fn mask_of(image: &RgbaImage) -> [[bool; GRID]; GRID] {
 
 /// A thing hung on a drying rack, read off its own picture once, at load.
 ///
-/// **"в сушилке пусть будет не плоская хрень, а рыба или мясо".** What
+/// **A rack hangs a fish or a strip of meat, not a flat board.** What
 /// hung under a rack's ridge was one slab wearing the carried picture --
 /// a sticker of a fish, with the picture's transparent corners cut out of
 /// a flat board. The rack now hangs the things themselves

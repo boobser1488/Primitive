@@ -6839,7 +6839,7 @@ fn push_hung_silhouette(
 /// `rack::HANGING`, along `x0 .. x0 + 10`, under a ridge whose underside is
 /// at `ridge`.
 ///
-/// **"в сушилке пусть будет не плоская хрень, а рыба или мясо".** This was
+/// **A rack hangs a fish or a strip of meat, not a flat board.** This was
 /// one slab twelve sixteenths by eight wearing the good's carried picture:
 /// a board with a fish painted on it, and the picture's transparent margin
 /// cut out of the board. Each good is now hung the way it is hung to dry,
@@ -14649,7 +14649,7 @@ mod cutout_split_tests {
 
     #[test]
     fn every_face_of_a_hung_good_carries_the_direction_its_winding_points() {
-        // **"в сушилке пусть будет не плоская хрень, а рыба или мясо".** The
+        // **A rack hangs a fish or a strip of meat, not a flat board.** The
         // slab under the ridge became strips, sods, hides and fish, and a fish
         // is its picture's silhouette stood on end, turned by whatever slant
         // the picture was drawn at, and mirrored into a solid

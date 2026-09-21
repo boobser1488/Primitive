@@ -816,8 +816,8 @@ pub enum Msg {
     // ---- the first two minutes, and the page that carries them ----
     //
     // Three sentences, each a *fact about the world* rather than an order.
-    // They were orders -- "pick a stone up off the ground" -- and the
-    // player's reply was "что за тупые подсказки". A game that tells a
+    // They were orders -- "pick a stone up off the ground" -- and they
+    // read as condescending. A game that tells a
     // grown adult to pick up a stone is a game talking down to them; a
     // game that mentions there are stones on the ground has told them the
     // same thing and left the decision where it belongs. See

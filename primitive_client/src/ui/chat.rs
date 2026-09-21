@@ -213,8 +213,7 @@ const QUIET: [f32; 4] = [0.48, 0.53, 0.60, 1.0];
 /// refusal in red, and it went with the refusals themselves -- every
 /// "that does not go there" the server answered a gesture with was written
 /// into the log, and a log of the player's own mistakes over what the
-/// others said was the thing asked to go ("удали эти тупые уведомления в
-/// чате"). A refusal is the HUD's banner now (`ServerMessage::Error` in
+/// others said was noise that buried the conversation. A refusal is the HUD's banner now (`ServerMessage::Error` in
 /// `lib.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -1923,8 +1922,8 @@ mod tests {
     /// The three kinds of line are three different colours.
     ///
     /// There were four: a refusal had a red of its own. Refusals left the log
-    /// for the HUD's banner ("удали эти тупые уведомления в чате о том что я
-    /// что то не так сделал"), and what a player reads back here is people and
+    /// for the HUD's banner, because a log of one's own mistakes buried the
+    /// conversation, and what a player reads back here is people and
     /// the server's replies -- which still must not look like each other.
     #[test]
     fn the_kinds_of_line_are_told_apart_by_their_ink() {
