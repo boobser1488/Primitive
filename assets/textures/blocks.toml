@@ -625,8 +625,10 @@ honing_stone = { all = "terrain/sandstone.png", item = "furniture/honing_stone_i
 # cells) of the leaf litter's own picture and the log's bark, so the face row
 # is the litter -- no layer of its own -- and the icon is the one picture of
 # its own: the hut from its mouth, three quarters on, the fork crossed over
-# the dark door and the heap running down to its tail.
-lean_to = { all = "plants/leaf_litter.png", item = "furniture/lean_to_item.png" }
+# the dark door and the heap running down to its tail. The litter with the
+# earth painted in (the pit cover's), since the ground's own has holes: a
+# thatch is a heap, and a heap has no daylight through it.
+lean_to = { all = "plants/pit_cover.png", item = "furniture/lean_to_item.png" }
 
 # ---- the smith and the joiner ----
 #
@@ -1224,8 +1226,11 @@ snare_caught = "tools/snare_caught.png"
 snare_sprung = "tools/snare_sprung.png"
 # **A pit's cover is the forest floor's own picture**, on purpose: a pit that
 # could be told from the leaf litter round it is a pit nothing walks into
-# (`pitfall`). It costs no layer.
-pit_cover = "plants/leaf_litter.png"
+# (`pitfall`). **With the earth between the leaves painted in**, where the
+# litter's own picture has holes now ("опавшую листву сделай прозрачной"): a
+# cover is drawn in the cut-out pass, and holes in it were holes into the pit.
+# It is the litter on bare earth to the texel, and it costs one layer.
+pit_cover = "plants/pit_cover.png"
 # A salt pan is puddled clay; what is in it is its top.
 salt_pan = "pottery/clay.png"
 salt_pan_brine = { top = "pottery/salt_pan_brine.png", all = "pottery/clay.png" }

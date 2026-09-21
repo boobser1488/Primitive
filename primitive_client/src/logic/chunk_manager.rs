@@ -355,6 +355,21 @@ impl ChunkManager {
         })
     }
 
+    /// [`Self::set_down_items`] with where each one lies in its cell
+    /// (`geometry::set_down_rest`): lowered onto a lip or a slab, moved onto
+    /// a step's tread. What the frame draws them at, and the same answer the
+    /// ray is given (`geometry::block_box_for_aim_near`), so a knife is aimed
+    /// at where it is seen.
+    pub fn set_down_laid(&self) -> impl Iterator<Item = ((i32, i32, i32), BlockId, BlockId, [f32; 3])> + '_ {
+        self.set_down_items().map(|(cell, block, item)| {
+            let near = |dx: i32, dy: i32, dz: i32| {
+                self.block_at(cell.0 + dx, cell.1 - 1 + dy, cell.2 + dz).unwrap_or(primitive_shared::types::BLOCK_AIR)
+            };
+            let rest = primitive_shared::geometry::set_down_rest(near(0, 0, 0), near).unwrap_or([0.0; 3]);
+            (cell, block, item, rest)
+        })
+    }
+
     /// What the server says is in the pit kiln at this cell.
     pub fn note_pit_pottery(&mut self, cell: (i32, i32, i32), pieces: Vec<BlockId>) {
         if pieces.is_empty() {

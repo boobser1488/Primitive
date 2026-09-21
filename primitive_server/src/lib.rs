@@ -12418,7 +12418,8 @@ pub(crate) fn pile_log(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, 
 /// thing has to be one that is set down (`types::can_be_set_down`), the cell
 /// has to be air -- not water, which is where a knife is lost rather than
 /// laid, and not a tuft of grass, which a set-down knife would otherwise
-/// delete -- and the cell under it has to be a whole floor. What a mod's
+/// delete -- and the cell under it has to have a flat top at some height
+/// (`types::set_down_drop`: a lip, a slab, a step's tread; not a riser). What a mod's
 /// protection says is asked as it is for a block put down, because a claim
 /// that stopped building and let a player strew a stranger's house with
 /// bones would not be a claim.
@@ -12426,7 +12427,7 @@ pub(crate) fn pile_log(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, 
 /// One thing, whatever the stack: a player laying out a table lays it out,
 /// and a stack of forty arrows set down as one is a chest with no lid.
 pub(crate) fn set_down_item(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, at: (i32, i32, i32)) {
-    use primitive_shared::types::{can_be_set_down, faced, has_full_top, is_air, Facing, BLOCK_SET_DOWN};
+    use primitive_shared::types::{can_be_set_down, faced, is_air, set_down_drop, Facing, BLOCK_SET_DOWN};
     let (feet, yaw, slot, held, dead) = {
         let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
         let slot = state.selected_slot;
@@ -12454,7 +12455,7 @@ pub(crate) fn set_down_item(ctx: &Arc<Context>, handle: &Arc<players::PlayerHand
         return;
     }
     let empty = ctx.world.cached_block(at.0, at.1, at.2).is_some_and(is_air);
-    let floor = ctx.world.cached_block(at.0, at.1 - 1, at.2).is_some_and(has_full_top);
+    let floor = ctx.world.cached_block(at.0, at.1 - 1, at.2).and_then(set_down_drop).is_some();
     if !empty || !floor {
         handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::SetDownOnSolidGround });
         return;

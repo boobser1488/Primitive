@@ -23021,6 +23021,18 @@ mod relief_repro;
 #[path = "leaf_distance_repro.rs"]
 mod leaf_distance_repro;
 
+/// Every kind of tree, alone, photographed. A child for the reason
+/// `lod_repro` is.
+#[cfg(test)]
+#[path = "tree_repro.rs"]
+mod tree_repro;
+
+/// Leaf litter lying flush on the turf, photographed and counted for
+/// z-fighting. A child for the reason `lod_repro` is.
+#[cfg(test)]
+#[path = "litter_repro.rs"]
+mod litter_repro;
+
 /// Water where the generator put it -- the sea, the shallows, a river, a
 /// cave lake -- from above and from under the lid. A child for the reason
 /// `lod_repro` is.

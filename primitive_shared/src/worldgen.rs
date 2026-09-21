@@ -1308,6 +1308,11 @@ mod surface_metal_tests;
 /// Where the wild hives are, in its own file for `surface_metal_tests`' reason.
 #[cfg(test)]
 mod hive_tests;
+
+/// Leaves and the wood that holds them, in its own file for
+/// `surface_metal_tests`' reason.
+#[cfg(test)]
+mod tree_tests;
 pub use scale::Scale;
 /// Hill country and plain country, rivers that drain to the sea, relief that
 /// follows the rock: what `Scale::Landforms` adds over `Scale::Earth`. See
@@ -5363,6 +5368,9 @@ impl WorldGen {
         if self.preset == Preset::Test {
             return crate::showcase::generate_chunk(pos);
         }
+        // The crowns an older scale drew, for as long as this chunk takes:
+        // see `branches::TORN_CROWNS`.
+        let _crowns = branches::OldCrowns::when(self.scale != Scale::Landforms);
         // **The whole of what makes a seed one planet**, and it is a
         // relabelling rather than a generation: the chunk is cut from the
         // patch of the globe this world was laid on, and then told which

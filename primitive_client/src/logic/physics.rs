@@ -2258,9 +2258,18 @@ fn raycast_in(
         // without ever passing through the cell the snow is in -- and took
         // the lip, turf and all, from under a player sweeping at the white.
         // The nearer of the two is what was hit.
-        if chunks.block_at(cell[0], cell[1], cell[2]).and_then(primitive_shared::types::coating_rests_at).is_some_and(|top| top < 1.0) {
+        // ...and a thing set down on a lip, a slab or a step's tread
+        // (`geometry::set_down_rest`), for the same reason: it lies in the
+        // cell under its own.
+        let ground = chunks.block_at(cell[0], cell[1], cell[2]);
+        let lowered = ground.and_then(primitive_shared::types::coating_rests_at).is_some_and(|top| top < 1.0);
+        let shelf = ground.and_then(primitive_shared::types::set_down_drop).is_some_and(|drop| drop > 0.0);
+        if lowered || shelf {
             let above = [cell[0], cell[1] + 1, cell[2]];
-            if chunks.block_at(above[0], above[1], above[2]).is_some_and(primitive_shared::types::is_flat) {
+            let lying = chunks.block_at(above[0], above[1], above[2]);
+            if lying.is_some_and(|b| {
+                (lowered && primitive_shared::types::is_flat(b)) || primitive_shared::types::is_set_down(b)
+            }) {
                 if let Some((distance, face)) =
                     ray_enters_block(chunks, origin, dir, above, travelled, max_distance, include_liquid)
                 {

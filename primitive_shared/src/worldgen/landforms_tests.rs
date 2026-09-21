@@ -237,12 +237,15 @@ fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
     let held: [((i32, i32), u64); 8] = [
         ((0, 0), 0xc1b2_3ce7_5051_149c),
         ((5, -3), 0x7d71_38ac_74ab_3526),
-        ((-40, 90), 0x3176_3451_5768_83a8),
+        // Four taken again when the crowns were made to hold on to their
+        // wood (`branches::blob`, a fork with no arms growing on): trees
+        // stand in these, and nothing else of the ground moved.
+        ((-40, 90), 0x1a03_6043_184b_7c21),
         ((313, -77), 0x7a5c_8bd0_2eb1_9d17),
-        ((-1875, -1875), 0x9573_c7e6_b509_916f),
+        ((-1875, -1875), 0x6119_5bbe_53c5_e027),
         ((-1868, -1872), 0x49ce_371a_7b0d_a380),
-        ((-1864, -1864), 0xecc0_5056_2316_7b9d),
-        ((-1873, -1866), 0x8bdf_bb14_3011_0902),
+        ((-1864, -1864), 0xca42_bd16_4d6b_d01d),
+        ((-1873, -1866), 0xeada_69ce_25f2_4caa),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(true));
@@ -274,7 +277,9 @@ fn the_landforms_lay_the_same_lips_every_time() {
         // scales' prints above did not move.
         ((0, 0), 0x9187_d283_ea52_b9b8),
         ((5, -3), 0x05f4_c29d_70d4_d892),
-        ((-1875, -1875), 0xdb00_7841_5a15_f039),
+        // ...and again when the crowns held on to their wood: a tree stands
+        // in it.
+        ((-1875, -1875), 0x017b_d630_8e7e_d0b1),
         ((-1868, -1872), 0x8653_33f3_497c_c219),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
@@ -293,10 +298,16 @@ fn print_fingerprints() {
     }
     // ...and the landforms' own two sets, which a change that means to move
     // the new world's ground has to write down again.
+    // The first as their test reads them, with the features on the whole
+    // block they were laid on (`lips::FEATURES_KEEP_THEIR_STEP`); printed
+    // without it they were prints of another ground, and a change taken
+    // again from them failed the test it was taken for.
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
+    super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(true));
     for (x, z) in LANDFORM_CHUNKS {
         println!("((({x}, {z})), {:#018x}),", fingerprint_as(&gen, ChunkPos::new(x, z), crate::dig::whole));
     }
+    super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(false));
     for (x, z) in LANDFORM_CHUNKS.iter().take(2).chain(LANDFORM_CHUNKS[4..6].iter()) {
         println!("lips (({x}, {z})), {:#018x},", fingerprint(&gen, ChunkPos::new(*x, *z)));
     }

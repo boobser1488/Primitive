@@ -1370,8 +1370,22 @@ fn what_is_set_down_by_hand() {
         laid.push((6 + i, 4, 4, faced(BLOCK_SET_DOWN, Facing::toward_viewer(0.0)), thing));
     }
     laid.push((14, 5, 2, faced(BLOCK_SET_DOWN, Facing::toward_viewer(0.0)), BLOCK_COPPER_KNIFE));
+    // ...and a knife on each partial top it lies on (`types::set_down_drop`),
+    // for "через шифт можно ставить только на полные блоки": a turf lip a
+    // quarter down, a slab, and the tread of a stair climbing west.
+    let partial = [
+        primitive_shared::dig::lowered(primitive_shared::types::BLOCK_GRASS, 1),
+        primitive_shared::types::BLOCK_TILE_SLAB,
+        faced(primitive_shared::types::BLOCK_PLANK_STAIRS, Facing::West),
+    ];
+    for (i, _) in partial.iter().enumerate() {
+        laid.push((7 + 2 * i, 5, 7, faced(BLOCK_SET_DOWN, Facing::toward_viewer(-std::f32::consts::FRAC_PI_2)), BLOCK_COPPER_KNIFE));
+    }
     let mut extra: Vec<(usize, usize, usize, BlockId)> = laid.iter().map(|&(x, y, z, cell, _)| (x, y, z, cell)).collect();
     extra.push((14, 4, 2, BLOCK_STONE));
+    for (i, &ground) in partial.iter().enumerate() {
+        extra.push((7 + 2 * i, 4, 7, ground));
+    }
     let world = world_with(device, queue, &textures, &extra);
     let mut chunks = ChunkManager::new(4);
     {
@@ -1387,7 +1401,7 @@ fn what_is_set_down_by_hand() {
     let layers = textures.face_layers();
     let mut g = Geometry::default();
     crate::logic::entities::build_set_down_into(
-        chunks.set_down_items(),
+        chunks.set_down_laid(),
         ORIGIN,
         &layers,
         &world.light,
@@ -1403,6 +1417,8 @@ fn what_is_set_down_by_hand() {
     for (name, eye, at) in [
         ("above", Vec3::new(9.5, 7.4, 7.2), Vec3::new(9.5, 4.0, 3.0)),
         ("low", Vec3::new(9.5, 5.0, 7.5), Vec3::new(9.5, 4.1, 3.0)),
+        ("partial", Vec3::new(9.5, 6.3, 10.0), Vec3::new(9.5, 4.6, 7.0)),
+        ("partial_side", Vec3::new(5.0, 5.4, 9.5), Vec3::new(9.5, 4.6, 7.0)),
     ] {
         rig.frame(Look::After, Quality::Balanced, true, &world, &models, (eye, at), 0.4);
         let shot = rig.read();

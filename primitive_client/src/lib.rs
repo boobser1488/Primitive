@@ -6509,7 +6509,7 @@ fn run(
                     // was put. Asked of the chunks rather than the entities:
                     // it is a cell in the world, not a stack the server moves.
                     entities::build_set_down_into(
-                        chunks.set_down_items(),
+                        chunks.set_down_laid(),
                         render_origin,
                         &face_layers,
                         &light,
@@ -11424,17 +11424,18 @@ fn tends(block: BlockId, held: BlockId) -> bool {
 
 /// The empty cell a thing would be set down in, from where the camera looks:
 /// the one over the top of the block the placement ray stops at, if that
-/// cell is air and the block is a whole floor. `None` for a side or an
-/// underside, for water, and for a drift or a slab.
+/// cell is air and the block has a flat top of any height
+/// (`types::set_down_drop`: a lip, a slab, a step's tread). `None` for a
+/// side or an underside, for water, and for a riser, a lattice or a post.
 ///
 /// The server asks the same of its own world (`set_down_item`); this is only
 /// so a gesture it would refuse is said in words instead of sent.
 fn set_down_cell(chunks: &ChunkManager, camera: &Camera) -> Option<(i32, i32, i32)> {
-    use primitive_shared::types::{has_full_top, is_air};
+    use primitive_shared::types::{is_air, set_down_drop};
     let (hit, before) = physics::raycast_block(chunks, camera.position, camera.forward(), INTERACT_RANGE)?;
     let over_the_top = before == (hit.0, hit.1 + 1, hit.2);
     let empty = chunks.block_at(before.0, before.1, before.2).is_some_and(is_air);
-    let floor = chunks.block_at(hit.0, hit.1, hit.2).is_some_and(has_full_top);
+    let floor = chunks.block_at(hit.0, hit.1, hit.2).and_then(set_down_drop).is_some();
     (over_the_top && empty && floor).then_some(before)
 }
 

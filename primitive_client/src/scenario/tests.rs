@@ -2896,7 +2896,10 @@ fn nothing_is_put_or_set_down_over_the_air_of_a_partial_top() {
             s.release_all();
             s.seconds(0.6);
             let there = s.server().block_at(over.0, over.1, over.2);
-            let whole = ground == t::BLOCK_STONE;
+            // ...except a thing set down, which has no foot to hang and lies
+            // on any level top at its height (`types::set_down_drop`): the
+            // slab, the tread, the floor dug down and the heap. Not the fire.
+            let whole = ground == t::BLOCK_STONE || (set_down && t::set_down_drop(ground).is_some());
             let went = there.is_some_and(|b| !t::is_air(b));
             assert_eq!(
                 went,
@@ -2916,6 +2919,69 @@ fn nothing_is_put_or_set_down_over_the_air_of_a_partial_top() {
     let eye = DVec3::new(f64::from(x0) - 1.0, f64::from(g) + 2.2, f64::from(z0));
     look_from(&mut s, eye, DVec3::new(f64::from(x0) + 2.5, f64::from(g) + 0.5, f64::from(z0)));
     s.shot("nothing_over_partial_tops");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_thing_set_down_on_a_lip_a_slab_and_a_stair_lies_on_it_and_is_picked_up_again() {
+    // **"через шифт можно ставить только на полные блоки".** Setting down
+    // asked for a whole top, and the ground is full of tops that are not:
+    // the lip every generated slope is edged with, a slab, a stair. A knife
+    // goes down on each, is drawn and aimed at on the surface it lies on --
+    // not a quarter or half a block over it -- and comes back to the hand.
+    let mut s = Scenario::new();
+    let (x0, z0) = FIELD;
+    let g = GROUND + 1;
+    let lip = primitive_shared::dig::lowered(t::BLOCK_GRASS, 1);
+    s.stand_at(feet_on(x0, z0));
+    let grounds = [lip, t::BLOCK_TILE_SLAB, t::faced(t::BLOCK_PLANK_STAIRS, Facing::West)];
+    let ground_at = |i: usize| (x0 + 2, g, z0 - 3 + 3 * i as i32);
+    s.build(&grounds.iter().enumerate().map(|(i, &b)| (ground_at(i), b)).collect::<Vec<_>>());
+    s.give(t::BLOCK_COPPER_KNIFE, 4);
+    for (i, &ground) in grounds.iter().enumerate() {
+        let cell = ground_at(i);
+        let over = (cell.0, cell.1 + 1, cell.2);
+        let top = if t::is_step(ground) { 0.5 } else { 1.0 - t::set_down_drop(ground).expect("no floor") };
+        s.stand_at(feet_on(x0, cell.2));
+        // At the top a player can see: the tread of the stair, toward them.
+        let across = if t::is_step(ground) { 0.25 } else { 0.5 };
+        let aim = DVec3::new(f64::from(cell.0) + across, f64::from(cell.1) + f64::from(top), f64::from(cell.2) + 0.5);
+        s.select(t::BLOCK_COPPER_KNIFE);
+        s.look_at(aim);
+        assert_eq!(s.aimed().map(|(c, _)| c), Some(cell), "not aiming at the {}", t::block_name(ground));
+        let before = s.inventory.count(t::BLOCK_COPPER_KNIFE);
+        s.hold(Action::Sprint);
+        s.use_aimed();
+        s.release_all();
+        let laid = s.until(3.0, |s| s.chunks.set_down_laid().any(|(c, _, item, _)| c == over && t::block_kind(item) == t::BLOCK_COPPER_KNIFE));
+        assert!(laid, "a knife was not set down on a {}: {:?}", t::block_name(ground), s.block(over).map(t::block_name));
+        let (_, _, _, rest) = s.chunks.set_down_laid().find(|&(c, ..)| c == over).expect("laid");
+        let lies_at = f64::from(over.1) + f64::from(rest[1]);
+        let surface = f64::from(cell.1) + f64::from(top);
+        assert!(
+            (lies_at - surface).abs() < 1e-4,
+            "a knife on a {} is drawn at {lies_at}, the surface is at {surface}",
+            t::block_name(ground)
+        );
+        // Drawn over the tread, not the riser: the front half of a stair
+        // facing west is its -x half.
+        if t::is_step(ground) {
+            assert!(rest[0] < 0.0 && rest[2].abs() < 1e-6, "a knife on a stair lies at {rest:?}, not on its tread");
+        }
+        // Aimed at where it lies, and taken back.
+        let knife = DVec3::new(
+            f64::from(over.0) + 0.5 + f64::from(rest[0]),
+            lies_at + 0.05,
+            f64::from(over.2) + 0.5 + f64::from(rest[2]),
+        );
+        s.look_at(knife);
+        assert_eq!(s.aimed().map(|(c, _)| c), Some(over), "the knife on a {} is not aimed at", t::block_name(ground));
+        s.shot(&format!("set_down_on_{}", ["lip", "slab", "stair"][i]));
+        s.use_aimed();
+        s.release_all();
+        let back = s.until(3.0, |s| s.inventory.count(t::BLOCK_COPPER_KNIFE) == before && s.block(over).is_some_and(t::is_air));
+        assert!(back, "the knife on a {} did not come back to the hand", t::block_name(ground));
+    }
     no_corrections(&s);
 }
 
