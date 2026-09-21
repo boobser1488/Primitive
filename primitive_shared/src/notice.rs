@@ -141,6 +141,111 @@ pub enum Notice {
     /// food. Said at the waking, because a buff nobody is told about is a
     /// buff nobody goes home for.
     SleptAtHome,
+    // ---- the rest of the English the server was sending ----
+    //
+    // Every `ServerMessage::Error` that was still an English sentence, and
+    // the pit's and the charcoal pile's words, which went out as chat lines
+    // in English too. The ones that carry a number are sent as
+    // `ServerMessage::Said` with the numbers beside the code (`Said`), and
+    // the client's row has `{0}`, `{1}` where they go.
+    /// The anticheat refused an edit. The reason stays in the server's log:
+    /// it is for an operator, not a player.
+    EditPutBack,
+    PluginRefused,
+    NotInsideYourself,
+    /// A block or a course laid where another player stands. Their name is
+    /// not said: a refusal is about the gesture.
+    NotInsideSomebody,
+    NeedBetterTool,
+    NeedsSolidGround,
+    LeanToNeedsRoom,
+    BedNeedsRoom,
+    RackNeedsRoom,
+    DoorNeedsRoom,
+    TorchNeedsRoom,
+    DoesNotGoThere,
+    NotCarryingThat,
+    /// A block edit the world could not write: past the top or the bottom of it.
+    PastTheEdge,
+    CannotMakeThat,
+    NotCarryingEnough,
+    WallWantsMortar,
+    WallFinished,
+    LiftStillWet,
+    HeadArmourFell,
+    ChestArmourFell,
+    LegsArmourFell,
+    FeetArmourFell,
+    BackArmourFell,
+    FlintShattered,
+    /// `{0}` is how many.
+    FlintsShattered,
+    TrunkScored,
+    BarrelHoldsWater,
+    BarrelHoldsGrain,
+    BarrelHoldsOtherGrain,
+    BarrelWantsFullJug,
+    OnlyGrainInBarrel,
+    /// Said at the swallow, like `StaleWater`.
+    WrongCap,
+    MeatTurned,
+    RawFlesh,
+    /// A dressing offered to a part with nothing on it that the dressing
+    /// treats.
+    NothingItWouldHelp,
+    EdgeAlreadySharp,
+    ShortOfMaterials,
+    NoRoomForIt,
+    StruckEarly,
+    OutOfTurn,
+    Rushed,
+    RunNotYet,
+    CastShort,
+    TooShallowToFish,
+    NoFishHere,
+    /// `{0}` sticks and `{1}` log make a firepit; `{2}` sticks and `{3}` logs
+    /// are lying here.
+    FirepitWants,
+    NoRaftThere,
+    SomebodyAtOars,
+    PitNeedsFloor,
+    PitOpenAtSide,
+    PitSmothered,
+    TakePotteryOut,
+    PitHoldsFour,
+    /// `{0}` fibre, then `{1}` logs.
+    PitFibreFirst,
+    /// `{0}` logs.
+    PitFibrePacked,
+    /// `{0}` needed, `{1}` there.
+    PitFibreBeforeLogs,
+    /// `{0}` fibre and `{1}` logs; `{2}` fibre there.
+    PitLitWithFibreAndLogs,
+    PitFull,
+    /// `{0}` needed, `{1}` there.
+    PitLitWithLogs,
+    /// `{0}` of `{1}`.
+    PitLogs,
+    /// `{0}` minutes.
+    PitBurning,
+    RainOnPit,
+    NothingToFire,
+    PitAlight,
+    PileNeedsFloor,
+    PileOpen,
+    /// `{0}` minutes.
+    CharcoalBurning,
+    /// `{0}` logs.
+    PileHolds,
+    /// `{0}` seconds.
+    PileAlight,
+    // ---- the field, turned (`lib.rs`, `field_note`) ----
+    RichSoilWatered,
+    RichSoilDry,
+    ThinSoilWatered,
+    ThinSoilDry,
+    SoilWatered,
+    SoilDry,
 }
 
 impl Notice {
@@ -221,6 +326,82 @@ impl Notice {
         Notice::SeaWaterIsSalt,
         Notice::StaleWater,
         Notice::SleptAtHome,
+        Notice::EditPutBack,
+        Notice::PluginRefused,
+        Notice::NotInsideYourself,
+        Notice::NotInsideSomebody,
+        Notice::NeedBetterTool,
+        Notice::NeedsSolidGround,
+        Notice::LeanToNeedsRoom,
+        Notice::BedNeedsRoom,
+        Notice::RackNeedsRoom,
+        Notice::DoorNeedsRoom,
+        Notice::TorchNeedsRoom,
+        Notice::DoesNotGoThere,
+        Notice::NotCarryingThat,
+        Notice::PastTheEdge,
+        Notice::CannotMakeThat,
+        Notice::NotCarryingEnough,
+        Notice::WallWantsMortar,
+        Notice::WallFinished,
+        Notice::LiftStillWet,
+        Notice::HeadArmourFell,
+        Notice::ChestArmourFell,
+        Notice::LegsArmourFell,
+        Notice::FeetArmourFell,
+        Notice::BackArmourFell,
+        Notice::FlintShattered,
+        Notice::FlintsShattered,
+        Notice::TrunkScored,
+        Notice::BarrelHoldsWater,
+        Notice::BarrelHoldsGrain,
+        Notice::BarrelHoldsOtherGrain,
+        Notice::BarrelWantsFullJug,
+        Notice::OnlyGrainInBarrel,
+        Notice::WrongCap,
+        Notice::MeatTurned,
+        Notice::RawFlesh,
+        Notice::NothingItWouldHelp,
+        Notice::EdgeAlreadySharp,
+        Notice::ShortOfMaterials,
+        Notice::NoRoomForIt,
+        Notice::StruckEarly,
+        Notice::OutOfTurn,
+        Notice::Rushed,
+        Notice::RunNotYet,
+        Notice::CastShort,
+        Notice::TooShallowToFish,
+        Notice::NoFishHere,
+        Notice::FirepitWants,
+        Notice::NoRaftThere,
+        Notice::SomebodyAtOars,
+        Notice::PitNeedsFloor,
+        Notice::PitOpenAtSide,
+        Notice::PitSmothered,
+        Notice::TakePotteryOut,
+        Notice::PitHoldsFour,
+        Notice::PitFibreFirst,
+        Notice::PitFibrePacked,
+        Notice::PitFibreBeforeLogs,
+        Notice::PitLitWithFibreAndLogs,
+        Notice::PitFull,
+        Notice::PitLitWithLogs,
+        Notice::PitLogs,
+        Notice::PitBurning,
+        Notice::RainOnPit,
+        Notice::NothingToFire,
+        Notice::PitAlight,
+        Notice::PileNeedsFloor,
+        Notice::PileOpen,
+        Notice::CharcoalBurning,
+        Notice::PileHolds,
+        Notice::PileAlight,
+        Notice::RichSoilWatered,
+        Notice::RichSoilDry,
+        Notice::ThinSoilWatered,
+        Notice::ThinSoilDry,
+        Notice::SoilWatered,
+        Notice::SoilDry,
     ];
 
     /// Whether this is news rather than a refusal: said the same way, but
@@ -242,7 +423,61 @@ impl Notice {
                 | Notice::SeaWaterIsSalt
                 | Notice::StaleWater
                 | Notice::SleptAtHome
+                // Nothing refused: something broke, went down wrong, or a
+                // pit moved on a stage -- the player did the thing.
+                | Notice::HeadArmourFell
+                | Notice::ChestArmourFell
+                | Notice::LegsArmourFell
+                | Notice::FeetArmourFell
+                | Notice::BackArmourFell
+                | Notice::FlintShattered
+                | Notice::FlintsShattered
+                | Notice::WrongCap
+                | Notice::MeatTurned
+                | Notice::RawFlesh
+                | Notice::PitFibreFirst
+                | Notice::PitFibrePacked
+                | Notice::PitFull
+                | Notice::PitLogs
+                | Notice::PitBurning
+                | Notice::PitAlight
+                | Notice::PileOpen
+                | Notice::CharcoalBurning
+                | Notice::PileAlight
+                | Notice::RichSoilWatered
+                | Notice::RichSoilDry
+                | Notice::ThinSoilWatered
+                | Notice::ThinSoilDry
+                | Notice::SoilWatered
+                | Notice::SoilDry
         )
+    }
+}
+
+/// A notice with the numbers it says: "3 of 6 logs on the pit kiln".
+///
+/// **The numbers beside the code, never in it.** A variant carrying its
+/// count would not be a unit variant, and `ALL` -- what the client's rows are
+/// checked against, by index -- only works for unit ones; and a count folded
+/// into the words on the server is English again. So the code names the
+/// sentence, the client's row has `{0}`, `{1}` where the numbers go, and
+/// these fill them in order (`ui::lang::said`). A row asking for a number
+/// that is not here prints the placeholder, which a test would see.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Said {
+    pub what: Notice,
+    pub numbers: Vec<u32>,
+}
+
+impl Said {
+    pub fn new(what: Notice, numbers: &[u32]) -> Said {
+        Said { what, numbers: numbers.to_vec() }
+    }
+}
+
+impl From<Notice> for Said {
+    fn from(what: Notice) -> Said {
+        Said { what, numbers: Vec::new() }
     }
 }
 
@@ -259,7 +494,7 @@ mod tests {
         // append one** -- that is the whole check, and a notice appended
         // to the enum and forgotten in `ALL` is a notice the client is
         // never asked to have words for.
-        assert_eq!(Notice::ALL.len(), Notice::SleptAtHome as usize + 1);
+        assert_eq!(Notice::ALL.len(), Notice::SoilDry as usize + 1);
         for (i, notice) in Notice::ALL.iter().enumerate() {
             assert_eq!(*notice as usize, i, "{notice:?} is out of place in `ALL`");
         }

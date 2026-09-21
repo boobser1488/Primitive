@@ -178,7 +178,7 @@ pub struct FrameInfo {
     /// which world it happened in.
     pub seed: u32,
     /// The biome under the player's feet.
-    pub biome: &'static str,
+    pub biome: std::borrow::Cow<'static, str>,
     /// How far north or south of the equator the player stands, in
     /// degrees (`WorldGen::latitude_degrees`); `None` on the test world.
     ///
@@ -763,7 +763,7 @@ mod tests {
             season: "spring",
             sun_intensity: 1.0,
             seed: 1337,
-            biome: "plains",
+            biome: "plains".into(),
             latitude: Some(45.0),
             nourishment: 1.0,
             weather: "clear",

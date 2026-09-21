@@ -2927,7 +2927,11 @@ pub fn tab_at(cursor: (f32, f32)) -> Option<usize> {
 /// pack. See `Layout::finger`, which is a floor under a widget and not
 /// under a screen.
 pub fn grow_by(layout: crate::ui::widgets::Layout) -> f32 {
-    layout.fit(extent())
+    // The shared number, not the pack's own answer: the pack is wide and
+    // low and had room to grow half again past the chest, which is what
+    // made it look like a different game's screen. See
+    // `widgets::screen_growth`.
+    crate::ui::widgets::screen_growth(layout)
 }
 
 pub fn extent() -> (f32, f32) {
@@ -5313,7 +5317,11 @@ mod touch_layout_tests {
             for requested in [0.5f32, 1.0, 1.5, 2.0] {
                 let layout = Layout::for_screen(aspect, requested);
                 let scale = grow_by(layout);
-                let room_left = scale < layout.ceiling(extent()) - 1e-3;
+                // The glass that stops the pack is the *shared* one: it
+                // is grown by what fits it and a chest together, so a pack
+                // with room of its own to spare is still against the
+                // glass when the chest is. See `widgets::screen_growth`.
+                let room_left = scale < layout.ceiling(widgets::screen_extent()) - 1e-3;
                 assert!(
                     scale > previous + 0.1 || !room_left,
                     "at {aspect:.2}, asking for {requested} drew the pack at {scale}, \
@@ -5362,12 +5370,22 @@ mod touch_layout_tests {
         // of the range, which is where these now look. Above the glass
         // the settings genuinely do answer the same number, and that is
         // arithmetic rather than a bug: see the test above.
+        //
+        // They moved once more when the natural growth came down to 1.3:
+        // below about 0.77 a setting asks for less than the size the pack
+        // was authored at, and *that* floor is rule 1's and stated --
+        // `Layout::fit` never draws a screen smaller than authored. So the
+        // pairs start where a setting can be told apart from it.
         let layout = |r| Layout::for_screen(PHONE, r);
-        for pair in [(0.5f32, 0.7f32), (0.7, 0.9), (0.9, 1.1)] {
+        for pair in [(0.8f32, 1.0f32), (1.0, 1.2), (1.2, 1.4)] {
             let (small, large) = (grow_by(layout(pair.0)), grow_by(layout(pair.1)));
-            let room_left = small < layout(pair.0).ceiling(extent()) - 1e-3;
+            // A step that reaches the glass part way is still a step: on a
+            // phone held sideways the chest's height stops every screen
+            // at about 1.34, a few hundredths past what 1.0 asks for.
+            let ceiling = layout(pair.1).ceiling(widgets::screen_extent());
+            let room_left = large < ceiling - 1e-3;
             assert!(
-                large > small * 1.05 || !room_left,
+                large > small * 1.02 || !room_left,
                 "{} and {} both draw the pack at about {small}",
                 pair.0,
                 pair.1,

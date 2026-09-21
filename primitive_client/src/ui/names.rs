@@ -271,6 +271,20 @@ pub fn young(species: primitive_shared::animals::Species, language: Language) ->
 /// word for it. Anything else -- a fall, a drowning, another player -- is
 /// printed as the server sent it, which is what it always was.
 pub fn death_cause(cause: &str, language: Language) -> Cow<'_, str> {
+    // Everything that is not an animal: a fall, the cold, a tree. Looked up
+    // by the English because that is what the server sends, and the server
+    // is left alone -- the death path is being reworked beside this, and a
+    // table here merges with anything; a code on the wire would not. A
+    // cause with no row is still printed as it came, as it always was.
+    if let Some(row) = CAUSES.iter().find(|row| row.id == cause) {
+        return Cow::Borrowed(row.in_language(language));
+    }
+    // Another player's blow names them, and a name is not translated: only
+    // the words around it are.
+    if let Some(who) = cause.strip_prefix(STRUCK_DOWN_BY) {
+        let words = STRUCK_DOWN.in_language(language);
+        return Cow::Owned(format!("{words} {who}"));
+    }
     let Some(species) = primitive_shared::animals::Species::of_death_cause(cause) else {
         return Cow::Borrowed(cause);
     };
@@ -332,6 +346,77 @@ const DEATHS: &[Name] = &[
     // rather than "killed by an animal". See `Species::Crab`.
     Name { id: "crab", en: "was nipped by a crab", simple: "a crab pinched you and you died", ru: "укушен крабом", pl: "uszczypnięty przez kraba" },
 ];
+
+/// How anything that is not an animal killed somebody, keyed by the
+/// server's English word for word (`survival`, `falling::crush_cause`,
+/// lightning, bees, the horse, the anvil of another player's blow below).
+///
+/// Russian in the register `DEATHS` set: a short participle phrase, as a
+/// line under the notice reads -- "загрызен волком", "утонул". Masculine,
+/// as `DEATHS` is: the server does not know, and the notice does not ask.
+///
+/// `every_death_the_server_can_write_has_words_in_every_language` reads the
+/// server's sources for the causes it writes, so a new way to die is caught
+/// the day it is added rather than the day a Russian player meets it.
+#[rustfmt::skip]
+const CAUSES: &[Name] = &[
+    Name { id: "fell from a great height", en: "fell from a great height", simple: "you fell too far", ru: "разбился, упав с высоты", pl: "spadł z wysoka" },
+    Name { id: "fell onto a stalagmite", en: "fell onto a stalagmite", simple: "you fell onto a stone spike", ru: "упал на сталагмит", pl: "spadł na stalagmit" },
+    Name { id: "drowned", en: "drowned", simple: "you ran out of air under water", ru: "утонул", pl: "utonął" },
+    Name { id: "starved", en: "starved", simple: "you did not eat for too long", ru: "умер от голода", pl: "zmarł z głodu" },
+    Name { id: "died of thirst", en: "died of thirst", simple: "you did not drink for too long", ru: "умер от жажды", pl: "zmarł z pragnienia" },
+    Name { id: "froze to death", en: "froze to death", simple: "you got too cold", ru: "замёрз насмерть", pl: "zamarzł na śmierć" },
+    Name { id: "died of heatstroke", en: "died of heatstroke", simple: "you got too hot", ru: "умер от теплового удара", pl: "zmarł z udaru cieplnego" },
+    Name { id: "choked on smoke", en: "choked on smoke", simple: "the smoke choked you", ru: "задохнулся в дыму", pl: "udusił się dymem" },
+    Name { id: "burned to death", en: "burned to death", simple: "you burned", ru: "сгорел заживо", pl: "spłonął żywcem" },
+    Name { id: "bled to death", en: "bled to death", simple: "you lost too much blood", ru: "истёк кровью", pl: "wykrwawił się" },
+    Name { id: "ate something they should not have", en: "ate something they should not have", simple: "you ate something bad", ru: "съел то, чего есть не стоило", pl: "zjadł coś, czego nie powinien" },
+    Name { id: "ran into sharpened stakes", en: "ran into sharpened stakes", simple: "you ran onto sharp stakes", ru: "напоролся на заострённые колья", pl: "nadział się na zaostrzone pale" },
+    Name { id: "was crushed by a falling tree", en: "was crushed by a falling tree", simple: "a falling tree hit you", ru: "раздавлен упавшим деревом", pl: "przygnieciony przez padające drzewo" },
+    Name { id: "was crushed by falling rock", en: "was crushed by falling rock", simple: "falling rock hit you", ru: "раздавлен обвалом камня", pl: "przygnieciony przez spadające skały" },
+    Name { id: "was crushed by a collapsing roof", en: "was crushed by a collapsing roof", simple: "a roof fell on you", ru: "раздавлен рухнувшей крышей", pl: "przygnieciony przez walący się dach" },
+    Name { id: "was buried under falling earth", en: "was buried under falling earth", simple: "falling earth buried you", ru: "погребён под осыпью", pl: "zasypany przez osuwającą się ziemię" },
+    Name { id: "was struck by lightning", en: "was struck by lightning", simple: "lightning hit you", ru: "убит молнией", pl: "rażony piorunem" },
+    Name { id: "was stung by nettles", en: "was stung by nettles", simple: "nettles stung you", ru: "изжален крапивой", pl: "poparzony przez pokrzywy" },
+    Name { id: "was stung to death by bees", en: "was stung to death by bees", simple: "bees stung you", ru: "зажален пчёлами насмерть", pl: "zażądlony na śmierć przez pszczoły" },
+    Name { id: "was thrown by a horse", en: "was thrown by a horse", simple: "a horse threw you off", ru: "сброшен лошадью", pl: "zrzucony przez konia" },
+    Name { id: "was killed by an animal", en: "was killed by an animal", simple: "an animal killed you", ru: "убит зверем", pl: "zabity przez zwierzę" },
+    Name { id: "was struck down", en: "was struck down", simple: "you were killed", ru: "сражён", pl: "powalony" },
+];
+
+/// What a biome is called in `language`, keyed by `Biome::name` -- which is
+/// what `/biometp` takes and the save and the mod interface spell, so it
+/// stays the identifier and this is only what the screen shows.
+pub fn biome(biome: primitive_shared::worldgen::Biome, language: Language) -> Cow<'static, str> {
+    or_readable(BIOMES.iter().find(|row| row.id == biome.name()), biome.name(), language)
+}
+
+#[rustfmt::skip]
+const BIOMES: &[Name] = &[
+    Name { id: "ocean", en: "ocean", simple: "sea", ru: "океан", pl: "ocean" },
+    Name { id: "beach", en: "beach", simple: "beach", ru: "пляж", pl: "plaża" },
+    Name { id: "desert", en: "desert", simple: "desert", ru: "пустыня", pl: "pustynia" },
+    Name { id: "savanna", en: "savanna", simple: "dry grassland with trees", ru: "саванна", pl: "sawanna" },
+    Name { id: "plains", en: "plains", simple: "grassland", ru: "равнина", pl: "równina" },
+    Name { id: "forest", en: "forest", simple: "forest", ru: "лес", pl: "las" },
+    Name { id: "dead forest", en: "dead forest", simple: "dead forest", ru: "мёртвый лес", pl: "martwy las" },
+    Name { id: "birch forest", en: "birch forest", simple: "birch forest", ru: "березняк", pl: "brzezina" },
+    Name { id: "swamp", en: "swamp", simple: "swamp", ru: "болото", pl: "bagno" },
+    Name { id: "bog", en: "bog", simple: "wet peat land", ru: "торфяник", pl: "torfowisko" },
+    Name { id: "taiga", en: "taiga", simple: "cold pine forest", ru: "тайга", pl: "tajga" },
+    Name { id: "tundra", en: "tundra", simple: "cold flat land", ru: "тундра", pl: "tundra" },
+    Name { id: "mountains", en: "mountains", simple: "mountains", ru: "горы", pl: "góry" },
+    Name { id: "snowy peaks", en: "snowy peaks", simple: "snowy mountain tops", ru: "снежные вершины", pl: "ośnieżone szczyty" },
+    Name { id: "river", en: "river", simple: "river", ru: "река", pl: "rzeka" },
+    Name { id: "steppe", en: "steppe", simple: "dry grassland", ru: "степь", pl: "step" },
+    Name { id: "hills", en: "hills", simple: "hills", ru: "холмы", pl: "wzgórza" },
+];
+
+/// Another player's killing blow: the server writes the name after these
+/// words (`lib.rs`, "was struck down by {}"), and the name stays as it is.
+const STRUCK_DOWN_BY: &str = "was struck down by ";
+#[rustfmt::skip]
+const STRUCK_DOWN: Name = Name { id: "was struck down by", en: "was struck down by", simple: "you were killed by", ru: "сражён игроком", pl: "powalony przez" };
 
 /// Conditions, keyed by the English the rules print.
 ///
@@ -1202,6 +1287,72 @@ mod tests {
     /// through `youth::young_name`, so a species that starts breeding needs a
     /// word for its young in all four languages too.
     #[test]
+    fn every_biome_has_a_name_in_every_language() {
+        for &biome in primitive_shared::worldgen::Biome::ALL {
+            let row = BIOMES.iter().find(|row| row.id == biome.name()).unwrap_or_else(|| panic!("no name in `BIOMES` for {biome:?}"));
+            for &language in Language::ALL {
+                assert_printable(&format!("{biome:?} in {language:?}"), row.in_language(language));
+            }
+        }
+    }
+
+    /// **Read off the server's own sources**, because the causes are
+    /// literals scattered through it -- a fall in `survival`, rock in
+    /// `falling`, a tree in `lib` -- and there is no list of them to walk. A
+    /// new `hurt(.., "was ...")` with no row here is a death a Russian
+    /// player reads in English, which is what this table was written to end.
+    #[test]
+    fn every_death_the_server_can_write_has_words_in_every_language() {
+        let sources = [
+            include_str!("../../../primitive_server/src/lib.rs"),
+            include_str!("../../../primitive_server/src/logic/survival.rs"),
+            include_str!("../../../primitive_server/src/logic/falling.rs"),
+            include_str!("../../../primitive_server/src/logic/horses.rs"),
+            include_str!("../../../primitive_server/src/logic/api_impl.rs"),
+        ];
+        let starts = ["\"was ", "\"died ", "\"fell ", "\"drowned\"", "\"starved\"", "\"froze ", "\"burned ", "\"bled ", "\"choked ", "\"ran into ", "\"ate something"];
+        let mut found = 0;
+        for source in sources {
+            // Not a comment, and not a test's own words: an assertion's
+            // message ("burned by no fire") is not a way to die.
+            let words = |line: &&str| {
+                let line = line.trim_start();
+                !line.starts_with("//") && !line.contains("assert") && !line.contains("expect(") && !line.contains("panic!")
+            };
+            for line in source.lines().filter(words) {
+                for start in starts {
+                    let Some(at) = line.find(start) else { continue };
+                    let rest = &line[at + 1..];
+                    let Some(end) = rest.find('"') else { continue };
+                    let cause = &rest[..end];
+                    // Words about the code rather than a death.
+                    if cause.contains('?') || cause.ends_with(" possible") || cause.ends_with(" working") || cause.contains("alive") || cause == "was broken" {
+                        continue;
+                    }
+                    found += 1;
+                    if let Some(who) = cause.strip_suffix("{}") {
+                        assert_eq!(who, STRUCK_DOWN_BY, "a cause that names somebody is not the one this file knows how to say");
+                        continue;
+                    }
+                    for &language in Language::ALL {
+                        let said = death_cause(cause, language);
+                        assert!(
+                            language == Language::English || said != cause,
+                            "{cause:?} has no words in {language:?} -- add a row to `CAUSES`",
+                        );
+                    }
+                }
+            }
+        }
+        assert!(found >= 15, "only {found} causes found in the server: the scan has stopped seeing them");
+        for row in CAUSES {
+            for &language in Language::ALL {
+                assert_printable(&format!("{} in {language:?}", row.id), row.in_language(language));
+            }
+        }
+    }
+
+    #[test]
     fn every_species_has_a_name_in_every_language() {
         use primitive_shared::animals::Species;
         for &species in Species::ALL {
@@ -1246,8 +1397,9 @@ mod tests {
                 }
             }
         }
-        // ...and anything else goes through untouched.
-        assert_eq!(death_cause("fell from a great height", Language::Russian), "fell from a great height");
+        // ...and what no table knows goes through untouched -- a mod's own
+        // way to die, say -- rather than coming out blank.
+        assert_eq!(death_cause("was eaten by a grue", Language::Russian), "was eaten by a grue");
     }
 
     /// Walks the shared table rather than this one, so a block added in

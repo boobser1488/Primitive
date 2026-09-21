@@ -145,7 +145,16 @@ pub fn line_height(scale: f32) -> f32 {
 /// will be, rather than keeping a copy of this arithmetic that drifts.
 pub fn button_label_scale(rect: Rect, text: &str, content: f32) -> f32 {
     let usable = (rect.width() - BUTTON_TEXT_PAD * 2.0).max(0.0);
-    let tall_enough = (rect.height() / BUTTON_DESIGN_HEIGHT).clamp(0.55, content);
+    // **Never under the smallest size the interface writes in** while the
+    // button is tall enough to hold it. The floor was 0.55, under
+    // `size::NOTE` -- so a desktop's short buttons (the pack's tabs, TIDY,
+    // TAKE ALL) were lettered smaller than the tooltip beside them, a sixth
+    // tier nobody chose; the pack's tab words came out smaller than the
+    // caption over the grid under them. The height check keeps a switch on
+    // a settings row from being written taller than itself.
+    let holds = rect.height() * 0.8 / (PIXEL * crate::engine::font::GLYPH_HEIGHT as f32);
+    let floor = size::NOTE.min(holds).max(0.55);
+    let tall_enough = (rect.height() / BUTTON_DESIGN_HEIGHT).max(floor).min(content.max(floor));
     fitted_scale(text, tall_enough, usable, BUTTON_TEXT_FLOOR)
 }
 
@@ -924,23 +933,65 @@ const SCREEN_MARGIN: f32 = 0.06;
 /// How far past its authored size a fixed-shape screen grows on its own,
 /// before the player has asked for anything.
 ///
-/// **Chosen against the pictures, not by taste.** At 1.6 the pack fills
-/// 1136x496 of a 1280x720 window -- the slot grid, the figure and the
-/// recipe column all legible at arm's length -- and the hearth, whose
-/// height is what runs out first, takes what is left of the glass
-/// (about 1.34) and stops. The cap matters most for the *small*
-/// screens: the death notice and the anvil's job list have room to
-/// triple, and a two-line notice drawn the height of a monitor is a
-/// billboard rather than an interface. Everything here is capped again
-/// by the glass in [`Layout::fit_wanted`], so this number can only ever
-/// make a screen smaller than the window, never larger.
+/// **1.3, and it used to be 1.6 -- chosen per screen.** At 1.6 the pack
+/// filled 1136x496 of a 1280x720 window, and every screen took that much
+/// *of its own room*: the pack grew by 1.6, the chest ran out of height
+/// at 1.34 and stopped, the anvil's list grew by 1.6 from a smaller
+/// start. So the same square was 55 pixels in the pack and 44 in the
+/// chest beside it, and on a phone the pack was drawn at 2.1 against the
+/// chest's 1.34 -- the player's words were "the inventory looks strange,
+/// it is huge relative to the other screens", and it was: its body text
+/// was a size and a half of the settings screen's. Now every screen
+/// grows by *one* number ([`screen_growth`]), and this is how much of
+/// it there is before the setting is touched: at 1.3 the pack comes to
+/// about 920 pixels of a 1280 window, the chest's slots are the pack's
+/// slots, and the writing is within a third of the menus' rather than
+/// half again. The cap still matters most for the *small* screens: the
+/// death notice and the anvil's job list have room to triple, and a
+/// two-line notice drawn the height of a monitor is a billboard rather
+/// than an interface. Everything here is capped again by the glass in
+/// [`Layout::fit_wanted`], so this number can only ever make a screen
+/// smaller than the window, never larger.
 ///
 /// Rejected: growing to a fixed *fraction* of the window. That reads
 /// well for the pack and badly for everything narrow -- a confirm
 /// dialogue stretched to 80% of a 22:9 phone is a sentence with a metre
 /// of air either side of it -- because the screens are not the same
 /// shape and a fraction has no idea which one it is looking at.
-const NATURAL_GROWTH: f32 = 1.6;
+const NATURAL_GROWTH: f32 = 1.3;
+
+/// How much bigger than authored every centred screen is drawn: the pack,
+/// a chest, a hearth, a station, the death notice.
+///
+/// **One number for all of them**, which is the whole of what it is for.
+/// Each screen used to ask [`Layout::fit`] about its *own* shape, and the
+/// answers differed by up to half: the pack is wide and low, so it had
+/// room to spare where the chest, tall and narrow, had run out -- and the
+/// pack's slots, its captions and its body text came out bigger than the
+/// same slots and the same words one screen over. A player moves between
+/// the pack and a chest a hundred times an hour; the squares have to be
+/// the same squares.
+///
+/// The number is what fits the union of the pack and a chest -- the
+/// widest and the tallest screen that is opened often -- so neither is
+/// ever grown past the glass by it. A screen taller still (a body with
+/// its rucksack tabs) takes [`Layout::no_more_than`] its own room, which
+/// only ever makes it smaller than the rest, never larger.
+///
+/// Rejected: sizing everything to the *smallest* of the screens' own
+/// answers across every kind. That is the corpse's rucksack page, opened
+/// a few times a life, setting the size of the pack every other minute.
+pub fn screen_growth(layout: Layout) -> f32 {
+    layout.fit(screen_extent())
+}
+
+/// What [`screen_growth`] is measured against: the pack's width and a
+/// chest's height, whichever of the two is the larger each way.
+pub fn screen_extent() -> (f32, f32) {
+    let pack = crate::ui::inventory_screen::extent();
+    let chest = crate::ui::chest_screen::chest_extent();
+    (pack.0.max(chest.0), pack.1.max(chest.1))
+}
 
 /// What this window is, and therefore how to lay a screen out on it.
 ///
@@ -1099,6 +1150,16 @@ impl Layout {
     pub fn fit(&self, extent: (f32, f32)) -> f32 {
         let natural = self.fit_wanted(NATURAL_GROWTH, extent);
         self.fit_wanted(self.requested * natural, extent)
+    }
+
+    /// `growth`, or less if a screen of this extent would leave the glass
+    /// at it -- and never under 1.0.
+    ///
+    /// What a screen grown by [`screen_growth`] asks about its *own*
+    /// shape: the shared number is what fits the pack and a chest, and a
+    /// screen taller than both has to stop where its own room runs out.
+    pub fn no_more_than(&self, growth: f32, extent: (f32, f32)) -> f32 {
+        self.fit_wanted(growth, extent)
     }
 
     /// The largest a screen with these half-extents can ever be drawn at

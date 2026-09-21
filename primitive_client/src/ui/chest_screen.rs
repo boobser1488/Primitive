@@ -756,7 +756,7 @@ impl ChestScreen {
     /// two screens are the same grid of the same cells, drawn at the
     /// same size, and two answers here would be two screens.
     pub fn grow_by(&self, layout: crate::ui::widgets::Layout) -> f32 {
-        layout.fit(self.extent())
+        layout.no_more_than(crate::ui::widgets::screen_growth(layout), self.extent())
     }
 
     fn release(&mut self) {
@@ -2149,6 +2149,13 @@ fn panel_rect(layout: Layout) -> Rect {
 /// would keep it a third smaller than it could be. See
 /// `widgets::Layout::fit`, and `place_cursor`, which divides a click by
 /// the answer to this.
+/// A plain chest's extent: the tallest of the screens opened every few
+/// minutes, and so half of what `widgets::screen_growth` measures the
+/// one size of every screen against.
+pub fn chest_extent() -> (f32, f32) {
+    extent_for(Layout::Chest)
+}
+
 fn extent_for(layout: Layout) -> (f32, f32) {
     let panel = panel_rect(layout);
     (panel.width() / 2.0, panel.y1.abs().max(panel.y0.abs()))
@@ -3117,7 +3124,7 @@ mod bulk_tests {
             ] {
                 let layout = Layout::of(kind);
                 let panel = panel_rect(layout);
-                let drawn = phone.fit(extent_for(layout));
+                let drawn = phone.no_more_than(widgets::screen_growth(phone), extent_for(layout));
                 // The way out is not in this list any more, and that
                 // is the point of it not being here: leaving is a tap
                 // anywhere off the panel, which is the largest target

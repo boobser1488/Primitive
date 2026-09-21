@@ -70,6 +70,26 @@ pub const PICKUP_ARM_DELAY: Duration = Duration::from_millis(500);
 /// on top of the player who dropped it and is picked straight back up.
 const PICKUP_DELAY: Duration = Duration::from_millis(1200);
 
+/// ...and after that, not while the thrower has **never stepped out of
+/// reach of it** -- unless it has lain this long.
+///
+/// **The delay alone undid every throw a player made standing still.** The
+/// lob is gentle on purpose (see `spawn_worn`), so a stack thrown down lands
+/// inside `PICKUP_RANGE` of the feet that threw it, and 1.2 seconds later it
+/// was back in the pack. That is a nuisance for litter and a wall for the
+/// firepit: three sticks and a log *thrown on the ground* and struck is the
+/// first fire there is (`strike_firepit`), and the sticks were gone again
+/// before the flint came out -- the first-hour scenario could not light one
+/// at all. So a throw stays thrown until its thrower has walked away from it
+/// once, which is the moment "I want that back" can mean anything; walking
+/// back over it then picks it up, as it always did.
+///
+/// The minute is for the one case that never walks away: somebody who threw
+/// a stack, stood where they were, and forgot. Rejected: a longer
+/// `PICKUP_DELAY`. Any number short enough not to feel like a lost item is
+/// shorter than laying a firepit and finding the flint.
+const RECLAIM_AFTER: Duration = Duration::from_secs(60);
+
 /// The most items that may exist at once.
 ///
 /// A cap rather than a queue: past this, drops are simply not spawned.
@@ -163,6 +183,9 @@ pub struct Item {
     spawned_at: Instant,
     /// Who dropped it, if anyone. See `PICKUP_DELAY`.
     dropped_by: Option<u64>,
+    /// Whether the player who threw it has been within reach of it every
+    /// time they were asked about since. See `RECLAIM_AFTER`.
+    thrower_near: bool,
     resting: bool,
 }
 
@@ -185,7 +208,9 @@ impl Item {
         let wait = match self.dropped_by {
             // Yours for longer than anyone else's, so a throw is not
             // undone by the act of walking away from it.
-            Some(owner) if owner == player => PICKUP_DELAY,
+            Some(owner) if owner == player => {
+                return age >= PICKUP_DELAY && (!self.thrower_near || age >= RECLAIM_AFTER);
+            }
             _ => PICKUP_ARM_DELAY,
         };
         age >= wait
@@ -311,6 +336,7 @@ impl Items {
             velocity: (direction.0 * 2.2, direction.1 * 2.2 + 1.4, direction.2 * 2.2),
             spawned_at: now,
             dropped_by,
+            thrower_near: dropped_by.is_some(),
             resting: false,
         });
         // Indexed straight away rather than waiting for the next step:
@@ -621,7 +647,7 @@ impl Items {
                 };
                 for index in bucket {
                     let item = &mut self.items[*index as usize];
-                    if item.count == 0 || !item.can_be_picked_up_by(player, now) {
+                    if item.count == 0 {
                         continue;
                     }
                     // Nearest point of the collider, then the distance
@@ -635,7 +661,14 @@ impl Items {
                         item.position.1 - nearest_y,
                         item.position.2 - feet.2,
                     );
-                    if dx * dx + dy * dy + dz * dz > range_sq {
+                    let within = dx * dx + dy * dy + dz * dz <= range_sq;
+                    // The thrower stepping out of reach is what gives a
+                    // throw back to them: see `RECLAIM_AFTER`. Asked before
+                    // the delays, so a step away during them counts.
+                    if !within && item.dropped_by == Some(player) {
+                        item.thrower_near = false;
+                    }
+                    if !within || !item.can_be_picked_up_by(player, now) {
                         continue;
                     }
                     let taken = take(item.block, item.count, item.damage).min(item.count);
@@ -1353,16 +1386,42 @@ mod tests {
     }
 
     #[test]
-    fn the_thrower_can_take_it_back_after_a_moment() {
+    fn the_thrower_takes_it_back_by_walking_away_and_back_over_it() {
         let mut items = Items::new();
         let spawned = Instant::now() - PICKUP_DELAY - Duration::from_millis(50);
+        items.spawn(BLOCK_DIRT, 1, (0.0, 1.0, 0.0), (0.0, 0.0, 0.0), Some(7), spawned);
+        let mut got = 0;
+        let mut take = |_: BlockId, c: u32, _: u32| {
+            got += c;
+            c
+        };
+        // Standing where it was thrown from, past the delay: still thrown.
+        items.collect_near(7, (0.0, 0.5, 0.0), Instant::now(), &mut take);
+        // A step out of reach, and back over it.
+        items.collect_near(7, (2.5, 0.5, 0.0), Instant::now(), &mut take);
+        items.collect_near(7, (0.0, 0.5, 0.0), Instant::now(), &mut take);
+        assert_eq!(got, 1, "walking away and back over a throw did not pick it up");
+    }
+
+    /// **The firepit's own bug**: sticks thrown down at the feet came back
+    /// into the pack before the flint could strike them.
+    #[test]
+    fn a_throw_stays_on_the_ground_while_its_thrower_stands_over_it() {
+        let mut items = Items::new();
+        let spawned = Instant::now() - PICKUP_DELAY * 5;
         items.spawn(BLOCK_DIRT, 1, (0.0, 1.0, 0.0), (0.0, 0.0, 0.0), Some(7), spawned);
         let mut got = 0;
         items.collect_near(7, (0.0, 0.5, 0.0), Instant::now(), |_, c, _| {
             got += c;
             c
         });
-        assert_eq!(got, 1);
+        assert_eq!(got, 0, "a thrower standing still picked their throw back up");
+        // ...but not for ever: a stack forgotten underfoot comes back.
+        items.collect_near(7, (0.0, 0.5, 0.0), spawned + RECLAIM_AFTER, |_, c, _| {
+            got += c;
+            c
+        });
+        assert_eq!(got, 1, "a throw left underfoot a minute never came back");
     }
 
     #[test]

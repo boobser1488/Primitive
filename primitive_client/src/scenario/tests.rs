@@ -1500,7 +1500,7 @@ fn a_cob_lift_is_refused_on_a_wet_one_and_the_wall_waits_as_it_was_left() {
     assert!((hi[1] - wall.1 as f32 - 0.25).abs() < 0.05, "one lift is drawn {} high", hi[1] - wall.1 as f32);
     s.look_at(glam::DVec3::new(wall.0 as f64 + 0.5, wall.1 as f64 + 0.2, wall.2 as f64 + 0.5));
     s.use_aimed();
-    let told = s.until(3.0, |s| s.heard_any(|m| matches!(m, ServerMessage::Error(e) if e.contains("still wet"))));
+    let told = s.until(3.0, |s| s.heard_any(|m| matches!(m, ServerMessage::Notice { what: primitive_shared::notice::Notice::LiftStillWet })));
     assert!(told, "a lift went onto a wet one without a word");
     assert_eq!(s.block(wall), Some(first), "the wet lift changed under a refused one");
     assert_eq!(s.inventory.count(t::BLOCK_COB), 1, "the refused lump was spent");
@@ -3729,5 +3729,206 @@ fn a_player_downed_by_hunger_who_eats_gets_up_and_walks() {
     assert!(s.until(2.0, |s| s.health * 20.0 >= RAISED_HEALTH - 0.01), "raised on {} of a bar", s.health);
     let walk = crawled(&mut s, 1.5, false) / 1.5;
     assert!(walk > crawl * 2.5, "up again, and still crawling: {walk} against {crawl}");
+    no_corrections(&s);
+}
+
+/// The age the ladder page says this player stands on, off the client's own
+/// copy of what they have held.
+fn age_of(s: &Scenario) -> Option<primitive_shared::ladder::Age> {
+    primitive_shared::ladder::standing_on(&knowledge(s)).map(|rung| rung.age)
+}
+
+/// Puts the pack's stack of `block` into hearth square `slot` the way a
+/// player drags it: picked up off the pack, put down on the square.
+fn load_hearth(s: &mut Scenario, block: t::BlockId, slot: usize) {
+    let square = crate::ui::chest_screen::hearth_slot_rect(slot).expect("a hearth square");
+    let from = pack_square(s, block);
+    s.chest_click(from);
+    s.seconds(0.2);
+    s.chest_click(centre(square));
+    let landed = s.until(3.0, |s| last_contents(s).block_in(slot).map(t::block_kind) == Some(t::block_kind(block)));
+    assert!(landed, "{} never reached hearth square {slot}: {:?}", t::block_name(block), s.heard.iter().rev().take(4).collect::<Vec<_>>());
+}
+
+/// **The first hour, played to its end: bare hands, flint, fire, clay and a
+/// copper ingot out of a kiln.**
+///
+/// `a_player_who_has_just_woken_up_is_shown_three_things_to_do_and_then_left_alone`
+/// is the first two minutes and `progression` is the whole walk on paper;
+/// neither had ever put a player in front of a kiln. This is the spine of
+/// the ladder page (`ladder::LADDER`) done through the real server and the
+/// real screens -- sticks and a log thrown down and struck alight, a kiln made and set
+/// down, its squares filled by dragging, struck, and the ingot taken out of
+/// its tray -- with the page asked at every rung whether it agrees.
+///
+/// **What is given rather than gathered**, and why: stone and flint are
+/// taken off the ground as a player takes them (the test above has the rest
+/// of the gathering), but the cobbles, clay and ore come from the script's
+/// hand, because digging is a scenario of its own
+/// (`earth_dug_out_comes_as_four_handfuls_and_four_handfuls_heap_back_into_the_hole`)
+/// and a mine is a walk this harness cannot make in real time. The pot and
+/// the mould are given fired: a firing is 110 seconds of a hearth's clock
+/// each (`hearth::batch_seconds`), the smelt here runs the same batch code,
+/// and a scenario that took eight minutes would be one nobody runs.
+#[test]
+fn the_first_hour_goes_from_bare_hands_through_flint_fire_and_clay_to_a_copper_ingot() {
+    use primitive_shared::hearth::{FUEL_SLOT, INPUT_SLOTS, OUTPUT_SLOTS};
+    use primitive_shared::ladder::Age;
+
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let g = GROUND;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(0.5);
+    assert_eq!(age_of(&s), None, "an empty-handed player already stands on a rung");
+
+    // ---- bare hands: stones off the grass ----
+    let stones: Vec<_> = (0..2).map(|n| ((x0 + 2, g + 1, z + n), t::BLOCK_PEBBLE)).collect();
+    s.build(&stones);
+    s.seconds(0.3);
+    for &(cell, _) in &stones {
+        take_by_hand(&mut s, cell);
+    }
+    assert!(s.until(3.0, |s| age_of(s) == Some(Age::BareHands)), "stones in the pack and no rung: {:?}", age_of(&s));
+
+    // ---- flint: nodules off the gravel, knapped ----
+    let flints: Vec<_> = (0..6).map(|n| ((x0 + 3, g + 1, z + n), t::BLOCK_FLINT)).collect();
+    s.build(&flints);
+    s.seconds(0.3);
+    for &(cell, _) in &flints {
+        take_by_hand(&mut s, cell);
+    }
+    s.stand_at(feet_on(x0, z));
+    for _ in 0..6 {
+        if s.inventory.count(t::BLOCK_FLINT_FLAKE) > 0 {
+            break;
+        }
+        craft(&mut s, "flint flakes");
+        s.seconds(0.4);
+    }
+    assert!(s.until(3.0, |s| age_of(s) == Some(Age::Flint)), "flakes in the pack and not the flint age: {:?}", age_of(&s));
+    assert!(s.inventory.count(t::BLOCK_FLINT) >= 2, "knapping left no nodule to strike a fire with");
+
+    // ---- fire: a firepit, the fire that wants no cobblestone ----
+    //
+    // Sticks and a log thrown down in front of the player and struck where
+    // they lie: the first fire there is, because the campfire's ring of
+    // cobbles wants a pick the flint age has not got. It used to leave the
+    // path page in the flint age -- nothing about a firepit passes through
+    // the pack -- which is why the rung is asked here.
+    s.give(t::BLOCK_STICK, 3);
+    s.give(t::BLOCK_LOG, 1);
+    // Thrown the way a player throws: looking ahead and a little down, so
+    // the wood lands a couple of steps off rather than at the feet -- where
+    // `items::PICKUP_DELAY` hands it straight back to its thrower.
+    s.look_at(DVec3::new(x0 as f64 + 4.0, g as f64 + 1.2, z as f64 + 0.5));
+    s.seconds(0.3);
+    for kind in [t::BLOCK_STICK, t::BLOCK_LOG] {
+        let slot = slot_of(&s, kind).expect("in the pack");
+        s.send(ClientMessage::DropSlot { slot: slot as u8, whole_stack: true });
+        s.seconds(0.2);
+    }
+    s.seconds(1.5);
+    assert_eq!(s.inventory.count(t::BLOCK_STICK), 0, "the thrown sticks came straight back into the pack");
+    // Struck at the ground under the sticks: where the client sees them lie.
+    let under_the_sticks = s
+        .entities
+        .values()
+        .find_map(|e| match e.kind {
+            primitive_shared::protocol::EntityKind::Item { block, .. } if t::block_kind(block) == t::BLOCK_STICK => {
+                Some((e.x.floor() as i32, e.y.floor() as i32 - 1, e.z.floor() as i32))
+            }
+            _ => None,
+        })
+        .expect("the sticks are nowhere on the ground");
+    let over = (under_the_sticks.0, under_the_sticks.1 + 1, under_the_sticks.2);
+    s.select(t::BLOCK_FLINT);
+    s.look_at_face(under_the_sticks, (0, 1, 0));
+    assert!(s.until(1.0, |s| s.aimed().map(|(cell, _)| cell) == Some(under_the_sticks)), "the ground under the sticks cannot be aimed at");
+    // What the frame sends for flint at the makings of a firepit
+    // (`ground_fire_claim`, which turns the placement into a strike). Sent
+    // as itself: the harness's `use_aimed` has no copy of that claim, and
+    // would set the nodule down instead.
+    s.send(ClientMessage::UseBlock { global_x: under_the_sticks.0, global_y: under_the_sticks.1, global_z: under_the_sticks.2 });
+    let lit = s.until(3.0, |s| s.block(over).map(t::block_kind) == Some(t::BLOCK_FIREPIT_LIT));
+    assert!(
+        lit,
+        "flint struck where the sticks and the log lay lit nothing: {:?}",
+        s.heard
+            .iter()
+            .filter(|m| matches!(m, ServerMessage::Said { .. } | ServerMessage::Notice { .. } | ServerMessage::Error(_)))
+            .collect::<Vec<_>>(),
+    );
+    assert!(s.until(3.0, |s| age_of(s) == Some(Age::Fire)), "a lit firepit and not the fire age: {:?}", age_of(&s));
+
+    // ---- clay: the pottery raw, and a kiln ----
+    s.give(t::BLOCK_CLAY, 15);
+    s.give(t::BLOCK_SAND, 1);
+    s.give(t::BLOCK_COBBLESTONE, 4);
+    s.seconds(0.3);
+    for (name, made) in [("clay vessel", t::BLOCK_VESSEL_RAW), ("ingot mould", t::BLOCK_MOULD_RAW), ("kiln", t::BLOCK_KILN)] {
+        craft(&mut s, name);
+        assert!(s.until(3.0, |s| s.inventory.count(made) == 1), "{name} was not made");
+    }
+    assert!(s.until(3.0, |s| age_of(s) == Some(Age::Clay)), "a kiln in the pack and not the clay age: {:?}", age_of(&s));
+    let kiln = (x0 + 2, g + 1, z + 2);
+    s.select(t::BLOCK_KILN);
+    s.look_at_face((kiln.0, g, kiln.2), (0, 1, 0));
+    s.use_aimed();
+    assert!(s.until(3.0, |s| s.block(kiln).map(t::block_kind) == Some(t::BLOCK_KILN)), "the kiln was not set down");
+
+    // ---- copper: ore, charcoal, a fired pot and mould, in the kiln ----
+    s.give(t::BLOCK_COPPER_ORE, 3);
+    s.give(t::BLOCK_COAL, 6);
+    s.give(t::BLOCK_VESSEL, 1);
+    s.give(t::BLOCK_MOULD, 1);
+    s.select(t::BLOCK_PEBBLE);
+    s.look_at_face(kiln, (-1, 0, 0));
+    s.use_aimed();
+    assert!(
+        s.until(3.0, |s| s.chest_screen.is_open()),
+        "the kiln never opened: {:?}",
+        s.heard.iter().rev().take(4).collect::<Vec<_>>()
+    );
+    let mut inputs = INPUT_SLOTS;
+    for block in [t::BLOCK_COPPER_ORE, t::BLOCK_VESSEL, t::BLOCK_MOULD, t::BLOCK_COAL] {
+        load_hearth(&mut s, block, inputs.next().expect("a free input square"));
+    }
+    // The recipe takes two of the coal; the fire gets the rest, dragged in
+    // again from what is left in the pack if the first drag took it all.
+    if s.inventory.count(t::BLOCK_COAL) == 0 {
+        s.give(t::BLOCK_COAL, 4);
+        s.seconds(0.3);
+    }
+    load_hearth(&mut s, t::BLOCK_COAL, FUEL_SLOT);
+    s.close_screens();
+    s.select(t::BLOCK_FLINT);
+    s.look_at_face(kiln, (-1, 0, 0));
+    s.use_aimed();
+    assert!(
+        s.until(3.0, |s| s.block(kiln).map(t::block_kind) == Some(t::BLOCK_KILN_LIT)),
+        "flint struck on a loaded kiln did not light it: {:?}",
+        s.heard.iter().rev().take(4).collect::<Vec<_>>()
+    );
+    // The hearth's own clock: a heat to climb to copper's and 75 seconds of
+    // smelt once it is there. The screen is opened to be told.
+    s.select(t::BLOCK_PEBBLE);
+    s.look_at_face(kiln, (-1, 0, 0));
+    s.use_aimed();
+    assert!(s.until(3.0, |s| s.chest_screen.is_open()), "the lit kiln never opened");
+    let holds_ingot = |s: &Scenario| {
+        OUTPUT_SLOTS.clone().find(|&slot| last_contents(s).block_in(slot).map(t::block_kind) == Some(t::BLOCK_COPPER_INGOT))
+    };
+    let smelted = s.until(240.0, |s| holds_ingot(s).is_some());
+    let state = s.heard.iter().rev().find_map(|m| match m {
+        ServerMessage::ChestState { hearth, .. } => Some(*hearth),
+        _ => None,
+    });
+    assert!(smelted, "four minutes of a lit kiln and no ingot: {state:?}, {:?}", last_contents(&s));
+    let tray = holds_ingot(&s).expect("the ingot's tray");
+    s.chest_shift_click(centre(crate::ui::chest_screen::hearth_slot_rect(tray).expect("a tray square")));
+    assert!(s.until(3.0, |s| s.inventory.count(t::BLOCK_COPPER_INGOT) == 1), "the ingot would not come out of the tray");
+    assert!(s.until(3.0, |s| age_of(s) == Some(Age::Copper)), "an ingot in the pack and not the copper age: {:?}", age_of(&s));
+    s.shot("first_hour_copper");
     no_corrections(&s);
 }

@@ -125,6 +125,7 @@
 //! how cob has always been built, and what makes a cob house a thing started
 //! in a dry spell.
 
+use crate::notice::Notice;
 use crate::types::{
     block_kind, is_air, BlockId, BLOCK_AIR, BLOCK_BRICK, BLOCK_BRICKS, BLOCK_BRICK_COURSES,
     BLOCK_CLAY, BLOCK_COB, BLOCK_COB_WALL, BLOCK_DAUB, BLOCK_DIRT, BLOCK_DRY_BRICKS, BLOCK_DRY_GRASS,
@@ -500,9 +501,9 @@ pub fn builds_on(existing: BlockId, held: BlockId) -> bool {
 /// `along_x` is which way a new wattle panel runs: across the builder's
 /// view, so they are looking at its face.
 ///
-/// The reasons are what the server tells the player, in the words the
-/// interface translates (`ui::lang`).
-pub fn lay(existing: BlockId, held: BlockId, mortar: bool, under: BlockId, along_x: bool) -> Result<Laid, &'static str> {
+/// The reasons are codes the server sends on (`notice`), which the
+/// interface says in the player's language (`ui::lang`).
+pub fn lay(existing: BlockId, held: BlockId, mortar: bool, under: BlockId, along_x: bool) -> Result<Laid, Notice> {
     let kind = block_kind(existing);
     // **A new wall or a new heap stands on something.** Not on a heap part
     // way up, not on air: the course under it is what it is laid on.
@@ -511,7 +512,7 @@ pub fn lay(existing: BlockId, held: BlockId, mortar: bool, under: BlockId, along
         if footed {
             Ok(Laid { result, spends, mortar })
         } else {
-            Err("that needs solid ground under it")
+            Err(Notice::NeedsSolidGround)
         }
     };
     let next = |spends: u32, mortar: bool| {
@@ -519,7 +520,7 @@ pub fn lay(existing: BlockId, held: BlockId, mortar: bool, under: BlockId, along
         Ok(Laid { result: with_courses(existing, n + 1, 0), spends, mortar })
     };
     if is_handful(held) {
-        let result = heap(existing, held).ok_or("that does not go there")?;
+        let result = heap(existing, held).ok_or(Notice::DoesNotGoThere)?;
         return if open(existing) { fresh(result, 1, false) } else { Ok(Laid { result, spends: 1, mortar: false }) };
     }
     match block_kind(held) {
@@ -531,20 +532,20 @@ pub fn lay(existing: BlockId, held: BlockId, mortar: bool, under: BlockId, along
                     fresh(with_courses(BLOCK_DRY_BRICKS, 1, 0), 1, false)
                 }
             }
-            BLOCK_BRICK_COURSES if !mortar => Err("that wall is laid in mortar, and you have none"),
+            BLOCK_BRICK_COURSES if !mortar => Err(Notice::WallWantsMortar),
             BLOCK_BRICK_COURSES if courses(existing) >= 3 => Ok(Laid { result: BLOCK_BRICKS, spends: 1, mortar: true }),
             BLOCK_BRICK_COURSES => next(1, true),
-            BLOCK_DRY_BRICKS if courses(existing) >= 4 => Err("that wall is finished"),
+            BLOCK_DRY_BRICKS if courses(existing) >= 4 => Err(Notice::WallFinished),
             BLOCK_DRY_BRICKS => next(1, false),
-            _ => Err("that does not go there"),
+            _ => Err(Notice::DoesNotGoThere),
         },
         _ if is_field_stone(held) => match kind {
             // The footing stone is the pebble already lying there: it is
             // what the first course is laid round, and it stays in the wall.
             _ if is_field_stone(existing) => fresh(with_courses(BLOCK_DRY_STONE_WALL, 1, 0), STONES_FOOTING, false),
-            BLOCK_DRY_STONE_WALL if courses(existing) >= 4 => Err("that wall is finished"),
+            BLOCK_DRY_STONE_WALL if courses(existing) >= 4 => Err(Notice::WallFinished),
             BLOCK_DRY_STONE_WALL => next(STONES_A_COURSE, false),
-            _ => Err("that does not go there"),
+            _ => Err(Notice::DoesNotGoThere),
         },
         BLOCK_STICK if kind == BLOCK_STAKE => Ok(Laid {
             result: with_courses(BLOCK_WATTLE, WOVEN + 1, if along_x { ALONG_X } else { 0 }),
@@ -553,16 +554,16 @@ pub fn lay(existing: BlockId, held: BlockId, mortar: bool, under: BlockId, along
         }),
         BLOCK_DAUB if kind == BLOCK_WATTLE => match stage(existing) {
             WOVEN => Ok(Laid { result: with_courses(existing, DAUBED_WET + 1, existing & ALONG_X), spends: DAUB_A_PANEL, mortar: false }),
-            _ => Err("that wall is finished"),
+            _ => Err(Notice::WallFinished),
         },
         BLOCK_COB => match kind {
             _ if open(existing) => fresh(with_courses(BLOCK_COB_WALL, 1, WET), 1, false),
-            BLOCK_COB_WALL if is_wet(existing) => Err("the lift under it is still wet"),
-            BLOCK_COB_WALL if courses(existing) >= 4 => Err("that wall is finished"),
+            BLOCK_COB_WALL if is_wet(existing) => Err(Notice::LiftStillWet),
+            BLOCK_COB_WALL if courses(existing) >= 4 => Err(Notice::WallFinished),
             BLOCK_COB_WALL => Ok(Laid { result: with_courses(existing, courses(existing) + 1, WET), spends: 1, mortar: false }),
-            _ => Err("that does not go there"),
+            _ => Err(Notice::DoesNotGoThere),
         },
-        _ => Err("that does not go there"),
+        _ => Err(Notice::DoesNotGoThere),
     }
 }
 

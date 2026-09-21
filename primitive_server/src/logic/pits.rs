@@ -44,6 +44,7 @@ use primitive_shared::pit::{
     FIBRE_NEEDED, LOGS_NEEDED, OPEN_PILE_SECONDS, PILE_LOGS_MAX, PIT_KILN_SECONDS, POTTERY_MAX,
     RAIN_PUTS_OUT_SECONDS,
 };
+use primitive_shared::notice::{Notice, Said};
 use primitive_shared::protocol::BlockChange;
 use primitive_shared::types::{block_kind, BlockId, BLOCK_AIR, BLOCK_ASH, BLOCK_FIBER, BLOCK_LOG, BLOCK_LOG_PILE, BLOCK_LOG_PILE_LIT};
 use primitive_shared::weather::Weather;
@@ -131,13 +132,13 @@ pub struct Outcome {
     /// Cells that changed, and what they became.
     pub wrote: Vec<(PitPos, BlockId)>,
     /// What the player is told.
-    pub said: Option<String>,
+    pub said: Option<Said>,
 }
 
 impl Outcome {
-    fn say(text: impl Into<String>) -> Outcome {
+    fn say(said: impl Into<Said>) -> Outcome {
         Outcome {
-            said: Some(text.into()),
+            said: Some(said.into()),
             ..Outcome::default()
         }
     }
@@ -281,11 +282,11 @@ impl Pits {
             Stage::Pottery { pieces, fired } => {
                 if let Some(piece) = held.filter(|&piece| pit::is_raw_pottery(piece)) {
                     if fired {
-                        return Outcome::say("take the fired pottery out of the pit first");
+                        return Outcome::say(Notice::TakePotteryOut);
                     }
                     let kiln = self.kilns.entry(at).or_default();
                     if kiln.pottery.len() >= POTTERY_MAX as usize {
-                        return Outcome::say("a pit kiln holds four pieces of pottery");
+                        return Outcome::say(Notice::PitHoldsFour);
                     }
                     kiln.pottery.push(piece);
                     let count = kiln.pottery.len() as u8;
@@ -298,7 +299,7 @@ impl Pits {
                 }
                 if held.is_some_and(pit::is_fibre) {
                     if fired {
-                        return Outcome::say("take the fired pottery out of the pit first");
+                        return Outcome::say(Notice::TakePotteryOut);
                     }
                     let wrote = write(self, Stage::Fibre(1));
                     return Outcome {
@@ -328,16 +329,14 @@ impl Pits {
                 }
                 let _ = pieces;
                 if held.is_some_and(pit::is_log) || striking {
-                    return Outcome::say(format!(
-                        "{FIBRE_NEEDED} fibre go over the pottery first, then {LOGS_NEEDED} logs, then it is lit"
-                    ));
+                    return Outcome::say(Said::new(Notice::PitFibreFirst, &[FIBRE_NEEDED as u32, LOGS_NEEDED as u32]));
                 }
                 Outcome::default()
             }
             Stage::Fibre(fibre) => {
                 if held.is_some_and(pit::is_fibre) {
                     if fibre >= FIBRE_NEEDED {
-                        return Outcome::say(format!("the fibre is packed in: {LOGS_NEEDED} logs go on top now"));
+                        return Outcome::say(Said::new(Notice::PitFibrePacked, &[LOGS_NEEDED as u32]));
                     }
                     let wrote = write(self, Stage::Fibre(fibre + 1));
                     return Outcome {
@@ -348,9 +347,7 @@ impl Pits {
                 }
                 if let Some(log) = held.filter(|&log| pit::is_log(log)) {
                     if fibre < FIBRE_NEEDED {
-                        return Outcome::say(format!(
-                            "the pit needs {FIBRE_NEEDED} fibre before the logs go on ({fibre} now)"
-                        ));
+                        return Outcome::say(Said::new(Notice::PitFibreBeforeLogs, &[FIBRE_NEEDED as u32, fibre as u32]));
                     }
                     // Green or seasoned, as it is: a pit laid with green wood
                     // does not get hot enough (see the end of the burn).
@@ -363,16 +360,14 @@ impl Pits {
                     };
                 }
                 if striking || held.is_none() {
-                    return Outcome::say(format!(
-                        "a pit kiln is lit with {FIBRE_NEEDED} fibre and {LOGS_NEEDED} logs in it ({fibre} fibre, 0 logs now)"
-                    ));
+                    return Outcome::say(Said::new(Notice::PitLitWithFibreAndLogs, &[FIBRE_NEEDED as u32, LOGS_NEEDED as u32, fibre as u32]));
                 }
                 Outcome::default()
             }
             Stage::Logs(logs) => {
                 if let Some(log) = held.filter(|&log| pit::is_log(log)) {
                     if logs >= LOGS_NEEDED {
-                        return Outcome::say("the pit kiln is full: strike it with flint to light it");
+                        return Outcome::say(Notice::PitFull);
                     }
                     self.kilns.entry(at).or_default().logs.push(log);
                     let wrote = write(self, Stage::Logs(logs + 1));
@@ -384,14 +379,12 @@ impl Pits {
                 }
                 if striking {
                     if logs < LOGS_NEEDED {
-                        return Outcome::say(format!(
-                            "a pit kiln is lit with {LOGS_NEEDED} logs on it ({logs} now)"
-                        ));
+                        return Outcome::say(Said::new(Notice::PitLitWithLogs, &[LOGS_NEEDED as u32, logs as u32]));
                     }
                     return self.light_kiln(world, at);
                 }
                 if held.is_none() {
-                    return Outcome::say(format!("{logs} of {LOGS_NEEDED} logs on the pit kiln"));
+                    return Outcome::say(Said::new(Notice::PitLogs, &[logs as u32, LOGS_NEEDED as u32]));
                 }
                 Outcome::default()
             }
@@ -399,7 +392,7 @@ impl Pits {
                 let minutes = self
                     .kiln_seconds_left(at)
                     .map_or(60, |left| (left / 60.0).ceil().max(1.0) as u32);
-                Outcome::say(format!("the pit kiln is burning: {minutes} minutes until the pottery is fired"))
+                Outcome::say(Said::new(Notice::PitBurning, &[minutes]))
             }
         }
     }
@@ -416,11 +409,11 @@ impl Pits {
         // is spending sixteen armfuls on twenty seconds, and the player
         // asked for none of that.
         if self.weather.is_wet() && pit::open_to_the_sky(look, at) {
-            return Outcome::say("it is raining on the pit: a pit kiln in the open goes out in the rain");
+            return Outcome::say(Notice::RainOnPit);
         }
         let kiln = self.kilns.entry(at).or_default();
         if kiln.pottery.is_empty() {
-            return Outcome::say("there is nothing in the pit to fire");
+            return Outcome::say(Notice::NothingToFire);
         }
         kiln.burn = Some(Burn {
             left: PIT_KILN_SECONDS,
@@ -434,7 +427,7 @@ impl Pits {
             // every refusal above returned before it. See `fire::STRIKER`.
             spent: Some(STRIKER),
             wrote: vec![(at, lit)],
-            said: Some("the pit kiln is alight: in an hour the pottery is fired".to_string()),
+            said: Some(Notice::PitAlight.into()),
             ..Outcome::default()
         }
     }
@@ -447,7 +440,7 @@ impl Pits {
             return Outcome::default();
         };
         if !pit::pile_fits(|x, y, z| world.block(x, y, z), at) {
-            return Outcome::say("a log pile needs an empty cell with a floor under it");
+            return Outcome::say(Notice::PileNeedsFloor);
         }
         // The log as it is, green or seasoned: a pile is where green wood
         // seasons (`season_piles`), and what it gives back is what it made
@@ -481,17 +474,17 @@ impl Pits {
             let covered = pit::pile_covered(|x, y, z| world.block(x, y, z), at) == Ok(true);
             if !covered {
                 return Outcome::say(
-                    "the pile is burning open to the air: cover every face with earth or stone, or it burns to ash",
+                    Notice::PileOpen,
                 );
             }
             let minutes = self
                 .pile_seconds_left(at)
                 .map_or(60, |left| (left / 60.0).ceil().max(1.0) as u32);
-            return Outcome::say(format!("the charcoal pit is burning: {minutes} minutes to go"));
+            return Outcome::say(Said::new(Notice::CharcoalBurning, &[minutes]));
         }
         if let Some(log) = held.filter(|&log| pit::is_log(log)) {
             if logs >= PILE_LOGS_MAX {
-                return Outcome::say(format!("a log pile holds {PILE_LOGS_MAX} logs"));
+                return Outcome::say(Said::new(Notice::PileHolds, &[PILE_LOGS_MAX as u32]));
             }
             let pile = self.piles.entry(at).or_default();
             if pile.logs.is_empty() {
@@ -513,10 +506,7 @@ impl Pits {
                 // Spent only if something caught: a strike at a pile that is
                 // already alight lights nothing and costs nothing.
                 spent: (!wrote.is_empty()).then_some(STRIKER),
-                said: Some(format!(
-                    "the log pile is alight: cover it within {} seconds, every face, or it burns to ash",
-                    OPEN_PILE_SECONDS as u32
-                )),
+                said: Some(Said::new(Notice::PileAlight, &[OPEN_PILE_SECONDS as u32])),
                 wrote,
                 ..Outcome::default()
             };
@@ -1139,7 +1129,7 @@ mod tests {
         build(&mut pits, &world, &[BLOCK_VESSEL_RAW], 8, 7);
         let struck = pits.use_kiln(&world, AT, Some(BLOCK_FLINT));
         assert_eq!(Stage::of(world.get(AT.0, AT.1, AT.2)), Some(Stage::Logs(7)), "seven logs caught");
-        assert!(struck.said.is_some_and(|said| said.contains("7")), "the refusal did not say how many");
+        assert!(struck.said.is_some_and(|said| said.numbers.contains(&7)), "the refusal did not say how many");
         // ...and fibre short is the same refusal one step earlier: logs do
         // not go onto seven fibre at all.
         let world = pit_world();
@@ -1157,7 +1147,7 @@ mod tests {
         world.put(AT.0 + 1, AT.1, AT.2, BLOCK_AIR);
         let struck = pits.use_kiln(&world, AT, Some(BLOCK_FLINT));
         assert_eq!(Stage::of(world.get(AT.0, AT.1, AT.2)), Some(Stage::Logs(8)), "an open pit caught");
-        assert_eq!(struck.said.as_deref(), Some(pit::Breach::Wall.says()));
+        assert_eq!(struck.said.map(|said| said.what), Some(pit::Breach::Wall.says()));
 
         // And pottery never goes into a hole with a side open to begin with.
         let open = pit_world();

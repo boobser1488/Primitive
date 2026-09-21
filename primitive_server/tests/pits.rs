@@ -195,12 +195,12 @@ async fn a_pit_kiln_is_dug_filled_lit_and_gives_back_fired_pottery_over_the_wire
     client.use_with(flint, pit).await;
     let refusal = client
         .wait_for(10, |m| match m {
-            ServerMessage::Error(text) if text.contains("logs") => Some(text.clone()),
+            ServerMessage::Said { said, .. } if format!("{:?}", said.what).contains("Logs") => Some(said.clone()),
             _ => None,
         })
         .await
         .expect("a kiln struck with seven logs said nothing");
-    assert!(refusal.contains('7'), "the refusal did not say how many logs there were: {refusal}");
+    assert!(refusal.numbers.contains(&7), "the refusal did not say how many logs there were: {refusal:?}");
     assert_eq!(server.block_at(pit.0, pit.1, pit.2).and_then(Stage::of), Some(Stage::Logs(7)), "seven logs caught");
 
     client.use_with(logs, pit).await;

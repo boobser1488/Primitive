@@ -154,7 +154,14 @@ pub const LADDER: [Rung; 7] = [
     },
     Rung {
         age: Age::Fire,
-        marks: &[BLOCK_CAMPFIRE, BLOCK_COAL],
+        // **The firepit too**, which is the fire a player makes *first*:
+        // three sticks and a log on the ground, struck with flint, needing
+        // no cobblestone -- and cobblestone wants a pick the flint age has
+        // not got yet. Nothing about a firepit ever passes through the pack,
+        // so the server notes it at the strike (`strike_firepit`); without
+        // that, a player sitting by the fire they lit was told by this page
+        // that they were still in the flint age.
+        marks: &[BLOCK_CAMPFIRE, BLOCK_COAL, BLOCK_FIREPIT],
         wants: &[BLOCK_COBBLESTONE, BLOCK_STICK, BLOCK_LOG],
         found: Found::Woods,
     },

@@ -152,7 +152,7 @@ pub struct PlayerRuntime {
     /// What turning earth last told this player, and when -- so the same
     /// news about the same field is said once rather than once a
     /// spadeful. See `field_note` in `lib.rs`.
-    pub field_note: Option<(&'static str, Instant)>,
+    pub field_note: Option<(primitive_shared::notice::Notice, Instant)>,
     /// What the player has on. Server-owned for the reason the pack is:
     /// it decides what a blow costs, how cold they get and how fast they
     /// move, and a client that owned it would be a client in

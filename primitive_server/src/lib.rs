@@ -5281,10 +5281,17 @@ pub(crate) fn strike_player(
         broadcast_blood(ctx, primitive_shared::geometry::wide(at), drops);
     }
     for slot in broke {
-        victim.send(ServerMessage::Error(format!(
-            "your {} armour fell apart",
-            slot.name()
-        )));
+        use primitive_shared::equipment::Slot;
+        use primitive_shared::notice::Notice;
+        victim.send(ServerMessage::Notice {
+            what: match slot {
+                Slot::Head => Notice::HeadArmourFell,
+                Slot::Chest => Notice::ChestArmourFell,
+                Slot::Legs => Notice::LegsArmourFell,
+                Slot::Feet => Notice::FeetArmourFell,
+                Slot::Back => Notice::BackArmourFell,
+            },
+        });
     }
     // The worn set changed, so the client has to be told: it draws the
     // equipment screen from this and works out its own speed from it.
@@ -5850,11 +5857,15 @@ pub(crate) fn craft_for(
         // gone, and flakes that vanish without a blade look like a bug
         // rather than a bad blow. The same channel every other refusal
         // uses, so it lands in the same place on the screen.
-        handle.send(ServerMessage::Error(if crafts.failed == 1 {
-            "the flint shattered".to_string()
+        use primitive_shared::notice::{Notice, Said};
+        if crafts.failed == 1 {
+            handle.send(ServerMessage::Notice { what: Notice::FlintShattered });
         } else {
-            format!("{} flints shattered", crafts.failed)
-        }));
+            handle.send(ServerMessage::Said {
+                said: Said::new(Notice::FlintsShattered, &[crafts.failed]),
+                to_log: false,
+            });
+        }
     }
     crafts
 }
@@ -6349,7 +6360,7 @@ pub(crate) fn use_block(
     if primitive_shared::types::is_knife(held) {
         if let Some(outcome) = tap_trunk(ctx, handle, at, block) {
             if let Err(said) = outcome {
-                handle.send(ServerMessage::Error(said.to_string()));
+                handle.send(ServerMessage::Notice { what: said });
             }
             return;
         }
@@ -6492,12 +6503,9 @@ pub(crate) fn use_block(
             }
             news
         };
+        // To the log, where it always went, and in the player's words.
         if news {
-            handle.send(ServerMessage::Chat {
-                from: None,
-                username: "server".to_string(),
-                text: note.to_string(),
-            });
+            handle.send(ServerMessage::Said { said: note.into(), to_log: true });
         }
         return;
     }
@@ -6664,7 +6672,7 @@ pub(crate) fn tap_trunk(
     handle: &Arc<players::PlayerHandle>,
     at: (i32, i32, i32),
     block: primitive_shared::types::BlockId,
-) -> Option<Result<(), &'static str>> {
+) -> Option<Result<(), primitive_shared::notice::Notice>> {
     use primitive_shared::types::{block_axis, block_kind, Axis, BLOCK_RESIN, BLOCK_STRIPPED_LOG};
     let standing = primitive_shared::wildfire::fuel(block) == Some(primitive_shared::wildfire::Fuel::Log)
         && block_axis(block) == Axis::Y
@@ -6678,7 +6686,7 @@ pub(crate) fn tap_trunk(
         .unwrap_or_else(|e| e.into_inner())
         .score_trunk(at, RESIN_REGROW_SECONDS);
     if !bleeding {
-        return Some(Err("this trunk has been scored: it has no more resin for now"));
+        return Some(Err(primitive_shared::notice::Notice::TrunkScored));
     }
     // **A birch and a willow give their bark, and the rest their resin.**
     // Neither is a resinous tree -- the pitch a torch is wadded with bleeds
@@ -7087,7 +7095,7 @@ fn use_barrel(
 
 /// Tells a player why the barrel did nothing.
 fn refuse_at_barrel(handle: &Arc<players::PlayerHandle>, why: primitive_shared::types::BarrelRefusal) {
-    handle.send(ServerMessage::Error(why.words().to_string()));
+    handle.send(ServerMessage::Notice { what: why.notice() });
 }
 
 /// What the jug in the selected slot holds, if it is a jug holding
@@ -7516,18 +7524,14 @@ pub(crate) fn eat_from_slot(
         // was warned about is a bug report rather than a lesson.
         let illness = primitive_shared::food::sickness_seconds(about_to_eat);
         if illness > 0.0 {
-            handle.send(ServerMessage::Error(
-                match primitive_shared::types::block_kind(about_to_eat) {
-                    primitive_shared::types::BLOCK_TOADSTOOL => {
-                        "the cap was the wrong one, and you know it now"
-                    }
-                    primitive_shared::types::BLOCK_ROTTEN => {
-                        "it had turned, and it sits badly"
-                    }
-                    _ => "raw flesh, and your stomach says so",
-                }
-                .to_string(),
-            ));
+            use primitive_shared::notice::Notice;
+            handle.send(ServerMessage::Notice {
+                what: match primitive_shared::types::block_kind(about_to_eat) {
+                    primitive_shared::types::BLOCK_TOADSTOOL => Notice::WrongCap,
+                    primitive_shared::types::BLOCK_ROTTEN => Notice::MeatTurned,
+                    _ => Notice::RawFlesh,
+                },
+            });
         }
         send_inventory(handle);
         send_nourishment(handle);
@@ -8412,12 +8416,11 @@ pub(crate) fn treat_from_slot(handle: &Arc<players::PlayerHandle>, slot: usize, 
             refresh_carried_weight(handle);
         }
         Err((Refusal::NotATreatment, _)) | Err((_, None)) => {}
-        Err((Refusal::NothingItHelps, Some(treatment))) => {
-            handle.send(ServerMessage::Error(format!(
-                "nothing on your {} that a {} would help",
-                part.name(),
-                treatment.name()
-            )));
+        // The part and the dressing are not named: the player has just
+        // chosen both, and naming them was English the client could not
+        // put into their language.
+        Err((Refusal::NothingItHelps, Some(_))) => {
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NothingItWouldHelp });
         }
     }
 }
@@ -9877,7 +9880,7 @@ pub(crate) fn station_begin(
             match held {
                 Some(block) if primitive_shared::tools::takes_an_edge(block) => {
                     if primitive_shared::tools::blunt_step(block) == 0 {
-                        Some("that edge is already sharp")
+                        Some(primitive_shared::notice::Notice::EdgeAlreadySharp)
                     } else {
                         if let Some(seat) = state.station.as_mut() {
                             seat.honing = Some((slot, primitive_shared::types::block_kind(block)));
@@ -9886,7 +9889,7 @@ pub(crate) fn station_begin(
                         None
                     }
                 }
-                _ => Some("hold the blade you want to sharpen"),
+                _ => Some(primitive_shared::notice::Notice::HoldBladeToSharpen),
             }
         } else if let Some(recipe) = job.recipe() {
             // **The row itself, run up to the moment of making** -- any
@@ -9905,7 +9908,7 @@ pub(crate) fn station_begin(
                     }
                     None
                 }
-                None => Some("you are short of what that takes"),
+                None => Some(primitive_shared::notice::Notice::ShortOfMaterials),
             }
         } else {
         let mut short = false;
@@ -9915,7 +9918,7 @@ pub(crate) fn station_begin(
             }
         }
         if short {
-            Some("you are short of what that takes")
+            Some(primitive_shared::notice::Notice::ShortOfMaterials)
         } else {
         // **Room for the best the run could go, checked before a thing is
         // spent.** The crafting table's rule for the crafting table's reason:
@@ -9928,7 +9931,7 @@ pub(crate) fn station_begin(
             after.take_exact(block, amount);
         }
         if best.made.is_some_and(|(block, count)| !after.has_room_for(block, count)) {
-            Some("no room for what that would make")
+            Some(primitive_shared::notice::Notice::NoRoomForIt)
         } else {
             for &(block, amount) in job.inputs() {
                 state.inventory.take_exact(block, amount);
@@ -9944,8 +9947,8 @@ pub(crate) fn station_begin(
         }
         }
     };
-    if let Some(note) = refused {
-        handle.send(ServerMessage::Error(note.to_string()));
+    if let Some(what) = refused {
+        handle.send(ServerMessage::Notice { what });
         return;
     }
     send_inventory(handle);
@@ -9987,7 +9990,7 @@ pub(crate) fn station_run(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle
             // The materials stay spent. A refused run is a bar that was heated
             // and a lump that was wedged; what it is not is a free retry, or
             // every cheat in the book would be worth trying once.
-            handle.send(ServerMessage::Error(refusal.note().to_string()));
+            handle.send(ServerMessage::Notice { what: refusal.note() });
             return;
         }
     };
@@ -11891,14 +11894,14 @@ fn cast_line(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, power: f32
     // this side does not agree there is a cast, the picture has to be taken
     // away, or the player is left watching a float over a line nobody is
     // holding.
-    let refuse = |why: Option<&str>| {
-        if let Some(why) = why {
-            handle.send(ServerMessage::Error(why.to_string()));
+    let refuse = |why: Option<primitive_shared::notice::Notice>| {
+        if let Some(what) = why {
+            handle.send(ServerMessage::Notice { what });
         }
         send_line(handle, None);
     };
     let Some(at) = fishing::cast_target(eye, look, power, |x, y, z| ctx.world.cached_block(x, y, z)) else {
-        refuse(Some("the line came down short of the water"));
+        refuse(Some(primitive_shared::notice::Notice::CastShort));
         return;
     };
     let Some(block) = ctx.world.cached_block(at.0, at.1, at.2) else {
@@ -11927,9 +11930,9 @@ fn cast_line(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, power: f32
         bait.map(|(_, bait)| bait),
     ) else {
         let why = if spot.holds_fish() {
-            "too shallow: the float would lie on the bottom"
+            primitive_shared::notice::Notice::TooShallowToFish
         } else {
-            "no fish live in water this small"
+            primitive_shared::notice::Notice::NoFishHere
         };
         drop(fishing_state);
         refuse(Some(why));
@@ -12624,16 +12627,11 @@ pub(crate) fn apply_pit_outcome(
         // is in it -- see `ServerMessage::PitPottery`.
         tell_pit_pottery(ctx, at);
     }
+    // News to the log and a refusal to the banner, as it always went --
+    // but as a code the client says in the player's language, where it was
+    // a chat line and an error in English. See `ServerMessage::Said`.
     if let Some(said) = outcome.said {
-        if changed {
-            handle.send(ServerMessage::Chat {
-                from: None,
-                username: "server".to_string(),
-                text: said,
-            });
-        } else {
-            handle.send(ServerMessage::Error(said));
-        }
+        handle.send(ServerMessage::Said { said, to_log: changed });
     }
 }
 
@@ -12721,7 +12719,7 @@ pub(crate) fn set_down_item(ctx: &Arc<Context>, handle: &Arc<players::PlayerHand
         plugins::Value::Int(block as i64),
     ];
     if !fire_plugin_hook(ctx, "on_block_place", hook_args, Some(vec![at])) {
-        handle.send(ServerMessage::Error("a plugin refused that change".to_string()));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PluginRefused });
         return;
     }
     // Spent, then written, then filled: a cell that refused the write gives
@@ -12874,9 +12872,13 @@ pub(crate) fn strike_firepit(ctx: &Arc<Context>, handle: &Arc<players::PlayerHan
         }
         if sticks < FIREPIT_STICKS || logs < FIREPIT_LOGS {
             drop(items);
-            handle.send(ServerMessage::Error(format!(
-                "a firepit is {FIREPIT_STICKS} sticks and {FIREPIT_LOGS} log lying on the ground ({sticks} sticks and {logs} logs here)"
-            )));
+            handle.send(ServerMessage::Said {
+                said: primitive_shared::notice::Said::new(
+                    primitive_shared::notice::Notice::FirepitWants,
+                    &[FIREPIT_STICKS, FIREPIT_LOGS, sticks, logs],
+                ),
+                to_log: false,
+            });
             return;
         }
         items.take_lying_in(cell, is_stick, FIREPIT_STICKS);
@@ -12893,6 +12895,18 @@ pub(crate) fn strike_firepit(ctx: &Arc<Context>, handle: &Arc<players::PlayerHan
     spend_striker(ctx, handle);
     notify_mechanics(ctx, cell.0, cell.1, cell.2);
     broadcast_block(ctx, cell, BLOCK_FIREPIT_LIT);
+    // **Lighting a fire is knowing fire**, though no firepit was ever in the
+    // pack -- the one door every other discovery comes through
+    // (`send_inventory`). The ladder's fire rung is marked by it
+    // (`ladder::LADDER`); the unlit kind, because that is what the rung
+    // names and what a lit one goes back to.
+    let learned = {
+        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.discovered.note(primitive_shared::types::BLOCK_FIREPIT)
+    };
+    if learned {
+        send_discovered(handle);
+    }
 }
 
 /// A pit kiln or a log pile broken: what went into it comes out.
@@ -15453,15 +15467,16 @@ const FIELD_NOTE_REPEAT_SECS: f32 = 60.0;
 /// because a player who has read "this is rich soil" a hundred times
 /// reads it at a glance. Ordinary soil is still said by saying nothing
 /// about it -- most of the world is ordinary.
-fn field_note(soil: primitive_shared::worldgen::Fertility, watered: bool) -> &'static str {
+fn field_note(soil: primitive_shared::worldgen::Fertility, watered: bool) -> primitive_shared::notice::Notice {
+    use primitive_shared::notice::Notice;
     use primitive_shared::worldgen::Fertility;
     match (soil, watered) {
-        (Fertility::Rich, true) => "this is rich soil, and water is close by",
-        (Fertility::Rich, false) => "this is rich soil, but there is no water close by",
-        (Fertility::Poor, true) => "this soil is thin, but water is close by",
-        (Fertility::Poor, false) => "this soil is thin, and there is no water close by",
-        (Fertility::Ordinary, true) => "water is close by",
-        (Fertility::Ordinary, false) => "there is no water close by",
+        (Fertility::Rich, true) => Notice::RichSoilWatered,
+        (Fertility::Rich, false) => Notice::RichSoilDry,
+        (Fertility::Poor, true) => Notice::ThinSoilWatered,
+        (Fertility::Poor, false) => Notice::ThinSoilDry,
+        (Fertility::Ordinary, true) => Notice::SoilWatered,
+        (Fertility::Ordinary, false) => Notice::SoilDry,
     }
 }
 
@@ -17868,12 +17883,14 @@ mod wear_tests {
 
         drop_from_slot(&ctx, &handle, 0, true);
 
-        // ...and picked straight back up, through exactly the closure the
-        // tick loop uses.
+        // ...and picked back up, through exactly the closure the tick loop
+        // uses -- by a thrower who stepped away from it and came back, the
+        // way a throw is given back (`items::RECLAIM_AFTER`).
         let later = Instant::now() + std::time::Duration::from_secs(5);
         {
             let mut items = ctx.items.lock().unwrap();
             let mut state = handle.state.lock().unwrap();
+            items.collect_near(handle.id, (feet.0 + 3.0, feet.1, feet.2), later, |_, _, _| 0);
             items.collect_near(handle.id, feet, later, |block, count, damage| {
                 let left = state.inventory.add_worn(block, count, damage);
                 count - left
@@ -19030,6 +19047,7 @@ mod butchering_tests {
             match msg {
                 players::Outgoing::Message(ServerMessage::Error(text)) => out.push(text),
                 players::Outgoing::Message(ServerMessage::Notice { what }) => out.push(format!("{what:?}")),
+                players::Outgoing::Message(ServerMessage::Said { said, .. }) => out.push(format!("{:?}", said.what)),
                 _ => {}
             }
         }
@@ -19982,7 +20000,7 @@ mod tool_chain_tests {
         // ...and the player was told, in the channel every refusal uses.
         let said = errors(&mut rx);
         assert!(
-            said.iter().any(|e| e.contains("shattered")),
+            said.iter().any(|e| e.contains("Shattered")),
             "flint vanished without a word: {said:?}"
         );
 
@@ -20133,13 +20151,13 @@ mod tool_chain_tests {
         // dry one says so, and the soil's own words are still in it.
         use primitive_shared::worldgen::Fertility;
         for soil in [Fertility::Rich, Fertility::Ordinary, Fertility::Poor] {
-            let (wet, dry) = (field_note(soil, true), field_note(soil, false));
+            let (wet, dry) = (format!("{:?}", field_note(soil, true)), format!("{:?}", field_note(soil, false)));
             assert_ne!(wet, dry, "a farmer cannot tell a wet field from a dry one");
-            assert!(dry.contains("no water"), "{dry:?} does not say the field is dry");
-            assert!(!wet.contains("no water"), "{wet:?} says a watered field is dry");
+            assert!(dry.ends_with("Dry"), "{dry:?} does not say the field is dry");
+            assert!(wet.ends_with("Watered"), "{wet:?} says a watered field is dry");
         }
-        assert!(field_note(Fertility::Rich, false).contains("rich soil"));
-        assert!(field_note(Fertility::Poor, true).contains("thin"));
+        assert!(format!("{:?}", field_note(Fertility::Rich, false)).starts_with("Rich"));
+        assert!(format!("{:?}", field_note(Fertility::Poor, true)).starts_with("Thin"));
     }
 }
 
