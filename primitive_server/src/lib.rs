@@ -759,6 +759,19 @@ impl Server {
         self.ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).spawn(species, at)
     }
 
+    /// Rigs the night's roll for finding a sleeper to `dice` (`None` rolls
+    /// again): a scenario that has to know whether the night comes cannot
+    /// roll for it. The bed's own odds still decide -- nought by a fire
+    /// stays nought. See `pass_the_night`.
+    pub fn set_sleeper_dice(&self, dice: Option<f32>) {
+        self.ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).set_sleeper_dice(dice);
+    }
+
+    /// Where every animal of `species` is, for a scenario counting wolves.
+    pub fn animals_of(&self, species: primitive_shared::animals::Species) -> Vec<(f32, f32, f32)> {
+        self.ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).positions_of(species)
+    }
+
     /// Puts a keeping, and a horse's gear, on an animal outright: what a
     /// scenario about riding does instead of spending two days gentling one.
     pub fn keep_animal(
@@ -2448,6 +2461,7 @@ async fn tick_loop(ctx: Arc<Context>) {
                     airborne: !state.on_ground && !state.flying,
                     low: state.sitting_on.is_some() || state.sleeping_in.is_some() || state.rowing.is_some(),
                     wounded: state.vitals.health() < logic::survival::MAX_HEALTH * 0.5,
+                    asleep: state.sleeping_in.is_some() && state.asleep_since.is_some(),
                     held: state.inventory.block_in(state.selected_slot),
                     reek: state.equipment.reek(),
                 });
@@ -2497,7 +2511,7 @@ async fn tick_loop(ctx: Arc<Context>) {
             // every sleeper's closed eyes, never in front of them: see
             // `night_may_pass`.
             if night_may_pass(&handles) {
-                sleep_through_to_dawn(&ctx, &handles);
+                pass_the_night(&ctx, &handles);
             }
 
             // A crop's air is the climate's, and the climate reads the fire
@@ -14469,18 +14483,86 @@ pub(crate) fn growth_step(
 /// false and the posture stays lying -- and the player gets up when they
 /// press something (`ClientMessage::StandUp`).
 fn sleep_through_to_dawn(ctx: &Arc<Context>, handles: &[Arc<players::PlayerHandle>]) {
-    /// When morning is, as a fraction of the day. A quarter: midnight
-    /// is zero and noon is a half, so this is six in the morning -- the
-    /// hour the light comes back (see the client's `sky`).
-    const DAWN: f32 = 0.25;
+    sleep_until(ctx, handles, DAWN, &[]);
+}
 
+/// When morning is, as a fraction of the day. A quarter: midnight is zero
+/// and noon is a half, so this is six in the morning -- the hour the light
+/// comes back (see the client's `sky`).
+const DAWN: f32 = 0.25;
+
+/// **The night passes -- unless it finds somebody first.** What the tick
+/// loop calls when everybody is asleep, in front of `sleep_through_to_dawn`.
+///
+/// Each sleeper's bed is asked what the night would have made of it
+/// (`animals::found_asleep_odds`: a fire near it or a shut door is never
+/// found, a lean-to a quarter of the time, the open a half) and the animals
+/// roll it (`Animals::find_the_sleeper`), which puts the pack down if it
+/// comes. Only after dark: a day slept through is a day, and the wolves are
+/// few and fed in it.
+///
+/// If nobody is found the night passes to dawn exactly as it always has. If
+/// somebody is, **the clock stops halfway to dawn** -- the hour they came --
+/// and everything up to it is charged as a night is; the found are stood
+/// up, told (`Notice::WokenByWolves`), and the pack is already running in. Everybody else sleeps on: the night will pass for them when the
+/// found are back in bed, if they get back to it.
+///
+/// Halfway, and not a random hour, because the hour is not a decision
+/// anybody can make and a number nobody can see does not need to vary; and
+/// not *at once*, because a night that woke you the moment your eyes shut
+/// would read as the bed refusing you rather than as something finding you
+/// in the dark.
+fn pass_the_night(ctx: &Arc<Context>, handles: &[Arc<players::PlayerHandle>]) {
+    let now = ctx.clock.time_of_day();
+    if !logic::animals::is_night(now) {
+        sleep_through_to_dawn(ctx, handles);
+        return;
+    }
+    // Where each sleeper lies and how exposed it is, read under each
+    // player's own lock; the world and the animals are asked afterwards, so
+    // no player lock is ever held across the animals' one.
+    let beds: Vec<(PlayerId, (f32, f32, f32), f32)> = handles
+        .iter()
+        .filter_map(|h| {
+            let state = h.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.sleeping_in.map(|_| (h.id, primitive_shared::geometry::narrow(state.position), state.surroundings.enclosure))
+        })
+        .collect();
+    let mut found: Vec<PlayerId> = Vec::new();
+    {
+        let mut animals = ctx.animals.lock().unwrap_or_else(|e| e.into_inner());
+        for (who, at, enclosure) in beds {
+            let fire = logic::animals::fire_keeps_the_night_off(&*ctx.world, at);
+            let odds = primitive_shared::animals::found_asleep_odds(enclosure, fire);
+            if !animals.find_the_sleeper(&*ctx.world, at, odds).is_empty() {
+                found.push(who);
+            }
+        }
+    }
+    if found.is_empty() {
+        sleep_through_to_dawn(ctx, handles);
+        return;
+    }
+    let ahead = (DAWN - now).rem_euclid(1.0);
+    sleep_until(ctx, handles, (now + ahead * 0.5).rem_euclid(1.0), &found);
+}
+
+/// Winds the clock to `until`, charging every sleeper for the hours, and
+/// wakes them -- all of them into the morning when `found` is empty, and
+/// only the `found` (onto their feet, with the notice) when it is not. See
+/// `pass_the_night` for why the two are one function: the hours up to the
+/// wolves are billed exactly as the hours up to dawn are.
+fn sleep_until(ctx: &Arc<Context>, handles: &[Arc<players::PlayerHandle>], until: f32, found: &[PlayerId]) {
     let now = ctx.clock.time_of_day();
     // How far forward, never backwards and never zero: a player who
     // lies down exactly at dawn sleeps the day round rather than
     // finding the clock refusing to move.
-    let ahead = (DAWN - now).rem_euclid(1.0);
+    let ahead = (until - now).rem_euclid(1.0);
     let seconds = ahead * ctx.clock.day_length_seconds();
-    ctx.clock.set_time_of_day(DAWN);
+    ctx.clock.set_time_of_day(until);
+    // A night cut short is not a morning: nobody else wakes, nobody is
+    // told they slept well, and no lean-to falls in.
+    let morning = found.is_empty();
 
     for handle in handles {
         // **The new hour first, and to this player's own queue.** The
@@ -14491,13 +14573,17 @@ fn sleep_through_to_dawn(ctx: &Arc<Context>, handles: &[Arc<players::PlayerHandl
         // the order; a broadcast is a second path to race this one.
         handle.send(ServerMessage::TimeSync {
             tick: ctx.clock.tick(),
-            time_of_day: DAWN,
+            time_of_day: until,
             world_days: ctx.clock.world_days(),
         });
+        let woken = found.contains(&handle.id);
         let outcome = {
             let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-            // Awake, and still in the bed -- see the note above.
-            state.asleep_since = None;
+            // Awake, and still in the bed -- see the note above. Or, on a
+            // night cut short, asleep still unless it was them it found.
+            if morning || woken {
+                state.asleep_since = None;
+            }
             let rest = state
                 .sleeping_in
                 .and_then(|at| ctx.world.cached_block(at.0, at.1, at.2))
@@ -14520,7 +14606,7 @@ fn sleep_through_to_dawn(ctx: &Arc<Context>, handles: &[Arc<players::PlayerHandl
             // night is not billed at the rested rate: the reward is the day
             // ahead. The place is the last survey, taken while lying in the
             // bed or on the way to it (`SURVEY_SECONDS`).
-            if state.sleeping_in.is_some() && primitive_shared::comfort::rests_at_home(&state.surroundings) {
+            if morning && state.sleeping_in.is_some() && primitive_shared::comfort::rests_at_home(&state.surroundings) {
                 state.vitals.rest_at_home();
                 handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::SleptAtHome });
             }
@@ -14549,7 +14635,14 @@ fn sleep_through_to_dawn(ctx: &Arc<Context>, handles: &[Arc<players::PlayerHandl
         // and the bed would turn the next player away.
         if matches!(outcome, survival::Outcome::Died { .. }) {
             stand_up(ctx, handle, None);
-        } else {
+        } else if woken {
+            // **On their feet, and told why.** Stood up rather than left
+            // lying, because what woke them is running at the bed and a
+            // player who had to press a key to get up first would lose the
+            // two seconds the pack was put down far enough off to give.
+            stand_up(ctx, handle, None);
+            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::WokenByWolves });
+        } else if morning {
             // No line in the chat: "you wake at first light" was English
             // on every screen. The client says it, in the player's
             // language, once the dark has lifted.
@@ -19534,6 +19627,90 @@ mod butchering_tests {
             !night_may_pass(&handles),
             "a sleeper left lying at dawn would sleep the next day through as well"
         );
+    }
+
+    /// A floor of stone a dozen blocks round the origin, open sky over it,
+    /// on chunks that are loaded: somewhere for a pack to be put down.
+    fn a_clearing(ctx: &Arc<Context>) {
+        for (cx, cz) in [(-1, -1), (-1, 0), (0, -1)] {
+            let chunk = ctx.world.generate(ChunkPos { x: cx, z: cz });
+            ctx.world.insert(chunk);
+        }
+        for x in -12..=12 {
+            for z in -12..=12 {
+                for y in FLOOR - 2..FLOOR + 12 {
+                    let block = if y <= FLOOR { BLOCK_STONE } else { BLOCK_AIR };
+                    assert!(ctx.world.set_block(x, y, z, block), "({x}, {y}, {z}) is not loaded");
+                }
+            }
+        }
+    }
+
+    /// Lies the hunter down in a bed in the open at dusk, with the night's
+    /// roll rigged to `dice`, and lets the night try to pass.
+    fn a_night_out(dice: f32) -> (Arc<Context>, Arc<players::PlayerHandle>, Vec<String>) {
+        let (ctx, handle, mut rx) = a_hunter();
+        a_clearing(&ctx);
+        let at = (0, FLOOR + 1, 0);
+        assert!(ctx.world.set_block(at.0, at.1, at.2, primitive_shared::types::BLOCK_BED));
+        ctx.clock.set_time_of_day(0.8);
+        use_block(&ctx, &handle, at);
+        assert!(handle.state.lock().unwrap().sleeping_in.is_some(), "could not lie down");
+        ctx.animals.lock().unwrap().set_sleeper_dice(Some(dice));
+        let _ = errors(&mut rx);
+        pass_the_night(&ctx, std::slice::from_ref(&handle));
+        let said = errors(&mut rx);
+        (ctx, handle, said)
+    }
+
+    #[test]
+    fn a_sleeper_the_night_finds_in_the_open_wakes_before_dawn_on_their_feet_with_wolves_about() {
+        let (ctx, handle, said) = a_night_out(0.0);
+        let wolves = ctx.animals.lock().unwrap().positions_of(primitive_shared::animals::Species::Wolf);
+        assert_eq!(wolves.len(), 2, "the night found the sleeper and sent no pair of wolves");
+        assert!(said.iter().any(|s| s == "WokenByWolves"), "the sleeper was not told what woke them: {said:?}");
+        assert_eq!(handle.state.lock().unwrap().sleeping_in, None, "woken by wolves and left lying in bed");
+        let now = ctx.clock.time_of_day();
+        assert!(
+            logic::animals::is_night(now) && (now - 0.8).rem_euclid(1.0) > 0.01,
+            "the night was not cut short where the wolves came: it is {now}"
+        );
+    }
+
+    #[test]
+    fn a_sleeper_beside_a_lit_fire_sleeps_to_dawn_whatever_the_night_would_do() {
+        // The roll rigged to the worst there is, and the bed's own odds
+        // asked: a lit fire two blocks off makes them nought
+        // (`found_asleep_odds`), so the night passes whatever the dice say.
+        let (ctx, handle, said) = {
+            let (ctx, handle, mut rx) = a_hunter();
+            a_clearing(&ctx);
+            let at = (0, FLOOR + 1, 0);
+            assert!(ctx.world.set_block(at.0, at.1, at.2, primitive_shared::types::BLOCK_BED));
+            assert!(ctx.world.set_block(-2, FLOOR + 1, 0, primitive_shared::types::BLOCK_CAMPFIRE_LIT));
+            ctx.clock.set_time_of_day(0.8);
+            use_block(&ctx, &handle, at);
+            ctx.animals.lock().unwrap().set_sleeper_dice(Some(0.0));
+            let _ = errors(&mut rx);
+            pass_the_night(&ctx, std::slice::from_ref(&handle));
+            let said = errors(&mut rx);
+            (ctx, handle, said)
+        };
+        assert!(ctx.animals.lock().unwrap().positions_of(primitive_shared::animals::Species::Wolf).is_empty());
+        assert!(!said.iter().any(|s| s == "WokenByWolves"), "woken by wolves beside a lit fire");
+        assert!((ctx.clock.time_of_day() - DAWN).abs() < 1e-4, "the night by the fire did not pass to dawn");
+        assert!(handle.state.lock().unwrap().sleeping_in.is_some(), "the morning by the fire stood the sleeper up");
+    }
+
+    #[test]
+    fn a_night_the_odds_spare_passes_to_dawn_as_it_always_did() {
+        // A roll just over the open's odds (`FOUND_IN_THE_OPEN`): the bet
+        // came off.
+        let (ctx, handle, said) = a_night_out(primitive_shared::animals::FOUND_IN_THE_OPEN + 0.01);
+        assert!(ctx.animals.lock().unwrap().positions_of(primitive_shared::animals::Species::Wolf).is_empty());
+        assert!(!said.iter().any(|s| s == "WokenByWolves"), "{said:?}");
+        assert!((ctx.clock.time_of_day() - DAWN).abs() < 1e-4, "a quiet night did not pass to dawn");
+        assert!(handle.state.lock().unwrap().asleep_since.is_none(), "morning came and the sleeper is still asleep");
     }
 
     #[test]

@@ -136,6 +136,10 @@ pub struct Heard {
     /// The flash of a blow, as the server sends it: above zero for a
     /// moment after every hit. What a wound is heard from -- see [`Voices`].
     pub hurt: f32,
+    /// Low and circling: a hunter walking the ring round somebody, or round
+    /// the edge of a fire's light (`protocol::Attitude::Stalking`). What
+    /// makes a night hunter howl close -- see [`STALKING_HOWL`].
+    pub stalking: bool,
 }
 
 /// Is a bird in the air, from its speed and whether it was a moment ago?
@@ -1454,6 +1458,31 @@ const IDLE_RANGE: f32 = 32.0;
 /// How close a charge has to start to be a threat to *you*.
 const THREAT_RANGE: f32 = 20.0;
 
+/// How often a night hunter that is *stalking* -- circling a person, or the
+/// edge of a fire -- is picked to howl, against its calm night rate
+/// (`idle_chance`, 0.15 for a wolf).
+///
+/// **The warning is the sound.** A pack circling a camp in the dark is two
+/// shapes nobody can see, and the only way a player at the fire knows the
+/// ring is there -- and that it is *closing*, as the howls come from nearer
+/// -- is to hear it. At the calm rate a pair walking the ring said something
+/// once a minute, which is no warning; at this it is every few seconds from
+/// somewhere round the dark, and the one that falls silent is the one
+/// coming in (a charge is `Cry::Threat`, not a howl).
+///
+/// Rejected: *eyes that glint at the edge of the light.* It is the picture
+/// everybody has, and the renderer has no cheap way to draw a lit point on
+/// an animal the night has darkened: the animal models are lit as the world
+/// is, and a pair of unlit texels would need a second pass or a new vertex
+/// flag through every model. A voice needed a byte the wire already had.
+const STALKING_HOWL: f32 = 0.7;
+
+/// ...and how far off a stalking hunter is listened for: the whole of
+/// hearing, where a calm call stops at `IDLE_RANGE`. The ring round a fire
+/// is inside either; a pack working round a sleeper from further off is the
+/// one worth hearing at the edge of it.
+const STALKING_RANGE: f32 = crate::audio::HEARING;
+
 /// Blocks from the ears at which an animal that minds company is walked up to.
 const APPROACHED: f64 = 4.0;
 
@@ -1554,6 +1583,8 @@ struct Known {
     cried_until: f32,
     /// Within a few steps of the ears. See `snorts_at_company`.
     near: bool,
+    /// As it was last drawn: see `Heard::stalking`.
+    stalking: bool,
 }
 
 /// Every animal's voice, read off what was drawn.
@@ -1629,6 +1660,7 @@ impl Voices {
                 quiet_until: clock + rng.range(0.0, 4.0),
                 cried_until: clock,
                 near: false,
+                stalking: animal.stalking,
             });
 
             // ---- a wound ----
@@ -1705,6 +1737,7 @@ impl Voices {
             now.running = running;
             now.at = animal.at;
             now.hurt = animal.hurt;
+            now.stalking = animal.stalking;
             known.push(now);
         }
 
@@ -1725,23 +1758,35 @@ impl Voices {
         self.idle_left -= dt;
         if self.idle_left <= 0.0 {
             self.idle_left = rng.range(0.8, 2.0);
+            // A night hunter on the ring howls as a stalker, anything else
+            // as itself: see `STALKING_HOWL`.
+            let stalker = |k: &Known| night && k.stalking && idle_chance(k.species, true) > 0.0;
             let calm: Vec<usize> = (0..self.known.len())
                 .filter(|&i| {
                     let k = &self.known[i];
+                    let range = if stalker(k) { STALKING_RANGE } else { IDLE_RANGE };
                     !k.running
                         && clock >= k.quiet_until
-                        && (k.at - ear).length() < f64::from(IDLE_RANGE)
+                        && (k.at - ear).length() < f64::from(range)
                         && idle_chance(k.species, night) > 0.0
                         && voice_of(k.species, Cry::Idle).is_some()
                 })
                 .collect();
-            if !calm.is_empty() {
-                let i = calm[rng.below(calm.len())];
+            // **The ring first.** A stalker in earshot is picked before a
+            // grazing sheep, or the pack round the camp would be waiting its
+            // turn behind the flock in the pen.
+            let stalking: Vec<usize> = calm.iter().copied().filter(|&i| stalker(&self.known[i])).collect();
+            let pool = if stalking.is_empty() { &calm } else { &stalking };
+            if !pool.is_empty() {
+                let i = pool[rng.below(pool.len())];
                 let species = self.known[i].species;
-                if rng.chance(idle_chance(species, night)) && self.spend() {
+                let ringing = stalker(&self.known[i]);
+                let chance = if ringing { STALKING_HOWL } else { idle_chance(species, night) };
+                if rng.chance(chance) && self.spend() {
                     if let Some(sfx) = voice_of(species, Cry::Idle) {
-                        said.push(Utterance { sfx, at: self.known[i].at, gain: 0.55 });
-                        self.known[i].quiet_until = clock + rng.range(5.0, 12.0);
+                        let gain = if ringing { 0.75 } else { 0.55 };
+                        said.push(Utterance { sfx, at: self.known[i].at, gain });
+                        self.known[i].quiet_until = clock + if ringing { rng.range(3.0, 6.0) } else { rng.range(5.0, 12.0) };
                     }
                 }
             }
@@ -2355,7 +2400,7 @@ mod tests {
     }
 
     fn animal(id: u32, species: Species, at: Vec3, speed: f32, hurt: f32) -> Heard {
-        Heard { id: id as EntityId, species, at: at.as_dvec3(), speed, hurt }
+        Heard { id: id as EntityId, species, at: at.as_dvec3(), speed, hurt, stalking: false }
     }
 
     /// Runs `frames` of listening with the same animals, and gathers what
@@ -2467,6 +2512,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_pack_circling_in_the_dark_howls_far_oftener_than_one_at_rest() {
+        // Two wolves thirty-five blocks off -- past a calm call's reach -- and two
+        // at ten: resting, the far pair is never heard and the near pair now
+        // and then; walking the ring, both pairs are heard, and the near pair
+        // several times as often. The ring is the warning, and a warning
+        // that came once a minute would not be one.
+        let pack = |stalking: bool| -> Vec<Heard> {
+            [(0, 10.0), (1, 11.0), (2, 35.0), (3, 36.0)]
+                .iter()
+                .map(|&(i, x)| Heard { stalking, ..animal(i, Species::Wolf, Vec3::new(x, 0.0, i as f32), 0.3, 0.0) })
+                .collect()
+        };
+        let howls = |stalking: bool| -> (usize, usize) {
+            let mut voices = Voices::new();
+            let mut rng = Rng::new(9);
+            let said = listen(&mut voices, 60 * 60, &pack(stalking), true, &mut rng);
+            let is_howl = |c: &&Utterance| c.sfx == Sfx::Animal(Species::Wolf, Cry::Idle);
+            let near = said.iter().filter(is_howl).filter(|c| c.at.x < 20.0).count();
+            let far = said.iter().filter(is_howl).filter(|c| c.at.x >= 20.0).count();
+            (near, far)
+        };
+        let (resting_near, resting_far) = howls(false);
+        let (ringing_near, ringing_far) = howls(true);
+        assert_eq!(resting_far, 0, "a resting pack thirty-five blocks off was heard");
+        assert!(ringing_far > 0, "a pack circling thirty-five blocks off was never heard");
+        assert!(
+            ringing_near >= resting_near * 3 && ringing_near >= 6,
+            "a circling pack at ten blocks howled {ringing_near} times in a minute, against {resting_near} at rest"
+        );
     }
 
     #[test]

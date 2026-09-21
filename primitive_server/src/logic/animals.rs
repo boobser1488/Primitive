@@ -94,6 +94,12 @@
 //!   nothing in a pack closes on a lit fire after dark, and a wolf below
 //!   half its health backs off to twelve blocks and *shadows* rather
 //!   than leaving. See `flank`, `lit_fire_near` and `shadow`.
+//! * **The night is worse than the day.** A fire is seen from far off after
+//!   dark (`FIRE_SEEN_AT_NIGHT`) and a hunter that sees one comes to the edge
+//!   of its light and circles there (`FIRE_EDGE`); a sleeper in the dark is
+//!   the one person a lone wolf will come at (`think_hunter`'s `sleeper`);
+//!   and the night that is skipped while everybody sleeps is asked whether
+//!   it would have found them (`Animals::find_the_sleeper`).
 //! * **They get thirsty, and water is a place rather than a wall.** An
 //!   animal with nothing else to do and a couple of minutes' thirst on
 //!   it walks to the nearest open water, stands on the bank and drinks
@@ -1332,6 +1338,70 @@ const DANGERS_REMEMBERED: usize = 4;
 /// of five blocks through the wood.
 const FIRE_RADIUS: f32 = 5.0;
 
+/// Where a night hunter that has come to a fire waits: the ring it walks
+/// round the fire, in blocks from it.
+///
+/// **Three past the circle it will not enter**, which is about where a
+/// campfire's light has fallen off to a glow: near enough that a player at
+/// the fire sees shapes moving at the edge of it, far enough that the
+/// shapes are never inside a spear's reach of somebody sitting by the
+/// flames. It used to stand wherever it happened to notice the camp from --
+/// thirty blocks off, in the dark, where nobody could see it -- and a pack
+/// that is kept at bay and never seen is not a pack at all, it is a rule.
+/// Now it comes to the edge and circles, which is the picture: the fire, and
+/// the dark round it with something walking in it.
+const FIRE_EDGE: f32 = FIRE_RADIUS + 3.0;
+
+/// The share of its thoughts at the edge of a fire that a hunter spends
+/// stopped and looking in, rather than walking the ring. A third: enough
+/// that a player at the fire catches one standing and staring, not so much
+/// that the ring stops moving.
+const FIRE_EDGE_PAUSE: f32 = 0.3;
+
+/// How much further a person beside a lit fire is seen after dark than a
+/// person on a walk by day.
+///
+/// **Two: a fire is the brightest thing in the night**, brighter than the
+/// torch in a hand (`TORCH_AT_NIGHT`, 1.3), and it does not move with you.
+/// A player sitting still by a campfire is seen by a wolf from about
+/// twenty blocks (its eighteen, times two, times a stand's 0.6) against
+/// about five in the dark with no fire at all (times `DARKNESS`). **That is
+/// the price of the fire and the whole of the decision it makes**: lit, the
+/// night knows where you are and comes to look, and cannot come in; dark,
+/// you are nearly invisible and nothing keeps anything off you.
+const FIRE_SEEN_AT_NIGHT: f32 = 2.0;
+
+/// How often, in seconds, whether a player is sitting by a fire is looked
+/// at again. The look is `lit_fire_near`'s disc -- a few hundred block
+/// reads -- and a fire does not light or go out twenty times a second, so
+/// a second's staleness costs nothing a player could notice.
+const FIRE_LOOK_EVERY: f32 = 1.0;
+
+/// How far from a bed the pack that finds a sleeper is put down, in blocks.
+///
+/// **Two seconds of a wolf's run.** They come in at once (`FOUND_GRUDGE`),
+/// so the distance *is* the warning: at ten to twelve blocks and a run of
+/// six a second, the waking player has about the time it takes to read the
+/// notice, stand, and choose -- the torch in the hand, the spear, a wall at
+/// the back. Put down in a bite, the waking would be the death; put down at
+/// twenty, it would be a howl nobody had to answer.
+const SLEEPER_FOUND_DISTANCE: (f32, f32) = (10.0, 12.0);
+
+/// How long the pack that finds a sleeper comes on regardless, in seconds.
+///
+/// **They came for somebody, and they know where.** Without it the pair was
+/// put down at ten blocks from a person standing still in the dark -- whom
+/// a wolf sees at five (`DARKNESS`) -- and half the time they lost the
+/// player they had just found and wandered off grazing: a night that woke
+/// you for nothing. With it they come in as a wolf that has been struck
+/// comes in (`angry_for`, which reaches past noticing), and it runs out:
+/// twelve seconds is the run-in and a bite or two, and after that the pair
+/// is an ordinary pack with the ordinary rules -- a player who broke away
+/// and kept moving has lost them. **A fire still wins**: the fire rule in
+/// `think_hunter` is asked before any grudge, so a torch lit in the first
+/// second of waking is the circle they stop at.
+const FOUND_GRUDGE: f32 = 12.0;
+
 /// The radius the second wolf circles at while it works round to the
 /// far side of you, in blocks.
 ///
@@ -1525,6 +1595,10 @@ pub struct PlayerSign {
     pub low: bool,
     /// Under half their health. What a wolf pack waits for.
     pub wounded: bool,
+    /// In a bed. **Not the same as `low`**, which a stool also sets: a
+    /// sleeper cannot see anything coming, and after dark that is what a
+    /// lone wolf waits for (`think_hunter`).
+    pub asleep: bool,
     /// What is in their hand, if anything: feed held out is a lure to an
     /// animal that eats it (`lure`).
     pub held: Option<primitive_shared::types::BlockId>,
@@ -1652,6 +1726,8 @@ struct Figure {
     /// Which way they face, if the tick loop said.
     facing: Option<f32>,
     wounded: bool,
+    /// In a bed: see `PlayerSign::asleep`.
+    asleep: bool,
     /// What is in their hand: see `PlayerSign::held`.
     held: Option<primitive_shared::types::BlockId>,
     /// How far their smell carries: see `PlayerSign::reek`.
@@ -1665,6 +1741,10 @@ struct Track {
     anchor: (f32, f32, f32),
     age: f32,
     speed: f32,
+    /// Sitting by a lit fire, as of the last look (`FIRE_LOOK_EVERY`).
+    by_fire: bool,
+    /// Seconds to the next look.
+    fire_look_in: f32,
 }
 
 /// How far a player may move in one tick and still be moving rather than
@@ -2777,6 +2857,14 @@ pub struct Animals {
     manger_clock: u32,
     /// The night a raid on the pens was last rolled for: see `raid_the_pens`.
     raided: Option<i64>,
+    /// The night a sleeper was last found: see `find_the_sleeper`.
+    found_sleeper: Option<i64>,
+    /// What `find_the_sleeper`'s dice show instead of a roll, for a
+    /// scenario that has to know what the night will do. **The dice, not the
+    /// odds**: a rigged roll of nought still finds nobody by a fire, whose
+    /// odds are nought, so a test that rigs it is still asking the bed. A
+    /// hook, not a setting: nothing but a test sets it.
+    sleeper_dice: Option<f32>,
     /// What dead horses left on the ground this step -- saddle, bags and the
     /// load in them (`horse::Gear::left_behind`) -- for the tick loop to throw
     /// down as items, which this file cannot do (see `staked`).
@@ -2861,6 +2949,8 @@ impl Animals {
             hay_eaten: Vec::new(),
             manger_clock: 0,
             raided: None,
+            found_sleeper: None,
+            sleeper_dice: None,
             spilled: Vec::new(),
             thefts: Vec::new(),
             raining: false,
@@ -3695,15 +3785,31 @@ impl Animals {
             let track = match self.tracks.iter_mut().find(|t| t.who == who) {
                 Some(track) => track,
                 None => {
-                    self.tracks.push(Track { who, anchor: at, age: 0.0, speed: 0.0 });
+                    self.tracks.push(Track { who, anchor: at, age: 0.0, speed: 0.0, by_fire: false, fire_look_in: 0.0 });
                     self.tracks.last_mut().expect("just pushed")
                 }
             };
             track.age += dt;
+            // **Is there a fire lit beside them?** Only asked after dark,
+            // which is the only time the answer changes anything, and only
+            // once a `FIRE_LOOK_EVERY`. By day the answer is dropped, so the
+            // first look of the evening is a fresh one.
+            if night {
+                track.fire_look_in -= dt;
+                if track.fire_look_in <= 0.0 {
+                    track.fire_look_in = FIRE_LOOK_EVERY;
+                    track.by_fire = lit_fire_near(world, at, FIRE_RADIUS).is_some();
+                }
+            } else {
+                track.by_fire = false;
+                track.fire_look_in = 0.0;
+            }
             let moved = (at.0 - track.anchor.0).hypot(at.2 - track.anchor.2);
             if moved > TELEPORT + RUNNING_ABOVE * track.age {
-                // Put somewhere, not moving: the window starts again from here.
-                *track = Track { who, anchor: at, age: 0.0, speed: 0.0 };
+                // Put somewhere, not moving: the window starts again from
+                // here -- and the fire is looked for again, since the
+                // person is somewhere else now.
+                *track = Track { who, anchor: at, age: 0.0, speed: 0.0, by_fire: false, fire_look_in: 0.0 };
             } else if track.age >= GAIT_WINDOW {
                 track.speed = moved / track.age;
                 track.anchor = at;
@@ -3735,7 +3841,16 @@ impl Animals {
                 visibility *= IN_COVER;
             }
             if night {
-                visibility *= if self.fire_bearers.contains(&who) { TORCH_AT_NIGHT } else { DARKNESS };
+                // The brightest light they are in decides it: a fire on the
+                // ground outshines a torch in the hand, and either outshines
+                // the dark. See `FIRE_SEEN_AT_NIGHT` for what that costs.
+                visibility *= if track.by_fire {
+                    FIRE_SEEN_AT_NIGHT
+                } else if self.fire_bearers.contains(&who) {
+                    TORCH_AT_NIGHT
+                } else {
+                    DARKNESS
+                };
             }
             figures.push(Figure {
                 who,
@@ -3744,6 +3859,7 @@ impl Animals {
                 visibility,
                 facing: sign.map(|s| s.facing),
                 wounded: sign.is_some_and(|s| s.wounded),
+                asleep: sign.is_some_and(|s| s.asleep),
                 held: sign.and_then(|s| s.held),
                 reek: sign.map_or(1.0, |s| s.reek.clamp(1.0, primitive_shared::equipment::TAR_REEK)),
             });
@@ -5580,6 +5696,109 @@ impl Animals {
         sent
     }
 
+    /// **The night that is skipped, asked whether it would have found a
+    /// sleeper.** `odds` is `animals::found_asleep_odds` for the place round
+    /// the bed; rolled once, and if it comes up, the night's hunters are put
+    /// down `SLEEPER_FOUND_DISTANCE` from the bed and their ids come back --
+    /// an empty list is a night that passed quietly.
+    ///
+    /// **Why the night has to be asked at all.** It passes the moment
+    /// everybody is asleep (`night_may_pass`), which in singleplayer is two
+    /// and a half seconds after lying down, and no wolf walking about in the
+    /// world can find anybody in that. Without this, the rule that a pack
+    /// comes for a sleeper after dark (`think_hunter`'s `sleeper`) would only
+    /// ever apply on a server where somebody else was still awake -- and
+    /// sleeping in the open would be exactly as safe as sleeping behind a
+    /// door for everyone playing alone.
+    ///
+    /// **They come in at once** (`FOUND_GRUDGE`), from two seconds' run
+    /// away (`SLEEPER_FOUND_DISTANCE`): this is the attack the sleeper wakes
+    /// to, not a pack that might wander up later.
+    ///
+    /// **What comes is whatever hunts at night here** (`shies_from_fire`: a
+    /// wolf in the woods and meadows, a lion on the savanna), and in the
+    /// smallest number that has the nerve to come at a standing person: two
+    /// wolves (`needs_company`), one lion. Not the three a pen raid sends
+    /// (`raid`): this is somebody who has just been woken with nothing in
+    /// their hand, and a pair is a fight a spear can win or a fire can end.
+    /// Where nothing hunts at night -- a beach, a desert, the high ground --
+    /// nothing comes, and the night passes; the country is part of the bet.
+    ///
+    /// **Once a night.** A sleeper who was found, dealt with it and lay down
+    /// again is not rolled for twice: whatever is still out there is out
+    /// there for real, and comes or does not by its own rules.
+    ///
+    /// Rejected: *a pack spawned in the world when somebody lies down, left to
+    /// find them on its own.* The night would have passed before it had
+    /// taken a step. *Holding the night back while a sleeper is exposed*
+    /// makes the bed stop working in the open, which is a rule and not a
+    /// risk.
+    pub fn find_the_sleeper(&mut self, world: &dyn BlockWorld, bed: (f32, f32, f32), odds: f32) -> Vec<EntityId> {
+        let this_night = self.calendar.map(|today| (today + 0.5).floor() as i64);
+        if this_night.is_some() && self.found_sleeper == this_night {
+            return Vec::new();
+        }
+        if odds <= 0.0 {
+            return Vec::new();
+        }
+        let roll = match self.sleeper_dice {
+            Some(rigged) => rigged,
+            None => self.rng.range(0.0, 1.0),
+        };
+        if roll >= odds {
+            return Vec::new();
+        }
+        let country = world.biome(bed.0.floor() as i32, bed.2.floor() as i32).unwrap_or(UNKNOWN_COUNTRY);
+        let hunters: Vec<Species> = Species::ALL
+            .iter()
+            .copied()
+            .filter(|h| h.shies_from_fire() && h.lives_in(country) && !h.needs_trees())
+            .collect();
+        let Some(&hunter) = self.rng.pick(&hunters) else {
+            return Vec::new();
+        };
+        let count = if hunter.needs_company() { 2 } else { 1 };
+        let bearing = self.rng.range(0.0, std::f32::consts::TAU);
+        let mut sent = Vec::new();
+        for n in 0..count {
+            // The second a little round from the first, so the pair is a
+            // pair and not one animal drawn twice -- and so `flank` has two
+            // sides to work from.
+            let heading = bearing + n as f32 * 0.7;
+            let distance = self.rng.range(SLEEPER_FOUND_DISTANCE.0, SLEEPER_FOUND_DISTANCE.1);
+            let (x, z) = (bed.0 + heading.cos() * distance, bed.2 + heading.sin() * distance);
+            let Some(ground) = surface_under(world, x, bed.1 + 8.0, z) else {
+                continue;
+            };
+            if fits(world, (f64::from(x), f64::from(ground as f32), f64::from(z)), hunter) {
+                if let Some(id) = self.spawn(hunter, (x, ground as f32, z)) {
+                    // Facing the bed, and coming: they came *for* it.
+                    if let Some(animal) = self.animals.iter_mut().find(|a| a.id == id) {
+                        animal.yaw = (bed.2 - z).atan2(bed.0 - x);
+                        animal.wants_yaw = animal.yaw;
+                        animal.angry_for = FOUND_GRUDGE;
+                    }
+                    sent.push(id);
+                }
+            }
+        }
+        if !sent.is_empty() {
+            self.found_sleeper = this_night;
+        }
+        sent
+    }
+
+    /// Rigs `find_the_sleeper`'s roll to `dice` -- `None` rolls again. For
+    /// a scenario: see `sleeper_dice`.
+    pub fn set_sleeper_dice(&mut self, dice: Option<f32>) {
+        self.sleeper_dice = dice;
+    }
+
+    /// Where every living one of `species` is. For a scenario.
+    pub fn positions_of(&self, species: Species) -> Vec<(f32, f32, f32)> {
+        self.animals.iter().filter(|a| a.species == species).map(|a| a.at()).collect()
+    }
+
     /// Writes every kept animal -- in the world and parked -- to `herd.bin`
     /// beside the other saves, atomically, the way the carcasses are written.
     pub fn save_herd(&self, dir: &std::path::Path) -> std::io::Result<usize> {
@@ -7400,7 +7619,9 @@ fn furthest_sense(species: Species, acuity: f32) -> f32 {
     let hear = species.hearing() * WORKING_LOUDNESS;
     // ...the smell as far as the rankest coat carries it (`equipment::reek`).
     let smell = species.nose() * SCENT_RANGE.1 * primitive_shared::equipment::TAR_REEK;
-    let see = species.awareness() * TORCH_AT_NIGHT * Gait::Running.visibility();
+    // The brightest a person can be is sitting by a fire at night: a scan
+    // cut at the torch's reach would never find the camp the fire lit.
+    let see = species.awareness() * TORCH_AT_NIGHT.max(FIRE_SEEN_AT_NIGHT) * Gait::Running.visibility();
     hear.max(smell).max(see) * KEEN * acuity.max(0.0)
 }
 
@@ -7557,6 +7778,16 @@ fn cover_heading(world: &dyn BlockWorld, animal: &Animal, away: f32) -> Option<(
     best.map(|(at, _)| at)
 }
 
+/// Is there a fire lit near enough to `at` to keep a night hunter off it?
+///
+/// The same circle a pack will not step into (`FIRE_RADIUS`), asked by the
+/// server of a bed before the night is let pass (`find_the_sleeper`) -- one
+/// answer to "does this fire keep them off", so the bed and the wolf can
+/// never disagree about whether a fire counted.
+pub fn fire_keeps_the_night_off(world: &dyn BlockWorld, at: (f32, f32, f32)) -> bool {
+    lit_fire_near(world, at, FIRE_RADIUS).is_some()
+}
+
 /// The nearest lit fire within `radius` of a point, if there is one:
 /// a burning hearth (`is_burning`) or a torch left standing lit.
 ///
@@ -7678,7 +7909,7 @@ fn carrion_near(
 /// day -- see `Sky::sun_elevation`, which is the same sine. This is that
 /// comparison and nothing more, so the two cannot drift apart into a
 /// world where the animals are asleep in the sunshine.
-fn is_night(time_of_day: f32) -> bool {
+pub fn is_night(time_of_day: f32) -> bool {
     let t = time_of_day.rem_euclid(1.0);
     !(0.25..0.75).contains(&t)
 }
@@ -8721,20 +8952,52 @@ fn think_hunter(
             animal.charge_at = None;
             animal.flank_to = None;
             let (fx, fz) = (fire.0 - animal.at().0, fire.2 - animal.at().2);
-            if fx * fx + fz * fz < (FIRE_RADIUS + 1.0).powi(2) {
+            let off = fx.hypot(fz);
+            if off < FIRE_RADIUS + 1.0 {
                 // Inside the light: out, at a walk. Not a bolt -- it
                 // is not frightened of you, it is declining the fire.
                 animal.mind = Mind::Wander;
                 animal.wants_yaw = open_heading(world, animal, (-fz).atan2(-fx));
                 animal.next_thought = rng.range(0.5, 1.0);
-            } else {
+            } else if off > FIRE_EDGE + 1.0 {
+                // **Drawn to it from the dark**, at a stalk: the fire is
+                // what it saw (`FIRE_SEEN_AT_NIGHT`), and it comes to the
+                // edge of the light to look. Not a chase -- nothing here
+                // is going to be run down -- so it walks, low.
+                animal.mind = Mind::Wander;
+                animal.attitude = primitive_shared::protocol::Attitude::Stalking;
+                animal.wants_yaw = open_heading(world, animal, fz.atan2(fx));
+                animal.next_thought = rng.range(0.5, 1.0);
+            } else if rng.chance(FIRE_EDGE_PAUSE) {
+                // Stops, and looks in at you.
                 animal.mind = Mind::Watch;
+                animal.attitude = primitive_shared::protocol::Attitude::Alert;
                 animal.wants_yaw = facing;
-                animal.next_thought = rng.range(0.6, 1.4);
+                animal.next_thought = rng.range(0.8, 1.6);
+            } else {
+                // **At the edge: round it.** The ring `FIRE_EDGE` out,
+                // the way a pack walks round a person (`ring_round`), so the
+                // shapes out there are moving -- which is what an eye
+                // picks out of the dark, and what makes them read as
+                // something waiting rather than as scenery.
+                animal.mind = Mind::Wander;
+                animal.attitude = primitive_shared::protocol::Attitude::Stalking;
+                animal.wants_yaw = open_heading(world, animal, ring_round(animal, fire, FIRE_EDGE));
+                animal.next_thought = rng.range(0.4, 0.8);
             }
             return;
         }
     }
+
+    // **A sleeper after dark is the one opening a lone wolf takes.** Lying
+    // in a bed with the eyes shut is somebody who cannot see anything
+    // coming, and a wolf that will not face a standing person alone
+    // (`needs_company`) does not have to face this one. Night only: by day a
+    // sleeper in a meadow is a sleeper in plain view of everything, and the
+    // day is when the wolves are few and fed (`spawn_weight`). The fire
+    // above has already had its say, so a sleeper by a lit fire is never
+    // this -- which is the whole of why a fire is worth its fuel.
+    let sleeper = figure.is_some_and(|f| f.asleep) && is_night(time_of_day);
 
     // **Nerve.** A boar has it always: it is defending the patch of wood
     // it is standing in, and it does not care how many of it there are.
@@ -8756,7 +9019,7 @@ fn think_hunter(
     // company either.
     let wounded = figure.is_some_and(|f| f.wounded);
     let pack = animal.species.needs_company() && seen.company >= PACK;
-    let bold = !animal.species.needs_company() || pack || wounded;
+    let bold = !animal.species.needs_company() || pack || wounded || sleeper;
     // A wolf that is already working round you is committed: the
     // circle it runs is wider than its provoking range at the far side
     // of a chord, and a wolf that dropped the engagement every time the
@@ -8775,7 +9038,7 @@ fn think_hunter(
     });
     let opening = animal.species.flanks()
         && bold
-        && (back_turned || wounded)
+        && (back_turned || wounded || sleeper)
         && distance <= animal.species.awareness() * OPENING_FRACTION;
     // **Trespass.** A bear that has had one look at somebody on its ground
     // comes, from wherever it is. The look first (`Mind::Watch`), so there
@@ -8837,11 +9100,19 @@ fn think_hunter(
 /// wolf's own, from its id, so a pack spreads round both sides rather than
 /// filing round one.
 fn stalking(animal: &Animal, at: (f32, f32, f32)) -> f32 {
-    let (dx, dz) = (animal.at().0 - at.0, animal.at().2 - at.2);
+    ring_round(animal, at, STALK_RADIUS)
+}
+
+/// The heading that walks a ring of `radius` round `centre`: `stalking`'s
+/// ring, and the one a night hunter walks round the edge of a fire's light
+/// (`FIRE_EDGE`). One function, so the two rings bend in and out the same
+/// way and a wolf does not change its gait between a person and a camp.
+fn ring_round(animal: &Animal, centre: (f32, f32, f32), radius: f32) -> f32 {
+    let (dx, dz) = (animal.at().0 - centre.0, animal.at().2 - centre.2);
     let distance = dx.hypot(dz);
     let around = dz.atan2(dx);
     let hand = if animal.id.is_multiple_of(2) { 1.0 } else { -1.0 };
-    let bend = ((distance - STALK_RADIUS) / STALK_RADIUS).clamp(-0.9, 0.9);
+    let bend = ((distance - radius) / radius).clamp(-0.9, 0.9);
     around + hand * (std::f32::consts::FRAC_PI_2 + bend)
 }
 
@@ -13926,6 +14197,142 @@ mod tests {
         );
     }
 
+    /// What the tick loop would say about somebody lying in a bed -- or
+    /// standing still, when `asleep` is false.
+    fn lying(asleep: bool) -> PlayerSign {
+        PlayerSign {
+            who: 1,
+            facing: 0.0,
+            working: false,
+            airborne: false,
+            low: asleep,
+            wounded: false,
+            asleep,
+            held: None,
+            reek: 1.0,
+        }
+    }
+
+    #[test]
+    fn a_lone_wolf_comes_for_a_sleeper_in_the_dark_and_leaves_one_alone_by_day() {
+        // **The opening the night gives a lone wolf.** One wolf, which by
+        // its own rule (`needs_company`) never comes at a standing person
+        // alone, three blocks from somebody asleep in the open and looking
+        // at them. At midnight it comes; at noon it does not -- and a
+        // standing person at midnight is not come for either, which is what
+        // proves it is the sleep and not the dark.
+        const MIDNIGHT: f32 = 0.0;
+        let night = |time: f32, asleep: bool| -> (bool, usize) {
+            let world = meadow(40);
+            let mut animals = Animals::seeded(71);
+            let id = animals.spawn(Species::Wolf, (3.5, 21.0, 0.5)).expect("wolf");
+            animals.face_for_test(id, std::f32::consts::PI);
+            animals.player_signs(vec![lying(asleep)]);
+            let at = (0.5, 21.0, 0.5);
+            let (mut charged, mut blows) = (false, 0);
+            for _ in 0..300 {
+                blows += animals.step(&world, &player(at), 0.05, time).len();
+                charged |= animals.find(id).is_some_and(|w| w.mind == Mind::Charge);
+            }
+            (charged, blows)
+        };
+        let (charged, blows) = night(MIDNIGHT, true);
+        assert!(charged && blows > 0, "a lone wolf left a sleeper in the open alone at midnight");
+        let (charged, blows) = night(NOON, true);
+        assert!(!charged && blows == 0, "a lone wolf came for a sleeper in broad daylight");
+        let (charged, blows) = night(MIDNIGHT, false);
+        assert!(!charged && blows == 0, "a lone wolf came for somebody standing awake: its nerve is the pack's");
+    }
+
+    #[test]
+    fn a_sleeper_by_a_lit_fire_is_not_come_for() {
+        // The same lone wolf and the same sleeper at midnight, with a
+        // campfire lit two blocks from the bed: the fire has its say before
+        // the opening does (`think_hunter`), so nothing bites.
+        use primitive_shared::types::BLOCK_CAMPFIRE_LIT;
+        let world = meadow(40);
+        world.put(-2, 21, 0, BLOCK_CAMPFIRE_LIT);
+        let mut animals = Animals::seeded(71);
+        let id = animals.spawn(Species::Wolf, (3.5, 21.0, 0.5)).expect("wolf");
+        animals.face_for_test(id, std::f32::consts::PI);
+        animals.player_signs(vec![lying(true)]);
+        let at = (0.5, 21.0, 0.5);
+        let mut blows = 0;
+        for _ in 0..300 {
+            blows += animals.step(&world, &player(at), 0.05, 0.0).len();
+            assert_ne!(animals.find(id).expect("alive").mind, Mind::Charge, "a wolf charged a sleeper beside a lit fire");
+        }
+        assert_eq!(blows, 0, "a wolf bit a sleeper beside a lit fire");
+    }
+
+    #[test]
+    fn wolves_drawn_to_a_fire_circle_at_the_edge_of_its_light_and_never_step_into_it() {
+        // **The picture the fire makes.** A pack of two eighteen blocks off
+        // in the dark, a player sitting still by a campfire. The fire is
+        // what they see (`FIRE_SEEN_AT_NIGHT`) -- a still person in the dark
+        // with no fire is seen from five -- so they come; the fire is what
+        // stops them (`FIRE_RADIUS`), so they come to its edge
+        // (`FIRE_EDGE`) and walk round it. Stated as three things a player
+        // at the fire would notice: they came nearer than they started,
+        // they never came into the light, and nothing bit anybody.
+        use primitive_shared::types::BLOCK_CAMPFIRE_LIT;
+        let world = meadow(60);
+        world.put(-2, 21, 0, BLOCK_CAMPFIRE_LIT);
+        let fire = (-1.5, 21.0, 0.5);
+        let at = (0.5, 21.0, 0.5);
+        let mut animals = Animals::seeded(72);
+        let pack = [
+            animals.spawn(Species::Wolf, (18.5, 21.0, 0.5)).expect("wolf"),
+            animals.spawn(Species::Wolf, (18.5, 21.0, 2.5)).expect("wolf"),
+        ];
+        for id in pack {
+            animals.face_for_test(id, std::f32::consts::PI);
+        }
+        animals.player_signs(vec![lying(false)]);
+        let (mut blows, mut nearest, mut came_to_the_edge) = (0, f32::INFINITY, false);
+        let mut stalked = false;
+        for _ in 0..900 {
+            blows += animals.step(&world, &player(at), 0.05, 0.0).len();
+            for id in pack {
+                let wolf = animals.find(id).expect("alive");
+                let off = apart(wolf.at(), fire);
+                nearest = nearest.min(off);
+                came_to_the_edge |= off <= FIRE_EDGE + 2.5;
+                stalked |= wolf.attitude == primitive_shared::protocol::Attitude::Stalking;
+            }
+        }
+        assert_eq!(blows, 0, "a wolf bit somebody sitting by a lit fire");
+        assert!(nearest >= FIRE_RADIUS - 0.5, "a wolf came {nearest:.1} blocks from a lit fire after dark");
+        assert!(came_to_the_edge, "the pack never came to the edge of the light: nearest {nearest:.1}");
+        assert!(stalked, "nothing at the edge of the light was ever seen stalking");
+    }
+
+    #[test]
+    fn the_night_finds_a_sleeper_only_as_the_odds_say_and_once() {
+        // `find_the_sleeper`: nothing at odds of nought, a pair of wolves
+        // put down just past a lunge at odds of one -- and not a second pair
+        // the same night, however the sleeper's luck is rolled again.
+        let world = meadow(40);
+        let bed = (0.5, 21.0, 0.5);
+        let mut animals = Animals::seeded(73);
+        animals.calendar(3.9);
+        assert!(animals.find_the_sleeper(&world, bed, 0.0).is_empty(), "the night came at odds of nought");
+        let came = animals.find_the_sleeper(&world, bed, 1.0);
+        assert_eq!(came.len(), 2, "the night that came was not a pair of wolves: {came:?}");
+        for id in &came {
+            let wolf = animals.find(*id).expect("put down");
+            assert_eq!(wolf.species, Species::Wolf);
+            let off = apart(wolf.at(), bed);
+            assert!(
+                off > Species::Wolf.provoke_range() && off <= SLEEPER_FOUND_DISTANCE.1 + 0.5,
+                "a wolf was put down {off:.1} blocks from the bed"
+            );
+        }
+        assert!(animals.find_the_sleeper(&world, bed, 1.0).is_empty(), "the same night came twice");
+        animals.calendar(4.9);
+        assert_eq!(animals.find_the_sleeper(&world, bed, 1.0).len(), 2, "the next night did not come at all");
+    }
+
     #[test]
     fn a_wounded_wolf_shadows_rather_than_leaves() {
         // Under half its health a wolf stops coming in and falls back to
@@ -15681,7 +16088,7 @@ mod tests {
     /// in the open, by day, standing, whole.
     fn figure_at(at: (f32, f32, f32), speed: f32) -> Figure {
         let gait = Gait::of_speed(speed);
-        Figure { who: 1, at, loudness: gait.loudness(), visibility: gait.visibility(), facing: None, wounded: false, held: None, reek: 1.0 }
+        Figure { who: 1, at, loudness: gait.loudness(), visibility: gait.visibility(), facing: None, wounded: false, asleep: false, held: None, reek: 1.0 }
     }
 
     /// The furthest a person moving at `speed` is noticed by one of these,
@@ -15917,6 +16324,7 @@ mod tests {
                     airborne: false,
                     low: false,
                     wounded: false,
+                    asleep: false,
                     held: None,
                     reek,
                 }]);
@@ -16125,6 +16533,7 @@ mod tests {
                     airborne: false,
                     low: false,
                     wounded: false,
+                    asleep: false,
                     held: None,
                     reek: 1.0,
                 }]);
@@ -16147,7 +16556,7 @@ mod tests {
         let id = animals.spawn(Species::Wolf, (4.0, 21.0, 0.5)).expect("wolf");
         let mut charged = false;
         for _ in 0..200 {
-            animals.player_signs(vec![PlayerSign { who: 1, facing: 0.0, working: false, airborne: false, low: false, wounded: true, held: None, reek: 1.0 }]);
+            animals.player_signs(vec![PlayerSign { who: 1, facing: 0.0, working: false, airborne: false, low: false, wounded: true, asleep: false, held: None, reek: 1.0 }]);
             animals.step(&world, &player((1.0, 21.0, 0.5)), 0.05, NOON);
             charged |= animals.find(id).expect("alive").mind == Mind::Charge;
         }
@@ -16907,6 +17316,7 @@ mod husbandry_tests {
             airborne: false,
             low: false,
             wounded: false,
+            asleep: false,
             held,
             reek: 1.0,
         }]);

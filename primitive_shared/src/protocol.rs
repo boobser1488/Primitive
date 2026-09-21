@@ -561,6 +561,7 @@ pub type PlayerId = u64;
 /// ...and going down before dying: `ServerMessage::Downed` back,
 /// `ClientMessage::HelpUp` out and `Posture::Crawling`, all appended, and a
 /// `downed::Cause` on the wire by its place in the list. 57 still.
+/// ...and the night: `Notice::WokenByWolves` appended. 57 still.
 pub const PROTOCOL_VERSION: u32 = 57;
 
 /// What kind of container a screen is showing.

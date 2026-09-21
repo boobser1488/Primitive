@@ -1768,6 +1768,8 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::Notice(Notice::ThinSoilDry), en: "this soil is thin, and there is no water close by", simple: "poor soil, and no water near", ru: "земля здесь тощая, и воды рядом нет", pl: "ziemia jest tu jałowa i w pobliżu nie ma wody" },
     Line { msg: Msg::Notice(Notice::SoilWatered), en: "water is close by", simple: "water is near", ru: "вода рядом", pl: "woda jest blisko" },
     Line { msg: Msg::Notice(Notice::SoilDry), en: "there is no water close by", simple: "no water near", ru: "воды рядом нет", pl: "w pobliżu nie ma wody" },
+    // ---- the night ----
+    Line { msg: Msg::Notice(Notice::WokenByWolves), en: "wolves! you wake to them circling your bed in the dark", simple: "wolves! they woke you - they are all around", ru: "волки! вы просыпаетесь: они кружат у постели в темноте", pl: "wilki! budzisz się, a one krążą w ciemności wokół posłania" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as

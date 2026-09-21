@@ -2917,6 +2917,76 @@ pub const MAX_KEPT: usize = 60;
 /// the edge of vision is worse than one that is never there.
 pub const DESPAWN_DISTANCE: f32 = 96.0;
 
+// ---- a night slept out ----
+//
+// The server winds the clock to dawn the moment everybody is asleep
+// (`primitive_server::night_may_pass`), which in singleplayer is two and a
+// half seconds after lying down. That is far too short for any wolf that is
+// actually walking about to find a sleeper, so the whole of "the night is
+// more dangerous than the day" would have stopped at the bed: a player who
+// slept in the open slept exactly as safely as one behind a door. The night
+// that is skipped is therefore asked, once, whether it would have found
+// them -- and these are the odds it answers with.
+
+/// How likely a night hunter is to find somebody asleep in the open, with no
+/// fire, over one night.
+///
+/// **A half, and not a certainty.** A certainty is a rule ("never sleep
+/// without a fire"), and a rule with one right answer is a chore, not a
+/// decision (CLAUDE.md). A half is a bet a player can take knowingly --
+/// no stones for a firepit tonight, a long way home, try it -- and lose
+/// often enough that nobody mistakes it for safe. Not more than a half,
+/// because the first night of a new player who never found flint for a
+/// fire should be a fright more often than not, not a death sentence: the
+/// pack is a pair, it wakes them two seconds' run away (see the server's
+/// `find_the_sleeper`), and what they do in those two seconds is theirs.
+pub const FOUND_IN_THE_OPEN: f32 = 0.5;
+
+/// ...under a roof with an open side: a lean-to, or a hut whose doorway has
+/// no door in it.
+///
+/// **Half the open's odds**, because what a roof of leaves does against a
+/// wolf is hide you: a sleeper under one is not a shape on the skyline, and
+/// the smell does not carry the way it does over grass. It does not *stop*
+/// anything -- the mouth is open -- which is why it is a quarter and not
+/// nothing, and why a lean-to with a fire at its mouth is the camp that is
+/// actually safe.
+pub const FOUND_UNDER_A_ROOF: f32 = 0.25;
+
+/// How shut a room has to be before nothing gets in at all: walls, a roof
+/// and a *shut* door. Over the comfort's own [`HOME_ENCLOSURE`]
+/// (`comfort::HOME_ENCLOSURE`), which lets a doorway count as home -- a room
+/// with a gap in it is warm enough, and it is not closed to anything on
+/// four legs. Nothing on four legs here opens a door (`logic::animals`
+/// says so about its own rules), so a shut one is the end of the question.
+///
+/// [`HOME_ENCLOSURE`]: crate::comfort::HOME_ENCLOSURE
+pub const SHUT_ROOM: f32 = 0.95;
+
+/// The chance the night finds a sleeper, from what is round their bed.
+///
+/// * **a lit fire near the bed: never.** Fire is the answer to the night
+///   (the server's `FIRE_RADIUS`, the same circle a pack will not step
+///   into) -- and it is paid for, in fuel that burns down while you sleep
+///   and in being seen from much further off (`FIRE_SEEN_AT_NIGHT` on the
+///   server). A fire is a decision to be found and kept at bay;
+/// * **a shut room: never.** Walls and a door are the other answer, and
+///   the dearer one to build;
+/// * **a lean-to or an open doorway: [`FOUND_UNDER_A_ROOF`]**;
+/// * **the open: [`FOUND_IN_THE_OPEN`].**
+///
+/// `enclosure` is `comfort::Surroundings::enclosure` as the server last
+/// surveyed it. Pure, so a test can read the whole table off literals.
+pub fn found_asleep_odds(enclosure: f32, fire_near: bool) -> f32 {
+    if fire_near || enclosure >= SHUT_ROOM {
+        0.0
+    } else if enclosure >= crate::shelter::LEAN_TO_ENCLOSURE {
+        FOUND_UNDER_A_ROOF
+    } else {
+        FOUND_IN_THE_OPEN
+    }
+}
+
 // ---- what an animal can hide in, and what it can hide behind ----
 //
 // Two predicates about blocks, here rather than in `types` because they
@@ -3176,6 +3246,31 @@ pub fn butcher(block: BlockId, held: Option<BlockId>) -> Option<Butchered> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_fire_or_a_shut_door_keeps_the_night_off_a_sleeper_and_a_roof_only_halves_it() {
+        use super::{found_asleep_odds, FOUND_IN_THE_OPEN, FOUND_UNDER_A_ROOF};
+        let open = 0.0;
+        let lean_to = crate::shelter::LEAN_TO_ENCLOSURE;
+        let doorway = crate::comfort::HOME_ENCLOSURE;
+        let shut = 1.0;
+        assert_eq!(found_asleep_odds(open, false), FOUND_IN_THE_OPEN, "the open");
+        assert_eq!(found_asleep_odds(lean_to, false), FOUND_UNDER_A_ROOF, "a lean-to with no fire");
+        assert_eq!(
+            found_asleep_odds(doorway, false),
+            FOUND_UNDER_A_ROOF,
+            "a room with a doorway and no door was taken for a shut one"
+        );
+        assert_eq!(found_asleep_odds(shut, false), 0.0, "a shut room let the night in");
+        for enclosure in [open, lean_to, doorway, shut] {
+            assert_eq!(found_asleep_odds(enclosure, true), 0.0, "a fire at {enclosure} kept nothing off");
+        }
+        // The two numbers the balance rests on, stated so moving either says
+        // what it did: a roof is better than the open, and the open is a bet
+        // rather than a sentence.
+        const { assert!(FOUND_UNDER_A_ROOF < FOUND_IN_THE_OPEN) };
+        const { assert!(FOUND_IN_THE_OPEN < 1.0, "a night in the open with no fire became certain death") };
+    }
 
     #[test]
     fn breaking_a_body_gives_nothing_and_the_knife_gives_everything() {
