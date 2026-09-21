@@ -249,6 +249,13 @@ pub enum Notice {
     // ---- a death, told to everybody (`report_vitals`) ----
     /// `{who}` `{cause}`: see `Said::death`.
     PlayerDied,
+    // ---- the night ----
+    /// **Woken by wolves.** The night was asked whether it found a sleeper
+    /// out in the open with no fire (`animals::found_asleep_odds`), and it
+    /// did: the clock stops where they came, the sleeper is on their feet,
+    /// and the pack is at the edge of a lunge. Said at once, because it is
+    /// the only warning there is.
+    WokenByWolves,
 }
 
 impl Notice {
@@ -406,6 +413,7 @@ impl Notice {
         Notice::SoilWatered,
         Notice::SoilDry,
         Notice::PlayerDied,
+        Notice::WokenByWolves,
     ];
 
     /// Whether this is news rather than a refusal: said the same way, but
@@ -456,6 +464,8 @@ impl Notice {
                 | Notice::ThinSoilDry
                 | Notice::SoilWatered
                 | Notice::SoilDry
+                // Nothing refused: something came.
+                | Notice::WokenByWolves
         )
     }
 }
@@ -527,7 +537,7 @@ mod tests {
         // append one** -- that is the whole check, and a notice appended
         // to the enum and forgotten in `ALL` is a notice the client is
         // never asked to have words for.
-        assert_eq!(Notice::ALL.len(), Notice::PlayerDied as usize + 1);
+        assert_eq!(Notice::ALL.len(), Notice::WokenByWolves as usize + 1);
         for (i, notice) in Notice::ALL.iter().enumerate() {
             assert_eq!(*notice as usize, i, "{notice:?} is out of place in `ALL`");
         }

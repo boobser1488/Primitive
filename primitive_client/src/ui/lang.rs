@@ -1778,6 +1778,8 @@ pub const STRINGS: &[Line] = &[
     // (`names::death_cause`); see `said` for why Simple English borrows the
     // plain English one here.
     Line { msg: Msg::Notice(Notice::PlayerDied), en: "{who} {cause}", simple: "{who} died: {cause}", ru: "{who} {cause}", pl: "{who} {cause}" },
+    // ---- the night ----
+    Line { msg: Msg::Notice(Notice::WokenByWolves), en: "wolves! you wake to them circling your bed in the dark", simple: "wolves! they woke you - they are all around", ru: "волки! вы просыпаетесь: они кружат у постели в темноте", pl: "wilki! budzisz się, a one krążą w ciemności wokół posłania" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as

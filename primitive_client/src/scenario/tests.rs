@@ -1939,7 +1939,12 @@ fn a_lean_to_keeps_its_sleeper_out_of_the_rain_and_falls_in_at_dawn() {
     // full test run takes fewer of them in six seconds of frames.
     assert!(s.until(20.0, |s| s.server().wetness_of(&name).unwrap_or(0.0) > 0.1), "standing in the rain wet nobody");
 
-    // In, and down: at the bed of leaves inside the mouth.
+    // In, and down: at the bed of leaves inside the mouth. **With the
+    // night's roll rigged to spare them**: a lean-to with no fire is found
+    // one night in four (`animals::FOUND_UNDER_A_ROOF`), and this is about
+    // the rain and the morning, not about wolves -- a found sleeper wakes
+    // before dawn and the hut never falls in.
+    s.server().set_sleeper_dice(Some(0.99));
     s.look_at(DVec3::new(mouth.0 as f64 + 0.5, mouth.1 as f64 + 0.1, mouth.2 as f64 + 0.5));
     s.use_aimed();
     let down = s.until(3.0, |s| s.heard.iter().any(|m| matches!(m, ServerMessage::Asleep { asleep: true })));
@@ -3930,5 +3935,120 @@ fn the_first_hour_goes_from_bare_hands_through_flint_fire_and_clay_to_a_copper_i
     assert!(s.until(3.0, |s| s.inventory.count(t::BLOCK_COPPER_INGOT) == 1), "the ingot would not come out of the tray");
     assert!(s.until(3.0, |s| age_of(s) == Some(Age::Copper)), "an ingot in the pack and not the copper age: {:?}", age_of(&s));
     s.shot("first_hour_copper");
+    no_corrections(&s);
+}
+
+// ------------------------------------------------------------------ the night
+
+/// The server's circle a night hunter will not step into round a lit fire
+/// (`logic::animals::FIRE_RADIUS`), written out: the scenario asserts what a
+/// player would measure, not the constant.
+const FIRE_KEEPS: f64 = 5.0;
+
+/// Wolves near `at` on the server, and the nearest one's distance.
+fn wolves_near(s: &Scenario, at: DVec3, within: f64) -> (usize, f64) {
+    let wolves = s.server().animals_of(primitive_shared::animals::Species::Wolf);
+    let apart = |w: &(f32, f32, f32)| (f64::from(w.0) - at.x).hypot(f64::from(w.2) - at.z);
+    let near = wolves.iter().filter(|w| apart(w) <= within).count();
+    let nearest = wolves.iter().map(apart).fold(f64::INFINITY, f64::min);
+    (near, nearest)
+}
+
+/// Lies down on the straw at `bed`, and waits to be told the eyes are shut.
+fn lie_down_on(s: &mut Scenario, bed: (i32, i32, i32)) {
+    s.look_at(DVec3::new(bed.0 as f64 + 0.5, bed.1 as f64 + 0.2, bed.2 as f64 + 0.5));
+    s.use_aimed();
+    assert!(
+        s.until(3.0, |s| s.heard_any(|m| matches!(m, ServerMessage::Asleep { asleep: true }))),
+        "the straw could not be slept on: aimed at {:?}",
+        s.aimed().map(|(c, b)| (c, t::block_name(b)))
+    );
+}
+
+/// **A night by a lit firepit.** A pair of wolves put down in the dark sixteen
+/// blocks off: the fire is what they see, so they come -- and it is what
+/// stops them, so they walk the edge of its light and never step in, and
+/// nobody is bitten. Then the player lies down on straw beside it with the
+/// night's dice rigged to the worst roll there is, and sleeps to dawn anyway:
+/// a fire by the bed is odds of nought, and no roll beats nought.
+#[test]
+fn a_night_by_a_lit_firepit_keeps_the_wolves_at_the_edge_of_its_light_and_the_sleeper_sleeps_till_dawn() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.server().console_command("/time night");
+    let fire = (x0 - 2, GROUND + 1, z);
+    s.server().place_block(fire.0, fire.1, fire.2, t::BLOCK_FIREPIT_LIT);
+    let fire_at = DVec3::new(fire.0 as f64 + 0.5, fire.1 as f64, fire.2 as f64 + 0.5);
+    let ground = (GROUND + 1) as f32;
+    for dz in [0.5, 2.5] {
+        s.server()
+            .spawn_animal(primitive_shared::animals::Species::Wolf, (x0 as f32 + 16.5, ground, z as f32 + dz))
+            .expect("no room for a wolf");
+    }
+    let health = s.health;
+    let (mut nearest, mut came) = (f64::INFINITY, false);
+    for _ in 0..80 {
+        s.seconds(0.25);
+        let (_, closest) = wolves_near(&s, fire_at, 64.0);
+        nearest = nearest.min(closest);
+        came |= closest <= FIRE_KEEPS + 6.0;
+    }
+    s.shot("night_firepit");
+    assert!(came, "the wolves never came to the edge of the firelight: nearest {nearest:.1}");
+    assert!(nearest >= FIRE_KEEPS - 0.5, "a wolf came {nearest:.1} blocks from a lit firepit after dark");
+    assert!(s.health >= health, "somebody sitting by a lit firepit was bitten: {health} -> {}", s.health);
+
+    // Down on the straw by the fire, and the worst roll there is.
+    let bed = (x0, GROUND + 1, z + 1);
+    s.server().place_block(bed.0, bed.1, bed.2, t::BLOCK_STRAW_BED);
+    assert!(s.until(2.0, |s| s.block(bed) == Some(t::BLOCK_STRAW_BED)), "the straw never arrived");
+    s.server().set_sleeper_dice(Some(0.0));
+    lie_down_on(&mut s, bed);
+    let dawn = s.until(10.0, |s| {
+        s.heard_any(|m| matches!(m, ServerMessage::TimeSync { time_of_day, .. } if (*time_of_day - 0.25).abs() < 1e-3))
+    });
+    assert!(dawn, "a night asleep by a lit firepit never reached the morning");
+    assert!(
+        !s.heard_any(|m| matches!(m, ServerMessage::Notice { what: Notice::WokenByWolves })),
+        "woken by wolves beside a lit firepit"
+    );
+    no_corrections(&s);
+}
+
+/// **A night in the open.** No fire, straw on the grass, and the same rigged
+/// roll: the night finds the sleeper. They are told, in their own language
+/// (`Notice::WokenByWolves`), on their feet rather than lying there, with a
+/// pair of wolves a couple of seconds' run off -- and with nothing to keep
+/// them off, the pair comes in.
+#[test]
+fn a_night_asleep_in_the_open_without_a_fire_is_woken_by_wolves_that_come_in() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let (x0, z) = (x0 + 40, z + 20);
+    s.stand_at(feet_on(x0, z));
+    s.server().console_command("/time night");
+    let bed = (x0 + 1, GROUND + 1, z);
+    s.server().place_block(bed.0, bed.1, bed.2, t::BLOCK_STRAW_BED);
+    assert!(s.until(2.0, |s| s.block(bed) == Some(t::BLOCK_STRAW_BED)), "the straw never arrived");
+    s.server().set_sleeper_dice(Some(0.0));
+    lie_down_on(&mut s, bed);
+
+    let woken = s.until(10.0, |s| s.heard_any(|m| matches!(m, ServerMessage::Notice { what: Notice::WokenByWolves })));
+    assert!(woken, "a night asleep in the open with the worst roll there is passed quietly");
+    let name = s.name.clone();
+    assert!(s.until(2.0, |s| !s.server().asleep(&name)), "woken by wolves and still asleep");
+    // About the bed, not the player: by the time the client has been told,
+    // the pair is already running in and may be anywhere between.
+    let bed_at = DVec3::new(bed.0 as f64 + 0.5, bed.1 as f64, bed.2 as f64 + 0.5);
+    let (pair, nearest) = wolves_near(&s, bed_at, 14.0);
+    assert!(pair >= 2, "woken by wolves with {pair} wolves about the bed (nearest {nearest:.1})");
+    s.shot("night_open_woken");
+
+    // Stand there: the pack comes in.
+    let health = s.health;
+    let bitten = s.until(30.0, |s| s.health < health || s.downed.is_some());
+    let (_, closest) = wolves_near(&s, s.feet(), 64.0);
+    assert!(bitten, "the pack that woke a sleeper in the open never came in: nearest {closest:.1}");
     no_corrections(&s);
 }

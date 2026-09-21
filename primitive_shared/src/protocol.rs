@@ -563,6 +563,7 @@ pub type PlayerId = u64;
 /// `downed::Cause` on the wire by its place in the list. 57 still.
 /// ...and deaths told as a code: `notice::Said` gained `who` and `cause`
 /// and `Notice::PlayerDied` was appended. 57 still, which no release speaks.
+/// ...and the night: `Notice::WokenByWolves` appended. 57 still.
 pub const PROTOCOL_VERSION: u32 = 57;
 
 /// What kind of container a screen is showing.

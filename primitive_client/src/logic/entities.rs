@@ -1185,12 +1185,15 @@ impl Entities {
         self.entities
             .iter()
             .filter_map(|(id, entity)| match entity.kind {
-                EntityKind::Animal { species, hurt, .. } => Some(crate::audio::soundscape::Heard {
+                EntityKind::Animal { species, hurt, attitude, .. } => Some(crate::audio::soundscape::Heard {
                     id: *id,
                     species,
                     at: entity.drawn(now),
                     speed: entity.gait(now).1,
                     hurt,
+                    // The body language the head is already drawn by
+                    // (`animal_model::head_carried`), heard as well.
+                    stalking: attitude == primitive_shared::protocol::Attitude::Stalking,
                 }),
                 _ => None,
             })
