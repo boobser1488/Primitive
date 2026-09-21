@@ -940,6 +940,9 @@ pub enum Msg {
     /// What the server tells a player, as a code (`notice`): one row per
     /// notice, checked against `Notice::ALL`.
     Notice(primitive_shared::notice::Notice),
+    // ---- the ages as journeys ----
+    /// Where the bronze rung's tin is: `ladder::Found::FarCountry`.
+    FoundFarCountry,
 }
 
 /// One line of interface text, in every language at once.
@@ -1634,6 +1637,10 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::Notice(Notice::SeaWaterIsSalt), en: "the sea is salt, and you are thirstier for it", simple: "sea water makes you more thirsty, not less", ru: "море солёное -- от него пить хочется сильнее", pl: "morze jest słone -- po nim pragnienie jest większe" },
     Line { msg: Msg::Notice(Notice::StaleWater), en: "the water is stale, and it sits badly", simple: "this water is old -- it will make you ill", ru: "вода затхлая, и она ещё аукнется", pl: "woda jest zastała i odbije się czkawką" },
     Line { msg: Msg::Notice(Notice::RaftNeedsOpenWater), en: "a raft needs open water: three blocks long, two wide, and deep enough to float", simple: "a raft needs open water - three blocks long, two wide, and deep enough", ru: "плоту нужна чистая вода: три блока в длину, два в ширину и достаточно глубоко", pl: "tratwa potrzebuje otwartej wody: trzy bloki długości, dwa szerokości i dość głęboko" },
+    // Woken at home by a lit fire. See `comfort::RESTED_SECONDS`.
+    // Where tin is, on the path page. See `ladder::Found::FarCountry`.
+    Line { msg: Msg::FoundFarCountry, en: "far from home, in tin country: an expedition", simple: "far away - you must travel to find it", ru: "далеко от дома, в оловянном краю: туда нужен поход", pl: "daleko od domu, w krainie cyny: to wyprawa" },
+    Line { msg: Msg::Notice(Notice::SleptAtHome), en: "you slept well at home: the day ahead will cost less food", simple: "you slept well at home - you will get hungry slower today", ru: "вы хорошо выспались дома: день пройдёт сытнее", pl: "dobrze się wyspałeś w domu: dzień minie syciej" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as

@@ -1261,3 +1261,11 @@ cooked_mussels = "food/cooked_mussels.png"
 # (see the fish above).
 crab_meat = "food/crab_meat.png"
 cooked_crab = "food/cooked_crab.png"
+
+# Winter feed. **Both recoloured, neither drawn**: hay is the fibre's hank
+# and a haystack the straw pallet's stalks, each pushed from pale straw
+# toward the green-gold of grass dried while it was still green -- which is
+# what tells hay from fibre in the pack at a glance, and a stack in a pen
+# from a bed in a house. See `types::BLOCK_HAY`.
+hay = "plants/hay.png"
+haystack = "plants/haystack.png"

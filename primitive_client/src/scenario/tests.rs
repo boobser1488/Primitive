@@ -3570,3 +3570,73 @@ fn a_player_who_has_just_woken_up_is_shown_three_things_to_do_and_then_left_alon
     s.shot("first_three_things_done");
     no_corrections(&s);
 }
+
+// ---------------------------------------------------------------- winter feed
+
+/// The world's first day of winter, off the calendar.
+fn first_winter_day() -> f32 {
+    use primitive_shared::season::Season;
+    (0..400).map(|q| q as f32 * 0.25).find(|&day| Season::at(day) == Season::Winter).expect("a year with no winter")
+}
+
+#[test]
+fn hay_built_into_a_stack_by_the_pen_keeps_a_ewe_through_a_winter_week_and_the_ewe_without_one_goes_wild() {
+    // **The whole of the winter feed, as a player meets it.** Eight hay
+    // built into a stack, the stack set down by the pen, and then a week of
+    // winter -- turf that feeds nothing (`husbandry::grazes`) -- in one jump
+    // of the calendar, as a week away on the road would be. The ewe by the
+    // stack is still tame and fed, and the stack a player looks at is lower
+    // by what she ate; the ewe twelve blocks off, on the same turf with
+    // nothing put up for her, has gone wild.
+    use primitive_shared::animals::Species;
+    use primitive_shared::husbandry::Keeping;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    let g = GROUND;
+    s.stand_at(feet_on(x0, z));
+    s.give(t::BLOCK_HAY, t::HAYSTACK_HOLDS as u32);
+    craft(&mut s, "haystack");
+    assert!(s.until(3.0, |s| s.inventory.count(t::BLOCK_HAYSTACK) == 1), "eight hay did not build a stack");
+    assert_eq!(s.inventory.count(t::BLOCK_HAY), 0, "the stack did not take the hay");
+    s.select(t::BLOCK_HAYSTACK);
+    let ground = (x0 + 2, g, z);
+    s.look_at_face(ground, (0, 1, 0));
+    s.use_aimed();
+    let stack = (x0 + 2, g + 1, z);
+    assert!(
+        s.until(3.0, |s| s.block(stack).and_then(t::hay_in_stack) == Some(t::HAYSTACK_HOLDS)),
+        "the stack never stood by the pen: {:?}",
+        s.block(stack).map(t::block_name)
+    );
+
+    // Winter first, and the ewes after: the jump from the world's first
+    // day to its first winter is three weeks, and a flock kept before it
+    // would have lived those too.
+    let winter = first_winter_day();
+    s.server().set_world_days(winter + 0.5);
+    s.seconds(0.5);
+    let tame_here = |at: (f32, f32, f32)| Keeping { trust: 1.0, tame: true, home: Some(at), hunger: 0.0, ..Keeping::wild() };
+    let by_stack = ((x0 + 3) as f32 + 0.5, (g + 1) as f32, z as f32 + 0.5);
+    let far_off = ((x0 - 12) as f32 + 0.5, (g + 1) as f32, z as f32 + 0.5);
+    let fed = s.server().spawn_animal(Species::Sheep, by_stack).expect("no room for a ewe");
+    let unfed = s.server().spawn_animal(Species::Sheep, far_off).expect("no room for a ewe");
+    s.server().keep_animal(fed, tame_here(by_stack), None);
+    s.server().keep_animal(unfed, tame_here(far_off), None);
+    s.seconds(0.5);
+    s.server().set_world_days(winter + 7.5);
+    let eaten = |s: &Scenario| t::HAYSTACK_HOLDS - s.block(stack).and_then(t::hay_in_stack).unwrap_or(0);
+    assert!(s.until(5.0, |s| eaten(s) >= 5), "a winter week took {} bites of the stack the player can see", eaten(&s));
+    s.shot("haystack_after_a_winter_week");
+    let kept = s.server().animal_keeping(fed).expect("the ewe by the stack is gone");
+    assert!(kept.tame && !kept.is_hungry(), "the ewe by the stack went hungry or wild: {kept:?}");
+    let left = s.server().animal_keeping(unfed);
+    assert!(!left.is_some_and(|k| k.tame), "a ewe with nothing put up for her kept tame through a winter week: {left:?}");
+    // A bite a day and not faster: eight bites last a ewe a week.
+    assert!(
+        s.block(stack).and_then(t::hay_in_stack).is_some(),
+        "one ewe ate a stack of eight in a week: {:?}",
+        s.block(stack).map(t::block_kind)
+    );
+    no_corrections(&s);
+}
+

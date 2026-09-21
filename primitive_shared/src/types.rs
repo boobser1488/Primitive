@@ -3708,6 +3708,50 @@ pub const BLOCK_SADDLE: BlockId = 485;
 /// load in them slows it (`horse::load_factor`) -- a horse carries a trip's
 /// ore home, and pays for it in pace.
 pub const BLOCK_SADDLEBAGS: BlockId = 486;
+
+// ---- winter feed: hay, and the stack a flock eats it from ----
+//
+// **Two ids from the gap after 671**, for the reason the horse's took the
+// gap after the sundew: the low gaps are what a parallel branch reaches
+// for first. Not 440, which was hay once (a pit kiln's packing) and is
+// retired: a save from then may still name it, and it must stay nothing.
+
+/// **Hay**: cut grass dried on a rack (`rack::cures_into`), the fodder a
+/// sheep or a horse is kept on through a winter. Fibre fed fresh does the
+/// same for a day, and in summer the pen's own turf does half of it
+/// (`husbandry::GRAZING_HUNGER`); in winter the turf feeds nothing
+/// (`husbandry::grazes`), and what the flock eats is what was put up for it.
+pub const BLOCK_HAY: BlockId = 672;
+/// **A haystack**: eight hay built into a stack in the pen. A kept sheep or
+/// horse within `husbandry::MANGER_REACH` eats from it by itself when it
+/// is getting hungry, a bite at a time, and the stack goes down by what it
+/// eats -- **the variant counts the bites taken** ([`hay_in_stack`]).
+///
+/// What it is for is the trip. A flock fed by hand is a visit every day
+/// or two all winter, and a player on a week's walk to the tin country
+/// comes back to sheep that have gone wild; a stack by the pen keeps them
+/// while nobody is there, and eight bites is a week for one ewe and two
+/// days for four. Broken, it gives back the hay left in it.
+pub const BLOCK_HAYSTACK: BlockId = 673;
+/// Hay a new stack is built of, and bites it holds.
+pub const HAYSTACK_HOLDS: u8 = 8;
+
+/// A haystack with `left` hay in it; air for none. `left` over
+/// [`HAYSTACK_HOLDS`] is a full stack.
+#[inline]
+pub fn haystack_holding(left: u8) -> BlockId {
+    if left == 0 {
+        return BLOCK_AIR;
+    }
+    let eaten = HAYSTACK_HOLDS - left.min(HAYSTACK_HOLDS);
+    BLOCK_HAYSTACK | ((eaten as BlockId) << VARIANT_SHIFT)
+}
+
+/// How much hay is left in this stack, or `None` if it is not one.
+#[inline]
+pub fn hay_in_stack(id: BlockId) -> Option<u8> {
+    (block_kind(id) == BLOCK_HAYSTACK).then(|| HAYSTACK_HOLDS - ((id & VARIANT_MASK) >> VARIANT_SHIFT) as u8)
+}
 /// A bolt of plain woven cotton, and the material of the cloth set.
 pub const BLOCK_CLOTH: BlockId = 190;
 /// What cloth is worn as, one per slot. What they do is in
@@ -5151,6 +5195,9 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     (BLOCK_SALT_PAN_SALT, "salt_pan_salt"),
     (BLOCK_SNARE_CAUGHT, "snare_caught"),
     (BLOCK_SNARE_SPRUNG, "snare_sprung"),
+    // Winter feed. See `BLOCK_HAY`.
+    (BLOCK_HAY, "hay"),
+    (BLOCK_HAYSTACK, "haystack"),
 ];
 
 /// What a player is allowed to put into the world: the client hotbar
@@ -5489,6 +5536,8 @@ pub const PLACEABLE_BLOCKS: &[BlockId] = &[
     BLOCK_SNARE,
     BLOCK_PIT_COVER,
     BLOCK_SALT_PAN,
+    // The winter's feed, built by the pen. See `BLOCK_HAYSTACK`.
+    BLOCK_HAYSTACK,
 ];
 
 // ---- what a block id carries besides its kind ----
@@ -6489,6 +6538,10 @@ fn may_carry_variant(kind: BlockId) -> bool {
         // (see `barrel_of`). Left off, the first jug poured into one
         // would write an id the anti-cheat calls invented into the world.
         || is_barrel(kind)
+        // ...and a haystack, whose variant is **how many bites a flock has
+        // taken out of it** (`hay_in_stack`). Left off, the first bite
+        // would write an id the anti-cheat calls invented into the pen.
+        || kind == BLOCK_HAYSTACK
         || crate::food::is_perishable(kind)
         // ...and every stage of a pit kiln and a pile of logs, whose
         // variant is a count (see `pit::Stage`). Left off, the first fibre
@@ -9443,6 +9496,8 @@ pub fn block_drop_count(id: BlockId) -> u8 {
         // number in its variant: a charcoal pit that gave one lump for a
         // heap of four would be a pit nobody dug twice. See `pit`.
         BLOCK_CHARCOAL_PILE => crate::pit::charcoal_in(id).unwrap_or(1),
+        // What a flock has not eaten yet: a stack taken apart is its hay.
+        BLOCK_HAYSTACK => hay_in_stack(id).unwrap_or(1),
         // **A nettle is two strands**: the best fibre in the world, and it
         // stings the hand that takes it without a knife (`nettle_stings`).
         // One would make it grass that hurts; two is a reason to go to the

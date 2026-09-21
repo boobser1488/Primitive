@@ -555,6 +555,9 @@ pub type PlayerId = u64;
 /// (`types::BLOCK_CURD`), eleven rows at the end of `RECIPES`, and
 /// `injury::Treatment::WillowBark` appended (a dressing's place is on the
 /// wire, in `Injuries`). 57 still.
+/// ...and winter feed and home: hay and the haystack at ids 672-673
+/// (`types::BLOCK_HAY`), the haystack's row at the end of `RECIPES`, and
+/// `Notice::SleptAtHome` appended. 57 still, which no release speaks.
 pub const PROTOCOL_VERSION: u32 = 57;
 
 /// What kind of container a screen is showing.

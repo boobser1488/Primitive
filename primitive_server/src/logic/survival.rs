@@ -392,6 +392,10 @@ pub struct Vitals {
     /// slept through in one step rolls exactly as often as the same night
     /// lived tick by tick.
     starving_owed: f32,
+    /// Seconds of a night at home still keeping the hunger down
+    /// (`comfort::RESTED_SECONDS`, `rest_at_home`). Not saved: see the note
+    /// on `RESTED_SECONDS` for why a relog costs the morning and nothing else.
+    rested_for: f32,
     /// How many starvation rolls this body has made, and the seed they are
     /// made from. Their own sequence rather than `blow_seed`, which every
     /// blow and every mouthful of bad water advances: with that one a
@@ -500,6 +504,7 @@ impl Vitals {
                 .unwrap_or(0),
             drip_owed: 0.0,
             starving_owed: 0.0,
+            rested_for: 0.0,
             hunger_rolls: 0,
             hunger_seed: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1203,7 +1208,12 @@ impl Vitals {
         // The load is the vitals' own copy, kept by `set_carried_weight`
         // -- the same number the fall arithmetic uses, so a player who
         // is too heavy to float is too heavy for exactly one reason.
-        let drain = effort.drain(dt, self.carried_kg) * shivering;
+        // **Slept at home**: a quarter off, for the half day after a night in
+        // a bed by a lit fire (`comfort::rests_at_home`). Counted down here,
+        // the one place every second of hunger passes through.
+        let rested = if self.rested_for > 0.0 { primitive_shared::comfort::RESTED_HUNGER } else { 1.0 };
+        self.rested_for = (self.rested_for - dt).max(0.0);
+        let drain = effort.drain(dt, self.carried_kg) * shivering * rested;
         let before = self.nourishment;
         self.nourishment = (before - drain).max(0.0);
         if self.nourishment > 0.0 {
@@ -1224,6 +1234,18 @@ impl Vitals {
             }
         }
         self.hurt(taken, "starved")
+    }
+
+    /// **A night slept at home**: rested for `comfort::RESTED_SECONDS` from
+    /// now, whatever was left of the last one -- two nights at home are not
+    /// a day and a half of it.
+    pub fn rest_at_home(&mut self) {
+        self.rested_for = primitive_shared::comfort::RESTED_SECONDS;
+    }
+
+    /// Seconds of the last night at home still keeping the hunger down.
+    pub fn rested_for(&self) -> f32 {
+        self.rested_for
     }
 
     /// Fixes the starvation rolls, for a test that compares two bodies
@@ -2074,6 +2096,37 @@ mod hunger_tests {
         // drowning somebody: the safe direction, as everywhere else in
         // this file.
         assert_eq!(buoyancy(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn a_night_at_home_makes_the_next_half_day_cost_a_quarter_less_food_and_then_it_is_gone() {
+        use primitive_shared::comfort::{RESTED_HUNGER, RESTED_SECONDS};
+        use primitive_shared::food::MAX_NOURISHMENT;
+        let spent = |rested: bool, seconds: f32| {
+            let mut vitals = Vitals::new();
+            vitals.set_nourishment(MAX_NOURISHMENT);
+            if rested {
+                vitals.rest_at_home();
+            }
+            vitals.digest(Effort::IDLE, seconds);
+            MAX_NOURISHMENT - vitals.nourishment()
+        };
+        let (plain, rested) = (spent(false, 300.0), spent(true, 300.0));
+        assert!(
+            (rested / plain - RESTED_HUNGER).abs() < 0.01,
+            "five minutes rested cost {rested} against {plain} tired"
+        );
+        // After the half day, the ordinary rate again.
+        let mut vitals = Vitals::new();
+        vitals.set_nourishment(MAX_NOURISHMENT);
+        vitals.rest_at_home();
+        for _ in 0..(RESTED_SECONDS as usize) {
+            vitals.digest(Effort::IDLE, 1.0);
+        }
+        assert_eq!(vitals.rested_for(), 0.0, "the rest outlasted its half day");
+        let before = vitals.nourishment();
+        vitals.digest(Effort::IDLE, 300.0);
+        assert!((before - vitals.nourishment() - plain).abs() < 1e-3, "the rest was still at work after it ran out");
     }
 
     #[test]

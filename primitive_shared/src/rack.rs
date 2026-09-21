@@ -127,19 +127,46 @@ pub fn cures_into(raw: BlockId) -> Option<BlockId> {
         // so the pack says which one lasts.
         crate::types::BLOCK_SALTED_MEAT => Some(crate::types::BLOCK_DRIED_SALTED_MEAT),
         crate::types::BLOCK_SALTED_FISH => Some(crate::types::BLOCK_DRIED_SALTED_FISH),
+        // **Cut grass dries into hay**, the fodder a flock is wintered on
+        // (`husbandry::grazes`). The fibre a player pulls out of every tuft
+        // is the same stuff, so a summer's hay is a summer's grass cut and
+        // hung -- and fibre fed fresh does in a pinch, which is why hay is
+        // worth the rack at all only because it *keeps* where grass does not
+        // grow.
+        crate::types::BLOCK_FIBER => Some(crate::types::BLOCK_HAY),
         _ => None,
     }
 }
 
 /// How long one of `raw` takes to cure in ideal weather, in seconds.
 ///
-/// [`CURE_SECONDS`] for everything. A function rather than the constant
-/// because grass had a minute of its own while it dried into hay for the pit
-/// kiln; the kiln takes fibre now and nothing here is quicker than a skin.
+/// [`CURE_SECONDS`] for everything but grass, which has [`HAY_SECONDS`].
+///
+/// **Grass has a minute of its own again.** It had one while it dried into
+/// hay for the pit kiln, lost it when the kiln learned to take fibre, and
+/// has it back now that hay is winter feed. Twelve minutes a handful would
+/// be a winter's hay for four sheep -- thirty-odd handfuls -- as six days of
+/// one rack, which is not a summer's work but a summer's chore; see
+/// [`HAY_SECONDS`].
 pub fn cure_seconds(raw: BlockId) -> f32 {
-    let _ = raw;
+    if block_kind(raw) == crate::types::BLOCK_FIBER {
+        return HAY_SECONDS;
+    }
     CURE_SECONDS
 }
+
+/// How long a handful of grass takes to dry into hay in ideal weather, in
+/// seconds: three minutes.
+///
+/// **What a winter's hay costs, as a number.** A kept sheep eats about a
+/// feed a day from the stack when there is no grazing
+/// (`husbandry::STACK_AFTER_DAYS`), and a winter is ten days, so four sheep
+/// want some forty hay: at three minutes each that is two hours of one rack
+/// -- a rack loaded in the morning and emptied in the evening, a few days of
+/// a summer, or two racks side by side. Laborious enough that the flock is
+/// sized by the hay put up for it, which is the decision; short enough that
+/// nobody stands and watches grass dry.
+pub const HAY_SECONDS: f32 = 180.0;
 
 /// What a column of a rack of two by two can be seen to carry, by the four
 /// bits its two cells hold (`types::rack_column_goods`). Index 0 is a bare
@@ -154,7 +181,7 @@ pub fn cure_seconds(raw: BlockId) -> f32 {
 ///
 /// Every skin shows as a hide and every haunch as a strip of meat, for the
 /// reason `cures_into` gives: they all cure into the same thing.
-pub const HANGING: [Option<BlockId>; 15] = [
+pub const HANGING: [Option<BlockId>; 16] = [
     None,
     Some(BLOCK_HIDE),
     Some(BLOCK_LEATHER),
@@ -170,6 +197,12 @@ pub const HANGING: [Option<BlockId>; 15] = [
     Some(BLOCK_DRIED_PEAT),
     Some(crate::types::BLOCK_KELP_FROND),
     Some(crate::types::BLOCK_DRIED_KELP),
+    // **The last of the sixteen, and one row for both.** Grass and hay
+    // would be two pictures, and there is one row left: so a ridge of cut
+    // grass shows as hay from the moment it is hung (`hanging_index`). What
+    // a player loses is seeing it dry, which for grass is three minutes; the
+    // next good a rack takes has to share a row too, or widen the column.
+    Some(crate::types::BLOCK_HAY),
 ];
 
 /// Which row of [`HANGING`] shows this item on a ridge: 0 for anything a
@@ -181,6 +214,9 @@ pub fn hanging_index(item: BlockId) -> u8 {
         | crate::types::BLOCK_FOWL_MEAT
         | crate::types::BLOCK_BEAR_MEAT
         | crate::types::BLOCK_WOLF_MEAT => BLOCK_RAW_MEAT,
+        // Grass on a ridge is drawn as the hay it is becoming: see the last
+        // row of `HANGING`.
+        crate::types::BLOCK_FIBER => crate::types::BLOCK_HAY,
         kind => kind,
     };
     HANGING.iter().position(|&row| row == Some(shown)).unwrap_or(0) as u8
@@ -224,7 +260,8 @@ pub fn is_rack(block: BlockId) -> bool {
 ///   dries its kelp where it dries its catch.
 /// * [`Trade::Skins`], the hide frame: the hide, the pelt, the bear's hide.
 ///   Nothing else in the world is stretched to cure -- wool is shorn, not
-///   cured, and fibre dries in a pit kiln's packing, not on a frame -- so the
+///   cured, and grass is hung in hanks on the larder rack to dry into hay
+///   (`BLOCK_HAY`), not stretched -- so the
 ///   frame's list is the skins, and nothing is added to it for symmetry.
 ///
 /// **Peat is on neither.** It dries lying on the ground in the open
@@ -240,7 +277,7 @@ pub fn is_rack(block: BlockId) -> bool {
 /// is the same loss slower.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Trade {
-    /// The rack of two by two: meat, fish and kelp, hung.
+    /// The rack of two by two: meat, fish, kelp and grass, hung.
     Larder,
     /// The hide frame: skins, stretched.
     Skins,
@@ -284,6 +321,9 @@ impl Trade {
                     | BLOCK_RAW_FISH
                     | BLOCK_SALTED_FISH
                     | BLOCK_KELP_FROND
+                    // Grass, hung in hanks to dry into hay: food too, only
+                    // for the flock rather than the table.
+                    | crate::types::BLOCK_FIBER
             ),
         }
     }

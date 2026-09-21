@@ -6916,7 +6916,12 @@ fn hang_goods(
                 drape(x0 + dx, x0 + dx + 1.6, low, low + 1.6, 0.5, dress, vertices, indices);
             }
         }
-        t::BLOCK_PEAT | t::BLOCK_DRIED_PEAT => {
+        // **Hay hangs as the sods do**: two hanks, each on its cord. Its
+        // picture is a hank of fibre, drawn wider than the three and a third
+        // between the silhouettes' cords, and hung by its tail it stood out of
+        // its column and through its neighbours (`model_overlap`); tied as a
+        // bundle it is the shape a hank of drying grass has anyway.
+        t::BLOCK_PEAT | t::BLOCK_DRIED_PEAT | t::BLOCK_HAY => {
             let material = (t::block_kind(item) == t::BLOCK_PEAT).then_some((t::BLOCK_PEAT, true));
             let dress = Dress::of(item, material, textures);
             // Two sods, each on its own cord, at two heights.
@@ -14660,7 +14665,7 @@ mod cutout_split_tests {
         use primitive_shared::types::{self as t, rack_far_step, Facing};
         let silhouette = |goods: u8| {
             primitive_shared::rack::HANGING[goods as usize].is_some_and(|item| {
-                ![t::BLOCK_HIDE, t::BLOCK_LEATHER, t::BLOCK_RAW_MEAT, t::BLOCK_DRIED_MEAT, t::BLOCK_SALTED_MEAT, t::BLOCK_DRIED_SALTED_MEAT, t::BLOCK_PEAT, t::BLOCK_DRIED_PEAT]
+                ![t::BLOCK_HIDE, t::BLOCK_LEATHER, t::BLOCK_RAW_MEAT, t::BLOCK_DRIED_MEAT, t::BLOCK_SALTED_MEAT, t::BLOCK_DRIED_SALTED_MEAT, t::BLOCK_PEAT, t::BLOCK_DRIED_PEAT, t::BLOCK_HAY]
                     .contains(&item)
             })
         };

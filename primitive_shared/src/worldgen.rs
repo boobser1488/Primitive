@@ -158,6 +158,33 @@ use crate::types::{
 
 pub const SEA_LEVEL: i32 = 64;
 
+/// **The ground a player wakes up on holds no copper**, out to this many
+/// blocks from the world's origin, in a world with landforms -- and then as
+/// much as the hills give, over [`COPPER_RAMP`].
+///
+/// The spawn search asks for "middling hills" (`spawn_quality`), and
+/// middling hills are the foot of copper country: measured over eight
+/// seeds, the nearest copper in the rock was twelve to fifty blocks from
+/// where a player stood up in six of them. The first metal was under the
+/// first night's camp, and "copper is in the hills" was a rule about some
+/// other hill. A hundred and some blocks is the next rise over -- one to
+/// two minutes on foot, a trip a player sets out on with a pick and comes
+/// back from with a load, which is what the copper age is.
+///
+/// Rejected: *raising copper country's foot* (`copper_country`). That moves
+/// every hill in the world, thins the copper the tests already hold at the
+/// floor (`all_four_ores_are_actually_in_the_ground`), and still leaves the
+/// seed whose spawn is on a shoulder with copper under its feet.
+pub const COPPER_CLEAR: f64 = 90.0;
+/// See [`COPPER_CLEAR`].
+pub const COPPER_RAMP: f64 = 60.0;
+/// No tin country within this many blocks of the world's origin, in a
+/// world with landforms: see `WorldGen::far_tin_country`.
+pub const TIN_CLEAR: f64 = 350.0;
+/// ...ramped in over this many more, so the edge of the home ground is a
+/// district thinning towards it rather than a circle.
+pub const TIN_RAMP: f64 = 150.0;
+
 /// Continent field to base height, as a piecewise-linear curve.
 ///
 /// Where the curve is flat it makes *terrain*: the long shallow run from
@@ -4920,11 +4947,93 @@ impl WorldGen {
         /// map.
         const EDGE: f64 = 0.30;
         const HEART: f64 = 0.56;
+        if self.scale == Scale::Landforms {
+            return self.far_tin_country(gx, gz);
+        }
         smoothstep(
             EDGE,
             HEART,
             fbm(&self.province_noise, gx as f64, gz as f64, FREQ, 2),
         )
+    }
+
+    /// Tin country in a world with landforms: **fewer districts, further
+    /// apart, and never the one a player wakes up in.**
+    ///
+    /// ## What was wrong with the old districts, measured
+    ///
+    /// The field above covers a sixth of the map in districts a couple of
+    /// hundred blocks apart, and the spawn search puts a player down near
+    /// the world's origin -- where, in every one of eight seeds measured,
+    /// the nearest district began 28 to 33 blocks away and the nearest tin
+    /// in the rock was 69 to 222. Bronze was the second half of a shopping
+    /// trip to the next valley, and "tin is scarce, and that is what makes
+    /// bronze mean something" (`the_ages_are_in_the_order_of_their_scarcity`)
+    /// was true of the totals and false of anything a player walked.
+    ///
+    /// ## What it is now
+    ///
+    /// * **Half the frequency and a higher edge**: a district is a region
+    ///   several hundred blocks across with most of a kilometre between it
+    ///   and the next, about one column in ten of the map (measured over
+    ///   fifteen hundred blocks round twelve spawns: 9 to 15 per cent, the
+    ///   cleared home ground counted in). Read at an offset in the field, because the
+    ///   old read was at the lattice point every seed's origin sits on and
+    ///   that is exactly the structure that put a district beside every
+    ///   spawn.
+    /// * **None within `TIN_CLEAR` of the world's origin**, ramped out over
+    ///   `TIN_RAMP` (`away_from_home`). The spawn search lands within a
+    ///   stone's throw of the origin, so this is "none where you start",
+    ///   and the ramp makes the edge of the cleared ground a district
+    ///   that thins towards home rather than a circle a prospector could
+    ///   draw.
+    ///
+    /// Rejected: *the rarer field alone.* A field is a field: over enough
+    /// seeds one of them puts a district on the spawn, and in that world
+    /// the bronze age is the copper age with a second ore beside it. The
+    /// clearing is what makes "far" a promise rather than a likelihood.
+    /// Rejected too: *moving the spawn out of tin country.* The spawn
+    /// search is about gentle land with trees and water in reach, and a
+    /// search that also had to dodge a mineral field would trade the first
+    /// five minutes for the fortieth hour.
+    ///
+    /// **Only here.** An Earth world keeps the districts it always had,
+    /// because its chunks already on disk were cut from them and a new
+    /// chunk beside them must agree (`an_old_worlds_new_chunks_are_the_old_
+    /// generators_to_the_block`).
+    fn far_tin_country(&self, gx: i32, gz: i32) -> f64 {
+        const FREQ: f64 = 0.0021;
+        const EDGE: f64 = 0.40;
+        const HEART: f64 = 0.62;
+        /// Where the field is read from: far enough along it that the
+        /// origin of the world is an ordinary point of it.
+        const OFFSET: (f64, f64) = (7_411.0, -5_203.0);
+        let home = self.away_from_home(gx, gz, TIN_CLEAR, TIN_RAMP);
+        if home <= 0.0 {
+            return 0.0;
+        }
+        home * smoothstep(
+            EDGE,
+            HEART,
+            fbm(&self.province_noise, gx as f64 + OFFSET.0, gz as f64 + OFFSET.1, FREQ, 2),
+        )
+    }
+
+    /// Nought within `clear` blocks of this world's own origin, one past
+    /// `clear + ramp`, eased between -- and one everywhere in a world
+    /// without landforms, which never had a home ground.
+    ///
+    /// Planet coordinates in, like every accessor here; the distance is
+    /// measured in the world's own, because the spawn search looks round
+    /// the world's origin and a zone cut from the tropics has its origin a
+    /// long way from the planet's.
+    fn away_from_home(&self, gx: i32, gz: i32, clear: f64, ramp: f64) -> f64 {
+        if self.scale != Scale::Landforms {
+            return 1.0;
+        }
+        let (wx, wz) = self.off_planet(gx, gz);
+        let away = (wx as f64).hypot(wz as f64);
+        smoothstep(clear, clear + ramp, away)
     }
 
     /// What ore, if any, is in the rock at this cell.
@@ -5105,7 +5214,9 @@ impl WorldGen {
         // conclude that copper is everywhere after all and never climb
         // anything. Either the rock under a plain has copper in it or it
         // does not, and it does not.
-        let copper = Self::copper_country(ground);
+        // **And not on the hill a player wakes up on**, in a world with
+        // landforms: see `COPPER_CLEAR`.
+        let copper = Self::copper_country(ground) * self.away_from_home(gx, gz, COPPER_CLEAR, COPPER_RAMP);
         // **0.78, and it was 0.60 while the mountains were shorter.**
         // Copper is the metal of the *uplands* (`copper_country` reads
         // the ground height), so making the relief taller made copper
@@ -6119,6 +6230,7 @@ impl WorldGen {
                     && hash2(gx, gz, self.seed.wrapping_add(0xC0FF))
                         .is_multiple_of(flint_spacing(ground, BLOCK_STONE).saturating_mul(4).max(1))
                     && Self::copper_country(height) > 0.0
+                    && self.away_from_home(gx, gz, COPPER_CLEAR, COPPER_RAMP) > 0.0
                 {
                     blocks[air_index] = BLOCK_NATIVE_COPPER;
                     continue;
@@ -17704,8 +17816,12 @@ mod ore_tests {
                     dx += step;
                     continue;
                 }
-                let (gx, gz) = (home_x + dx, home_z + dz);
-                let height = gen.height_at(gx, gz);
+                // Planet coordinates for everything but `height_at`: the
+                // private accessors all read the planet (`on_planet`), and a
+                // world cut from anywhere but the planet's origin measured
+                // the ore of some other place.
+                let (gx, gz) = gen.on_planet(home_x + dx, home_z + dz);
+                let height = gen.height_on_planet(gx, gz);
                 let surface = gen.surface_at(gx, gz, height);
                 for y in (BEDROCK_TOP + 1)..=(height - surface.soil) {
                     if gen.is_cave(gx, y, gz) {
@@ -17887,6 +18003,65 @@ mod ore_tests {
     }
 
     #[test]
+    fn tin_is_an_expedition_from_every_spawn_and_never_on_the_doorstep() {
+        // **The two halves of "rare and far", each a bound.** Tin nearer
+        // than `NOT_WITHIN` is the bronze age as a stroll to the next
+        // valley, which is what eight seeds out of eight used to be (69 to
+        // 222 blocks); tin further than `WITHIN` is a world with no bronze
+        // age a player will ever find. Copper gets the same pair on a
+        // shorter scale: past the hill a player wakes on, not over the
+        // horizon. See `far_tin_country` and `COPPER_CLEAR`.
+        //
+        // Measured when this was written, blocks from spawn to the first
+        // tin and the first copper: 816/158, 546/144, 511/346, 353/129,
+        // 612/126, 388/121, 431/158, 594/177 on the eight seeds below.
+        const NOT_WITHIN: i32 = 300;
+        const WITHIN: i32 = 1000;
+        for seed in [1337u32, 7, 99_999, 4242, 1, 42, 2024, 99] {
+            let gen = WorldGen::new(seed);
+            // A run against an older generator (`PRIMITIVE_TEST_SCALE`) has
+            // no home ground and no far districts to hold to anything.
+            if gen.scale() != Scale::Landforms {
+                return;
+            }
+            let far = how_far_from_home(&gen, WITHIN, 9);
+            let [_, copper, tin, _] = far;
+            let tin = tin.unwrap_or_else(|| panic!("no tin within {WITHIN} blocks of world {seed}'s spawn"));
+            assert!(tin >= NOT_WITHIN, "tin {tin} blocks from world {seed}'s spawn: bronze is not an expedition");
+            let copper = copper.unwrap_or_else(|| panic!("no copper within {WITHIN} blocks of world {seed}'s spawn"));
+            assert!(
+                (COPPER_CLEAR as i32..500).contains(&copper),
+                "copper {copper} blocks from world {seed}'s spawn: under the camp, or over the horizon"
+            );
+            println!("seed {seed}: tin {tin}, copper {copper}");
+        }
+    }
+
+    #[test]
+    fn an_earth_world_keeps_its_old_tin_districts() {
+        // The other half of "only for new worlds": the far districts and
+        // the cleared home ground are the landforms' alone, so an Earth
+        // world's chunks still being generated beside its saved ones find
+        // tin where the saved ones did.
+        let earth = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Earth);
+        let landforms = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
+        let (mut earth_near, mut new_near) = (false, false);
+        for dz in (-(TIN_CLEAR as i32)..TIN_CLEAR as i32).step_by(13) {
+            for dx in (-(TIN_CLEAR as i32)..TIN_CLEAR as i32).step_by(13) {
+                if f64::from(dx).hypot(f64::from(dz)) >= TIN_CLEAR {
+                    continue;
+                }
+                let (ex, ez) = earth.on_planet(dx, dz);
+                earth_near |= earth.tin_country(ex, ez) > 0.0;
+                let (lx, lz) = landforms.on_planet(dx, dz);
+                new_near |= landforms.tin_country(lx, lz) > 0.0;
+            }
+        }
+        assert!(earth_near, "an Earth world lost the districts round its origin");
+        assert!(!new_near, "a new world has tin country on the home ground");
+    }
+
+    #[test]
     fn all_four_ores_are_actually_in_the_ground() {
         // **The failure this exists for is silent.** A threshold tuned
         // one point too high does not break anything -- it ships a world
@@ -17978,12 +18153,19 @@ mod ore_tests {
         // one world's chunks cover. The measured distances are a third
         // of it (see `ore_numbers`), so this fails when a gate has shut
         // rather than when a seed was unlucky.
+        //
+        // **A thousand for tin, and only tin.** In a world with landforms
+        // tin is an expedition on purpose (`far_tin_country`): none within
+        // `TIN_CLEAR` of the spawn, and the nearest measured at 424 to 782
+        // blocks. Six hundred would fail on the seeds where the far
+        // districts lie as they were meant to; the other three stay a walk.
         for seed in [1337u32, 7, 99_999, 4242, 1] {
-            let far = how_far_from_home(&WorldGen::new(seed), 600, 11);
+            let far = how_far_from_home(&WorldGen::new(seed), 1000, 11);
             for (i, (_, name)) in ORES.iter().enumerate() {
+                let bound = if ORES[i].0 == BLOCK_TIN_ORE { 1000 } else { 600 };
                 assert!(
-                    far[i].is_some(),
-                    "no {name} within 600 blocks of where world {seed} puts a player down"
+                    far[i].is_some_and(|blocks| blocks <= bound),
+                    "no {name} within {bound} blocks of where world {seed} puts a player down"
                 );
             }
             println!("seed {seed}: {far:?}");
@@ -18033,7 +18215,13 @@ mod ore_tests {
         // chunks 176 blocks apart, and a vein is thirty across, so
         // widening it caught more *country* and not more ore. Tin, the
         // scarcest thing in the ground, is what says so first.
-        let cells = ore_cells(1337, 21, 3);
+        //
+        // **Six, and it was three**, when tin was taken out of the ground
+        // round every spawn (`far_tin_country`): the sweep reached 480
+        // blocks from the origin and the nearest tin of this seed is past
+        // 700. The chunks are as dense a sample of the *rock* as before;
+        // what the wider stride buys is a district inside it.
+        let cells = ore_cells(1337, 21, 6);
         // **A mean over nothing is zero, and zero reads as "at the
         // surface".** Tin is the scarcest thing in the ground, so it is
         // the one that empties out of a sweep first -- and when it did,

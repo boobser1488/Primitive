@@ -281,6 +281,59 @@ pub fn survey(look: impl Fn(i32, i32, i32) -> Option<BlockId>, feet: (i32, i32, 
     found
 }
 
+/// **Rested**: how long a night slept at home keeps a body's hunger down,
+/// in seconds of the world's clock -- a morning and an afternoon, half a
+/// day at the default thirty-minute day.
+///
+/// ## Why home needs a reason of its own
+///
+/// Comfort (above) already rewards a house, and it rewards it *while you are
+/// in it*: a wound closes faster by your own fire. What nothing rewarded was
+/// coming back. A player who had built a house and gone prospecting slept
+/// in a lean-to on the way and in the hills and lost nothing by it but a
+/// fifth of the tiredness -- so the house was where the chests were, and
+/// the trip home was a haul. This is the one small thing that is only had
+/// by going home: sleep in a bed, in a shut room, with a fire lit beside
+/// it, and the next half day costs less food.
+///
+/// **Modest on purpose.** A quarter off the hunger for half a day is about
+/// one meal saved -- felt on a long day's work, not a reason to sleep at
+/// home every night rather than finish the expedition. A buff big enough to
+/// plan around would make the camp a wrong answer, and the camp is how the
+/// tin is reached.
+///
+/// Rejected: *faster work.* Every tool's speed is a number tuned against
+/// the progression's clock (`progression`), and a morning's bonus on it is
+/// a second set of numbers to tune. Hunger is the one cost every hour of
+/// the game pays, so a saving there is felt whatever the player does.
+/// Rejected too: *saved across a restart.* Losing a morning's rest to a
+/// relog costs a player nothing they can exploit, and a field in the save
+/// for a twelve-hour stopwatch is the kind `survival` has refused before.
+pub const RESTED_SECONDS: f32 = 900.0;
+
+/// What a rested body's food goes at, against its ordinary rate. See
+/// [`RESTED_SECONDS`].
+pub const RESTED_HUNGER: f32 = 0.75;
+
+/// How shut a room has to be to count as home: a doorway's worth of opening
+/// and no more (see `Surroundings::enclosure`). A lean-to is
+/// `shelter::LEAN_TO_ENCLOSURE`, under this: it is shelter on the road, and
+/// the road is what home is the other end of.
+pub const HOME_ENCLOSURE: f32 = 0.7;
+
+/// **Did this night's sleep count as a night at home?** A shut room
+/// ([`HOME_ENCLOSURE`]) with a fire lit within reach of the bed
+/// (`Surroundings::hearth`, which is [`NEAR`]). The bed itself is asked by
+/// the caller: this is the place's half.
+///
+/// **A fire, and not only a roof**, because a roof is a lean-to and a
+/// hearth is a household: somebody had to have laid the fire before lying
+/// down, and a cold house in winter is the one place this game wants a
+/// player to feel the difference.
+pub fn rests_at_home(place: &Surroundings) -> bool {
+    place.enclosure >= HOME_ENCLOSURE && place.hearth
+}
+
 /// Where comfort is heading, from the body and the place.
 ///
 /// A sum of terms rather than a product, because each is a separate thing a
@@ -582,5 +635,29 @@ mod tests {
         // ...and a house is still better than a heap of leaves.
         let home = survey(hut(true, &[((1, 10, 1), crate::types::BLOCK_BED)]), (0, 10, 0));
         assert!(target(body, home) > target(body, inside));
+    }
+
+    #[test]
+    fn a_shut_house_with_a_fire_lit_is_home_and_a_cold_one_or_a_lean_to_is_not() {
+        use crate::types::{bed_half_of, Facing, BLOCK_CAMPFIRE, BLOCK_CAMPFIRE_LIT, BLOCK_LEAN_TO};
+        let lit = [((1, 10, 1), BLOCK_BED), ((-1, 10, -1), BLOCK_CAMPFIRE_LIT)];
+        let cold = [((1, 10, 1), BLOCK_BED), ((-1, 10, -1), BLOCK_CAMPFIRE)];
+        assert!(rests_at_home(&survey(hut(true, &lit), (0, 10, 0))), "a shut house by a lit fire was not home");
+        assert!(!rests_at_home(&survey(hut(true, &cold), (0, 10, 0))), "a house with the fire out was home");
+        assert!(!rests_at_home(&survey(hut(false, &lit), (0, 10, 0))), "walls and a fire under the sky were home");
+        // A lean-to with a fire at its mouth is the best night on the road,
+        // and still the road.
+        let lean_to = bed_half_of(BLOCK_LEAN_TO, Facing::South, false);
+        let camp = |x, y, z| {
+            Some(match (x, y, z) {
+                (0, 10, 0) => lean_to,
+                (0, 10, 2) => BLOCK_CAMPFIRE_LIT,
+                (_, y, _) if y < 10 => BLOCK_STONE,
+                _ => BLOCK_AIR,
+            })
+        };
+        let camp = survey(camp, (0, 10, 0));
+        assert!(camp.hearth, "the fire at the lean-to's mouth was not found: {camp:?}");
+        assert!(!rests_at_home(&camp), "a lean-to by a fire was home");
     }
 }

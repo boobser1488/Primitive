@@ -136,6 +136,15 @@ impl WorldClock {
         *origin = (Instant::now(), days.floor() + f64::from(time_of_day.rem_euclid(1.0)));
     }
 
+    /// Moves the calendar to `world_days`, the hour in the fraction: a
+    /// scenario's way to a winter, and to the week after it, without living
+    /// through them. Every system that reads the days (`Animals::calendar`,
+    /// the seasons) sees the jump as days that went by, the way a night
+    /// slept through is.
+    pub fn set_world_days(&self, world_days: f32) {
+        *self.origin.lock().unwrap_or_else(|e| e.into_inner()) = (Instant::now(), f64::from(world_days));
+    }
+
     pub fn day_length_seconds(&self) -> f32 {
         self.day_length_seconds
     }
@@ -759,6 +768,18 @@ impl Server {
         gear: Option<primitive_shared::horse::Gear>,
     ) {
         self.ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).put_keeping(id, keep, gear);
+    }
+
+    /// What a person has made of an animal, as the server has it: `None`
+    /// for a wild one nobody has fed, or one that is gone.
+    pub fn animal_keeping(&self, id: primitive_shared::protocol::EntityId) -> Option<primitive_shared::husbandry::Keeping> {
+        self.ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).keeping(id)
+    }
+
+    /// Jumps the world's calendar to `world_days` (see
+    /// `WorldClock::set_world_days`): a scenario about a winter starts in one.
+    pub fn set_world_days(&self, world_days: f32) {
+        self.ctx.clock.set_world_days(world_days);
     }
 
     /// Turns an animal to face `yaw`: a scenario stands a horse along its
@@ -2729,6 +2750,14 @@ async fn tick_loop(ctx: Arc<Context>) {
             // the carcasses' reason: `set_block` and the broadcast.
             for at in dung {
                 lay_animal_dung(&ctx, at);
+            }
+            // ...and the bites they took out of the haystacks, on the same
+            // terms. Its own drain rather than a ninth member of the tuple
+            // above: a lock taken twice a tick is nothing, and the tuple is
+            // everybody's.
+            let hay_eaten = ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).take_hay_eaten();
+            for at in hay_eaten {
+                bite_the_haystack(&ctx, at);
             }
             // ...and what the monkeys took, for the same reason: an
             // inventory is the tick loop's, not the animals'.
@@ -7941,6 +7970,25 @@ fn lay_animal_dung(ctx: &Arc<Context>, feet: (f64, f64, f64)) {
     };
     if ctx.world.set_block(at.0, at.1, at.2, BLOCK_DUNG) {
         broadcast_block(ctx, at, BLOCK_DUNG);
+    }
+}
+
+/// One bite out of the haystack at `at`: a stack of one fewer, and nothing
+/// once the last is eaten (`types::haystack_holding`). A cell that is not a
+/// stack any more -- broken between the step and now -- is left alone; the
+/// sheep ate from a stack that was there when it ate.
+fn bite_the_haystack(ctx: &Arc<Context>, at: (i32, i32, i32)) {
+    use primitive_shared::types::{hay_in_stack, haystack_holding};
+    let Some(left) = ctx.world.cached_block(at.0, at.1, at.2).and_then(hay_in_stack) else {
+        return;
+    };
+    let next = haystack_holding(left.saturating_sub(1));
+    if ctx.world.set_block(at.0, at.1, at.2, next) {
+        ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+        broadcast_block(ctx, at, next);
+        // The last bite leaves air, and whatever stood on the stack falls.
+        ctx.falling.lock().unwrap_or_else(|e| e.into_inner()).on_block_changed(at.0, at.1, at.2);
+        notify_mechanics(ctx, at.0, at.1, at.2);
     }
 }
 
@@ -14248,6 +14296,16 @@ fn sleep_through_to_dawn(ctx: &Arc<Context>, handles: &[Arc<players::PlayerHandl
             let thirst = state
                 .vitals
                 .drink_down(primitive_shared::body::Exertion::RESTING, seconds);
+            // **A night at home** -- a bed, a shut room, a fire lit beside it
+            // (`comfort::rests_at_home`) -- keeps the next half day's hunger
+            // down, and it is said. After the night's own hunger, so the
+            // night is not billed at the rested rate: the reward is the day
+            // ahead. The place is the last survey, taken while lying in the
+            // bed or on the way to it (`SURVEY_SECONDS`).
+            if state.sleeping_in.is_some() && primitive_shared::comfort::rests_at_home(&state.surroundings) {
+                state.vitals.rest_at_home();
+                handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::SleptAtHome });
+            }
             // **Whatever the night did, reported as it happened.** Both
             // outcomes used to be thrown away and "changed" sent in their
             // place, so a night that starved a sleeper to death marked

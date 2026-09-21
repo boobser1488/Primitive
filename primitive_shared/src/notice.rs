@@ -135,6 +135,12 @@ pub enum Notice {
     SeaWaterIsSalt,
     /// The same, for standing water.
     StaleWater,
+    // ---- home ----
+    /// **Woken rested**: the night was slept in a bed in a shut room by a
+    /// lit fire (`comfort::rests_at_home`), and the half day ahead costs less
+    /// food. Said at the waking, because a buff nobody is told about is a
+    /// buff nobody goes home for.
+    SleptAtHome,
 }
 
 impl Notice {
@@ -214,6 +220,7 @@ impl Notice {
         Notice::PanFreshWater,
         Notice::SeaWaterIsSalt,
         Notice::StaleWater,
+        Notice::SleptAtHome,
     ];
 
     /// Whether this is news rather than a refusal: said the same way, but
@@ -234,6 +241,7 @@ impl Notice {
                 // hour later when the sickness starts.
                 | Notice::SeaWaterIsSalt
                 | Notice::StaleWater
+                | Notice::SleptAtHome
         )
     }
 }
@@ -251,7 +259,7 @@ mod tests {
         // append one** -- that is the whole check, and a notice appended
         // to the enum and forgotten in `ALL` is a notice the client is
         // never asked to have words for.
-        assert_eq!(Notice::ALL.len(), Notice::StaleWater as usize + 1);
+        assert_eq!(Notice::ALL.len(), Notice::SleptAtHome as usize + 1);
         for (i, notice) in Notice::ALL.iter().enumerate() {
             assert_eq!(*notice as usize, i, "{notice:?} is out of place in `ALL`");
         }

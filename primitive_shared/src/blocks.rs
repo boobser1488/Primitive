@@ -10137,6 +10137,76 @@ pub const BLOCKS: &[BlockDef] = &[
         turns: false,
         propped: false,
     },
+    // ---- winter feed ----
+    //
+    // Hay is an item and nothing else: dried grass in the pack, fed by hand
+    // or built into a stack. See `types::BLOCK_HAY`.
+    BlockDef {
+        id: BLOCK_HAY,
+        name: "hay",
+        shape: Shape::Item,
+        thickness: LAYERS_PER_BLOCK,
+        matter: Matter::Solid,
+        opacity: 15,
+        emission: 0,
+        hardness: None,
+        felled: None,
+        needs: Tier::Hand,
+        work: Work::Any,
+        tool: None,
+        drop: Some(BLOCK_HAY),
+        leaves_behind: None,
+        // Grass with the water gone out of it: lighter than the fibre it
+        // was, which is the rack's whole work.
+        weight: 0.03,
+        stack: crate::inventory::MAX_STACK,
+        durability: None,
+        drag: 1.0,
+        grip: 1.0,
+        placeable: false,
+        foliage: false,
+        orientable: false,
+        faces: false,
+        falls: false,
+        container: false,
+        turns: false,
+        propped: false,
+    },
+    // **A haystack is a block and not a container**, and the argument is
+    // the barrel's: what is in it is one number, the number fits in the
+    // variant (`types::hay_in_stack`), and a stack with a screen of its own
+    // would be a second chest for one item. It is loose, so a stack with
+    // nothing under it comes down as a heap does; a fist pulls it apart, a
+    // knife quicker, and what comes back is the hay not yet eaten.
+    BlockDef {
+        id: BLOCK_HAYSTACK,
+        name: "haystack",
+        shape: Shape::Cube,
+        thickness: LAYERS_PER_BLOCK,
+        matter: Matter::Loose,
+        opacity: 15,
+        emission: 0,
+        hardness: Some(0.6),
+        felled: None,
+        needs: Tier::Hand,
+        work: Work::Plant,
+        tool: None,
+        drop: Some(BLOCK_HAY),
+        leaves_behind: None,
+        weight: 0.3,
+        stack: crate::inventory::MAX_STACK,
+        durability: None,
+        drag: 1.0,
+        grip: 1.0,
+        placeable: true,
+        foliage: false,
+        orientable: false,
+        faces: false,
+        falls: true,
+        container: false,
+        turns: false,
+        propped: false,
+    },
     BlockDef {
         id: BLOCK_RAW_FISH,
         name: "raw_fish",

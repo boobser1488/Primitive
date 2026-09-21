@@ -119,13 +119,15 @@ pub enum Ration {
 
 /// What `food` is to `species`, if it will eat it at all.
 pub fn ration(species: Species, food: BlockId) -> Option<Ration> {
-    use crate::types::{BLOCK_APPLE, BLOCK_BERRIES, BLOCK_FIBER, BLOCK_GRAIN, BLOCK_MILLET, BLOCK_MUSHROOM, BLOCK_ROOT};
+    use crate::types::{
+        BLOCK_APPLE, BLOCK_BERRIES, BLOCK_FIBER, BLOCK_GRAIN, BLOCK_HAY, BLOCK_MILLET, BLOCK_MUSHROOM, BLOCK_ROOT,
+    };
     match (species, block_kind(food)) {
         // Grass and grain, and the apple every horse will come across a
-        // field for -- the lure, as much as a meal.
-        (Species::Horse, BLOCK_FIBER) => Some(Ration::Fodder),
+        // field for -- the lure, as much as a meal. Hay is grass that kept.
+        (Species::Horse, BLOCK_FIBER | BLOCK_HAY) => Some(Ration::Fodder),
         (Species::Horse, BLOCK_GRAIN | BLOCK_MILLET | BLOCK_APPLE) => Some(Ration::Rich),
-        (Species::Sheep, BLOCK_FIBER) => Some(Ration::Fodder),
+        (Species::Sheep, BLOCK_FIBER | BLOCK_HAY) => Some(Ration::Fodder),
         (Species::Sheep, BLOCK_GRAIN | BLOCK_MILLET) => Some(Ration::Rich),
         (Species::Boar, BLOCK_BERRIES | BLOCK_MUSHROOM) => Some(Ration::Fodder),
         (Species::Boar, BLOCK_ROOT | BLOCK_APPLE) => Some(Ration::Rich),
@@ -224,6 +226,56 @@ pub const MILKED_LAMB_GROWTH: f32 = 0.5;
 
 /// Days between pats of dung from a kept animal that is eating.
 pub const DUNG_EVERY_DAYS: f32 = 0.5;
+
+/// **Does the turf feed a flock at this time of year?** Everywhere but in
+/// winter.
+///
+/// The year used to reach a pen only as cold: a flock on a meadow grazed
+/// half its keep in midwinter as in May (`GRAZING_HUNGER`), so a pen once
+/// built was as cheap in the tenth day of snow as in the first of summer,
+/// and nothing a player did in summer was *for* the flock's winter. Now the
+/// grass stops with the year: from the first day of winter a pen is bare
+/// ground whatever is under the snow, and what a flock eats is what was cut
+/// and dried for it (`types::BLOCK_HAY`) or fed by hand that day.
+///
+/// **The calendar, not the frost**, which is the other reading and the one
+/// `growth` takes for crops. A crop dies in one night's frost and that is
+/// its whole story; grazing is a flock's week, and a pen whose grass came
+/// and went with every warm afternoon of February would be a rule no
+/// player could plan a stack of hay against. A warm coast's winter is a
+/// winter too: the grass there is growing and the sheep are still eating
+/// the stack, which is generous to nobody and simple to know.
+pub fn grazes(season: crate::season::Season) -> bool {
+    season != crate::season::Season::Winter
+}
+
+/// How far from a haystack a kept animal eats from it, in blocks, across;
+/// [`MANGER_RISE`] up and down.
+///
+/// **Five: a pen.** Far enough that a stack in the corner of a walled
+/// pen of ten by ten reaches every sheep in it, near enough that a stack by
+/// the house does not feed a flock loose in the meadow beyond -- where the
+/// stack stands is where the flock has to be.
+pub const MANGER_REACH: i32 = 5;
+/// See [`MANGER_REACH`].
+pub const MANGER_RISE: i32 = 2;
+
+/// **Days of want before a kept animal goes to the stack**: one, half a
+/// day before it would go hungry (`HUNGRY_AFTER_DAYS`).
+///
+/// Before hungry, so an animal with a stack beside it never loses trust or
+/// condition for want of a bite it could have taken; not at once, so a
+/// stack is eaten a bite a day an animal and not a bite an hour -- the rate
+/// the arithmetic under [`HAYSTACK_HOLDS`](crate::types::HAYSTACK_HOLDS)
+/// promises a player putting one up.
+pub const STACK_AFTER_DAYS: f32 = 1.0;
+
+/// What a kept animal will eat out of a haystack, if anything: what it
+/// eats hay as. The boar does not -- a pig is wintered on roots and apples
+/// out of the cellar, fed by hand, which is the other half of the larder.
+pub fn eats_hay(species: Species) -> bool {
+    ration(species, crate::types::BLOCK_HAY).is_some()
+}
 
 /// Everything a person has done to one animal, and what it has come to.
 ///
@@ -454,6 +506,59 @@ impl Keeping {
         dung
     }
 
+    /// **`days` go by for an animal that may have a stack beside it**: the
+    /// days as `pass_days` has them, in quarter days, with the ground's
+    /// grazing asked of the season each quarter falls in, and a bite from
+    /// the stack whenever it is due one (`STACK_AFTER_DAYS`).
+    ///
+    /// `hay` is the bites the stacks within reach hold, and goes down by
+    /// what was eaten; `from_day` is the world's day the time starts on,
+    /// or `None` where nobody has a calendar (the season is then summer's,
+    /// as it always was). Returns the dung left and the bites taken.
+    ///
+    /// **One function for a watched pen and a parked one**, and that is the
+    /// point of it: a flock nobody was near for a week has to come out of
+    /// that week exactly as a flock somebody watched would have, or a player
+    /// learns to stand in the pen all winter, which is the chore a stack is
+    /// there to take away.
+    pub fn winter_through(
+        &mut self,
+        species: Species,
+        days: f32,
+        from_day: Option<f32>,
+        pasture: bool,
+        hay: &mut u32,
+    ) -> (u32, u32) {
+        if !days.is_finite() || days <= 0.0 {
+            return (0, 0);
+        }
+        let takes_hay = self.tame && eats_hay(species);
+        let (mut dung, mut eaten, mut gone) = (0, 0, 0.0);
+        while gone < days {
+            let step = (days - gone).min(0.25);
+            if takes_hay && *hay > 0 && self.hunger >= STACK_AFTER_DAYS {
+                self.eat_from_the_stack();
+                *hay -= 1;
+                eaten += 1;
+            }
+            let grazing = pasture
+                && from_day.is_none_or(|day| grazes(crate::season::Season::at(day + gone)));
+            dung += self.pass(step, grazing);
+            gone += step;
+        }
+        (dung, eaten)
+    }
+
+    /// A bite from a haystack: fed, as a handful of grass held out is, and
+    /// **no trust for it** -- nobody held it out. Home stays where it was:
+    /// a stack is not a person, and a sheep that moved house to whichever
+    /// stack it last ate from would be a flock that wandered off along a
+    /// row of them.
+    fn eat_from_the_stack(&mut self) {
+        self.hunger = 0.0;
+        self.condition = (self.condition + CONDITION_PER_FEED).min(1.0);
+    }
+
     /// Shears it: the wool, if the coat was ready, and a bare back.
     pub fn shear(&mut self) -> Option<u32> {
         if !self.tame || !self.fleece_ready() {
@@ -632,6 +737,74 @@ mod tests {
         assert!(k.will_gallop());
         k.pass_days(HUNGRY_AFTER_DAYS, false);
         assert!(!k.will_gallop(), "a hungry horse still galloped");
+    }
+
+    /// The world's first day of winter, found off the calendar rather than
+    /// written down, so a change to where a world opens moves it here too.
+    fn first_winter_day() -> f32 {
+        (0..400)
+            .map(|q| q as f32 * 0.25)
+            .find(|&day| crate::season::Season::at(day) == crate::season::Season::Winter)
+            .expect("a year with no winter in it")
+    }
+
+    #[test]
+    fn a_pen_on_turf_feeds_half_a_flock_in_summer_and_none_of_it_in_winter() {
+        let summer = crate::season::MIDSUMMER_WORLD_TIME;
+        let winter = first_winter_day();
+        let (mut grazed, mut snowed) = (tamed(), tamed());
+        let mut none = 0;
+        grazed.winter_through(Species::Sheep, 2.0, Some(summer), true, &mut none);
+        snowed.winter_through(Species::Sheep, 2.0, Some(winter), true, &mut none);
+        assert!(!grazed.is_hungry(), "a meadow pen in summer did not feed its sheep");
+        assert!(snowed.is_hungry(), "the turf fed a sheep in winter");
+    }
+
+    #[test]
+    fn a_flock_with_a_haystack_is_kept_through_a_winter_alone_and_one_without_goes_wild() {
+        // **The trip the stack is for.** A whole winter -- ten days -- with
+        // nobody there, on turf that feeds nothing in winter: the ewe with
+        // a stack beside her comes out of it tame and in condition, the one
+        // without is wild and skin and bone.
+        let winter = first_winter_day();
+        let mut kept = tamed();
+        let mut left = tamed();
+        let mut stack = u32::from(crate::types::HAYSTACK_HOLDS) + 4;
+        let mut none = 0;
+        let (_, eaten) = kept.winter_through(Species::Sheep, crate::season::SEASON_DAYS, Some(winter), true, &mut stack);
+        left.winter_through(Species::Sheep, crate::season::SEASON_DAYS, Some(winter), true, &mut none);
+        assert!(kept.tame && kept.condition >= THRIVING, "a ewe with hay in reach went wild or thin: {kept:?}");
+        assert!(!left.tame, "a ewe left a winter with nothing to eat is still tame");
+        // A bite a day, give or take the quarter day it waits for.
+        assert!((8..=11).contains(&eaten), "a winter took {eaten} bites of hay, not about one a day");
+        assert_eq!(stack, u32::from(crate::types::HAYSTACK_HOLDS) + 4 - eaten);
+    }
+
+    #[test]
+    fn a_stack_is_not_touched_by_an_animal_that_is_not_yet_getting_hungry() {
+        let mut k = tamed();
+        let mut stack = 8;
+        k.winter_through(Species::Sheep, 0.75, Some(first_winter_day()), false, &mut stack);
+        assert_eq!(stack, 8, "a sheep fed this morning ate from the stack");
+        let mut wild = Keeping::wild();
+        wild.hunger = 3.0;
+        wild.winter_through(Species::Sheep, 1.0, None, false, &mut stack);
+        assert_eq!(stack, 8, "a wild sheep ate a player's hay");
+    }
+
+    #[test]
+    fn hay_is_fodder_for_a_sheep_and_a_horse_and_nothing_to_a_boar() {
+        use crate::types::BLOCK_HAY;
+        assert_eq!(ration(Species::Sheep, BLOCK_HAY), Some(Ration::Fodder));
+        assert_eq!(ration(Species::Horse, BLOCK_HAY), Some(Ration::Fodder));
+        assert_eq!(ration(Species::Boar, BLOCK_HAY), None);
+        assert!(!eats_hay(Species::Boar) && eats_hay(Species::Sheep));
+        let mut boar = Keeping::wild();
+        boar.tame = true;
+        boar.hunger = 2.0;
+        let mut stack = 8;
+        boar.winter_through(Species::Boar, 1.0, None, false, &mut stack);
+        assert_eq!(stack, 8, "a boar ate hay");
     }
 
     #[test]

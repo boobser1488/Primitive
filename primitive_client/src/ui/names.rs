@@ -889,6 +889,9 @@ pub const BLOCKS: &[Name] = &[
     Name { id: "corpse", en: "Body", simple: "Dead body", ru: "Тело", pl: "Ciało" },
     Name { id: "remains", en: "Remains", simple: "Old dead body", ru: "Останки", pl: "Szczątki" },
     Name { id: "set_down", en: "Set down", simple: "Thing on the ground", ru: "Положенный предмет", pl: "Położony przedmiot" },
+    // Winter feed. See `types::BLOCK_HAY`.
+    Name { id: "hay", en: "Hay", simple: "Dry grass for animals", ru: "Сено", pl: "Siano" },
+    Name { id: "haystack", en: "Haystack", simple: "Pile of hay", ru: "Стог сена", pl: "Stóg siana" },
 ];
 
 /// Every recipe, by `Recipe::name`, in `crafting::RECIPES`'s order.
@@ -1173,6 +1176,8 @@ pub const RECIPES: &[Name] = &[
     Name { id: "wax torch", en: "Wax torch", simple: "Torch with wax", ru: "Факел с воском", pl: "Pochodnia z woskiem" },
     Name { id: "wax rewad", en: "Rewrap with wax", simple: "New wax on a torch", ru: "Обмотка с воском", pl: "Owijka z woskiem" },
     Name { id: "cane rod", en: "Cane rod", simple: "Fishing rod from reed cane", ru: "Удочка из тростника", pl: "Wędka z trzciny" },
+    // Winter feed. See `types::BLOCK_HAYSTACK`.
+    Name { id: "haystack", en: "Haystack", simple: "Pile of hay", ru: "Стог сена", pl: "Stóg siana" },
 ];
 
 #[cfg(test)]

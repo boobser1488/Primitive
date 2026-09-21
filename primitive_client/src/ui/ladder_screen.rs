@@ -100,6 +100,7 @@ pub fn found_text(found: Found) -> Msg {
         Found::Hills => Msg::FoundHills,
         Found::DeepRock => Msg::FoundDeepRock,
         Found::Woods => Msg::FoundWoods,
+        Found::FarCountry => Msg::FoundFarCountry,
     }
 }
 

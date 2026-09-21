@@ -4193,6 +4193,19 @@ pub const RECIPES: &[Recipe] = &[
         returns: &[],
         failure: 0.0,
     },
+    // **A haystack is eight hay built up by hand**, with nothing else and
+    // nowhere in particular: the work was the cutting and the drying
+    // (`rack::HAY_SECONDS`), and a stack that wanted a bench or a cord would
+    // be a price on carrying it, not on making it. At the end of the table
+    // because a row's index is what the client sends.
+    Recipe {
+        name: "haystack",
+        inputs: &[(crate::types::BLOCK_HAY, crate::types::HAYSTACK_HOLDS as u32)],
+        output: (crate::types::BLOCK_HAYSTACK, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
 ];
 
 /// Why a craft cannot happen, or that it can.

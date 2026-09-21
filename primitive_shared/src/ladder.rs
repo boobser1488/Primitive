@@ -103,6 +103,14 @@ pub enum Found {
     DeepRock,
     /// Standing timber.
     Woods,
+    /// **A country of its own, far from home**: tin, which is in districts
+    /// none of which is within a few hundred blocks of where a player wakes
+    /// up (`worldgen`'s `far_tin_country`). Its own place and not the
+    /// riverbank the stream tin lies on, because "by the river" sent a
+    /// player to the river beside their camp -- and in a world with landforms
+    /// that river has no tin in it. What the page can honestly say is that
+    /// the bronze age is a journey.
+    FarCountry,
 }
 
 /// One rung of the ladder.
@@ -175,7 +183,7 @@ pub const LADDER: [Rung; 7] = [
         // whose fifth row said "one more thing, and we will not say what"
         // would be the wiki-in-another-tab the book exists to avoid.
         wants: &[BLOCK_TIN_ORE, BLOCK_COPPER_INGOT, BLOCK_VESSEL, BLOCK_MOULD],
-        found: Found::Riverbank,
+        found: Found::FarCountry,
     },
     Rung {
         age: Age::Iron,
@@ -358,7 +366,7 @@ mod tests {
         assert_eq!(standing_on(&held).map(|r| r.age), Some(Age::Copper));
         let next = working_towards(&held).expect("bronze is above copper");
         assert_eq!(next.age, Age::Bronze);
-        assert_eq!(next.found, Found::Riverbank, "tin is panned, not quarried");
+        assert_eq!(next.found, Found::FarCountry, "the page does not say tin is a journey");
         let to_find: Vec<BlockId> = next.still_to_find(&held).collect();
         assert!(to_find.contains(&BLOCK_TIN_ORE), "the bronze rung did not say what it is short of");
         assert!(!to_find.contains(&BLOCK_COPPER_INGOT), "a thing already held was listed as still to find");
