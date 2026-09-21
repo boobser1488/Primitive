@@ -241,7 +241,15 @@ impl StationScreen {
         // The shut screen's game is nobody's, and nothing is drawn: the
         // anvil's shape stands in so the number is never a division by an
         // extent of zero.
-        layout.fit(extent_for(self.open.as_ref().map_or(Game::Anvil, |open| open.game)))
+        //
+        // Grown by the one number the pack and the chest are, so a job
+        // row's writing is the pack's writing -- see
+        // `widgets::screen_growth`. It used to ask about its own small
+        // shape and came out as big as the pack while being a third of it.
+        layout.no_more_than(
+            widgets::screen_growth(layout),
+            extent_for(self.open.as_ref().map_or(Game::Anvil, |open| open.game)),
+        )
     }
 
     /// Which job is under the cursor, if any. Exposed for the tests, which
@@ -617,8 +625,15 @@ impl Panel {
         let height = (heading + list.max(run) + footing).min(PANEL_HALF_HEIGHT * 2.0);
 
         let frame = Rect::centred(0.0, 0.0, PANEL_HALF_WIDTH * 2.0, height);
-        let title_top = frame.y1 - PAD - widgets::cell_height(TITLE_SCALE);
-        let rows_top = title_top - ROWS_UNDER_TITLE;
+        // **The top of the heading, which is where a glyph hangs from.** It
+        // was measured as `frame.y1 - PAD - cell_height`, the heading's
+        // *foot*, and then the text was hung from it: the word sat a whole
+        // line lower than the room made for it, with `PAD + cell` of empty
+        // slab above and its descenders on the first job row's edge. The
+        // heading band is the same height either way; only which end of it
+        // the word is hung from changed.
+        let title_top = frame.y1 - PAD;
+        let rows_top = title_top - widgets::cell_height(TITLE_SCALE) - ROWS_UNDER_TITLE;
         let close = Rect::new(
             frame.x1 - PAD - CLOSE_WIDTH,
             frame.y0 + PAD,

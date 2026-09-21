@@ -1366,6 +1366,7 @@ async fn a_bed_is_put_down_as_two_cells_and_broken_as_one() {
         if let Some(text) = client
             .wait_for(1, |m| match m {
                 ServerMessage::Error(text) => Some(text.clone()),
+                ServerMessage::Notice { what } => Some(format!("{what:?}")),
                 _ => None,
             })
             .await
@@ -1447,11 +1448,12 @@ async fn a_door_is_hung_as_two_cells_swung_as_one_and_broken_as_one() {
     let refusal = client
         .wait_for(30, |m| match m {
             ServerMessage::Error(text) => Some(text.clone()),
+            ServerMessage::Notice { what } => Some(format!("{what:?}")),
             _ => None,
         })
         .await;
     assert!(
-        refusal.as_deref().is_some_and(|text| text.contains("door")),
+        refusal.as_deref().is_some_and(|text| text.contains("Door")),
         "a door under a stone was not refused for its top half: {refusal:?}"
     );
     assert_eq!(server.block_at(at.0, at.1, at.2), Some(BLOCK_AIR), "half a door was hung under a stone");
@@ -1463,6 +1465,7 @@ async fn a_door_is_hung_as_two_cells_swung_as_one_and_broken_as_one() {
     let refusal = client
         .wait_for(30, |m| match m {
             ServerMessage::Error(text) => Some(text.clone()),
+            ServerMessage::Notice { what } => Some(format!("{what:?}")),
             _ => None,
         })
         .await;

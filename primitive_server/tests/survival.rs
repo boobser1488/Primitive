@@ -561,6 +561,7 @@ async fn placing_without_the_block_is_refused() {
     let refused = client
         .wait_for(|m| match m {
             ServerMessage::Error(text) => Some(text.clone()),
+            ServerMessage::Notice { what } => Some(format!("{what:?}")),
             _ => None,
         })
         .await
@@ -586,7 +587,7 @@ async fn an_unknown_recipe_is_refused_rather_than_crashing_the_server() {
         })
         .await;
     client
-        .wait_for(|m| matches!(m, ServerMessage::Error(_)).then_some(()))
+        .wait_for(|m| matches!(m, ServerMessage::Error(_) | ServerMessage::Notice { .. }).then_some(()))
         .await
         .expect("no answer to a nonsense recipe");
 

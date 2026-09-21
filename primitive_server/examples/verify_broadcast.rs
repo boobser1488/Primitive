@@ -401,11 +401,13 @@ async fn main() -> anyhow::Result<()> {
     let refusal = alice
         .wait_for("the refusal", |msg| match msg {
             ServerMessage::Error(text) => Some(text.clone()),
+            // A refusal is a code now (`notice`); its name is what is checked.
+            ServerMessage::Notice { what } => Some(format!("{what:?}")),
             _ => None,
         })
         .await?;
     anyhow::ensure!(
-        refusal.contains("inside"),
+        refusal.contains("Inside"),
         "expected a 'can't place inside' refusal, got: {refusal}"
     );
     println!("  refused: {refusal}");
@@ -565,6 +567,9 @@ async fn main() -> anyhow::Result<()> {
                         Some(text.clone())
                     }
                     ServerMessage::Error(text) if text.contains("plugin") => Some(text.clone()),
+                    ServerMessage::Notice { what: primitive_shared::notice::Notice::PluginRefused } => {
+                        Some("PluginRefused".to_string())
+                    }
                     _ => None,
                 }),
             )

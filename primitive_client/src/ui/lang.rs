@@ -31,7 +31,8 @@
 //! Block, item and recipe names. Those are identifiers in `blocks.toml`,
 //! in save files and on the wire, and their translations are a table of
 //! their own keyed by the identifier: `ui::names`, which says why it is
-//! not rows here. Biome names are still only identifiers.
+//! not rows here. Biome names and the causes of a death are tables there
+//! too, for the same reason: `names::biome`, `names::death_cause`.
 
 use serde::{Deserialize, Serialize};
 
@@ -1634,6 +1635,83 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::Notice(Notice::SeaWaterIsSalt), en: "the sea is salt, and you are thirstier for it", simple: "sea water makes you more thirsty, not less", ru: "море солёное -- от него пить хочется сильнее", pl: "morze jest słone -- po nim pragnienie jest większe" },
     Line { msg: Msg::Notice(Notice::StaleWater), en: "the water is stale, and it sits badly", simple: "this water is old -- it will make you ill", ru: "вода затхлая, и она ещё аукнется", pl: "woda jest zastała i odbije się czkawką" },
     Line { msg: Msg::Notice(Notice::RaftNeedsOpenWater), en: "a raft needs open water: three blocks long, two wide, and deep enough to float", simple: "a raft needs open water - three blocks long, two wide, and deep enough", ru: "плоту нужна чистая вода: три блока в длину, два в ширину и достаточно глубоко", pl: "tratwa potrzebuje otwartej wody: trzy bloki długości, dwa szerokości i dość głęboko" },
+    // The rest of the English the server was sending. See `notice`.
+    Line { msg: Msg::Notice(Notice::EditPutBack), en: "the world put that back", simple: "that did not work", ru: "мир вернул всё как было", pl: "świat cofnął tę zmianę" },
+    Line { msg: Msg::Notice(Notice::PluginRefused), en: "a plugin refused that change", simple: "a mod stopped that", ru: "мод запретил это изменение", pl: "mod zablokował tę zmianę" },
+    Line { msg: Msg::Notice(Notice::NotInsideYourself), en: "you cannot place a block inside yourself", simple: "you are standing there", ru: "нельзя ставить блок в самого себя", pl: "nie można postawić bloku w sobie" },
+    Line { msg: Msg::Notice(Notice::NotInsideSomebody), en: "somebody is standing there", simple: "somebody is standing there", ru: "там кто-то стоит", pl: "ktoś tam stoi" },
+    Line { msg: Msg::Notice(Notice::NeedBetterTool), en: "you need a better tool for that", simple: "your tool is too weak for this", ru: "для этого нужен инструмент получше", pl: "do tego potrzeba lepszego narzędzia" },
+    Line { msg: Msg::Notice(Notice::NeedsSolidGround), en: "that needs solid ground under it", simple: "put it on solid ground", ru: "под этим нужна твёрдая земля", pl: "to potrzebuje twardego gruntu pod spodem" },
+    Line { msg: Msg::Notice(Notice::LeanToNeedsRoom), en: "a lean-to needs three by three cells of clear, level ground in front of you and room over them", simple: "a lean-to needs a flat, empty space three by three in front of you", ru: "шалашу нужно ровное свободное место три на три клетки перед вами и простор над ним", pl: "szałas potrzebuje równego, wolnego miejsca trzy na trzy przed tobą i przestrzeni nad nim" },
+    Line { msg: Msg::Notice(Notice::BedNeedsRoom), en: "a bed needs a second free cell on solid ground behind it", simple: "a bed needs one more free space on solid ground behind it", ru: "кровати нужна ещё одна свободная клетка на твёрдой земле позади", pl: "łóżko potrzebuje drugiej wolnej komórki na twardym gruncie za nim" },
+    Line { msg: Msg::Notice(Notice::RackNeedsRoom), en: "a drying rack needs two cells of clear ground and two of air over them", simple: "a drying rack needs two empty spaces on the ground and air above them", ru: "сушилке нужны две свободные клетки земли и две клетки воздуха над ними", pl: "suszarka potrzebuje dwóch wolnych komórek gruntu i dwóch komórek powietrza nad nimi" },
+    Line { msg: Msg::Notice(Notice::DoorNeedsRoom), en: "a door needs a free cell over it for its top half", simple: "a door needs an empty space above it", ru: "двери нужна свободная клетка сверху для верхней половины", pl: "drzwi potrzebują wolnej komórki nad sobą na górną połowę" },
+    Line { msg: Msg::Notice(Notice::TorchNeedsRoom), en: "a standing torch needs a free cell over it for its flame", simple: "a standing torch needs an empty space above it", ru: "стоячему факелу нужна свободная клетка сверху для пламени", pl: "stojąca pochodnia potrzebuje wolnej komórki nad sobą na płomień" },
+    Line { msg: Msg::Notice(Notice::DoesNotGoThere), en: "that does not go there", simple: "that does not fit there", ru: "это сюда не ставится", pl: "to tu nie pasuje" },
+    Line { msg: Msg::Notice(Notice::NotCarryingThat), en: "you are not carrying that", simple: "you do not have that", ru: "у вас этого нет", pl: "nie masz tego przy sobie" },
+    Line { msg: Msg::Notice(Notice::PastTheEdge), en: "that is past the edge of the world", simple: "you cannot build there", ru: "там край мира", pl: "tam jest krawędź świata" },
+    Line { msg: Msg::Notice(Notice::CannotMakeThat), en: "cannot make that", simple: "you cannot make that", ru: "это не сделать", pl: "nie da się tego zrobić" },
+    Line { msg: Msg::Notice(Notice::NotCarryingEnough), en: "you are not carrying enough of that", simple: "you do not have enough of that", ru: "у вас этого не хватает", pl: "nie masz tego dość" },
+    Line { msg: Msg::Notice(Notice::WallWantsMortar), en: "that wall is laid in mortar, and you have none", simple: "that wall needs mortar, and you have none", ru: "эта стена кладётся на раствор, а его у вас нет", pl: "ten mur kładzie się na zaprawie, a nie masz jej" },
+    Line { msg: Msg::Notice(Notice::WallFinished), en: "that wall is finished", simple: "that wall is as high as it goes", ru: "эта стена уже готова", pl: "ten mur jest już skończony" },
+    Line { msg: Msg::Notice(Notice::LiftStillWet), en: "the lift under it is still wet", simple: "the layer below is still wet -- wait", ru: "слой под ним ещё сырой", pl: "warstwa pod spodem jest jeszcze mokra" },
+    Line { msg: Msg::Notice(Notice::HeadArmourFell), en: "your head armour fell apart", simple: "your helmet broke", ru: "броня на голове развалилась", pl: "zbroja na głowie się rozpadła" },
+    Line { msg: Msg::Notice(Notice::ChestArmourFell), en: "your chest armour fell apart", simple: "your body armour broke", ru: "броня на груди развалилась", pl: "zbroja na piersi się rozpadła" },
+    Line { msg: Msg::Notice(Notice::LegsArmourFell), en: "your legs armour fell apart", simple: "your leg armour broke", ru: "броня на ногах развалилась", pl: "zbroja na nogach się rozpadła" },
+    Line { msg: Msg::Notice(Notice::FeetArmourFell), en: "your feet armour fell apart", simple: "your boots broke", ru: "броня на ступнях развалилась", pl: "zbroja na stopach się rozpadła" },
+    Line { msg: Msg::Notice(Notice::BackArmourFell), en: "your back armour fell apart", simple: "the thing on your back broke", ru: "броня на спине развалилась", pl: "zbroja na plecach się rozpadła" },
+    Line { msg: Msg::Notice(Notice::FlintShattered), en: "the flint shattered", simple: "the flint broke into useless bits", ru: "кремень раскололся", pl: "krzemień się rozprysnął" },
+    Line { msg: Msg::Notice(Notice::FlintsShattered), en: "{0} flints shattered", simple: "{0} flints broke into useless bits", ru: "раскололось кремней: {0}", pl: "rozprysło się krzemieni: {0}" },
+    Line { msg: Msg::Notice(Notice::TrunkScored), en: "this trunk has been scored: it has no more resin for now", simple: "this tree has no more resin for now", ru: "этот ствол уже подсечен: смолы пока больше нет", pl: "ten pień jest już nacięty: na razie nie ma więcej żywicy" },
+    Line { msg: Msg::Notice(Notice::BarrelHoldsWater), en: "there is water in the barrel", simple: "the barrel has water in it", ru: "в бочке вода", pl: "w beczce jest woda" },
+    Line { msg: Msg::Notice(Notice::BarrelHoldsGrain), en: "there is grain in the barrel", simple: "the barrel has grain in it", ru: "в бочке зерно", pl: "w beczce jest ziarno" },
+    Line { msg: Msg::Notice(Notice::BarrelHoldsOtherGrain), en: "the barrel holds another grain", simple: "the barrel has a different grain in it", ru: "в бочке другое зерно", pl: "w beczce jest inne ziarno" },
+    Line { msg: Msg::Notice(Notice::BarrelWantsFullJug), en: "a barrel is filled a full jug at a time", simple: "fill the jug all the way first", ru: "бочку наполняют только полным кувшином", pl: "beczkę napełnia się tylko pełnym dzbanem" },
+    Line { msg: Msg::Notice(Notice::OnlyGrainInBarrel), en: "only grain is kept in a barrel", simple: "a barrel is only for grain", ru: "в бочке хранят только зерно", pl: "w beczce trzyma się tylko ziarno" },
+    Line { msg: Msg::Notice(Notice::WrongCap), en: "the cap was the wrong one, and you know it now", simple: "that mushroom was bad -- you will be ill", ru: "гриб оказался не тот, и теперь вы это знаете", pl: "to był nie ten grzyb i teraz już to wiesz" },
+    Line { msg: Msg::Notice(Notice::MeatTurned), en: "it had turned, and it sits badly", simple: "that food was rotten -- you will be ill", ru: "оно протухло, и это ещё аукнется", pl: "to było zepsute i odbije się czkawką" },
+    Line { msg: Msg::Notice(Notice::RawFlesh), en: "raw flesh, and your stomach says so", simple: "raw meat -- you will be ill", ru: "сырое мясо, и желудок это чувствует", pl: "surowe mięso i żołądek to czuje" },
+    Line { msg: Msg::Notice(Notice::NothingItWouldHelp), en: "nothing there that this would help", simple: "this does not help any wound there", ru: "там нет ничего, чему бы это помогло", pl: "nie ma tam nic, czemu by to pomogło" },
+    Line { msg: Msg::Notice(Notice::EdgeAlreadySharp), en: "that edge is already sharp", simple: "that blade is already sharp", ru: "это лезвие и так острое", pl: "to ostrze jest już ostre" },
+    Line { msg: Msg::Notice(Notice::ShortOfMaterials), en: "you are short of what that takes", simple: "you do not have everything for that", ru: "не хватает того, что для этого нужно", pl: "brakuje tego, czego to wymaga" },
+    Line { msg: Msg::Notice(Notice::NoRoomForIt), en: "no room for what that would make", simple: "no space in your pack for what it makes", ru: "некуда положить то, что получится", pl: "nie ma miejsca na to, co powstanie" },
+    Line { msg: Msg::Notice(Notice::StruckEarly), en: "you struck before the marker moved", simple: "you hit too soon", ru: "удар раньше, чем пошла метка", pl: "uderzenie, zanim ruszył znacznik" },
+    Line { msg: Msg::Notice(Notice::OutOfTurn), en: "those blows are out of turn", simple: "those hits were in the wrong order", ru: "удары не по порядку", pl: "uderzenia nie po kolei" },
+    Line { msg: Msg::Notice(Notice::Rushed), en: "no hand strikes that fast", simple: "that was too fast to be real", ru: "так быстро рука не бьёт", pl: "żadna ręka nie bije tak szybko" },
+    Line { msg: Msg::Notice(Notice::RunNotYet), en: "that run has not happened yet", simple: "that has not happened yet", ru: "этой работы ещё не было", pl: "tej pracy jeszcze nie było" },
+    Line { msg: Msg::Notice(Notice::CastShort), en: "the line came down short of the water", simple: "the line did not reach the water", ru: "леска не долетела до воды", pl: "żyłka nie doleciała do wody" },
+    Line { msg: Msg::Notice(Notice::TooShallowToFish), en: "too shallow: the float would lie on the bottom", simple: "the water is too shallow to fish", ru: "слишком мелко: поплавок ляжет на дно", pl: "za płytko: spławik legnie na dnie" },
+    Line { msg: Msg::Notice(Notice::NoFishHere), en: "no fish live in water this small", simple: "no fish live in water this small", ru: "в такой маленькой воде рыба не живёт", pl: "w tak małej wodzie nie żyją ryby" },
+    Line { msg: Msg::Notice(Notice::FirepitWants), en: "a firepit is {0} sticks and {1} log lying on the ground ({2} sticks and {3} logs here)", simple: "a firepit needs {0} sticks and {1} log on the ground (here: {2} sticks, {3} logs)", ru: "костровище -- это палки ({0}) и бревно ({1}) на земле (здесь палок: {2}, брёвен: {3})", pl: "palenisko to patyki ({0}) i kłoda ({1}) na ziemi (tu patyków: {2}, kłód: {3})" },
+    Line { msg: Msg::Notice(Notice::NoRaftThere), en: "there is no raft there", simple: "there is no raft there", ru: "там нет плота", pl: "tam nie ma tratwy" },
+    Line { msg: Msg::Notice(Notice::SomebodyAtOars), en: "somebody is already at the oars", simple: "somebody else is rowing", ru: "на вёслах уже кто-то есть", pl: "ktoś już siedzi przy wiosłach" },
+    Line { msg: Msg::Notice(Notice::PitNeedsFloor), en: "the pit needs solid earth or stone under it", simple: "the pit needs earth or stone under it", ru: "яме нужна твёрдая земля или камень снизу", pl: "dół potrzebuje twardej ziemi lub kamienia pod spodem" },
+    Line { msg: Msg::Notice(Notice::PitOpenAtSide), en: "the pit is open at the side: dig it one block deep, with earth or stone on all four sides", simple: "the pit has a hole in its side: dig it one block deep with earth or stone all round", ru: "яма открыта сбоку: выройте её на блок вглубь, с землёй или камнем со всех четырёх сторон", pl: "dół jest otwarty z boku: wykop go na jeden blok, z ziemią lub kamieniem ze wszystkich czterech stron" },
+    Line { msg: Msg::Notice(Notice::PitSmothered), en: "something is lying on the pit and smothers the fire", simple: "something on top of the pit puts the fire out", ru: "на яме что-то лежит и душит огонь", pl: "coś leży na dole i dusi ogień" },
+    Line { msg: Msg::Notice(Notice::TakePotteryOut), en: "take the fired pottery out of the pit first", simple: "take the finished pots out first", ru: "сначала достаньте обожжённую посуду", pl: "najpierw wyjmij wypaloną ceramikę" },
+    Line { msg: Msg::Notice(Notice::PitHoldsFour), en: "a pit kiln holds four pieces of pottery", simple: "a pit kiln fits four pots", ru: "в яму для обжига входят четыре изделия", pl: "w dole do wypalania mieszczą się cztery naczynia" },
+    Line { msg: Msg::Notice(Notice::PitFibreFirst), en: "{0} fibre go over the pottery first, then {1} logs, then it is lit", simple: "put {0} fibre on the pots first, then {1} logs, then light it", ru: "сначала на посуду волокно ({0}), потом брёвна ({1}), потом поджечь", pl: "najpierw włókno ({0}) na ceramikę, potem kłody ({1}), potem podpalić" },
+    Line { msg: Msg::Notice(Notice::PitFibrePacked), en: "the fibre is packed in: {0} logs go on top now", simple: "the fibre is in: now put {0} logs on top", ru: "волокно уложено: теперь сверху брёвна ({0})", pl: "włókno ułożone: teraz kłody na wierzch ({0})" },
+    Line { msg: Msg::Notice(Notice::PitFibreBeforeLogs), en: "the pit needs {0} fibre before the logs go on ({1} now)", simple: "the pit needs {0} fibre before the logs ({1} now)", ru: "до брёвен в яме нужно волокна: {0} (сейчас {1})", pl: "przed kłodami dół potrzebuje włókna: {0} (teraz {1})" },
+    Line { msg: Msg::Notice(Notice::PitLitWithFibreAndLogs), en: "a pit kiln is lit with {0} fibre and {1} logs in it ({2} fibre, 0 logs now)", simple: "a pit kiln needs {0} fibre and {1} logs before lighting ({2} fibre, 0 logs now)", ru: "яму поджигают с волокном ({0}) и брёвнами ({1}) (сейчас волокна: {2}, брёвен: 0)", pl: "dół podpala się z włóknem ({0}) i kłodami ({1}) (teraz włókna: {2}, kłód: 0)" },
+    Line { msg: Msg::Notice(Notice::PitFull), en: "the pit kiln is full: strike it with flint to light it", simple: "the pit kiln is ready: hit it with flint to light it", ru: "яма для обжига заполнена: чиркните кремнём, чтобы поджечь", pl: "dół do wypalania jest pełny: uderz krzemieniem, by podpalić" },
+    Line { msg: Msg::Notice(Notice::PitLitWithLogs), en: "a pit kiln is lit with {0} logs on it ({1} now)", simple: "a pit kiln needs {0} logs on it before lighting ({1} now)", ru: "яму поджигают с брёвнами сверху: {0} (сейчас {1})", pl: "dół podpala się z kłodami na wierzchu: {0} (teraz {1})" },
+    Line { msg: Msg::Notice(Notice::PitLogs), en: "{0} of {1} logs on the pit kiln", simple: "{0} of {1} logs on the pit kiln", ru: "брёвен на яме: {0} из {1}", pl: "kłód na dole: {0} z {1}" },
+    Line { msg: Msg::Notice(Notice::PitBurning), en: "the pit kiln is burning: {0} minutes until the pottery is fired", simple: "the pit kiln is burning: {0} minutes to go", ru: "яма для обжига горит: до готовности посуды {0} мин", pl: "dół do wypalania się pali: do wypalenia {0} min" },
+    Line { msg: Msg::Notice(Notice::RainOnPit), en: "it is raining on the pit: a pit kiln in the open goes out in the rain", simple: "it is raining: a pit kiln without a roof goes out", ru: "на яму идёт дождь: под открытым небом обжиг гаснет", pl: "pada na dół: dół pod gołym niebem gaśnie w deszczu" },
+    Line { msg: Msg::Notice(Notice::NothingToFire), en: "there is nothing in the pit to fire", simple: "the pit is empty", ru: "в яме нечего обжигать", pl: "w dole nie ma nic do wypalenia" },
+    Line { msg: Msg::Notice(Notice::PitAlight), en: "the pit kiln is alight: in an hour the pottery is fired", simple: "the pit kiln is lit: the pots are done in an hour", ru: "яма для обжига горит: через час посуда будет готова", pl: "dół do wypalania płonie: za godzinę ceramika będzie gotowa" },
+    Line { msg: Msg::Notice(Notice::PileNeedsFloor), en: "a log pile needs an empty cell with a floor under it", simple: "a log pile needs an empty space with ground under it", ru: "поленнице нужна пустая клетка с полом снизу", pl: "stos kłód potrzebuje pustej komórki z podłożem pod spodem" },
+    Line { msg: Msg::Notice(Notice::PileOpen), en: "the pile is burning open to the air: cover every face with earth or stone, or it burns to ash", simple: "the pile is burning in the open: cover every side with earth or stone, or it turns to ash", ru: "поленница горит на воздухе: закройте каждую грань землёй или камнем, иначе всё сгорит в золу", pl: "stos pali się na powietrzu: zakryj każdą ścianę ziemią lub kamieniem, inaczej spłonie na popiół" },
+    Line { msg: Msg::Notice(Notice::CharcoalBurning), en: "the charcoal pit is burning: {0} minutes to go", simple: "the charcoal pit is burning: {0} minutes to go", ru: "углежогная яма горит: ещё {0} мин", pl: "mielerz się pali: jeszcze {0} min" },
+    Line { msg: Msg::Notice(Notice::PileHolds), en: "a log pile holds {0} logs", simple: "a log pile fits {0} logs", ru: "в поленницу входит брёвен: {0}", pl: "stos mieści kłód: {0}" },
+    Line { msg: Msg::Notice(Notice::PileAlight), en: "the log pile is alight: cover it within {0} seconds, every face, or it burns to ash", simple: "the log pile is lit: cover every side within {0} seconds, or it turns to ash", ru: "поленница загорелась: закройте все грани за {0} с, иначе всё сгорит в золу", pl: "stos się zapalił: zakryj każdą ścianę w ciągu {0} s, inaczej spłonie na popiół" },
+    Line { msg: Msg::Notice(Notice::RichSoilWatered), en: "this is rich soil, and water is close by", simple: "good soil, and water is near", ru: "земля здесь жирная, и вода рядом", pl: "ziemia jest tu żyzna, a woda blisko" },
+    Line { msg: Msg::Notice(Notice::RichSoilDry), en: "this is rich soil, but there is no water close by", simple: "good soil, but no water near", ru: "земля здесь жирная, но воды рядом нет", pl: "ziemia jest tu żyzna, ale w pobliżu nie ma wody" },
+    Line { msg: Msg::Notice(Notice::ThinSoilWatered), en: "this soil is thin, but water is close by", simple: "poor soil, but water is near", ru: "земля здесь тощая, но вода рядом", pl: "ziemia jest tu jałowa, ale woda blisko" },
+    Line { msg: Msg::Notice(Notice::ThinSoilDry), en: "this soil is thin, and there is no water close by", simple: "poor soil, and no water near", ru: "земля здесь тощая, и воды рядом нет", pl: "ziemia jest tu jałowa i w pobliżu nie ma wody" },
+    Line { msg: Msg::Notice(Notice::SoilWatered), en: "water is close by", simple: "water is near", ru: "вода рядом", pl: "woda jest blisko" },
+    Line { msg: Msg::Notice(Notice::SoilDry), en: "there is no water close by", simple: "no water near", ru: "воды рядом нет", pl: "w pobliżu nie ma wody" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as
@@ -1717,9 +1795,44 @@ pub fn counted(language: Language, n: u64, msg: Msg) -> &'static str {
     forms[form_of(language, n)]
 }
 
+/// A notice with its numbers put in: the row's `{0}`, `{1}` replaced in
+/// order by what the server counted (`notice::Said`).
+///
+/// **Positional rather than one `{}` after another**, because the four
+/// languages do not put the numbers in the same order -- "3 of 6 logs" is
+/// "брёвен на яме: 3 из 6" -- and a row has to be free to say them where its
+/// grammar wants them. The rows name the noun around a number rather than
+/// declining it ("брёвен: 4"), which is what lets one row serve every count.
+pub fn said(language: Language, said: &primitive_shared::notice::Said) -> String {
+    let mut text = language.text(Msg::Notice(said.what)).to_string();
+    for (index, number) in said.numbers.iter().enumerate() {
+        text = text.replace(&format!("{{{index}}}"), &number.to_string());
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A number the English row says is a number every row says**, in
+    /// the same slots. A translation that dropped `{1}` would tell a Polish
+    /// player the pit wants logs without saying how many; one that added a
+    /// `{2}` the server never sends would print the braces.
+    #[test]
+    fn every_language_says_the_same_numbers_in_a_notice() {
+        let slots = |text: &str| (0..8).filter(|i| text.contains(&format!("{{{i}}}"))).collect::<Vec<_>>();
+        for &notice in Notice::ALL {
+            let english = slots(Language::English.text(Msg::Notice(notice)));
+            for &language in Language::ALL {
+                let text = language.text(Msg::Notice(notice));
+                assert_eq!(slots(text), english, "{language:?} says other numbers than English in {notice:?}: {text}");
+            }
+            // ...and filled, nothing of the braces is left.
+            let filled = said(Language::Russian, &primitive_shared::notice::Said::new(notice, &[7; 8]));
+            assert!(!filled.contains('{'), "{notice:?} left a placeholder: {filled}");
+        }
+    }
 
     /// Every character the interface can print has to have a glyph, or
     /// the word comes out as a row of boxes. This is the check that the

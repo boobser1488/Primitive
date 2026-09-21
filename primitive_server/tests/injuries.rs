@@ -232,7 +232,7 @@ async fn a_bandage_dropped_on_a_leg_with_no_cut_is_refused_and_kept() {
         .await;
     let said = client
         .wait_for(10, |m| match m {
-            ServerMessage::Error(text) if text.contains("bandage") => Some(text.clone()),
+            ServerMessage::Notice { what: primitive_shared::notice::Notice::NothingItWouldHelp } => Some(()),
             _ => None,
         })
         .await;
@@ -256,7 +256,7 @@ async fn a_bandage_dropped_on_a_leg_with_no_cut_is_refused_and_kept() {
         .await;
     let said = client
         .wait_for(10, |m| match m {
-            ServerMessage::Error(text) if text.contains("splint") => Some(()),
+            ServerMessage::Notice { what: primitive_shared::notice::Notice::NothingItWouldHelp } => Some(()),
             _ => None,
         })
         .await;

@@ -2720,6 +2720,20 @@ pub enum ServerMessage {
     Lightning {
         at: (f64, f64, f64),
     },
+    /// **A notice with numbers in it** (`notice::Said`): "3 of 6 logs on the
+    /// pit kiln", "4 flints shattered". `Notice` for everything that is only
+    /// words; this for the sentences that were `format!`ed in English on the
+    /// server.
+    ///
+    /// `to_log` is where it goes: the pit's progress -- a stage reached, a
+    /// log laid -- was a chat line and stays one, because it is news a player
+    /// may want to read back after the banner has gone; a refusal is the
+    /// banner, like every other refusal (`Error`'s arm on the client).
+    /// Appended, so it rides fifty-seven's bump.
+    Said {
+        said: crate::notice::Said,
+        to_log: bool,
+    },
 }
 
 /// Trims/sanitises a username before it's shown to other players or

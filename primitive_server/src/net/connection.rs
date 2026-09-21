@@ -547,7 +547,10 @@ async fn read_loop(
                     Verdict::Allow => {}
                     Verdict::Reject { reason, .. } => {
                         ctx.metrics.anticheat_flags.fetch_add(1, Ordering::Relaxed);
-                        handle.send(ServerMessage::Error(format!("edit refused: {reason}")));
+                        // The reason is for an operator and goes to the log; the
+                        // player is told the world put it back, in their words.
+                        eprintln!("[anticheat] {} edit refused: {reason}", handle.id);
+                        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::EditPutBack });
                         // Tell the client what's actually there, so a
                         // refused edit doesn't leave it desynced.
                         if let Some(actual) = ctx.world.cached_block(global_x, global_y, global_z) {
@@ -590,9 +593,7 @@ async fn read_loop(
                     hook_args,
                     Some(vec![(global_x, global_y, global_z)]),
                 ) {
-                    handle.send(ServerMessage::Error(
-                        "a plugin refused that change".to_string(),
-                    ));
+                    handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PluginRefused });
                     if let Some(actual) = ctx.world.cached_block(global_x, global_y, global_z) {
                         handle.send(ServerMessage::BlockUpdate(BlockChange {
                             global_x,
@@ -616,14 +617,16 @@ async fn read_loop(
                         global_z,
                         block_id,
                     ) {
-                        let who = if occupant.id == handle.id {
-                            "yourself".to_string()
-                        } else {
-                            occupant.username.clone()
-                        };
-                        handle.send(ServerMessage::Error(format!(
-                            "can't place a block inside {who}"
-                        )));
+                        // Not the other player's name: a refusal is about the
+                        // gesture, and a name is the one thing no row in the
+                        // client's tables could put into the player's language.
+                        handle.send(ServerMessage::Notice {
+                            what: if occupant.id == handle.id {
+                                primitive_shared::notice::Notice::NotInsideYourself
+                            } else {
+                                primitive_shared::notice::Notice::NotInsideSomebody
+                            },
+                        });
                         if let Some(actual) = ctx.world.cached_block(global_x, global_y, global_z) {
                             handle.send(ServerMessage::BlockUpdate(BlockChange {
                                 global_x,
@@ -662,9 +665,7 @@ async fn read_loop(
                     if target != BLOCK_AIR
                         && !primitive_shared::types::is_breakable_with(target, held)
                     {
-                        handle.send(ServerMessage::Error(
-                            "you need a better tool for that".to_string(),
-                        ));
+                        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NeedBetterTool });
                         continue;
                     }
                 }
@@ -690,9 +691,7 @@ async fn read_loop(
                         .cached_block(global_x + dx, global_y + dy, global_z + dz)
                         .unwrap_or(BLOCK_AIR);
                     if !primitive_shared::types::can_grow_on(block_id, holding) {
-                        handle.send(ServerMessage::Error(
-                            "that needs solid ground under it".to_string(),
-                        ));
+                        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NeedsSolidGround });
                         continue;
                     }
                 }
@@ -730,9 +729,7 @@ async fn read_loop(
                         }
                     }
                     if blocked {
-                        handle.send(ServerMessage::Error(
-                            "a lean-to needs three by three cells of clear, level ground in front of you and room over them".to_string(),
-                        ));
+                        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::LeanToNeedsRoom });
                         continue;
                     }
                 }
@@ -755,10 +752,7 @@ async fn read_loop(
                             .player_occupying_block(head_at.0, head_at.1, head_at.2, head)
                             .is_some();
                         if !free || occupied || !primitive_shared::types::can_grow_on(head, under) {
-                            handle.send(ServerMessage::Error(
-                                "a bed needs a second free cell on solid ground behind it"
-                                    .to_string(),
-                            ));
+                            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::BedNeedsRoom });
                             continue;
                         }
                     }
@@ -797,9 +791,7 @@ async fn read_loop(
                         }
                     }
                     if blocked {
-                        handle.send(ServerMessage::Error(
-                            "a drying rack needs two cells of clear ground and two of air over them".to_string(),
-                        ));
+                        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::RackNeedsRoom });
                         continue;
                     }
                 }
@@ -828,12 +820,12 @@ async fn read_loop(
                         .player_occupying_block(top_at.0, top_at.1, top_at.2, top)
                         .is_some();
                     if !free || occupied {
-                        let reason = if primitive_shared::types::is_door(block_id) {
-                            "a door needs a free cell over it for its top half"
+                        let what = if primitive_shared::types::is_door(block_id) {
+                            primitive_shared::notice::Notice::DoorNeedsRoom
                         } else {
-                            "a standing torch needs a free cell over it for its flame"
+                            primitive_shared::notice::Notice::TorchNeedsRoom
                         };
-                        handle.send(ServerMessage::Error(reason.to_string()));
+                        handle.send(ServerMessage::Notice { what });
                         continue;
                     }
                 }
@@ -854,9 +846,7 @@ async fn read_loop(
                     ) {
                         Some(verdict) => verdict,
                         None => {
-                            handle.send(ServerMessage::Error(
-                                "that does not go there".to_string(),
-                            ));
+                            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::DoesNotGoThere });
                             if let Some(actual) = was {
                                 handle.send(ServerMessage::BlockUpdate(BlockChange {
                                     global_x,
@@ -918,9 +908,7 @@ async fn read_loop(
                         }
                         primitive_shared::inventory::Wear::Broke => {
                             crate::send_inventory(&handle);
-                            handle.send(ServerMessage::Error(
-                                "your tool broke".to_string(),
-                            ));
+                            handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::ToolBroke });
                             crate::tool_broke(&ctx, handle.id, was_holding, tool_slot);
                         }
                     }
@@ -938,9 +926,7 @@ async fn read_loop(
                             == Some(primitive_shared::types::block_kind(block_id))
                     };
                     if !carrying {
-                        handle.send(ServerMessage::Error(
-                            "you are not carrying that".to_string(),
-                        ));
+                        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NotCarryingThat });
                         continue;
                     }
                 } else {
@@ -970,9 +956,7 @@ async fn read_loop(
                         }
                     };
                     if !spent {
-                        handle.send(ServerMessage::Error(
-                            "you are not carrying that".to_string(),
-                        ));
+                        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NotCarryingThat });
                         continue;
                     }
                     crate::send_inventory(&handle);
@@ -1001,7 +985,7 @@ async fn read_loop(
                     crate::unseal_ruin_chest(&ctx, (global_x, global_y, global_z));
                 }
                 if !ctx.world.set_block(global_x, global_y, global_z, written) {
-                    handle.send(ServerMessage::Error("block edit out of bounds".to_string()));
+                    handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PastTheEdge });
                     // The block was already taken out of the pack, so it
                     // has to go back in. Refusing after spending is how
                     // players quietly lose things. Nothing was spent on
@@ -1636,7 +1620,7 @@ async fn read_loop(
                 // already said so -- "cannot make that" on top of it
                 // would be two messages for one blow, and the wrong one.
                 if crafts.ran() == 0 {
-                    handle.send(ServerMessage::Error("cannot make that".to_string()));
+                    handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::CannotMakeThat });
                 }
             }
 
@@ -1945,7 +1929,10 @@ fn dig_one_slice(
         Verdict::Allow => {}
         Verdict::Reject { reason, .. } => {
             ctx.metrics.anticheat_flags.fetch_add(1, Ordering::Relaxed);
-            handle.send(ServerMessage::Error(format!("edit refused: {reason}")));
+            // The reason is for an operator and goes to the log; the
+                        // player is told the world put it back, in their words.
+                        eprintln!("[anticheat] {} edit refused: {reason}", handle.id);
+                        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::EditPutBack });
             handle.send(ServerMessage::BlockUpdate(BlockChange {
                 global_x,
                 global_y,
@@ -1970,9 +1957,7 @@ fn dig_one_slice(
         state.inventory.block_in(slot)
     };
     if !primitive_shared::types::is_breakable_with(target, held) {
-        handle.send(ServerMessage::Error(
-            "you need a better tool for that".to_string(),
-        ));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::NeedBetterTool });
         return;
     }
     // **The plugin's break hook fires on the first slice and not on the
@@ -1997,9 +1982,7 @@ fn dig_one_slice(
             Some(vec![(global_x, global_y, global_z)]),
         )
     {
-        handle.send(ServerMessage::Error(
-            "a plugin refused that change".to_string(),
-        ));
+        handle.send(ServerMessage::Notice { what: primitive_shared::notice::Notice::PluginRefused });
         handle.send(ServerMessage::BlockUpdate(BlockChange {
             global_x,
             global_y,
@@ -2065,8 +2048,8 @@ fn build_in_place(ctx: &Arc<Context>, handle: &Arc<PlayerHandle>, at: (i32, i32,
         return; // not loaded; nothing to build on
     };
     let under = ctx.world.cached_block(x, y - 1, z).unwrap_or(BLOCK_AIR);
-    let put_straight = |reason: &str| {
-        handle.send(ServerMessage::Error(reason.to_string()));
+    let put_straight = |what: primitive_shared::notice::Notice| {
+        handle.send(ServerMessage::Notice { what });
         handle.send(ServerMessage::BlockUpdate(BlockChange { global_x: x, global_y: y, global_z: z, block_id: target }));
     };
     let (slot, held, have, mortar) = {
@@ -2087,7 +2070,7 @@ fn build_in_place(ctx: &Arc<Context>, handle: &Arc<PlayerHandle>, at: (i32, i32,
         Err(reason) => return put_straight(reason),
     };
     if have < laid.spends {
-        return put_straight("you are not carrying enough of that");
+        return put_straight(primitive_shared::notice::Notice::NotCarryingEnough);
     }
     let verdict = {
         let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2097,7 +2080,8 @@ fn build_in_place(ctx: &Arc<Context>, handle: &Arc<PlayerHandle>, at: (i32, i32,
         Verdict::Allow => {}
         Verdict::Reject { reason, .. } => {
             ctx.metrics.anticheat_flags.fetch_add(1, Ordering::Relaxed);
-            return put_straight(&format!("edit refused: {reason}"));
+            eprintln!("[anticheat] {} edit refused: {reason}", handle.id);
+            return put_straight(primitive_shared::notice::Notice::EditPutBack);
         }
         Verdict::Kick(reason) => {
             ctx.metrics.anticheat_flags.fetch_add(1, Ordering::Relaxed);
@@ -2117,11 +2101,11 @@ fn build_in_place(ctx: &Arc<Context>, handle: &Arc<PlayerHandle>, at: (i32, i32,
         ],
         Some(vec![at]),
     ) {
-        return put_straight("a plugin refused that change");
+        return put_straight(primitive_shared::notice::Notice::PluginRefused);
     }
     // A course laid round somebody's ankles is a course laid inside them.
     if ctx.registry.player_occupying_block(x, y, z, laid.result).is_some() {
-        return put_straight("can't build inside somebody");
+        return put_straight(primitive_shared::notice::Notice::NotInsideSomebody);
     }
     // Spent before the write and given back if the write fails: the order the
     // placement path keeps, for its reason -- refusing after spending is how
@@ -2143,7 +2127,7 @@ fn build_in_place(ctx: &Arc<Context>, handle: &Arc<PlayerHandle>, at: (i32, i32,
         }
         if !mortared {
             std::mem::drop(state);
-            return put_straight("you are not carrying enough of that");
+            return put_straight(primitive_shared::notice::Notice::NotCarryingEnough);
         }
         state.inventory_dirty = true;
     }

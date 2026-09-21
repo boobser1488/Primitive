@@ -412,7 +412,7 @@ fn ui_snapshot() {
             &format!("{out}/{name}.png"),
             &death.build(font, language),
             font,
-            snapshot_layout().fit(crate::ui::death::EXTENT),
+            crate::ui::death::grow_by(snapshot_layout()),
         );
     }
 
@@ -2383,11 +2383,11 @@ fn ui_audit_snapshot() {
         // The death notice.
         {
             let mut death = crate::ui::death::DeathScreen::new();
-            death.open("fell from a great height".to_string());
+            death.open(crate::ui::names::death_cause("fell from a great height", language).into_owned());
             for _ in 0..40 {
                 death.tick(0.05);
             }
-            shot("death", &death.build(font, language), snapshot_layout().fit(crate::ui::death::EXTENT));
+            shot("death", &death.build(font, language), crate::ui::death::grow_by(snapshot_layout()));
         }
 
         // The whole HUD at once: every gauge in a bad state, a refusal, the

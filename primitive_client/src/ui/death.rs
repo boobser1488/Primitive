@@ -105,6 +105,14 @@ const SKIN: widgets::Theme = widgets::Theme {
 /// against this, so it cannot quietly stop being true.
 pub const EXTENT: (f32, f32) = (0.62, 0.52);
 
+/// How much bigger than authored the notice is drawn: the size every
+/// other centred screen is, stopped by the glass if it has to be. One
+/// definition, because the frame loop grows it by this and `place_cursor`
+/// divides a click by it. See `widgets::screen_growth`.
+pub fn grow_by(layout: widgets::Layout) -> f32 {
+    layout.no_more_than(widgets::screen_growth(layout), EXTENT)
+}
+
 const PANEL_WIDTH: f32 = 1.24;
 const PANEL_HEIGHT: f32 = 0.86;
 const BUTTON_WIDTH: f32 = 0.86;

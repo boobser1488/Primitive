@@ -409,6 +409,7 @@ async fn meat_cooks_beside_a_fire_and_nowhere_else() {
     let refusal = client
         .wait_for(|m| match m {
             ServerMessage::Error(text) => Some(text.clone()),
+            ServerMessage::Notice { what } => Some(format!("{what:?}")),
             _ => None,
         })
         .await;
@@ -433,6 +434,7 @@ async fn meat_cooks_beside_a_fire_and_nowhere_else() {
         client
             .wait_for(|m| match m {
                 ServerMessage::Error(text) => Some(text.clone()),
+                ServerMessage::Notice { what } => Some(format!("{what:?}")),
                 _ => None,
             })
             .await

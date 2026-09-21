@@ -281,13 +281,14 @@ pub enum Refusal {
 impl Refusal {
     /// What the player is told. In English here and translated on the way to
     /// the screen (`ui::lang`), like every other refusal on the wire.
-    pub fn note(self) -> &'static str {
+    pub fn note(self) -> crate::notice::Notice {
+        use crate::notice::Notice;
         match self {
-            Refusal::Count => "that is not a run",
-            Refusal::Early => "you struck before the marker moved",
-            Refusal::OutOfTurn => "those blows are out of turn",
-            Refusal::Rushed => "no hand strikes that fast",
-            Refusal::Ahead => "that run has not happened yet",
+            Refusal::Count => Notice::NotARun,
+            Refusal::Early => Notice::StruckEarly,
+            Refusal::OutOfTurn => Notice::OutOfTurn,
+            Refusal::Rushed => Notice::Rushed,
+            Refusal::Ahead => Notice::RunNotYet,
         }
     }
 }

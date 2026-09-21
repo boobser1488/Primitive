@@ -480,13 +480,12 @@ pub enum Breach {
 
 impl Breach {
     /// What the player is told.
-    pub fn says(self) -> &'static str {
+    pub fn says(self) -> crate::notice::Notice {
+        use crate::notice::Notice;
         match self {
-            Breach::Floor => "the pit needs solid earth or stone under it",
-            Breach::Wall => {
-                "the pit is open at the side: dig it one block deep, with earth or stone on all four sides"
-            }
-            Breach::Covered => "something is lying on the pit and smothers the fire",
+            Breach::Floor => Notice::PitNeedsFloor,
+            Breach::Wall => Notice::PitOpenAtSide,
+            Breach::Covered => Notice::PitSmothered,
         }
     }
 }

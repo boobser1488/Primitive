@@ -4200,17 +4200,19 @@ pub enum BarrelRefusal {
 }
 
 impl BarrelRefusal {
-    /// What the player is told, in the words every other refusal at a
-    /// barrel already uses (`ServerMessage::Error`).
-    pub fn words(self) -> &'static str {
+    /// What the player is told, as the code the client says in their
+    /// language (`notice`) -- the full and the empty barrel with the codes
+    /// the rest of the barrel's refusals already used.
+    pub fn notice(self) -> crate::notice::Notice {
+        use crate::notice::Notice;
         match self {
-            BarrelRefusal::Full => "the barrel is full",
-            BarrelRefusal::Empty => "the barrel is empty",
-            BarrelRefusal::HoldsWater => "there is water in the barrel",
-            BarrelRefusal::HoldsGrain => "there is grain in the barrel",
-            BarrelRefusal::HoldsOtherGoods => "the barrel holds another grain",
-            BarrelRefusal::JugNotFull => "a barrel is filled a full jug at a time",
-            BarrelRefusal::NotForABarrel => "only grain is kept in a barrel",
+            BarrelRefusal::Full => Notice::BarrelFull,
+            BarrelRefusal::Empty => Notice::BarrelEmpty,
+            BarrelRefusal::HoldsWater => Notice::BarrelHoldsWater,
+            BarrelRefusal::HoldsGrain => Notice::BarrelHoldsGrain,
+            BarrelRefusal::HoldsOtherGoods => Notice::BarrelHoldsOtherGrain,
+            BarrelRefusal::JugNotFull => Notice::BarrelWantsFullJug,
+            BarrelRefusal::NotForABarrel => Notice::OnlyGrainInBarrel,
         }
     }
 }

@@ -5876,12 +5876,16 @@ fn run(
                         weather: weather.name(),
                         falling: falling_on(&worldgen, &sky, weather, player.position).0,
                         heat,
-                        biome: worldgen
-                            .biome_at(
+                        // In the player's language: the one line of this
+                        // panel a player reads for the game rather than
+                        // for a bug report.
+                        biome: ui::names::biome(
+                            worldgen.biome_at(
                                 player.position.x.floor() as i32,
                                 player.position.z.floor() as i32,
-                            )
-                            .name(),
+                            ),
+                            settings.language,
+                        ),
                         latitude: worldgen.latitude_degrees(player.position.z.floor() as i32),
                         particles: particles.len(),
                         audio: audio.status(),
@@ -6443,7 +6447,7 @@ fn run(
                             widgets::scale_about(
                                 &mut ui_vertices[from..],
                                 widgets::anchor::CENTRE(ui_aspect),
-                                layout.fit(death::EXTENT),
+                                death::grow_by(layout),
                             );
                         }
                     }
@@ -7109,7 +7113,7 @@ fn place_cursor(
     if in_menu {
         menu.set_cursor(at);
     } else if death.is_open() {
-        death.set_cursor(into(layout.fit(death::EXTENT)));
+        death.set_cursor(into(death::grow_by(layout)));
     } else if station_screen.is_open() {
         station_screen.set_cursor(into(station_screen.grow_by(layout)));
     } else if chest_screen.is_open() {
@@ -8968,6 +8972,21 @@ fn drain_network(
                     station_screen.run_refused();
                 }
                 *notice = Some((language.text(ui::lang::Msg::Notice(what)).to_string(), Instant::now()));
+            }
+
+            // The same, with the numbers it counts. A pit's progress goes to
+            // the log, where it always went; a refusal to the banner, where
+            // every refusal goes. See `ServerMessage::Said`.
+            ServerMessage::Said { said, to_log } => {
+                let text = ui::lang::said(language, &said);
+                if to_log {
+                    chat.note(&text, Instant::now());
+                } else {
+                    if !said.what.is_news() {
+                        station_screen.run_refused();
+                    }
+                    *notice = Some((text, Instant::now()));
+                }
             }
 
             // A stall said no. In words, where every refusal lands.

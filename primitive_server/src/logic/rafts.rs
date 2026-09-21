@@ -233,12 +233,12 @@ impl Rafts {
     }
 
     /// Gives the oars to a player, if nobody else has them.
-    pub fn take_oars(&mut self, id: EntityId, player: PlayerId) -> Result<(), &'static str> {
+    pub fn take_oars(&mut self, id: EntityId, player: PlayerId) -> Result<(), primitive_shared::notice::Notice> {
         let Some(raft) = self.rafts.iter_mut().find(|raft| raft.id == id) else {
-            return Err("there is no raft there");
+            return Err(primitive_shared::notice::Notice::NoRaftThere);
         };
         match raft.rower {
-            Some(other) if other != player => Err("somebody is already at the oars"),
+            Some(other) if other != player => Err(primitive_shared::notice::Notice::SomebodyAtOars),
             _ => {
                 raft.rower = Some(player);
                 raft.oars = Oars::REST;
@@ -676,7 +676,7 @@ pub(crate) fn use_raft(
     };
     let body = match taken {
         Err(why) => {
-            handle.send(ServerMessage::Error(why.to_string()));
+            handle.send(ServerMessage::Notice { what: why });
             return;
         }
         Ok(None) => return,
