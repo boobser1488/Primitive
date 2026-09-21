@@ -440,6 +440,10 @@ pub struct InventoryScreen {
     /// Which rung the path page is reading out. See
     /// `ui::ladder_screen::LadderScreen`.
     path: crate::ui::ladder_screen::LadderScreen,
+    /// Whether presses come from a finger. See `set_touch`.
+    touch: bool,
+    /// The recipe a finger has read and not yet made. See `set_touch`.
+    chosen: Option<usize>,
 }
 
 impl InventoryScreen {
@@ -450,6 +454,7 @@ impl InventoryScreen {
     pub fn close(&mut self) {
         self.open = false;
         self.release();
+        self.chosen = None;
     }
 
     fn release(&mut self) {
@@ -510,6 +515,27 @@ impl InventoryScreen {
         self.cursor = cursor;
     }
 
+    /// Whether presses on this screen come from a finger.
+    ///
+    /// **On glass the first tap on a recipe reads it and the second makes
+    /// it.** A mouse points before it presses, so the tooltip -- the name,
+    /// and what it spends -- is on screen before the click is. A finger
+    /// has no pointing: the tap *was* the first the screen heard of it, so
+    /// a recipe cell crafted on contact and the player learned what a
+    /// picture meant by spending the materials on it. The first tap now
+    /// only puts the cursor there (which raises the same tooltip a mouse
+    /// gets) and remembers the recipe; a tap on that same recipe makes it,
+    /// and every tap after that makes another, so making five is still
+    /// five taps and not ten.
+    ///
+    /// Rejected: a long press to read. A rest is already the secondary
+    /// chord (make as many as possible, see `platform::touch::Chord`), and
+    /// "hold to find out what this is" is a gesture nobody tries on a
+    /// thing that looks like a button.
+    pub fn set_touch(&mut self, touch: bool) {
+        self.touch = touch;
+    }
+
     /// Whether the player is standing beside a lit fire.
     ///
     /// State on the screen rather than an argument threaded through
@@ -559,6 +585,10 @@ impl InventoryScreen {
     /// undone by the next snapshot -- visibly, as a stack jumping back.
     pub fn click(&mut self, inventory: &Inventory, button: Button, quick: bool) -> Option<Intent> {
         let cursor = self.cursor?;
+        // Taken here so that a press on anything else forgets it: a player
+        // who read a recipe, went to move a stack and came back has to
+        // read it again rather than find a stale choice making something.
+        let chosen = self.chosen.take();
 
         // Before everything: the way out. A tap anywhere off the panel is
         // what a thumb can hit, and it is the gesture this kind of screen
@@ -623,6 +653,13 @@ impl InventoryScreen {
         // "outside the grid, cancel" path and the menu never responds.
         if let Some(recipe) = recipe_at(cursor, self.recipe_scroll, inventory) {
             self.release();
+            // A finger reads first; see `set_touch`. Kept by recipe, not
+            // by cell, so a list that shifts under the thumb after a craft
+            // cannot turn "the same place" into a different recipe.
+            self.chosen = Some(recipe);
+            if self.touch && chosen != Some(recipe) {
+                return None;
+            }
             return Some(Intent::Craft {
                 index: recipe,
                 times: match button {
@@ -4133,6 +4170,58 @@ mod tests {
         let inventory = stocked();
         screen.open_at(None);
         assert_eq!(screen.click(&inventory, Button::Left, false), None);
+    }
+
+    #[test]
+    fn on_glass_the_first_tap_on_a_recipe_reads_it_and_the_second_makes_it() {
+        let mut screen = InventoryScreen::new();
+        screen.set_touch(true);
+        let inventory = with_something_to_make();
+        screen.open = true;
+        let (index, row) = first_offered(&inventory);
+        // The same point the drawing puts the cell at: the tap that reads
+        // it has to be the one the tooltip then answers.
+        screen.set_cursor(Some((row.centre_x(), row.centre_y())));
+        assert_eq!(
+            screen.click(&inventory, Button::Left, false),
+            None,
+            "the first tap on a recipe made it before its name was ever shown"
+        );
+        assert_eq!(
+            recipe_at((row.centre_x(), row.centre_y()), 0, &inventory),
+            Some(index),
+            "the tooltip under the tap is not the recipe the tap chose"
+        );
+        assert_eq!(
+            screen.click(&inventory, Button::Left, false),
+            Some(Intent::Craft { index, times: 1 })
+        );
+        assert_eq!(
+            screen.click(&inventory, Button::Left, false),
+            Some(Intent::Craft { index, times: 1 }),
+            "making a second one should not need reading it again"
+        );
+
+        // A tap somewhere else forgets the choice.
+        screen.set_cursor(Some(centre_of(0)));
+        screen.click(&inventory, Button::Left, false);
+        screen.release();
+        screen.set_cursor(Some((row.centre_x(), row.centre_y())));
+        assert_eq!(screen.click(&inventory, Button::Left, false), None);
+    }
+
+    #[test]
+    fn with_a_mouse_one_click_on_a_recipe_still_makes_it() {
+        let mut screen = InventoryScreen::new();
+        let inventory = with_something_to_make();
+        screen.open = true;
+        let (index, row) = first_offered(&inventory);
+        screen.set_cursor(Some((row.centre_x(), row.centre_y())));
+        assert_eq!(
+            screen.click(&inventory, Button::Left, false),
+            Some(Intent::Craft { index, times: 1 }),
+            "the read-first rule for fingers reached the mouse"
+        );
     }
 
     #[test]

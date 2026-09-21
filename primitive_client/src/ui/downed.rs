@@ -90,10 +90,105 @@ pub fn build_into(
         let top = FIRST_LINE_TOP - index as f32 * (widgets::cell_height(LINE_SCALE) + LINE_GAP);
         centred(&mut p, language.text(msg), top, LINE_SCALE, colour);
     }
+    // Inside the grown block, with the words: `give_up_rect` is authored
+    // at the size the words are, and the finger is taken back through the
+    // same growth (`GiveUpButton::handle`'s caller).
+    if widgets::touch_layout() {
+        p.button(give_up_rect(ui_scale), language.text(Msg::DownedGiveUpButton), false, true);
+    }
     *out = p.into_vertices();
     // The words grow with the interface size; the red is already at every
     // edge of every window, and scaling it would push it off them.
     widgets::scale_about(&mut out[text_from..], widgets::anchor::CENTRE(aspect), ui_scale);
+}
+
+/// **Where a phone's give-up button is**, in the authored space the words
+/// are drawn in -- before `scale_about(CENTRE, ui_scale)` grows them.
+///
+/// Under the three lines, centred, above the crosshair. At least a finger
+/// tall *after* the growth, which is why it takes the scale: at an
+/// interface size of one, a button authored for one and a half would be
+/// too small to hit on purpose.
+pub fn give_up_rect(ui_scale: f32) -> Rect {
+    let lines_end = FIRST_LINE_TOP - 3.0 * (widgets::cell_height(LINE_SCALE) + LINE_GAP);
+    let height = (widgets::FINGER_SIDE / ui_scale.max(0.1)).max(0.10);
+    let top = lines_end - LINE_GAP;
+    Rect::new(-0.26, top - height, 0.26, top)
+}
+
+/// A finger on the downed overlay's give-up button.
+///
+/// ## Why a phone has one
+///
+/// Giving up was the respawn key and nothing else, and a phone has no
+/// keys: a downed player on a phone could only wait out the whole clock,
+/// face down, however hopeless it was. The keyboard's way out is a key;
+/// the phone's is this button.
+///
+/// ## Why on the lift, and only for a finger that started on it
+///
+/// Every other button in the game acts on the tap. This one ends a life,
+/// and it sits in the look area, where a thumb that lands to turn the
+/// camera and drags away has pressed nothing -- so it gives up only when
+/// the finger that *went down* on it also *comes up* on it. A drag that
+/// began there is claimed and swallowed rather than turning the view,
+/// because a button that turned the camera when pressed would be a
+/// button that seemed not to be there.
+#[derive(Debug, Default)]
+pub struct GiveUpButton {
+    finger: Option<crate::platform::TouchId>,
+}
+
+/// What [`GiveUpButton::handle`] made of a touch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GiveUpTap {
+    /// Not ours: the thumb controls and the look area have it.
+    Ignored,
+    /// Ours, and nothing decided yet.
+    Held,
+    /// Lifted on the button: send the give-up.
+    GiveUp,
+}
+
+impl GiveUpButton {
+    /// `at` is the finger taken back into the words' authored space
+    /// (`widgets::unscale_about` about the centre by `ui_scale`), the exact
+    /// inverse of the `scale_about` the drawing does.
+    pub fn handle(
+        &mut self,
+        id: crate::platform::TouchId,
+        phase: crate::platform::TouchPhase,
+        at: (f32, f32),
+        downed: bool,
+        ui_scale: f32,
+    ) -> GiveUpTap {
+        use crate::platform::TouchPhase;
+        if !downed {
+            self.finger = None;
+            return GiveUpTap::Ignored;
+        }
+        let on = give_up_rect(ui_scale).contains(at.0, at.1);
+        match phase {
+            TouchPhase::Started if on && self.finger.is_none() => {
+                self.finger = Some(id);
+                GiveUpTap::Held
+            }
+            _ if self.finger != Some(id) => GiveUpTap::Ignored,
+            TouchPhase::Started | TouchPhase::Moved => GiveUpTap::Held,
+            TouchPhase::Ended => {
+                self.finger = None;
+                if on {
+                    GiveUpTap::GiveUp
+                } else {
+                    GiveUpTap::Held
+                }
+            }
+            TouchPhase::Cancelled => {
+                self.finger = None;
+                GiveUpTap::Held
+            }
+        }
+    }
 }
 
 /// The rings of red, outermost first: `(x0, y0, x1, y1, alpha)`, four
@@ -199,6 +294,79 @@ mod tests {
             assert!(near_edge, "a band of red reached ({x0}, {y0})..({x1}, {y1})");
         }
         assert!(reach < 0.5, "the red reaches half way to the crosshair");
+    }
+
+    #[test]
+    fn on_a_phone_the_give_up_button_is_pressed_where_it_is_drawn() {
+        use crate::platform::TouchPhase;
+        let aspect = 20.0 / 9.0;
+        for ui_scale in [1.0, 1.5] {
+            let drawn_rect = widgets::as_a_phone(|| {
+                let mut out = Vec::new();
+                let down = Down::new(Cause::Wound).unwrap();
+                build_into(FontAtlas::for_test(), Some(down), Language::Russian, aspect, ui_scale, std::time::Instant::now(), &mut out);
+                // Where the drawing put the button's corners, found by
+                // growing its authored rect the way the drawing does.
+                let r = give_up_rect(ui_scale);
+                let (x0, y0) = (r.x0 * ui_scale, r.y0 * ui_scale);
+                let (x1, y1) = (r.x1 * ui_scale, r.y1 * ui_scale);
+                let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+                assert!(
+                    out.iter().any(|v| near(v.position[0], x0) && near(v.position[1], y0))
+                        && out.iter().any(|v| near(v.position[0], x1) && near(v.position[1], y1)),
+                    "no button drawn where give_up_rect says at scale {ui_scale}"
+                );
+                Rect::new(x0, y0, x1, y1)
+            });
+            assert!(
+                drawn_rect.height() >= widgets::FINGER_SIDE - 1e-4,
+                "the give-up button is {} tall on glass, under a finger",
+                drawn_rect.height()
+            );
+            // A finger in the middle of the drawn button, taken back the
+            // way the frame loop takes it back.
+            let finger = (drawn_rect.centre_x(), drawn_rect.centre_y());
+            let authored = widgets::unscale_about(finger, widgets::anchor::CENTRE(aspect), ui_scale);
+            let mut button = GiveUpButton::default();
+            assert_eq!(button.handle(7, TouchPhase::Started, authored, true, ui_scale), GiveUpTap::Held);
+            assert_eq!(button.handle(7, TouchPhase::Ended, authored, true, ui_scale), GiveUpTap::GiveUp);
+
+            // Just outside it, nothing: the look area keeps the finger.
+            let outside = widgets::unscale_about(
+                (drawn_rect.x1 + 0.02, drawn_rect.centre_y()),
+                widgets::anchor::CENTRE(aspect),
+                ui_scale,
+            );
+            assert_eq!(button.handle(8, TouchPhase::Started, outside, true, ui_scale), GiveUpTap::Ignored);
+        }
+    }
+
+    #[test]
+    fn a_thumb_that_lands_on_give_up_and_drags_away_has_not_given_up() {
+        use crate::platform::TouchPhase;
+        let on = {
+            let r = give_up_rect(1.5);
+            (r.centre_x(), r.centre_y())
+        };
+        let mut button = GiveUpButton::default();
+        assert_eq!(button.handle(1, TouchPhase::Started, on, true, 1.5), GiveUpTap::Held);
+        assert_eq!(button.handle(1, TouchPhase::Moved, (1.2, -0.5), true, 1.5), GiveUpTap::Held);
+        assert_eq!(button.handle(1, TouchPhase::Ended, (1.2, -0.5), true, 1.5), GiveUpTap::Held);
+        // ...and a player on their feet has no button at all.
+        assert_eq!(button.handle(2, TouchPhase::Started, on, false, 1.5), GiveUpTap::Ignored);
+    }
+
+    #[test]
+    fn a_desktop_draws_no_give_up_button_because_it_has_the_key() {
+        let down = Down::new(Cause::Wound).unwrap();
+        let count = |touch| {
+            widgets::with_touch(touch, || {
+                let mut out = Vec::new();
+                build_into(FontAtlas::for_test(), Some(down), Language::English, 16.0 / 9.0, 1.0, std::time::Instant::now(), &mut out);
+                out.len()
+            })
+        };
+        assert!(count(true) > count(false), "the phone's button was not drawn");
     }
 
     #[test]

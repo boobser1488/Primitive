@@ -1087,11 +1087,19 @@ impl ChestScreen {
         );
         // The same size as the captions over the other groups, and fitted
         // to the half of the row the ash's word leaves it.
+        //
+        // **Half a letter between the flame and the word**, measured in the
+        // caption's own letters. It was a fixed 0.006 -- two pixels at 720
+        // lines -- and the flame tile is drawn edge to edge, so on a real
+        // screen the icon sat against the Т of ТОПЛИВО and read as one
+        // smudged glyph. A gap in letters grows with the text on a phone
+        // instead of staying two pixels wide at every size.
         let fuel_word = language.text(Msg::HearthFuel);
-        let room = (ash.x1 - fuel.x0) / 2.0 - 0.01 - (flame_icon.x1 + 0.006 - fuel.x0);
+        let word_x = flame_icon.x1 + widgets::measure("m", widgets::size::CAPTION) * 0.5;
+        let room = (ash.x1 - fuel.x0) / 2.0 - 0.01 - (word_x - fuel.x0);
         p.text(
             fuel_word,
-            flame_icon.x1 + 0.006,
+            word_x,
             label_top,
             widgets::fitted_scale(fuel_word, widgets::size::CAPTION, room, 0.7),
             widgets::INK_DIM,

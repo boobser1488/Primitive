@@ -246,6 +246,9 @@ pub enum Notice {
     ThinSoilDry,
     SoilWatered,
     SoilDry,
+    // ---- a death, told to everybody (`report_vitals`) ----
+    /// `{who}` `{cause}`: see `Said::death`.
+    PlayerDied,
 }
 
 impl Notice {
@@ -402,6 +405,7 @@ impl Notice {
         Notice::ThinSoilDry,
         Notice::SoilWatered,
         Notice::SoilDry,
+        Notice::PlayerDied,
     ];
 
     /// Whether this is news rather than a refusal: said the same way, but
@@ -434,6 +438,8 @@ impl Notice {
                 | Notice::FlintsShattered
                 | Notice::WrongCap
                 | Notice::MeatTurned
+                // Somebody else's death refused nothing of yours.
+                | Notice::PlayerDied
                 | Notice::RawFlesh
                 | Notice::PitFibreFirst
                 | Notice::PitFibrePacked
@@ -467,17 +473,44 @@ impl Notice {
 pub struct Said {
     pub what: Notice,
     pub numbers: Vec<u32>,
+    /// A player's name, for the row's `{who}`. Never translated: a name is
+    /// the one word in a sentence that is the same in every language.
+    pub who: Option<String>,
+    /// How somebody died, for the row's `{cause}`, **as the server's own
+    /// English** -- the same string `ServerMessage::Died` carries, which the
+    /// client already knows how to say in every language
+    /// (`ui::names::death_cause`). A second code list for causes would be
+    /// a second place a new way to die had to be added and could be
+    /// forgotten; this way a cause with words on the death screen has
+    /// words in the chat too.
+    pub cause: Option<String>,
 }
 
 impl Said {
     pub fn new(what: Notice, numbers: &[u32]) -> Said {
-        Said { what, numbers: numbers.to_vec() }
+        Said { what, numbers: numbers.to_vec(), who: None, cause: None }
+    }
+
+    /// **Somebody died, told to everyone** -- the chat line a small server
+    /// reads most.
+    ///
+    /// It was `format!("{name} {cause}")` on the server, in English, into
+    /// `ServerMessage::Chat`, so a Russian player read "Vasya drowned"
+    /// under a Russian interface. Sent as a code with the name and the
+    /// cause beside it, the words around them are the reader's.
+    pub fn death(who: &str, cause: &str) -> Said {
+        Said {
+            what: Notice::PlayerDied,
+            numbers: Vec::new(),
+            who: Some(who.to_string()),
+            cause: Some(cause.to_string()),
+        }
     }
 }
 
 impl From<Notice> for Said {
     fn from(what: Notice) -> Said {
-        Said { what, numbers: Vec::new() }
+        Said { what, numbers: Vec::new(), who: None, cause: None }
     }
 }
 
@@ -494,7 +527,7 @@ mod tests {
         // append one** -- that is the whole check, and a notice appended
         // to the enum and forgotten in `ALL` is a notice the client is
         // never asked to have words for.
-        assert_eq!(Notice::ALL.len(), Notice::SoilDry as usize + 1);
+        assert_eq!(Notice::ALL.len(), Notice::PlayerDied as usize + 1);
         for (i, notice) in Notice::ALL.iter().enumerate() {
             assert_eq!(*notice as usize, i, "{notice:?} is out of place in `ALL`");
         }

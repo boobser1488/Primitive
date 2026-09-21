@@ -162,7 +162,14 @@ pub const LADDER: [Rung; 7] = [
         // that, a player sitting by the fire they lit was told by this page
         // that they were still in the flint age.
         marks: &[BLOCK_CAMPFIRE, BLOCK_COAL, BLOCK_FIREPIT],
-        wants: &[BLOCK_COBBLESTONE, BLOCK_STICK, BLOCK_LOG],
+        // **What the firepit wants, not what the campfire does.** This
+        // listed cobblestone, stick and log -- the campfire's recipe -- and
+        // so sent a player with a flint knife off to find a stone they
+        // cannot break yet, for a fire they could already have lit. The
+        // real first fire is sticks and a log dropped on the ground and
+        // struck with flint; the page says how to lay it under the list
+        // (`ladder_screen::how_to_lay`).
+        wants: &[BLOCK_STICK, BLOCK_LOG, BLOCK_FLINT],
         found: Found::Woods,
     },
     Rung {
@@ -348,6 +355,18 @@ mod tests {
 
     /// Two rungs sharing a mark would light up together, and the page
     /// would skip an age the player never reached.
+    #[test]
+    fn the_fire_rung_asks_for_a_firepit_and_not_for_stone_a_flint_age_player_cannot_break() {
+        let fire = LADDER.iter().find(|rung| rung.age == Age::Fire).unwrap();
+        assert!(
+            !fire.wants.contains(&BLOCK_COBBLESTONE),
+            "the fire rung wants cobblestone, which needs a pick the flint age has not got"
+        );
+        for want in [BLOCK_STICK, BLOCK_LOG, BLOCK_FLINT] {
+            assert!(fire.wants.contains(&want), "the firepit's {want} is missing from the fire rung");
+        }
+    }
+
     #[test]
     fn no_two_rungs_are_marked_by_the_same_thing() {
         for (a, rung) in LADDER.iter().enumerate() {

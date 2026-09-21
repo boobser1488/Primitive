@@ -336,7 +336,7 @@ impl LadderScreen {
             }
         }
 
-        wants_block(p, layers, held, &LADDER[chosen], language);
+        let _ = wants_block(p, layers, held, &LADDER[chosen], language);
         now_block(p, learning, &LADDER[chosen], language);
     }
 }
@@ -358,14 +358,15 @@ fn tint(block: BlockId, held: bool) -> [f32; 4] {
     }
 }
 
-/// What the chosen rung takes, and where those things come from.
+/// What the chosen rung takes, and where those things come from. `false`
+/// if the how-to line under it was cut off by the pane's foot.
 fn wants_block(
     p: &mut Painter,
     layers: &FaceLayers,
     held: &Discovered,
     rung: &Rung,
     language: Language,
-) {
+) -> bool {
     let pane = wants_pane();
     let mut top = pane.y1;
     let heading = |p: &mut Painter, top: &mut f32, msg: Msg| {
@@ -405,6 +406,24 @@ fn wants_block(
         top -= row;
     }
 
+    // How the things are put together, for the one rung whose making is
+    // not a recipe in the book. See `how_to_lay`.
+    if let Some(msg) = how_to_lay(rung.age) {
+        top -= 0.010;
+        return wrapped(p, pane.x0, &mut top, pane, language.text(msg), widgets::INK_DIM);
+    }
+    true
+}
+
+/// The line under a rung's list that says how its things become the rung.
+///
+/// **Only the fire has one**, because only the fire is not made in the
+/// book: the firepit's sticks and log are dropped on the ground and struck
+/// with flint (`strike_firepit` on the server), and a player shown three
+/// icons with no recipe behind them was left to guess. Every other rung's
+/// things go into a recipe the book already explains.
+pub fn how_to_lay(age: Age) -> Option<Msg> {
+    (age == Age::Fire).then_some(Msg::LadderLayFirepit)
 }
 
 /// What to do now, the two buttons nothing names, and what has turned up.
@@ -446,7 +465,7 @@ fn now_block(p: &mut Painter, learning: Learning, rung: &Rung, language: Languag
         // is better than repeating the last one.
         _ => language.text(Msg::LadderDone).to_string(),
     };
-    wrapped(p, pane.x0, &mut top, pane, &now, widgets::INK);
+    let _ = wrapped(p, pane.x0, &mut top, pane, &now, widgets::INK);
     top -= 0.014;
 
     // ---- the controls that are not guessable ----
@@ -530,16 +549,19 @@ fn now_block(p: &mut Painter, learning: Learning, rung: &Rung, language: Languag
 /// Wrapped rather than fitted down: a sentence at half the size of the
 /// line above it is not a smaller line, it is a different voice -- which
 /// is the whole of what the player was complaining about.
-fn wrapped(p: &mut Painter, left: f32, top: &mut f32, pane: Rect, text: &str, ink: [f32; 4]) {
+/// Whether every line fitted: `false` is a sentence cut off at the pane's
+/// foot, which the tests look for.
+fn wrapped(p: &mut Painter, left: f32, top: &mut f32, pane: Rect, text: &str, ink: [f32; 4]) -> bool {
     let columns = ((pane.x1 - left) / widgets::measure("m", size::BODY)).max(8.0) as usize;
     let step = widgets::cell_height(size::BODY) + 0.008;
     for line in widgets::wrap(text, columns) {
         if *top - widgets::cell_height(size::BODY) < pane.y0 {
-            return;
+            return false;
         }
         p.text(&line, left, *top, size::BODY, ink);
         *top -= step;
     }
+    true
 }
 
 #[cfg(test)]
@@ -549,6 +571,24 @@ mod tests {
 
     fn holding(kinds: &[BlockId]) -> Discovered {
         Discovered::from_kinds(kinds.iter().copied())
+    }
+
+    #[test]
+    fn how_to_lay_a_firepit_is_read_to_the_end_in_every_language_on_both_layouts() {
+        let fire = LADDER.iter().find(|rung| rung.age == Age::Fire).unwrap();
+        assert!(how_to_lay(fire.age).is_some(), "the fire rung says nothing about laying a firepit");
+        let layers = FaceLayers::empty_for_test();
+        for touch in [false, true] {
+            widgets::with_touch(touch, || {
+                for &language in Language::ALL {
+                    let mut p = Painter::onto(crate::engine::texture::FontAtlas::for_test(), Vec::new());
+                    assert!(
+                        wants_block(&mut p, &layers, &Discovered::new(), fire, language),
+                        "the firepit's how-to is cut off in {language:?} (touch: {touch})"
+                    );
+                }
+            });
+        }
     }
 
     #[test]

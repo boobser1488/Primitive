@@ -5400,11 +5400,12 @@ pub(crate) fn report_vitals(
                 println!("[survival] {} {cause}", handle.username);
             }
             // Everyone hears about it. Deaths are the most interesting
-            // thing that happens on a small server.
-            ctx.registry.broadcast(ServerMessage::Chat {
-                from: None,
-                username: "server".to_string(),
-                text: format!("{} {cause}", handle.username),
+            // thing that happens on a small server. **As a code, not as
+            // English** (`notice::Said::death`): this was the last line
+            // of the server's own voice that reached the chat untranslated.
+            ctx.registry.broadcast(ServerMessage::Said {
+                said: primitive_shared::notice::Said::death(&handle.username, &cause),
+                to_log: true,
             });
             fire_plugin_hook(
                 ctx,
@@ -13600,6 +13601,18 @@ fn body_from_pack(
 }
 
 pub(crate) fn leave_corpse(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>) {
+    leave_corpse_at(ctx, handle, None);
+}
+
+/// [`leave_corpse`], at `at` rather than where the player stands.
+///
+/// For the one body that is not left where its owner is: a player saved
+/// dead with a full pack, joining at the spawn (`profiles::Restored::died_at`).
+pub(crate) fn leave_corpse_at(
+    ctx: &Arc<Context>,
+    handle: &Arc<players::PlayerHandle>,
+    at: Option<(f64, f64, f64)>,
+) {
     use primitive_shared::inventory::Inventory;
     use primitive_shared::types::BLOCK_CORPSE;
 
@@ -13636,7 +13649,7 @@ pub(crate) fn leave_corpse(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandl
         state.inventory_dirty = true;
         state.equipment_dirty |= stripped;
         let (body, overflow) = body_from_pack(&taken, garments);
-        (body, state.position, stripped, overflow)
+        (body, at.unwrap_or(state.position), stripped, overflow)
     };
     send_inventory(handle);
     if stripped {
@@ -20787,6 +20800,41 @@ mod downed_help_tests {
         hold(&friend, None);
         help_up(&ctx, &friend, hunter.id);
         assert!(hunter.state.lock().unwrap().vitals.is_downed());
+    }
+
+    #[test]
+    fn a_player_saved_down_by_a_crash_joins_at_spawn_with_nothing_and_their_pack_where_they_lay() {
+        // What the join does with `Restored::died_at`: the body goes where
+        // the save says they lay, not where the joining player stands.
+        let (ctx, hunter, _friend) = two_of_them();
+        let mut profiles = crate::logic::profiles::Profiles::new();
+        let first = profiles.restore("hunter", (0.5, 70.0, 0.5), survival::MAX_HEALTH);
+        let mut pack = primitive_shared::inventory::Inventory::new();
+        pack.put_in_slot(1, Stack::new(BLOCK_IRON_INGOT, 3));
+        // The one column the fixture clears, so there is air to lie in.
+        let lay_at = (0.5, f64::from(FLOOR) + 1.0, 0.5);
+        profiles.store(first.uuid, pack, lay_at, 0.0, 0.0, 0.0, 20.0, 0, Default::default());
+        let restored = profiles.restore("hunter", (0.5, 70.0, 0.5), survival::MAX_HEALTH);
+        assert_eq!(restored.health, survival::MAX_HEALTH);
+        {
+            let mut state = hunter.state.lock().unwrap();
+            state.inventory = restored.inventory;
+            // Joined at the spawn, a long way from where they lay.
+            state.position = (40.5, 70.0, 40.5);
+        }
+
+        leave_corpse_at(&ctx, &hunter, restored.died_at);
+
+        let state = hunter.state.lock().unwrap();
+        assert!(state.inventory.is_empty(), "the crash let the pack come back to life with its owner");
+        let at = *state.bags.last().expect("no body was left for a death the crash interrupted");
+        drop(state);
+        assert!(
+            at.0.abs() <= 1 && at.2.abs() <= 1,
+            "the body was left at {at:?}, not where the save says they lay"
+        );
+        assert_eq!(ctx.world.cached_block(at.0, at.1, at.2), Some(BLOCK_CORPSE));
+        assert_eq!(ctx.chests.lock().unwrap().contents(at).count(BLOCK_IRON_INGOT), 3);
     }
 
     #[test]

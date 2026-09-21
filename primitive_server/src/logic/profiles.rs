@@ -1418,6 +1418,20 @@ pub struct Restored {
     /// The bags they have still to go back for.
     pub bags: Vec<(i32, i32, i32)>,
     pub returning: bool,
+    /// **Where a player saved dead lies**, if they were saved dead: the
+    /// joining connection leaves their body there (`leave_corpse_at`).
+    ///
+    /// A player saved with no health and a full pack is one whose death
+    /// was never finished -- down when the server crashed, so the last
+    /// autosave caught the body on the ground with everything still on
+    /// it. Restoring that as it stood put them at the spawn *with their
+    /// pack*, which is a death that cost nothing, and a reason to pull
+    /// the plug on a server when you are going down. Leaving the body
+    /// where they lay makes the crash the same as leaving while down
+    /// (`give_up` on disconnect): dead where they fell, at the spawn with
+    /// nothing, with the way back on the map. After an ordinary death the
+    /// pack is already empty and this finds nothing to leave.
+    pub died_at: Option<(f64, f64, f64)>,
 }
 
 /// Whether the saved worn set has a rucksack on its back.
@@ -1554,6 +1568,7 @@ impl Profiles {
             discovered: Discovered::from_kinds(profile.discovered.iter().copied()),
             bags: profile.bags.clone(),
             returning,
+            died_at: if profile.health > 0.0 { None } else { profile.place_of_exit() },
         }
     }
 }
@@ -1643,6 +1658,24 @@ mod tests {
         assert!(again.returning);
         assert_eq!(again.health, 20.0);
         assert_eq!(again.position, primitive_shared::geometry::wide(SPAWN), "quitting on the death screen respawned the player where they died");
+    }
+
+    #[test]
+    fn a_player_saved_down_with_a_full_pack_is_told_where_their_body_lies() {
+        // The server crashed while they were on the ground: the last
+        // autosave has no health in it and everything still in the pack.
+        let mut profiles = Profiles::new();
+        let first = profiles.restore("crashed", SPAWN, 20.0);
+        let mut pack = Inventory::new();
+        pack.add(BLOCK_STONE, 12);
+        let lay_at = (300.5, 40.0, -120.5);
+        profiles.store(first.uuid, pack, lay_at, 0.0, 0.0, 0.0, 20.0, 0, StoredBody::default());
+        let again = profiles.restore("crashed", SPAWN, 20.0);
+        assert_eq!(again.died_at, Some(lay_at), "a death the crash interrupted was not handed back to be finished");
+        assert_eq!(again.position, primitive_shared::geometry::wide(SPAWN));
+        // ...and a living player has no body to leave.
+        profiles.store(first.uuid, Inventory::new(), lay_at, 0.0, 0.0, 12.0, 20.0, 0, StoredBody::default());
+        assert_eq!(profiles.restore("crashed", SPAWN, 20.0).died_at, None);
     }
 
     #[test]

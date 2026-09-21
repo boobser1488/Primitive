@@ -104,10 +104,10 @@
 //! slow, what saves. The server owns the timer (`survival::Vitals`) and
 //! tells the client a [`Down`] when it changes; the client counts it down
 //! for the screen, draws the crawl, and *predicts* the pace. The pace is
-//! not enforced: the anticheat has no per-player speed, the same as it has
-//! none for a broken leg, and a client that crawled at a walk would have
-//! gained distance and nothing else -- the timer and the rescue are the
-//! server's.
+//! held loosely by the server: the anticheat judges a downed body against
+//! a crawl's budget (`AntiCheat::set_crawling`, the fastest crawl in this
+//! table) rather than per cause, the same as it has no per-player speed
+//! for a broken leg. The timer and the rescue are the server's.
 
 use serde::{Deserialize, Serialize};
 

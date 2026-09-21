@@ -66,6 +66,14 @@ const W_REPLAY: f32 = 0.5;
 /// sustained speed. A saddle doing twenty blocks a second is not on a horse.
 pub const MOUNTED_SPEED: f32 = primitive_shared::horse::GALLOP * 1.35;
 
+/// **The fastest crawl in `downed`'s table**, as a share of a walk: what a
+/// body on the ground is held to, against the walker's own limit. One share
+/// for every cause rather than the cause's own, because the limit already
+/// carries the walker's margin over a sprint and a crawl is a sprint times
+/// this at most -- a slower crawl caught by the same budget is still a body
+/// that cannot run. A test holds it to the table.
+pub const FASTEST_CRAWL: f32 = 0.35;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
     /// Request is plausible; apply it.
@@ -137,6 +145,10 @@ pub struct AntiCheat {
 
     /// Distance budget in blocks (see module docs).
     move_budget: TokenBucket,
+    /// ...and a crawling body's, at [`FASTEST_CRAWL`] of it. See
+    /// `set_crawling`.
+    crawl_budget: TokenBucket,
+    crawling: bool,
     /// Height gained since the last time the player was on the ground or
     /// descended.
     ascent_run: f32,
@@ -249,6 +261,8 @@ impl AntiCheat {
             mounted: false,
             mount_budget: TokenBucket::new(MOUNTED_SPEED, 1.5, now),
             move_budget: TokenBucket::new(cfg.max_horizontal_speed, 1.5, now),
+            crawl_budget: TokenBucket::new(cfg.max_horizontal_speed * FASTEST_CRAWL, 1.5, now),
+            crawling: false,
             msg_bucket: TokenBucket::new(cfg.max_messages_per_sec, 2.0, now),
             edit_bucket: TokenBucket::new(cfg.max_block_edits_per_sec, 2.0, now),
             chunk_bucket: TokenBucket::new(cfg.max_chunk_requests_per_sec, 3.0, now),
@@ -404,6 +418,8 @@ impl AntiCheat {
         // their own.
         let (budget, limit) = if self.mounted {
             (&mut self.mount_budget, MOUNTED_SPEED.max(self.cfg.max_horizontal_speed))
+        } else if self.crawling {
+            (&mut self.crawl_budget, self.cfg.max_horizontal_speed * FASTEST_CRAWL)
         } else {
             (&mut self.move_budget, self.cfg.max_horizontal_speed)
         };
@@ -756,6 +772,25 @@ impl AntiCheat {
         self.mounted
     }
 
+    /// On the ground (`survival::Vitals::is_downed`), or up.
+    ///
+    /// **The crawl was a pace the client promised and nothing checked**:
+    /// a modified client could crawl at a sprint to the fire or the river
+    /// that raises it, and the thirty seconds of a bite were a walk home.
+    /// Held to its own budget -- the walker's limit times [`FASTEST_CRAWL`]
+    /// -- and nothing else changes: a crawl climbs and falls like a walk.
+    /// Full on the way down, so the stride a body was in when it fell is
+    /// the burst the budget's second and a half absorbs.
+    pub fn set_crawling(&mut self, crawling: bool) {
+        if self.crawling == crawling {
+            return;
+        }
+        self.crawling = crawling;
+        let now = Instant::now();
+        self.crawl_budget = TokenBucket::new(self.cfg.max_horizontal_speed * FASTEST_CRAWL, 1.5, now);
+        self.move_budget.refill(now);
+    }
+
     pub fn reset_to(&mut self, pos: (f64, f64, f64)) {
         self.last_pos = Some(pos);
         self.ascent_run = 0.0;
@@ -999,6 +1034,41 @@ mod tests {
             }
             other => panic!("expected a rejection, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_crawling_body_is_held_to_a_crawl_and_a_walk_still_passes_on_its_feet() {
+        // Every crawl in the table is under the share the budget allows.
+        for cause in primitive_shared::downed::Cause::ALL {
+            if let Some(profile) = cause.profile() {
+                assert!(profile.crawl <= FASTEST_CRAWL, "{cause:?} crawls faster than the anticheat allows");
+            }
+        }
+        // Paced on the clock, as `sustained_speedhack_exhausts_the_budget`
+        // is and for its reason: a sleep is not a duration on a busy machine.
+        let world = empty_world();
+        let pace = 8.0f32; // a hurried walk, well inside a walker's twelve
+        let run = |crawling: bool| {
+            let mut ac = AntiCheat::new(cfg(), 8, (0.0, 30.0, 0.0));
+            ac.set_crawling(crawling);
+            let mut x = 0.0f32;
+            let begun = std::time::Instant::now();
+            let mut last = begun;
+            let mut seq = 0u32;
+            while begun.elapsed() < Duration::from_secs(4) {
+                std::thread::sleep(Duration::from_millis(20));
+                let now = std::time::Instant::now();
+                x += (pace * now.duration_since(last).as_secs_f32()).min(2.0);
+                last = now;
+                seq += 1;
+                if !ac.check_transform(f64::from(x), 30.0, 0.0, true, seq, &world).is_allowed() {
+                    return true;
+                }
+            }
+            false
+        };
+        assert!(!run(false), "a player on their feet was flagged at {pace} b/s");
+        assert!(run(true), "a downed body crawled at {pace} b/s and nothing noticed");
     }
 
     #[test]

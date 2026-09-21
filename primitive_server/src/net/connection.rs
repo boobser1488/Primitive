@@ -255,6 +255,19 @@ async fn run_connection(
         day_length_seconds: ctx.settings.day_length_seconds,
     });
 
+    // **A death the server never finished**, finished now: a body saved
+    // dead with its things still on it is left where it lay, and the
+    // player -- already at the spawn and made whole by `restore` -- joins
+    // with nothing. See `Restored::died_at`. After `Welcome`, so the
+    // emptied pack and the new mark on the map reach a client that knows
+    // which world they are about.
+    if let Some(at) = restored.died_at {
+        crate::leave_corpse_at(&ctx, &handle, Some(at));
+        if ctx.options.logging {
+            println!("[survival] {username} was saved dead; their body is left where they lay");
+        }
+    }
+
     // The starting health, so the bar is populated before the player has
     // had a chance to hurt themselves. Everything after this is sent
     // only when the value changes.
@@ -1309,6 +1322,11 @@ async fn read_loop(
                 }
                 let verdict = {
                     let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+                    // A body on the ground is judged as a crawl
+                    // (`AntiCheat::set_crawling`), read here from the same
+                    // vitals that downed it so the two cannot disagree.
+                    let crawling = state.vitals.is_downed();
+                    state.anticheat.set_crawling(crawling);
                     let verdict = state
                         .anticheat
                         .check_transform(x, y, z, on_ground, sequence, &ctx.world);

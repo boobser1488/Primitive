@@ -661,6 +661,8 @@ pub enum Msg {
     SavedByAir,
     DownedGiveUp,
     DownedGiveUpTouch,
+    /// The phone's give-up button on the downed overlay: `downed::GiveUpButton`.
+    DownedGiveUpButton,
     // ---- fishing ----
     //
     // Said in place of a cast or a reach into a trap that would take nothing
@@ -797,6 +799,8 @@ pub enum Msg {
     LadderWants,
     /// Said once, at the foot, for a player who has climbed all seven.
     LadderDone,
+    /// How the fire rung's firepit is laid: `ladder_screen::how_to_lay`.
+    LadderLayFirepit,
     AgeBareHands,
     AgeFlint,
     AgeFire,
@@ -1429,6 +1433,7 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::SavedByAir,      en: "crawl out into clean air", simple: "get out of the smoke to get up", ru: "выползите на чистый воздух", pl: "wyczołgaj się na czyste powietrze" },
     Line { msg: Msg::DownedGiveUp,    en: "R GIVE UP", simple: "R GIVE UP", ru: "R СДАТЬСЯ", pl: "R PODDAJ SIĘ" },
     Line { msg: Msg::DownedGiveUpTouch, en: "somebody can still help you up", simple: "a friend can still help you up", ru: "вас ещё могут поднять", pl: "ktoś jeszcze może cię podnieść" },
+    Line { msg: Msg::DownedGiveUpButton, en: "GIVE UP", simple: "GIVE UP", ru: "СДАТЬСЯ", pl: "PODDAJ SIĘ" },
 
     Line { msg: Msg::FishingTooSmall,   en: "no fish live in water this small", simple: "this water is too small for fish", ru: "в такой маленькой воде рыба не живёт", pl: "w tak małej wodzie nie ma ryb" },
     Line { msg: Msg::FishingTooShallow, en: "too shallow: the float would lie on the bottom", simple: "too shallow to fish here -- find deeper water", ru: "слишком мелко: поплавок ляжет на дно", pl: "za płytko: spławik leżałby na dnie" },
@@ -1507,6 +1512,7 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::LadderNext,   en: "NEXT",           simple: "NEXT",       ru: "СЛЕДУЮЩЕЕ", pl: "NASTĘPNE" },
     Line { msg: Msg::LadderWants,  en: "WHAT IT TAKES", simple: "WHAT YOU NEED", ru: "ЧТО НУЖНО", pl: "CZEGO TRZEBA" },
     Line { msg: Msg::LadderDone,   en: "the whole ladder is behind you", simple: "you have done all of it", ru: "весь путь пройден", pl: "cała droga za tobą" },
+    Line { msg: Msg::LadderLayFirepit, en: "drop three sticks and a log on the ground and strike them with flint", simple: "put 3 sticks and 1 log on the ground, then hit them with flint", ru: "бросьте на землю три палки и бревно и ударьте по ним кремнём", pl: "rzuć na ziemię trzy patyki i kłodę i uderz w nie krzemieniem" },
     Line { msg: Msg::AgeBareHands, en: "BARE HANDS",     simple: "JUST HANDS", ru: "ГОЛЫЕ РУКИ", pl: "GOŁE RĘCE" },
     Line { msg: Msg::AgeFlint,     en: "FLINT",          simple: "FLINT",      ru: "КРЕМЕНЬ", pl: "KRZEMIEŃ" },
     Line { msg: Msg::AgeFire,      en: "FIRE",           simple: "FIRE",       ru: "ОГОНЬ", pl: "OGIEŃ" },
@@ -1768,6 +1774,10 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::Notice(Notice::ThinSoilDry), en: "this soil is thin, and there is no water close by", simple: "poor soil, and no water near", ru: "земля здесь тощая, и воды рядом нет", pl: "ziemia jest tu jałowa i w pobliżu nie ma wody" },
     Line { msg: Msg::Notice(Notice::SoilWatered), en: "water is close by", simple: "water is near", ru: "вода рядом", pl: "woda jest blisko" },
     Line { msg: Msg::Notice(Notice::SoilDry), en: "there is no water close by", simple: "no water near", ru: "воды рядом нет", pl: "w pobliżu nie ma wody" },
+    // Somebody died, in the chat. The cause is the death screen's own row
+    // (`names::death_cause`); see `said` for why Simple English borrows the
+    // plain English one here.
+    Line { msg: Msg::Notice(Notice::PlayerDied), en: "{who} {cause}", simple: "{who} died: {cause}", ru: "{who} {cause}", pl: "{who} {cause}" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as
@@ -1864,6 +1874,21 @@ pub fn said(language: Language, said: &primitive_shared::notice::Said) -> String
     for (index, number) in said.numbers.iter().enumerate() {
         text = text.replace(&format!("{{{index}}}"), &number.to_string());
     }
+    if let Some(who) = &said.who {
+        text = text.replace("{who}", who);
+    }
+    if let Some(cause) = &said.cause {
+        // **Simple English says somebody else's death in plain English.**
+        // Its cause rows are written to the one who died -- "you fell too
+        // far" -- because the death screen is where they were written for,
+        // and "Vasya died: you fell too far" in the chat is a sentence about
+        // the reader. The plain English rows are already the third person.
+        let voice = match language {
+            Language::SimpleEnglish => Language::English,
+            other => other,
+        };
+        text = text.replace("{cause}", &crate::ui::names::death_cause(cause, voice));
+    }
     text
 }
 
@@ -1884,10 +1909,41 @@ mod tests {
                 let text = language.text(Msg::Notice(notice));
                 assert_eq!(slots(text), english, "{language:?} says other numbers than English in {notice:?}: {text}");
             }
+            // ...and the same words: a row that dropped `{who}` would say
+            // somebody died without saying who.
+            for word in ["{who}", "{cause}"] {
+                let english = Language::English.text(Msg::Notice(notice)).contains(word);
+                for &language in Language::ALL {
+                    let text = language.text(Msg::Notice(notice));
+                    assert_eq!(text.contains(word), english, "{language:?} and English disagree about {word} in {notice:?}: {text}");
+                }
+            }
             // ...and filled, nothing of the braces is left.
-            let filled = said(Language::Russian, &primitive_shared::notice::Said::new(notice, &[7; 8]));
+            let filled = said(
+                Language::Russian,
+                &primitive_shared::notice::Said {
+                    who: Some("Vasya".to_string()),
+                    cause: Some("drowned".to_string()),
+                    ..primitive_shared::notice::Said::new(notice, &[7; 8])
+                },
+            );
             assert!(!filled.contains('{'), "{notice:?} left a placeholder: {filled}");
         }
+    }
+
+    /// **Another player's death reads in the reader's language**, name and
+    /// all: it was the server's English in every chat.
+    #[test]
+    fn another_players_death_is_told_in_the_readers_language() {
+        let death = primitive_shared::notice::Said::death("Vasya", "drowned");
+        assert_eq!(said(Language::English, &death), "Vasya drowned");
+        assert_eq!(said(Language::Russian, &death), "Vasya утонул");
+        assert_eq!(said(Language::Polish, &death), "Vasya utonął");
+        let simple = said(Language::SimpleEnglish, &death);
+        assert!(!simple.contains("you"), "Simple English told the reader they died: {simple}");
+        // A cause the client has never heard of is still printed as sent.
+        let odd = primitive_shared::notice::Said::death("Vasya", "was eaten by a grue");
+        assert_eq!(said(Language::Russian, &odd), "Vasya was eaten by a grue");
     }
 
     /// Every character the interface can print has to have a glyph, or

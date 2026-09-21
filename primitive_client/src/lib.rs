@@ -1050,6 +1050,10 @@ fn run(
     // first roll.
     let mut weather = primitive_shared::weather::Weather::Clear;
     let mut inventory_screen = inventory_screen::InventoryScreen::new();
+    // A finger reads a recipe before it makes it; see `set_touch`.
+    inventory_screen.set_touch(touch_controls);
+    // The phone's way to give up while down; see `ui::downed::GiveUpButton`.
+    let mut give_up_button = ui::downed::GiveUpButton::default();
     // What people have said, and the line being typed. Opened with
     // Enter; see the `chat` module.
     let mut chat = chat::Chat::new();
@@ -1730,6 +1734,42 @@ fn run(
                         _ => return,
                     }
                 } else {
+                    // **Giving up, on glass**, before the bar and the thumb
+                    // controls: the button is drawn over the look area, and
+                    // what is drawn on top is what is pressed. Taken back
+                    // through the same growth the overlay's words were
+                    // drawn with -- see `ui::downed::give_up_rect`.
+                    if touch_controls {
+                        let point = widgets::cursor_to_ui(
+                            (x as f64, y as f64),
+                            (graphics.size.width, graphics.size.height),
+                            1.0,
+                        );
+                        let authored = widgets::unscale_about(
+                            point,
+                            widgets::anchor::CENTRE(graphics.aspect()),
+                            graphics.ui_scale(),
+                        );
+                        match give_up_button.handle(
+                            id,
+                            phase,
+                            authored,
+                            body.downed.is_some(),
+                            graphics.ui_scale(),
+                        ) {
+                            ui::downed::GiveUpTap::Ignored => {}
+                            ui::downed::GiveUpTap::Held => return,
+                            // The same message the respawn key sends while
+                            // down, which the server takes as giving up.
+                            ui::downed::GiveUpTap::GiveUp => {
+                                if let Some(net) = net.as_ref() {
+                                    audio.play(audio::Sfx::Click);
+                                    net.send(ClientMessage::Respawn);
+                                }
+                                return;
+                            }
+                        }
+                    }
                     let mut return_event = None;
                     // **The bar first, and only where it is drawn.**
                     //
