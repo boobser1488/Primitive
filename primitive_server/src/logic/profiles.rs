@@ -1979,6 +1979,61 @@ mod tests {
     }
 
     #[test]
+    fn a_players_file_written_by_the_released_1_4_0_loads_byte_for_byte() {
+        // **Bytes, not the frozen struct.** Every other migration test here
+        // writes its file with the `ProfileVn` it is then read back with, so
+        // a copy frozen in the wrong shape would agree with itself and pass.
+        // This is the file 1.4.0 -- the last release, `v1.4.0` -- wrote,
+        // laid out by hand the way bincode 1 lays out its `Profile`: the
+        // version, a length, and per player a u128, a string, forty slots of
+        // `Option<(u16, u32)>`, three f32 of position, yaw, pitch, health, the
+        // hotbar slot, a u64 of joins and the operator flag. Two players, so
+        // a shape one byte off shears the second.
+        let dir = scratch("released-1.4.0");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let mut bytes = Vec::new();
+        bytes.extend(2u32.to_le_bytes());
+        bytes.extend(2u64.to_le_bytes());
+        for (name, stone, position, health, operator) in
+            [("builder", 17u32, (40.5f32, 23.0f32, -12.5f32), 13.5f32, true), ("second", 0, (1.0, 21.0, 2.0), 20.0, false)]
+        {
+            bytes.extend(Uuid::of_name(name).0.to_le_bytes());
+            bytes.extend((name.len() as u64).to_le_bytes());
+            bytes.extend(name.as_bytes());
+            bytes.extend(40u64.to_le_bytes());
+            for slot in 0..40 {
+                if slot == 3 && stone > 0 {
+                    bytes.push(1);
+                    bytes.extend(BLOCK_STONE.to_le_bytes());
+                    bytes.extend(stone.to_le_bytes());
+                } else {
+                    bytes.push(0);
+                }
+            }
+            for value in [position.0, position.1, position.2, 0.25, -0.5, health] {
+                bytes.extend(value.to_le_bytes());
+            }
+            bytes.push(3);
+            bytes.extend(9u64.to_le_bytes());
+            bytes.push(u8::from(operator));
+        }
+        std::fs::write(Profiles::path(&dir), &bytes).expect("write");
+
+        let mut profiles = Profiles::new();
+        assert_eq!(profiles.load(&dir).expect("a 1.4.0 players file did not load"), 2);
+        assert!(!profiles.is_unreadable());
+        assert!(profiles.is_operator(Uuid::of_name("builder")), "an operator of 1.4.0 lost the keys");
+        let restored = profiles.restore("builder", SPAWN, 20.0);
+        assert_eq!(restored.position, (40.5, 23.0, -12.5));
+        assert_eq!(restored.health, 13.5);
+        assert_eq!(restored.inventory.count(BLOCK_STONE), 17, "the 1.4.0 pack came back without its stone");
+        assert!(restored.died_at.is_none());
+        let second = profiles.get(Uuid::of_name("second")).expect("the second 1.4.0 profile was sheared");
+        assert_eq!((second.username.as_str(), second.joins, second.health), ("second", 9, 20.0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn what_a_player_has_held_and_where_their_bags_lie_survive_a_restart() {
         let dir = scratch("discovery");
         std::fs::create_dir_all(&dir).expect("mkdir");

@@ -3511,14 +3511,7 @@ async fn tick_loop(ctx: Arc<Context>) {
                 // a `Changed` (the bar has three points on it again) and the
                 // clock running out is a `Died`, down the one reporting path
                 // every death takes. See `primitive_shared::downed`.
-                {
-                    let outcome = {
-                        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-                        state.vitals.step_downed(tick_duration.as_secs_f32())
-                    };
-                    report_vitals(&ctx, handle, outcome);
-                    send_downed(handle);
-                }
+                step_downed_body(&ctx, handle, tick_duration.as_secs_f32());
 
                 // Whatever the block above decided, the client is told
                 // if it changed -- including the two involuntary
@@ -8256,6 +8249,37 @@ pub(crate) fn send_downed(handle: &Arc<players::PlayerHandle>) {
     handle.send(ServerMessage::Downed { down });
 }
 
+/// One tick of a downed body, from the tick loop: its clock, and getting
+/// it off whatever it was on when it went down.
+///
+/// **A body that gives out comes off whatever it was on.** Getting into a
+/// bed, onto a seat, a horse or the oars is refused from the ground
+/// (`use_block`, `barred_while_downed`) -- and so is every way *off* them:
+/// `StandUp`, `Dismount`, `Rein`, `Row`. A rider downed by a bite was
+/// therefore carried on by a horse nobody could steer or leave, a rower sat
+/// pinned at the oars (a rower's transforms are dropped) and could not crawl
+/// to anything, and a sleeper the night starved woke in a bed they could not
+/// get out of -- until the clock ran out on every one of them. Here, once a
+/// tick, rather than at each of the twenty places health is taken: a tick
+/// late is a twentieth of a second on the saddle.
+fn step_downed_body(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, dt: f32) {
+    let (outcome, perched) = {
+        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        let outcome = state.vitals.step_downed(dt);
+        let perched = state.vitals.is_downed()
+            && (state.sleeping_in.is_some()
+                || state.sitting_on.is_some()
+                || state.rowing.is_some()
+                || state.riding.is_some());
+        (outcome, perched)
+    };
+    if perched {
+        stand_up(ctx, handle, None);
+    }
+    report_vitals(ctx, handle, outcome);
+    send_downed(handle);
+}
+
 /// A downed player lets go: dead now, down the ordinary path, with the
 /// words of whatever put them on the ground. The respawn key while down,
 /// and a connection closing on a body that is down (see the field note on
@@ -10598,6 +10622,11 @@ fn roles_at(ctx: &Arc<Context>, at: containers::ChestPos) -> Roles {
 /// May this block be put into that slot of the container at `at`? See
 /// `Roles::accepts`, which is the rule once the world has said which
 /// container it is.
+///
+/// Only a mod asks this of a slot (`api_impl`); the server's own paths hold
+/// the `Roles` already. Compiled with the mods, so a phone -- whose server
+/// has none -- does not build a function nothing calls.
+#[cfg(feature = "mods")]
 fn container_accepts(
     ctx: &Arc<Context>,
     at: containers::ChestPos,
@@ -20963,6 +20992,24 @@ mod downed_help_tests {
         let outcome = hunter.state.lock().unwrap().vitals.step_downed(0.05);
         assert_eq!(outcome, survival::Outcome::Changed, "the bandage went on and the body stayed down");
         assert!(!hunter.state.lock().unwrap().vitals.is_downed());
+    }
+
+    #[test]
+    fn a_body_that_goes_down_on_a_seat_or_at_the_oars_is_off_it_by_the_next_tick() {
+        // Every way off a seat, a bed, a horse or the oars is barred from the
+        // ground, so a body left on one could neither crawl nor get up.
+        let (ctx, hunter, _friend) = two_of_them();
+        {
+            let mut state = hunter.state.lock().unwrap();
+            state.sitting_on = Some((1, FLOOR + 1, 1));
+            state.rowing = Some(7);
+        }
+        down_by_a_wolf(&hunter);
+        step_downed_body(&ctx, &hunter, 0.05);
+        let state = hunter.state.lock().unwrap();
+        assert!(state.vitals.is_downed(), "the tick did more than get the body off the seat");
+        assert_eq!(state.sitting_on, None, "a downed body was left sitting where nothing lets it stand");
+        assert_eq!(state.rowing, None, "a downed body was left pinned at the oars");
     }
 
     #[test]

@@ -3987,12 +3987,24 @@ fn a_night_by_a_lit_firepit_keeps_the_wolves_at_the_edge_of_its_light_and_the_sl
             .expect("no room for a wolf");
     }
     let health = s.health;
-    let (mut nearest, mut came) = (f64::INFINITY, false);
-    for _ in 0..80 {
+    // **Until they come, and then five seconds of them circling**, rather
+    // than twenty seconds flat: under a full test run the server's ticks
+    // arrive late, and the pair was still eighteen blocks out when the
+    // twenty seconds ended -- a red test about a slow machine, not about the
+    // fire. What is asserted is the same: that they reach the edge, and that
+    // the whole time they are watched none of them steps inside it.
+    let (mut nearest, mut came, mut circled) = (f64::INFINITY, false, 0);
+    for _ in 0..360 {
         s.seconds(0.25);
         let (_, closest) = wolves_near(&s, fire_at, 64.0);
         nearest = nearest.min(closest);
         came |= closest <= FIRE_KEEPS + 6.0;
+        if came {
+            circled += 1;
+            if circled >= 20 {
+                break;
+            }
+        }
     }
     s.shot("night_firepit");
     assert!(came, "the wolves never came to the edge of the firelight: nearest {nearest:.1}");

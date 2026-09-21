@@ -253,6 +253,30 @@ fn ground_under(world: &crate::logic::world::World, x: f64, y: f64, z: f64, half
     known.then_some(false)
 }
 
+/// How fast the water at the body is carrying it, in blocks a second: the
+/// generator's river (`WorldGen::river_current`) and whatever the flow
+/// simulation is moving through the cell (`fluid::running`), read at the
+/// feet and the cell over them as the client's collider reads them.
+///
+/// Nought out of water, and nought where the chunk is not cached -- the
+/// allowance is a thing the server has to be able to see, never a benefit
+/// of the doubt.
+fn water_carries(world: &World, x: f64, y: f64, z: f64) -> f32 {
+    let (cx, feet, cz) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
+    let wet = |cy: i32| world.cached_block(cx, cy, cz).is_some_and(primitive_shared::types::is_liquid);
+    if !wet(feet) && !wet(feet + 1) {
+        return 0.0;
+    }
+    let river = world.generator().river_current(x as f32, y as f32, z as f32);
+    let running = [feet, feet + 1]
+        .into_iter()
+        .map(|cy| primitive_shared::fluid::running(cx, cy, cz, &|x, y, z| world.cached_block(x, y, z)))
+        .find(|push| *push != (0.0, 0.0))
+        .map_or((0.0, 0.0), primitive_shared::fluid::running_velocity);
+    let speed = river.0.hypot(river.1) + running.0.hypot(running.1);
+    if speed.is_finite() { speed } else { 0.0 }
+}
+
 impl AntiCheat {
     pub fn new(cfg: AntiCheatSettings, view_distance_chunks: i32, spawn: (f64, f64, f64)) -> Self {
         let now = Instant::now();
@@ -423,8 +447,21 @@ impl AntiCheat {
         } else {
             (&mut self.move_budget, self.cfg.max_horizontal_speed)
         };
+        // **What the water moved is not what the arms did.** A crawl's budget
+        // is a third of a walker's, and a river's rapid (up to 2.6 blocks a
+        // second, more where two orders meet) with a cut pond running into it
+        // (`fluid::RUNNING_SPEED_MAX`) carries a downed body faster than
+        // that on its own -- and every transform past the budget put the
+        // body back upstream, a correction a tick for as long as it lay in
+        // the current. A walker never met this, with four times the room.
+        // So a crawler is billed for the move less the drift the server
+        // itself reads at the body: the client adds exactly that to its
+        // velocity (`physics::Player::current`, `running_water`), and a
+        // modified client gains nothing it could not get by lying in the
+        // river honestly.
+        let carried = if self.crawling { water_carries(world, x, y, z) * dt } else { 0.0 };
         budget.refill(now);
-        if !budget.take(horizontal, now) {
+        if !budget.take((horizontal - carried).max(0.0), now) {
             return self.flag(W_SPEED, format!("sustained speed above {limit:.1} b/s"));
         }
         // Where the ground and the water are looked for: the hooves, for a
@@ -1069,6 +1106,56 @@ mod tests {
         };
         assert!(!run(false), "a player on their feet was flagged at {pace} b/s");
         assert!(run(true), "a downed body crawled at {pace} b/s and nothing noticed");
+    }
+
+    #[test]
+    fn a_downed_body_carried_by_running_water_is_not_pulled_back_upstream() {
+        // **The rubber band in the river.** A floor at y = 19, a wall at
+        // z = 7 and a row of full water at z = 8 spilling into the air at
+        // z = 9: every cell of the row is handing on four eighths a step,
+        // which carries a body at two blocks a second (`fluid::running`).
+        // The body goes along it at 5.5 -- over a crawl's 4.2, under the
+        // crawl plus the water -- and must not be put back; the same pace on
+        // the dry floor beside it still must.
+        use primitive_shared::types::{Chunk, ChunkPos, BLOCK_AIR, CHUNK_VOLUME};
+        let world = World::new(1, 64);
+        for cx in 0..4 {
+            let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+            for z in 0..16 {
+                for x in 0..16 {
+                    blocks[Chunk::index(x, 19, z)] = BLOCK_COBBLESTONE;
+                }
+                blocks[Chunk::index(z, 20, 7)] = BLOCK_COBBLESTONE;
+                blocks[Chunk::index(z, 20, 8)] = BLOCK_WATER;
+            }
+            world.insert(Chunk { pos: ChunkPos::new(cx, 0), blocks });
+        }
+        assert!(water_carries(&world, 3.5, 20.0, 8.5) >= 1.9, "the test's water is not running");
+        let pace = 5.5f32;
+        assert!(pace > cfg().max_horizontal_speed * FASTEST_CRAWL);
+        let flagged = |z: f64| {
+            let mut ac = AntiCheat::new(cfg(), 8, (0.5, 20.0, z));
+            ac.set_crawling(true);
+            let mut x = 0.5f32;
+            let begun = std::time::Instant::now();
+            let mut last = begun;
+            let mut seq = 0u32;
+            // Six seconds: 1.3 b/s over the crawl has to outlast the budget's
+            // 6.3 blocks of burst before the dry run can be caught at all.
+            while begun.elapsed() < Duration::from_secs(6) {
+                std::thread::sleep(Duration::from_millis(20));
+                let now = std::time::Instant::now();
+                x += (pace * now.duration_since(last).as_secs_f32()).min(2.0);
+                last = now;
+                seq += 1;
+                if !ac.check_transform(f64::from(x), 20.0, z, true, seq, &world).is_allowed() {
+                    return Some(ac.last_reason.clone());
+                }
+            }
+            None
+        };
+        assert_eq!(flagged(8.5), None, "a body the water was carrying was put back");
+        assert!(flagged(4.5).is_some(), "the water's allowance reached a crawl on dry ground");
     }
 
     #[test]
