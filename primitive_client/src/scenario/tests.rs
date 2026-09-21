@@ -339,6 +339,12 @@ fn a_winter_hillside_of_lips_is_white_all_over_is_walked_up_and_is_swept_back_to
     let snow = (lx, ly + 1, lz);
     s.stand_at((f64::from(lx) - 1.5, stand, f64::from(lz) + 0.5));
     s.look_at(DVec3::new(f64::from(lx) + 0.5, f64::from(ly) + f64::from(t::collision_height(lip)) + 0.01, f64::from(lz) + 0.5));
+    // **Once the move has landed.** `stand_at` is a teleport the server has
+    // to confirm and the client has to catch up with; read the aim the same
+    // frame and, on a busy machine, there is nothing under the crosshair yet
+    // -- `None`, which is not a place the hand reaches but the absence of a
+    // hand. What is under it, when there is something, is what this asks.
+    s.until(3.0, |s| s.aimed().is_some());
     assert_eq!(s.aimed(), Some((snow, t::BLOCK_SNOW_COVER)), "the snow on the lip is not where the hand reaches for it");
     s.input.breaking = true;
     let swept = s.until(8.0, |s| s.block(snow) == Some(t::BLOCK_AIR));
