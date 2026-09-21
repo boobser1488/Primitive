@@ -1,0 +1,176 @@
+// iter — обход последовательностей.
+//
+// Подключение:
+//     import "iter" as iter
+//     for пара in iter.enumerate(["а", "б"]) { print(пара) }
+//
+// Всё возвращает готовые массивы, а не ленивые ряды: язык обходит массив
+// одним оператором, и лишний слой тут только мешал бы читать.
+
+/// Пары «номер, значение».
+function enumerate(items) {
+    итог = []
+    i = 0
+    while i < length(items) {
+        push(итог, tuple(i, items[i]))
+        i = i + 1
+    }
+    return итог
+}
+
+/// Разбивает на куски по size элементов. Последний может быть короче.
+function chunks(items, size) {
+    итог = []
+    if size <= 0 {
+        return итог
+    }
+    i = 0
+    while i < length(items) {
+        кусок = []
+        j = 0
+        while j < size and i + j < length(items) {
+            push(кусок, items[i + j])
+            j = j + 1
+        }
+        push(итог, кусок)
+        i = i + size
+    }
+    return итог
+}
+
+/// Все подряд идущие отрезки длины size: [1,2,3] с size 2 даёт [[1,2],[2,3]].
+function windows(items, size) {
+    итог = []
+    if size <= 0 or size > length(items) {
+        return итог
+    }
+    i = 0
+    while i + size <= length(items) {
+        окно = []
+        j = 0
+        while j < size {
+            push(окно, items[i + j])
+            j = j + 1
+        }
+        push(итог, окно)
+        i = i + 1
+    }
+    return итог
+}
+
+/// Пары из двух массивов и то, что получится, если применить к ним функцию.
+function zip_with(left, right, f) {
+    итог = []
+    n = length(left)
+    if length(right) < n {
+        n = length(right)
+    }
+    i = 0
+    while i < n {
+        push(итог, f(left[i], right[i]))
+        i = i + 1
+    }
+    return итог
+}
+
+/// Раскладывает по признаку: возвращает словарь «ключ — массив значений».
+/// Порядок внутри каждой ячейки тот же, в каком элементы шли в исходном.
+function group_by(items, key_of) {
+    итог = map()
+    i = 0
+    while i < length(items) {
+        ключ = key_of(items[i])
+        if has(итог, ключ) {
+            ячейка = get(итог, ключ)
+            push(ячейка, items[i])
+        } else {
+            set(итог, ключ, [items[i]])
+        }
+        i = i + 1
+    }
+    return итог
+}
+
+/// Делит надвое: подошедшие и остальные.
+function partition(items, предикат) {
+    да = []
+    нет = []
+    i = 0
+    while i < length(items) {
+        if предикат(items[i]) {
+            push(да, items[i])
+        } else {
+            push(нет, items[i])
+        }
+        i = i + 1
+    }
+    return tuple(да, нет)
+}
+
+/// Пропускает элементы, пока предикат истинен, и отдаёт остаток.
+function drop_while(items, предикат) {
+    i = 0
+    while i < length(items) and предикат(items[i]) {
+        i = i + 1
+    }
+    итог = []
+    while i < length(items) {
+        push(итог, items[i])
+        i = i + 1
+    }
+    return итог
+}
+
+/// Берёт элементы, пока предикат истинен.
+function take_while(items, предикат) {
+    итог = []
+    i = 0
+    while i < length(items) and предикат(items[i]) {
+        push(итог, items[i])
+        i = i + 1
+    }
+    return итог
+}
+
+/// Все накопленные значения свёртки, а не только последнее:
+/// [1,2,3] со сложением даёт [1, 3, 6].
+function scan(items, начало, f) {
+    итог = []
+    накопитель = начало
+    i = 0
+    while i < length(items) {
+        накопитель = f(накопитель, items[i])
+        push(итог, накопитель)
+        i = i + 1
+    }
+    return итог
+}
+
+/// Соседние повторы схлопываются в один.
+function dedup(items) {
+    итог = []
+    i = 0
+    while i < length(items) {
+        if i == 0 or items[i] != items[i - 1] {
+            push(итог, items[i])
+        }
+        i = i + 1
+    }
+    return итог
+}
+
+/// Сколько раз встречается каждое значение: словарь «значение — счёт».
+function counts(items) {
+    итог = map()
+    i = 0
+    while i < length(items) {
+        значение = items[i]
+        if has(итог, значение) {
+            set(итог, значение, get(итог, значение) + 1)
+        } else {
+            set(итог, значение, 1)
+        }
+        i = i + 1
+    }
+    return итог
+}

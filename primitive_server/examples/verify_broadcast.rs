@@ -112,7 +112,7 @@ impl Client {
                     socket,
                     id: your_id,
                     pack: primitive_shared::inventory::Inventory::new(),
-                    at: spawn,
+                    at: primitive_shared::geometry::narrow(spawn),
                 })
             }
             other => anyhow::bail!("expected Welcome, got {other:?}"),
@@ -401,11 +401,13 @@ async fn main() -> anyhow::Result<()> {
     let refusal = alice
         .wait_for("the refusal", |msg| match msg {
             ServerMessage::Error(text) => Some(text.clone()),
+            // A refusal is a code now (`notice`); its name is what is checked.
+            ServerMessage::Notice { what } => Some(format!("{what:?}")),
             _ => None,
         })
         .await?;
     anyhow::ensure!(
-        refusal.contains("inside"),
+        refusal.contains("Inside"),
         "expected a 'can't place inside' refusal, got: {refusal}"
     );
     println!("  refused: {refusal}");
@@ -565,6 +567,9 @@ async fn main() -> anyhow::Result<()> {
                         Some(text.clone())
                     }
                     ServerMessage::Error(text) if text.contains("plugin") => Some(text.clone()),
+                    ServerMessage::Notice { what: primitive_shared::notice::Notice::PluginRefused } => {
+                        Some("PluginRefused".to_string())
+                    }
                     _ => None,
                 }),
             )
@@ -653,9 +658,9 @@ async fn linger(client: &mut Client, ticks: u32, sequence: &mut u32) -> anyhow::
         *sequence += 1;
         client
             .send(ClientMessage::UpdateTransform {
-                x: at.0,
-                y: at.1,
-                z: at.2,
+                x: f64::from(at.0),
+                y: f64::from(at.1),
+                z: f64::from(at.2),
                 yaw: 0.0,
                 pitch: 0.0,
                 on_ground: true,
@@ -699,9 +704,9 @@ async fn walk_to(
         *sequence += 1;
         client
             .send(ClientMessage::UpdateTransform {
-                x: from.0 + dx * t,
-                y: from.1 + dy * t,
-                z: from.2 + dz * t,
+                x: f64::from(from.0 + dx * t),
+                y: f64::from(from.1 + dy * t),
+                z: f64::from(from.2 + dz * t),
                 yaw: 0.0,
                 pitch: 0.0,
                 // On the ground the whole way, because that is what

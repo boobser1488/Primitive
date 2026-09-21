@@ -1,0 +1,23 @@
+[package]
+name = "primitive_modapi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The stable contract between the Primitive server and a native mod"
+publish = false
+
+# Explicit target -- see the note in primitive_server/Cargo.toml.
+[lib]
+name = "primitive_modapi"
+path = "src/lib.rs"
+
+[features]
+default = ["manifest"]
+# The RON manifest reader. On for the server, which has to read one; a
+# mod does not, and turning it off means a mod crate links neither `ron`
+# nor `serde`.
+manifest = ["dep:ron", "dep:serde"]
+
+[dependencies]
+ron = { version = "0.8", optional = true }
+serde = { workspace = true, optional = true }

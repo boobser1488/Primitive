@@ -3,8 +3,8 @@
 #   .\package.ps1                 -> dist\Primitive-1.0.0
 #   .\package.ps1 -Zip            -> also dist\Primitive-1.0.0.zip
 #
-# What ends up in there is deliberate. The two binaries, the assets they
-# need, and the plugins folder -- and *no* settings files. Both binaries
+# What ends up in there is deliberate. The two binaries (the client
+# carries its own assets), the player's guide, and the plugins folder -- and *no* settings files. Both binaries
 # write their own on first run with every value present and commented in
 # the README, which is a better starting point than whatever happened to
 # be in the build directory. Shipping a config from a developer's machine
@@ -64,18 +64,34 @@ foreach ($exe in @("primitive_client.exe", "primitive_server.exe")) {
     Copy-Item (Join-Path $release $exe) $target
 }
 
-# Assets sit next to the executable; `resolve_assets_dir` looks there
-# first, so a packaged build finds them without any configuration.
-Copy-Item -Recurse (Join-Path $root "assets") (Join-Path $target "assets")
+# **No `assets` folder.** Every file in it -- 424 pictures, 412
+# recordings, 26 models, the font and `blocks.toml` -- is compiled into
+# `primitive_client.exe` (`embedded.rs`, and tests there, in
+# `audio::recorded` and in `logic::models` fail when one is not). A copy
+# beside the executable was the same 4 MB a second time: 32 MB of
+# unpacked release where 28 would do, for nothing the game reads
+# differently. The folder is still how a resource pack works -- a file
+# at `assets/textures/stone.png` beside the executable wins over the
+# built-in one -- so a player who wants one makes the folder and puts
+# in only what they replace, which is also the only way a pack stays
+# readable when the next release changes the other four hundred files.
+#
+# Rejected: shipping the folder as a template to edit. A full copy of
+# the defaults on disk *overrides* the defaults, so an old folder
+# carried into a new release silently puts back last version's
+# textures -- the resource-pack rule turns a convenience into a bug.
 Copy-Item -Recurse (Join-Path $root "plugins") (Join-Path $target "plugins")
-# GUIDE first: it is the one a player actually needs. README is the
-# design log and CHANGELOG is history.
+# GUIDE only, of the three documents: it is the one a player needs.
+# README is the design log (250 KB) and CHANGELOG is the history
+# (2.4 MB, and growing with every release) -- both are for whoever
+# works on the game, both live in the repository, and together they
+# were a tenth of the release folder. LICENSE goes because it has to.
 #
 # An ASCII filename on purpose. PowerShell 5.1 reads this script as the
 # system codepage, so a Cyrillic literal here arrives mangled -- and a
 # non-ASCII name inside a zip is a portability hazard besides. The
 # document itself is still in Russian.
-foreach ($doc in @("GUIDE.md", "README.md", "CHANGELOG.md", "LICENSE")) {
+foreach ($doc in @("GUIDE.md", "LICENSE", "LICENSE-APACHE", "LICENSE-ASSETS", "NOTICE")) {
     Copy-Item (Join-Path $root $doc) $target
 }
 

@@ -1,0 +1,49 @@
+// The sandbox mod: `/sandbox`.
+//
+// RON rather than TOML, and the reason is `settings` below: a mod
+// declares values whose types the host does not know, and RON is a
+// notation with types in it. See `primitive_modapi::manifest`.
+(
+    name: "sandbox",
+    version: "1.0.0",
+
+    // 2.0, which is what everything this mod calls was added in. It is
+    // the mod that would notice a table growing in the wrong place
+    // first, which is the whole reason it is in the workspace.
+    api: (major: 2, minor: 0),
+
+    description: "Calls every host table and counts every event, so /sandbox says whether the API works",
+    authors: ["Primitive"],
+    // **Off until somebody is diagnosing.** This mod subscribes to
+    // *every* event, which is the only way it can report which of them
+    // never arrive -- and a mod that subscribes to everything is a
+    // dispatch on every tick, every block the water moves and every
+    // stack anybody picks up. That is the one property the subscription
+    // list exists to protect (`ModHost::wants`), and a diagnostic left
+    // running is a diagnostic that costs the players who did not ask for
+    // it. Set this to true, run /sandbox, set it back.
+    enabled: false,
+
+    library: Auto,
+
+    dependencies: [],
+    load_after: [],
+    resources: [],
+
+    settings: {
+        // Whether `/sandbox write` is allowed to change the world.
+        //
+        // **False by default, and that is the safe default rather than
+        // the useful one.** The write sweep puts a block down, lights a
+        // fire, spills water and fells a tree within a few metres of
+        // whoever ran it. That is exactly what has to happen for "the
+        // API works" to mean anything, and it is not something to do to
+        // somebody's world without being asked.
+        "allow_writes": Bool(false),
+
+        // How far from the player the write sweep works, in blocks. Far
+        // enough not to build inside them, near enough that they can see
+        // what happened and undo it.
+        "scratch_offset": I64(3),
+    },
+)

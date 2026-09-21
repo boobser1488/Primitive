@@ -48,5 +48,20 @@ jobs:
       - name: Build the server without plugins
         run: cargo build -p primitive_server --no-default-features
 
+      # **And the client on its own, which is not the same build.**
+      #
+      # `cargo build --workspace` above unifies features across the whole
+      # graph: the server binary asks for `plugins` and `mods`, so the
+      # copy the *client* links gets them too, and a call site that only
+      # compiles with the scripting engine on passes. `cargo run -p
+      # primitive_client` -- which is what a player types -- resolves
+      # features for that package alone, and there the server has none of
+      # its defaults.
+      #
+      # That gap has now bitten twice. This step is the one that closes
+      # it, because it is the same command a player runs.
+      - name: Build the client on its own
+        run: cargo build -p primitive_client
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

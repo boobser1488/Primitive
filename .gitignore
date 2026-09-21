@@ -1,4 +1,7 @@
 /target
+# Each agent and each long session builds in its own target directory, so
+# two builds never fight over one lock; none of them is project state.
+/target-*
 /dist
 
 # Auto-generated on first run with defaults; edit the copy next to your
@@ -14,3 +17,30 @@ servers.toml
 
 # Local tool configuration: machine-specific paths, not project state.
 /.claude
+
+# The APK signing key. Kept out of `target/` so a clean does not
+# change the identity of every installed build -- see package-android.sh.
+# Never committed: a key in a repository is a key everyone has.
+android-debug.keystore
+
+# Frames written by the diagnostic hooks.
+#
+# `PRIMITIVE_SHOT`, `ui_snapshot` and the offscreen render tools all
+# write PNGs wherever they are pointed, and an investigation writes
+# dozens: one run of the specks hunt left 6.8 MB of them in three
+# directories nobody had named. They are evidence for a report, not
+# project state -- the report keeps the numbers and the finished
+# picture goes to the player, so the files themselves are rubbish the
+# moment the question is answered.
+#
+# Named by pattern rather than by directory because the next
+# investigation will invent its own name, which is exactly how the
+# last three got in.
+shots*/
+*_before/
+*_after/
+shot.*.png
+gpu_*.png
+
+# A hand-off prompt for a new work session: private notes, not the project.
+/HANDOFF.md

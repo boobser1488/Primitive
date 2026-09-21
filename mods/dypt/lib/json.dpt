@@ -1,0 +1,337 @@
+// json — чтение и запись JSON на чистом dypt.
+//
+// Подключение:
+//     import "json" as json
+//     data = json.decode("{\"a\": [1, 2]}")
+//     print(json.encode(data))
+//
+// Соответствие типов: объект JSON — словарь dypt, массив — массив, число без
+// точки и показателя — целое, остальные числа — дробные, null — null.
+
+import "strings" as jstr
+
+// ------------------------------------------------------------------- запись
+
+function escape(s) {
+    out = ""
+    i = 0
+    n = jstr.size(s)
+    while i < n {
+        c = s[i]
+        if c == "\"" {
+            out = out + "\\\""
+        } elif c == "\\" {
+            out = out + "\\\\"
+        } elif c == "\n" {
+            out = out + "\\n"
+        } elif c == "\r" {
+            out = out + "\\r"
+        } elif c == "\t" {
+            out = out + "\\t"
+        } elif ord(c) < 32 {
+            // Остальные управляющие знаки в JSON голыми стоять не могут.
+            цифры = "0123456789abcdef"
+            k = ord(c)
+            out = out + "\\u00" + цифры[k / 16] + цифры[k % 16]
+        } else {
+            out = out + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+function encode(value) {
+    kind = type(value)
+    if kind == "null" {
+        return "null"
+    }
+    if kind == "bool" {
+        if value {
+            return "true"
+        }
+        return "false"
+    }
+    if kind == "int" or kind == "float" {
+        return "" + value
+    }
+    if kind == "string" {
+        return "\"" + escape(value) + "\""
+    }
+    if kind == "array" {
+        parts = []
+        for item in value {
+            push(parts, encode(item))
+        }
+        return "[" + join(parts, ",") + "]"
+    }
+    if kind == "map" {
+        parts = []
+        for key in keys(value) {
+            push(parts, "\"" + escape("" + key) + "\":" + encode(get(value, key)))
+        }
+        return "{" + join(parts, ",") + "}"
+    }
+    return "null"
+}
+
+/// Запись с отступами — так удобнее читать глазами.
+function encode_pretty(value, indent) {
+    return encode_at(value, indent, 0)
+}
+
+function encode_at(value, indent, level) {
+    kind = type(value)
+    if kind != "array" and kind != "map" {
+        return encode(value)
+    }
+    pad = jstr.repeat(indent, level + 1)
+    closing = jstr.repeat(indent, level)
+    parts = []
+    if kind == "array" {
+        if length(value) == 0 {
+            return "[]"
+        }
+        for item in value {
+            push(parts, pad + encode_at(item, indent, level + 1))
+        }
+        return "[\n" + join(parts, ",\n") + "\n" + closing + "]"
+    }
+    if length(keys(value)) == 0 {
+        return "{}"
+    }
+    for key in keys(value) {
+        push(parts, pad + "\"" + escape("" + key) + "\": " + encode_at(get(value, key), indent, level + 1))
+    }
+    return "{\n" + join(parts, ",\n") + "\n" + closing + "}"
+}
+
+// ------------------------------------------------------------------- чтение
+//
+// Разбор идёт по символам. Позиция хранится в массиве из одного элемента:
+// в dypt нет ссылок, а так её видят и вызывающая, и вызванная функция.
+
+function decode(text) {
+    pos = [0]
+    skip_spaces(text, pos)
+    value = parse_value(text, pos)
+    return value
+}
+
+function at_end(text, pos) {
+    return pos[0] >= jstr.size(text)
+}
+
+function peek_char(text, pos) {
+    if at_end(text, pos) {
+        return ""
+    }
+    return text[pos[0]]
+}
+
+function advance(pos) {
+    pos[0] = pos[0] + 1
+}
+
+function skip_spaces(text, pos) {
+    while not at_end(text, pos) and jstr.is_space(peek_char(text, pos)) {
+        advance(pos)
+    }
+}
+
+function parse_value(text, pos) {
+    skip_spaces(text, pos)
+    c = peek_char(text, pos)
+    if c == "{" {
+        return parse_object(text, pos)
+    }
+    if c == "[" {
+        return parse_array(text, pos)
+    }
+    if c == "\"" {
+        return parse_string(text, pos)
+    }
+    if c == "t" {
+        pos[0] = pos[0] + 4
+        return true
+    }
+    if c == "f" {
+        pos[0] = pos[0] + 5
+        return false
+    }
+    if c == "n" {
+        pos[0] = pos[0] + 4
+        return null
+    }
+    return parse_number(text, pos)
+}
+
+function parse_object(text, pos) {
+    result = map()
+    advance(pos)
+    skip_spaces(text, pos)
+    if peek_char(text, pos) == "}" {
+        advance(pos)
+        return result
+    }
+    while true {
+        skip_spaces(text, pos)
+        key = parse_string(text, pos)
+        skip_spaces(text, pos)
+        advance(pos) // двоеточие
+        value = parse_value(text, pos)
+        set(result, key, value)
+        skip_spaces(text, pos)
+        c = peek_char(text, pos)
+        advance(pos)
+        if c != "," {
+            return result
+        }
+    }
+    return result
+}
+
+function parse_array(text, pos) {
+    result = []
+    advance(pos)
+    skip_spaces(text, pos)
+    if peek_char(text, pos) == "]" {
+        advance(pos)
+        return result
+    }
+    while true {
+        push(result, parse_value(text, pos))
+        skip_spaces(text, pos)
+        c = peek_char(text, pos)
+        advance(pos)
+        if c != "," {
+            return result
+        }
+    }
+    return result
+}
+
+function hex_digit(c) {
+    k = ord(c)
+    if k >= 48 and k <= 57 {
+        return k - 48
+    }
+    if k >= 97 and k <= 102 {
+        return k - 87
+    }
+    if k >= 65 and k <= 70 {
+        return k - 55
+    }
+    return -1
+}
+
+function hex4(text, pos) {
+    v = 0
+    k = 0
+    while k < 4 and not at_end(text, pos) {
+        d = hex_digit(peek_char(text, pos))
+        if d < 0 {
+            return -1
+        }
+        advance(pos)
+        v = v * 16 + d
+        k = k + 1
+    }
+    if k < 4 {
+        return -1
+    }
+    return v
+}
+
+// Половинки суррогатной пары сами по себе знаками не являются, поэтому
+// одиночная половинка заменяется знаком замены.
+function safe_chr(код) {
+    if код < 0 or (код >= 55296 and код <= 57343) or код > 1114111 {
+        return chr(65533)
+    }
+    return chr(код)
+}
+
+// Запись вида \uXXXX. Знаки вне основной таблицы пишутся парой, поэтому
+// за верхней половиной пары читается и нижняя.
+function unescape_u(text, pos) {
+    код = hex4(text, pos)
+    if код < 0 {
+        return "u"
+    }
+    if код >= 55296 and код <= 56319 {
+        if at_end(text, pos) or peek_char(text, pos) != "\\" {
+            return chr(65533)
+        }
+        advance(pos)
+        if at_end(text, pos) or peek_char(text, pos) != "u" {
+            return chr(65533) + "\\"
+        }
+        advance(pos)
+        низ = hex4(text, pos)
+        if низ >= 56320 and низ <= 57343 {
+            return chr(65536 + (код - 55296) * 1024 + (низ - 56320))
+        }
+        return chr(65533) + safe_chr(низ)
+    }
+    return safe_chr(код)
+}
+
+function parse_string(text, pos) {
+    advance(pos) // открывающая кавычка
+    out = ""
+    while not at_end(text, pos) {
+        c = peek_char(text, pos)
+        advance(pos)
+        if c == "\"" {
+            return out
+        }
+        if c == "\\" {
+            e = peek_char(text, pos)
+            advance(pos)
+            if e == "n" {
+                out = out + "\n"
+            } elif e == "r" {
+                out = out + "\r"
+            } elif e == "t" {
+                out = out + "\t"
+            } elif e == "b" {
+                out = out + chr(8)
+            } elif e == "f" {
+                out = out + chr(12)
+            } elif e == "u" {
+                out = out + unescape_u(text, pos)
+            } else {
+                out = out + e
+            }
+        } else {
+            out = out + c
+        }
+    }
+    return out
+}
+
+function parse_number(text, pos) {
+    start = pos[0]
+    if peek_char(text, pos) == "-" {
+        advance(pos)
+    }
+    fractional = false
+    while not at_end(text, pos) {
+        c = peek_char(text, pos)
+        if jstr.is_digit(c) {
+            advance(pos)
+        } elif c == "." or c == "e" or c == "E" or c == "+" or c == "-" {
+            fractional = true
+            advance(pos)
+        } else {
+            pos[0] = pos[0]
+            break
+        }
+    }
+    raw = jstr.substring(text, start, pos[0])
+    if fractional {
+        return tonumber(raw)
+    }
+    return jstr.to_int(raw)
+}

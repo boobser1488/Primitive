@@ -56,27 +56,56 @@ const SLOTS: usize = 3;
 /// The whole-pass number said the frame was fill-bound and said nothing
 /// about *which* fill. These do: each is a stage of the one render pass,
 /// and the marks between them are written by the GPU as it reaches them.
-pub const STAGES: [&str; 6] = ["solid", "cutout", "sky", "actors", "water", "ui"];
+///
+/// **`shadow` is last and is not a mark in that pass.** The sun's shadow
+/// map is drawn in a depth-only pass of its own before the frame (see
+/// `engine::shadow`), for the reason the small sky is: its own target.
+/// It is listed here so the F3 line prints it beside the rest -- a
+/// shadow setting whose cost did not appear in the GPU figure would be
+/// measured as free by exactly the before-and-after it most needs.
+pub const STAGES: [&str; 7] = ["solid", "cutout", "sky", "actors", "water", "ui", "shadow"];
+
+/// How many of `STAGES` are marks inside the main pass.
+const MAIN_STAGES: usize = 6;
+
+/// Where `shadow` sits in `STAGES`.
+const SHADOW_STAGE: usize = 6;
 
 /// Timestamps per frame: the start of the pass, one at the end of every
-/// stage, the end of the pass, and two more for the small sky.
+/// stage, the end of the pass, two for the small sky and two for the
+/// shadow map.
 ///
 /// The sky at reduced scale is drawn in a pass of its own *before* the
 /// frame -- its own target, no depth -- so the marks inside the main
 /// pass cannot see it. Left unmeasured it made the sky look free: the
 /// `sky` stage fell to a twentieth of a millisecond and the work had
 /// simply moved somewhere nothing was watching.
-const OFFSCREEN_BEGIN: u32 = 2 + STAGES.len() as u32;
+const OFFSCREEN_BEGIN: u32 = 2 + MAIN_STAGES as u32;
 const OFFSCREEN_END: u32 = OFFSCREEN_BEGIN + 1;
-const TIMESTAMPS: u32 = OFFSCREEN_END + 1;
-
-/// Bytes the resolve writes. `resolve_query_set` emits one `u64` each.
-const RESOLVED_BYTES: u64 = TIMESTAMPS as u64 * 8;
+const SHADOW_BEGIN: u32 = OFFSCREEN_END + 1;
+const SHADOW_END: u32 = SHADOW_BEGIN + 1;
+const TIMESTAMPS: u32 = SHADOW_END + 1;
 
 /// `resolve_query_set` requires its destination offset to be aligned,
 /// and the simplest way to never think about it again is to give every
-/// buffer a whole alignment unit to itself.
-const SLOT_BYTES: u64 = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
+/// group of timestamps a whole alignment unit to itself: the main pass
+/// in the first, the small sky in the second, the shadow pass in the
+/// third.
+///
+/// **Three resolves rather than one**, because a query that was never
+/// written must not be resolved (see `resolve`), and the sky and the
+/// shadow each come and go on their own -- one contiguous range could
+/// only ever stop short of the first missing one.
+const ALIGN: u64 = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
+const SLOT_BYTES: u64 = 3 * ALIGN;
+
+/// Bytes copied out per frame: all three groups, written or not.
+const RESOLVED_BYTES: u64 = SLOT_BYTES;
+
+/// Where a group's first timestamp lands among the `u64`s of a slot.
+const fn group_start(group: u64) -> usize {
+    (group * ALIGN / 8) as usize
+}
 
 // Slot states. A plain atomic rather than a channel: the map callback
 // has to be `'static` and this is the whole of what it needs to say.
@@ -93,6 +122,9 @@ struct Slot {
     /// read back a frame or three after it was true, by which time the
     /// setting may have changed.
     offscreen: bool,
+    /// ...and whether it drew the shadow map, which changes with the
+    /// time of day as well as with the setting.
+    shadow: bool,
 }
 
 pub struct GpuTiming {
@@ -154,6 +186,7 @@ impl GpuTiming {
             }),
             state: Arc::new(AtomicU8::new(FREE)),
             offscreen: false,
+            shadow: false,
         });
         Some(Self {
             query_set,
@@ -173,11 +206,13 @@ impl GpuTiming {
     /// end. Claims a readback slot for this frame; if none is free --
     /// which means the GPU is more than `SLOTS` frames behind -- the
     /// frame simply goes unmeasured rather than waiting for one.
+    #[allow(clippy::type_complexity)]
     pub fn pass_writes(
         &mut self,
     ) -> Option<(
         wgpu::RenderPassTimestampWrites<'_>,
         Option<&wgpu::QuerySet>,
+        wgpu::RenderPassTimestampWrites<'_>,
         wgpu::RenderPassTimestampWrites<'_>,
     )> {
         self.claimed = self
@@ -203,7 +238,12 @@ impl GpuTiming {
             beginning_of_pass_write_index: Some(OFFSCREEN_BEGIN),
             end_of_pass_write_index: Some(OFFSCREEN_END),
         };
-        Some((writes, marks, offscreen))
+        let shadow = wgpu::RenderPassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: Some(SHADOW_BEGIN),
+            end_of_pass_write_index: Some(SHADOW_END),
+        };
+        Some((writes, marks, offscreen, shadow))
     }
 
     /// The query index a stage's closing mark is written to.
@@ -222,13 +262,21 @@ impl GpuTiming {
     /// the sky is drawn at full size there is no second pass, nothing
     /// writes the last two timestamps, and the resolve has to stop
     /// short of them.
-    pub fn resolve(&mut self, encoder: &mut wgpu::CommandEncoder, offscreen: bool) {
+    /// ...and `shadow` is the same rule for the shadow pass, which does
+    /// not run at night, under a storm, or with the setting off.
+    pub fn resolve(&mut self, encoder: &mut wgpu::CommandEncoder, offscreen: bool, shadow: bool) {
         let Some(slot) = self.claimed else {
             return;
         };
         self.slots[slot].offscreen = offscreen;
-        let count = if offscreen { TIMESTAMPS } else { OFFSCREEN_BEGIN };
-        encoder.resolve_query_set(&self.query_set, 0..count, &self.resolve, 0);
+        self.slots[slot].shadow = shadow;
+        encoder.resolve_query_set(&self.query_set, 0..OFFSCREEN_BEGIN, &self.resolve, 0);
+        if offscreen {
+            encoder.resolve_query_set(&self.query_set, OFFSCREEN_BEGIN..SHADOW_BEGIN, &self.resolve, ALIGN);
+        }
+        if shadow {
+            encoder.resolve_query_set(&self.query_set, SHADOW_BEGIN..TIMESTAMPS, &self.resolve, 2 * ALIGN);
+        }
         encoder.copy_buffer_to_buffer(
             &self.resolve,
             0,
@@ -282,22 +330,26 @@ impl GpuTiming {
                 // are left at whatever the previous frame wrote when
                 // the sky is drawn at full scale, so a zero-or-negative
                 // difference is read as "did not happen".
-                let offscreen = if slot.offscreen {
-                    to_ms(ticks[OFFSCREEN_BEGIN as usize], ticks[OFFSCREEN_END as usize])
+                let pass_ms = |written: bool, group: u64| {
+                    let at = group_start(group);
+                    written
+                        .then(|| to_ms(ticks[at], ticks[at + 1]))
+                        .flatten()
                         .filter(|ms| *ms > 0.0)
                         .unwrap_or(0.0)
-                } else {
-                    0.0
                 };
+                let offscreen = pass_ms(slot.offscreen, 1);
+                let shadow = pass_ms(slot.shadow, 2);
                 if let Some(whole) = to_ms(ticks[0], ticks[1]) {
-                    // Everything the GPU did this frame, both passes.
-                    self.last_ms = Some(whole + offscreen);
+                    // Everything the GPU did this frame, every pass.
+                    self.last_ms = Some(whole + offscreen + shadow);
                 }
                 if self.stages_supported {
+                    self.last_stage_ms[SHADOW_STAGE] = shadow;
                     // Each stage runs from wherever the previous one
                     // finished, and the first from the start of the pass.
                     let mut previous = ticks[0];
-                    for stage in 0..STAGES.len() {
+                    for stage in 0..MAIN_STAGES {
                         let at = ticks[Self::stage_query(stage) as usize];
                         self.last_stage_ms[stage] = to_ms(previous, at).unwrap_or(0.0);
                         previous = at;

@@ -1,0 +1,231 @@
+// strings — работа с текстом.
+//
+// Подключение:
+//     import "strings" as strings
+//     print(strings.trim("  привет  "))
+//
+// Номер символа везде считается в символах, а не в байтах: строка «привет»
+// состоит из шести символов, хотя занимает двенадцать байт.
+
+/// Число символов в строке.
+function size(s) {
+    // Раньше символы приходилось считать перебором: length давала байты.
+    // Теперь она сама считает символы, и функция осталась только ради
+    // тех, кто её уже зовёт.
+    return length(s)
+}
+
+/// Сколько байт занимает символ с номером i.
+function byte_width(s, i) {
+    return byte_length(s[i])
+}
+
+/// Массив символов строки.
+function chars(s) {
+    out = []
+    i = 0
+    n = size(s)
+    while i < n {
+        push(out, s[i])
+        i = i + 1
+    }
+    return out
+}
+
+/// Подстрока с номера start по номер stop (не включая).
+function substring(s, start, stop) {
+    out = ""
+    i = start
+    n = size(s)
+    if stop < n {
+        n = stop
+    }
+    while i < n {
+        out = out + s[i]
+        i = i + 1
+    }
+    return out
+}
+
+function starts_with(s, prefix) {
+    return substring(s, 0, size(prefix)) == prefix
+}
+
+function ends_with(s, suffix) {
+    n = size(s)
+    k = size(suffix)
+    if k > n {
+        return false
+    }
+    return substring(s, n - k, n) == suffix
+}
+
+/// Номер первого вхождения или -1.
+function index_of(s, needle) {
+    n = size(s)
+    k = size(needle)
+    if k == 0 {
+        return 0
+    }
+    i = 0
+    while i + k <= n {
+        if substring(s, i, i + k) == needle {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/// Номер последнего вхождения или -1.
+function last_index_of(s, needle) {
+    n = size(s)
+    k = size(needle)
+    if k == 0 {
+        return n
+    }
+    i = n - k
+    while i >= 0 {
+        if substring(s, i, i + k) == needle {
+            return i
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+function count_of(s, needle) {
+    k = size(needle)
+    if k == 0 {
+        return 0
+    }
+    n = 0
+    i = 0
+    limit = size(s)
+    while i + k <= limit {
+        if substring(s, i, i + k) == needle {
+            n = n + 1
+            i = i + k
+        } else {
+            i = i + 1
+        }
+    }
+    return n
+}
+
+function is_space(c) {
+    return c == " " or c == "\t" or c == "\n" or c == "\r"
+}
+
+function trim_left(s) {
+    i = 0
+    n = size(s)
+    while i < n and is_space(s[i]) {
+        i = i + 1
+    }
+    return substring(s, i, n)
+}
+
+function trim_right(s) {
+    n = size(s)
+    while n > 0 and is_space(s[n - 1]) {
+        n = n - 1
+    }
+    return substring(s, 0, n)
+}
+
+function trim(s) {
+    return trim_right(trim_left(s))
+}
+
+function repeat(s, times) {
+    out = ""
+    i = 0
+    while i < times {
+        out = out + s
+        i = i + 1
+    }
+    return out
+}
+
+function pad_left(s, width, fill) {
+    out = s
+    while size(out) < width {
+        out = fill + out
+    }
+    return out
+}
+
+function pad_right(s, width, fill) {
+    out = s
+    while size(out) < width {
+        out = out + fill
+    }
+    return out
+}
+
+function reverse_str(s) {
+    out = ""
+    i = size(s) - 1
+    while i >= 0 {
+        out = out + s[i]
+        i = i - 1
+    }
+    return out
+}
+
+function is_digit(c) {
+    return c >= "0" and c <= "9"
+}
+
+/// Только латиница: у остальных алфавитов нет порядка в одном байте.
+function is_alpha(c) {
+    if c >= "a" and c <= "z" {
+        return true
+    }
+    return c >= "A" and c <= "Z"
+}
+
+function capitalize(s) {
+    if size(s) == 0 {
+        return s
+    }
+    return upper(s[0]) + substring(s, 1, size(s))
+}
+
+/// Разбор целого числа; при неудаче возвращается null.
+function to_int(s) {
+    t = trim(s)
+    if size(t) == 0 {
+        return null
+    }
+    negative = false
+    i = 0
+    if t[0] == "-" {
+        negative = true
+        i = 1
+    } elif t[0] == "+" {
+        i = 1
+    }
+    if i >= size(t) {
+        return null
+    }
+    value = 0
+    while i < size(t) {
+        if not is_digit(t[i]) {
+            return null
+        }
+        value = value * 10 + (ord(t[i]) - 48)
+        i = i + 1
+    }
+    if negative {
+        return -value
+    }
+    return value
+}
+
+/// Строка из массива строк, разделённых sep. Обёртка над встроенным join
+/// ради единообразия имён.
+function concat_with(parts, sep) {
+    return join(parts, sep)
+}

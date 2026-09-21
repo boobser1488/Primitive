@@ -24,6 +24,29 @@ pub enum Permission {
     Operator,
 }
 
+/// Which of the two a caller holds, from the two facts that decide it:
+/// whether this is a world of their own, and what the profiles say about
+/// their UUID (`None` for a connection that has not got one).
+///
+/// **One rule, because it is now asked in two places.** It has always been
+/// worked out where a chat line arrives; the give menu asks the same
+/// question outright before it draws itself
+/// (`protocol::ClientMessage::AmIAnOperator`). Written twice, the menu and
+/// the command could disagree about who may run `/give` -- a page that
+/// opens and then refuses, or worse, one that hides itself from somebody
+/// the server would have obeyed.
+pub fn permission_for(local_operator: bool, profile_says_operator: Option<bool>) -> Permission {
+    // Свой мир: единственный игрок — оператор по построению. См.
+    // `RunOptions::local_operator`.
+    if local_operator || profile_says_operator == Some(true) {
+        return Permission::Operator;
+    }
+    // No profile, no authority. Unreachable in practice -- the UUID is set
+    // before the handle is published -- but the fallback that costs
+    // nothing is the one that grants nothing.
+    Permission::Player
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Help,
@@ -36,14 +59,60 @@ pub enum Command {
     Say(String),
     /// Report or set the time of day (0.0..1.0, or a named phase).
     Time(Option<f32>),
+    /// Report or set the weather.
+    ///
+    /// The same shape as `/time` and for the same reason: an operator
+    /// wants to know what the sky is doing far more often than they want
+    /// to change it, so the reporting form is the one without an
+    /// argument and the one anybody may run.
+    ///
+    /// `Some(None)` is `/weather auto`: hand the sky back to the
+    /// countdown after it has been held somewhere by hand.
+    Weather(Option<Option<primitive_shared::weather::Weather>>),
     /// Where the caller is.
     Where,
     /// Teleport to absolute coordinates.
     Teleport { x: f32, y: f32, z: f32 },
     /// Teleport to the world spawn.
     Spawn,
+    /// Teleport to the nearest chunk of a named biome.
+    ///
+    /// **An operator's command and a test tool before it is anything
+    /// else.** "Does the bog look right" and "do wolves spawn in a taiga"
+    /// are questions that used to cost twenty minutes of walking or a
+    /// world generated until one appeared under the spawn point, and a
+    /// scenario cannot walk at all. It carries the name as typed rather
+    /// than a parsed `Biome` for one reason: an unknown name has to come
+    /// back as a list of the ones that exist, and the list belongs with
+    /// the reply rather than with the parser.
+    BiomeTeleport { biome: String },
+    /// Throw a bolt of lightning: at the top of a named column, or --
+    /// with no argument -- wherever the storm would have put one near
+    /// the caller (`logic::lightning::Storm::draw`).
+    ///
+    /// **Because a bolt cannot be waited for.** It falls about once a
+    /// minute and only in a storm, which is fine for a player and
+    /// useless for everybody who has to *check* what it does: a
+    /// scenario cannot wait five minutes, and a phone cannot be driven
+    /// at all (see CLAUDE.md on why anything that has to be verified has
+    /// to be reachable from a command or an environment variable). The
+    /// column form is the deterministic one -- plant a tree, strike it,
+    /// assert it burns.
+    ///
+    /// It does not need a storm overhead, deliberately: an operator
+    /// asking for a bolt has said what they want more plainly than the
+    /// sky could.
+    Lightning { at: Option<(i32, i32)> },
     /// Server counters: uptime, players, chunks, ticks.
     Stats,
+    /// What is extending this server: the scripted plugins and the
+    /// native mods, with what each of them says about itself.
+    ///
+    /// One command for both, because from an operator's side they are
+    /// one question -- "what is running here" -- and two commands would
+    /// mean somebody diagnosing a strange server has to know which kind
+    /// of thing to suspect before they can look.
+    Extensions,
     /// Flush the world to disk now.
     Save,
     /// Put blocks straight into the caller's pack.
@@ -81,11 +150,25 @@ impl Command {
             | Command::Where
             | Command::Spawn
             | Command::Stats
-            | Command::Time(None) => Permission::Player,
+            // Read-only, and worth being open: "what is running on this
+            // server" is a question a player is entitled to an answer
+            // to, and a server that hid it would be a server where
+            // nobody can tell a mod's behaviour from a bug.
+            | Command::Extensions
+            | Command::Time(None)
+            | Command::Weather(None) => Permission::Player,
             // Anything that affects other people or the world.
             Command::Say(_)
             | Command::Time(Some(_))
+            | Command::Weather(Some(_))
             | Command::Teleport { .. }
+            // It is a teleport, and it searches: a player who could run
+            // it could put themselves anywhere and make the server
+            // generate a few thousand columns while they thought about
+            // it.
+            | Command::BiomeTeleport { .. }
+            // It sets fire to things.
+            | Command::Lightning { .. }
             | Command::Save
             | Command::Give { .. }
             | Command::Kick { .. }
@@ -125,9 +208,14 @@ pub const HELP_TEXT: &[&str] = &[
     "/where                - your position",
     "/spawn                - teleport to spawn",
     "/stats                - server counters",
+    "/mods                 - the plugins and mods that are loaded",
     "/time                 - show the time of day",
     "/time <0..1|day|night|noon|midnight>  - set it (operator)",
+    "/weather              - what the sky is doing",
+    "/weather <clear|rain|storm|auto>  - set it (operator)",
     "/tp <x> <y> <z>       - teleport (operator)",
+    "/biometp <biome>      - teleport to the nearest chunk of it (operator)",
+    "/lightning [<x> <z>]  - throw a bolt, here or at a column (operator)",
     "/say <message>        - broadcast (operator)",
     "/save                 - flush world, chests and players to disk (operator)",
     "/give <block> [n]     - put blocks in your pack (operator)",
@@ -157,6 +245,7 @@ pub fn parse(line: &str) -> Result<Command, ParseError> {
         "where" | "pos" => Ok(Command::Where),
         "spawn" => Ok(Command::Spawn),
         "stats" | "tps" => Ok(Command::Stats),
+        "mods" | "plugins" | "extensions" => Ok(Command::Extensions),
         "save" => Ok(Command::Save),
         "stop" | "quit" | "shutdown" => Ok(Command::Stop),
 
@@ -170,6 +259,19 @@ pub fn parse(line: &str) -> Result<Command, ParseError> {
         "time" => match rest.first() {
             None => Ok(Command::Time(None)),
             Some(arg) => Ok(Command::Time(Some(parse_time(arg)?))),
+        },
+
+        "weather" => match rest.first() {
+            None => Ok(Command::Weather(None)),
+            Some(arg) if arg.eq_ignore_ascii_case("auto") => Ok(Command::Weather(Some(None))),
+            Some(arg) => match primitive_shared::weather::Weather::parse(arg) {
+                Some(weather) => Ok(Command::Weather(Some(Some(weather)))),
+                // A typo is a refusal rather than silently a clear sky,
+                // which is the same rule `Weather::parse` follows and
+                // for the same reason: an operator who mistyped "rian"
+                // should be told, not quietly given sunshine.
+                None => Err(ParseError::Usage("/weather <clear|rain|storm|auto>")),
+            },
         },
 
         "tp" | "teleport" => {
@@ -186,6 +288,37 @@ pub fn parse(line: &str) -> Result<Command, ParseError> {
                 z: coord(rest[2])?,
             })
         }
+
+        // The tail is joined rather than refused, so `/biometp snowy
+        // peaks` works as well as `/biometp snowy_peaks`: a biome whose
+        // name is two words is one a player will type as two words, and
+        // a usage error for a name that is on the list the command
+        // itself prints would be a command arguing with its own help.
+        "biometp" | "biome" => {
+            if rest.is_empty() {
+                return Err(ParseError::Usage("/biometp <biome>"));
+            }
+            Ok(Command::BiomeTeleport {
+                biome: rest.join(" "),
+            })
+        }
+
+        "lightning" | "bolt" => match rest.len() {
+            0 => Ok(Command::Lightning { at: None }),
+            2 => {
+                let coord = |s: &str| {
+                    s.parse::<i32>()
+                        .map_err(|_| ParseError::BadNumber(s.to_string()))
+                };
+                Ok(Command::Lightning {
+                    at: Some((coord(rest[0])?, coord(rest[1])?)),
+                })
+            }
+            // Two, not three: a bolt picks its own height -- the top of
+            // the column -- because that is what lightning does and a
+            // `y` would only be a way to ask for one inside a hill.
+            _ => Err(ParseError::Usage("/lightning [<x> <z>]")),
+        },
 
         "give" => {
             if rest.is_empty() || rest.len() > 2 {
@@ -243,6 +376,64 @@ pub fn parse(line: &str) -> Result<Command, ParseError> {
     }
 }
 
+/// How far `/biometp` looks, in chunks of sixteen columns.
+///
+/// **Ninety-six chunks is a kilometre and a half each way**, which is far
+/// enough to find anything the generator makes at the scale it makes it
+/// -- a desert and a taiga are never more than fifteen hundred blocks
+/// apart (`no_walk_leads_from_a_taiga_to_a_desert_inside_a_kilometre`),
+/// and the rarest biome there is, a bog, is a third of a percent of the
+/// world and so has about forty of them in this square.
+///
+/// And it is bounded because **an unbounded search is a hung server**:
+/// `biome_at` is noise rather than a chunk, so it costs no generation,
+/// but a spiral with no end asked for a biome the seed does not contain
+/// -- and some seeds contain no snowy peaks at all -- would walk until
+/// the coordinates overflowed. The reply says how far it looked, so a
+/// refusal reads as "not near here" rather than as "no such place".
+pub const BIOME_SEARCH_CHUNKS: i32 = 96;
+
+/// Which chunk of `wanted` is nearest, and how many chunks away it is.
+///
+/// Rings outward from the caller's own chunk, testing the middle column
+/// of each: the biome field is smooth (see `worldgen::Biome`, which is
+/// derived from three smooth fields), so a chunk whose middle is a bog
+/// is a bog, and sampling four corners would cost four times as much to
+/// find the same chunk half a ring sooner.
+///
+/// Ring by ring rather than a square scan sorted afterwards, because the
+/// answer is wanted *nearest first* and the far half of a square is
+/// thousands of columns that are only looked at to be thrown away.
+///
+/// A closure rather than a `&World`, so the whole of the search --
+/// including that it stops, and including what it does when the biome is
+/// under the caller's feet -- is testable against a field somebody drew
+/// by hand.
+pub fn nearest_biome(
+    from_chunk: (i32, i32),
+    wanted: primitive_shared::worldgen::Biome,
+    biome_at_chunk: impl Fn(i32, i32) -> primitive_shared::worldgen::Biome,
+) -> Option<((i32, i32), i32)> {
+    for ring in 0..=BIOME_SEARCH_CHUNKS {
+        // The edge of the square at this distance. `ring == 0` is the
+        // caller's own chunk, which is the answer to `/biometp forest`
+        // typed in a forest -- and it has to be, or the command would
+        // march somebody out of the place they were asking about.
+        for dz in -ring..=ring {
+            for dx in -ring..=ring {
+                if dx.abs() != ring && dz.abs() != ring {
+                    continue;
+                }
+                let at = (from_chunk.0 + dx, from_chunk.1 + dz);
+                if biome_at_chunk(at.0, at.1) == wanted {
+                    return Some((at, ring));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Accepts either a raw 0..1 fraction or a named phase. Named phases
 /// exist because "0.75" is not how anyone thinks about sunset.
 fn parse_time(arg: &str) -> Result<f32, ParseError> {
@@ -274,8 +465,17 @@ pub enum Response {
     /// Text to everyone.
     Broadcast(String),
     SetTime(f32),
+    /// Set the weather, or -- for `None` -- hand it back to the
+    /// countdown. See `Command::Weather`.
+    SetWeather(Option<primitive_shared::weather::Weather>),
     TeleportSelf { x: f32, y: f32, z: f32 },
     TeleportSelfToSpawn,
+    /// Find the nearest chunk of this biome and stand the caller in it.
+    /// The name is still unparsed here: see `Command::BiomeTeleport`.
+    TeleportSelfToBiome { biome: String },
+    /// Throw a bolt at a column, or near the caller. See
+    /// `Command::Lightning`.
+    Lightning { at: Option<(i32, i32)> },
     Kick { username: String, reason: String },
     /// Grant (`operator`) or revoke operator rights for a named player.
     ///
@@ -308,6 +508,7 @@ pub fn authorize(command: Command, permission: Permission, caller: Option<Player
         Command::List => Response::Reply(vec!["__LIST__".to_string()]),
         Command::Profiles => Response::Reply(vec!["__PROFILES__".to_string()]),
         Command::Stats => Response::Reply(vec!["__STATS__".to_string()]),
+        Command::Extensions => Response::Reply(vec!["__EXTENSIONS__".to_string()]),
         Command::Where => {
             if caller.is_none() {
                 // The console isn't standing anywhere.
@@ -330,6 +531,19 @@ pub fn authorize(command: Command, permission: Permission, caller: Option<Player
                 Response::TeleportSelf { x, y, z }
             }
         }
+        Command::BiomeTeleport { biome } => {
+            if caller.is_none() {
+                Response::Reply(vec!["the console can't teleport".to_string()])
+            } else {
+                Response::TeleportSelfToBiome { biome }
+            }
+        }
+        // The console may throw one at a named column; it may not throw
+        // one "here", because it is not standing anywhere.
+        Command::Lightning { at } => match (at, caller) {
+            (None, None) => Response::Reply(vec!["the console is not standing anywhere: /lightning <x> <z>".to_string()]),
+            (at, _) => Response::Lightning { at },
+        },
         Command::Give { block, count } => {
             if caller.is_none() {
                 // The console has no pack to put anything in.
@@ -341,6 +555,8 @@ pub fn authorize(command: Command, permission: Permission, caller: Option<Player
         Command::Say(text) => Response::Broadcast(text),
         Command::Time(None) => Response::Reply(vec!["__TIME__".to_string()]),
         Command::Time(Some(t)) => Response::SetTime(t),
+        Command::Weather(None) => Response::Reply(vec!["__WEATHER__".to_string()]),
+        Command::Weather(Some(weather)) => Response::SetWeather(weather),
         Command::Save => Response::Save,
         Command::Kick { username, reason } => Response::Kick { username, reason },
         Command::Op { username } => Response::SetOperator {
@@ -362,10 +578,14 @@ fn command_name(command: &Command) -> &'static str {
         Command::Profiles => "players",
         Command::Say(_) => "say",
         Command::Time(_) => "time",
+        Command::Weather(_) => "weather",
         Command::Where => "where",
         Command::Teleport { .. } => "tp",
         Command::Spawn => "spawn",
+        Command::BiomeTeleport { .. } => "biometp",
+        Command::Lightning { .. } => "lightning",
         Command::Stats => "stats",
+        Command::Extensions => "mods",
         Command::Save => "save",
         Command::Give { .. } => "give",
         Command::Kick { .. } => "kick",
@@ -377,6 +597,22 @@ fn command_name(command: &Command) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// **The rule the give menu is drawn from.** `ui::journal` shows the
+    /// page to an operator and to nobody else, and it learns which it is
+    /// facing by asking the server, which answers with this. A rule that
+    /// said yes where `authorize` says no would be a menu that opens and
+    /// then refuses -- which is what it did before, and what the player
+    /// asked to be rid of.
+    #[test]
+    fn your_own_world_makes_you_an_operator_and_a_server_that_never_heard_of_you_does_not() {
+        use super::{permission_for, Permission};
+        assert_eq!(permission_for(true, None), Permission::Operator, "the only player of a local world is not its operator");
+        assert_eq!(permission_for(true, Some(false)), Permission::Operator, "a local world outranks the profile file");
+        assert_eq!(permission_for(false, Some(true)), Permission::Operator);
+        assert_eq!(permission_for(false, Some(false)), Permission::Player);
+        assert_eq!(permission_for(false, None), Permission::Player, "a connection with no profile was granted authority");
+    }
+
     use super::*;
 
     #[test]
@@ -625,10 +861,108 @@ mod tests {
         // Guard against adding a command and forgetting to document it.
         let documented = HELP_TEXT.join(" ");
         for name in [
-            "/help", "/list", "/where", "/spawn", "/stats", "/time", "/tp", "/say", "/save",
-            "/kick", "/op", "/deop", "/stop",
+            "/help", "/list", "/where", "/spawn", "/stats", "/time", "/tp", "/biometp", "/lightning",
+            "/say", "/save", "/kick", "/op", "/deop", "/stop",
         ] {
             assert!(documented.contains(name), "{name} is missing from /help");
         }
+    }
+
+    #[test]
+    fn a_biome_is_named_the_way_the_game_names_it_and_a_two_word_name_survives_a_command_line() {
+        use primitive_shared::worldgen::Biome;
+        assert_eq!(
+            parse("/biometp steppe"),
+            Ok(Command::BiomeTeleport { biome: "steppe".to_string() })
+        );
+        // Both spellings of a two-word name reach the same biome.
+        for line in ["/biometp snowy peaks", "/biometp snowy_peaks", "/biometp SNOWY_PEAKS"] {
+            let Ok(Command::BiomeTeleport { biome }) = parse(line) else {
+                panic!("{line} did not parse");
+            };
+            assert_eq!(Biome::parse(&biome), Some(Biome::SnowyPeaks), "{line}");
+        }
+        // Every biome the game has can be asked for by the name it
+        // prints, which is what makes the list in the refusal usable.
+        for biome in Biome::ALL {
+            assert_eq!(Biome::parse(biome.name()), Some(*biome));
+        }
+        assert_eq!(Biome::parse("mordor"), None);
+        // ...and a bare `/biometp` is a usage line, not a walk to
+        // wherever chunk zero happens to be.
+        assert_eq!(parse("/biometp"), Err(ParseError::Usage("/biometp <biome>")));
+    }
+
+    #[test]
+    fn biometp_is_an_operators_command_and_the_console_cannot_stand_anywhere() {
+        let asked = parse("/biometp bog").unwrap();
+        assert!(matches!(
+            authorize(asked.clone(), Permission::Player, Some(1)),
+            Response::Denied(_)
+        ));
+        assert_eq!(
+            authorize(asked.clone(), Permission::Operator, Some(1)),
+            Response::TeleportSelfToBiome { biome: "bog".to_string() }
+        );
+        assert!(matches!(
+            authorize(asked, Permission::Operator, None),
+            Response::Reply(_)
+        ));
+    }
+
+    #[test]
+    fn a_bolt_can_be_asked_for_by_column_or_for_wherever_the_storm_would_put_one() {
+        assert_eq!(parse("/lightning"), Ok(Command::Lightning { at: None }));
+        assert_eq!(parse("/lightning 12 -30"), Ok(Command::Lightning { at: Some((12, -30)) }));
+        // A height is refused rather than half obeyed: a bolt picks its
+        // own, and `/lightning 1 2 3` is somebody expecting `/tp`.
+        assert_eq!(parse("/lightning 1 2 3"), Err(ParseError::Usage("/lightning [<x> <z>]")));
+        assert_eq!(parse("/lightning x z"), Err(ParseError::BadNumber("x".to_string())));
+        // The console is not standing anywhere, so it must say where.
+        assert!(matches!(
+            authorize(Command::Lightning { at: None }, Permission::Operator, None),
+            Response::Reply(_)
+        ));
+        assert_eq!(
+            authorize(Command::Lightning { at: Some((0, 0)) }, Permission::Operator, None),
+            Response::Lightning { at: Some((0, 0)) }
+        );
+        assert!(matches!(
+            authorize(Command::Lightning { at: None }, Permission::Player, Some(1)),
+            Response::Denied(_)
+        ));
+    }
+
+    #[test]
+    fn the_search_finds_the_nearest_chunk_of_it_and_the_one_underfoot_first() {
+        use primitive_shared::worldgen::Biome;
+        // A world that is meadow everywhere except one column of bog and
+        // one, nearer, of steppe.
+        let field = |x: i32, z: i32| match (x, z) {
+            (10, 0) => Biome::Bog,
+            (-2, 1) => Biome::Steppe,
+            _ => Biome::Plains,
+        };
+        assert_eq!(nearest_biome((0, 0), Biome::Bog, field), Some(((10, 0), 10)));
+        assert_eq!(nearest_biome((0, 0), Biome::Steppe, field), Some(((-2, 1), 2)));
+        // Standing in it already is a distance of nothing, not a march
+        // to the next one.
+        assert_eq!(nearest_biome((10, 0), Biome::Bog, field), Some(((10, 0), 0)));
+    }
+
+    #[test]
+    fn the_search_gives_up_rather_than_walking_out_of_the_world() {
+        use primitive_shared::worldgen::Biome;
+        use std::cell::Cell as CountCell;
+        // A seed with no snowy peaks in it at all -- which is a seed
+        // that exists. An unbounded spiral here is a hung server.
+        let looked = CountCell::new(0);
+        let counted = |_x: i32, _z: i32| {
+            looked.set(looked.get() + 1);
+            Biome::Ocean
+        };
+        assert_eq!(nearest_biome((0, 0), Biome::SnowyPeaks, counted), None);
+        let side = (BIOME_SEARCH_CHUNKS * 2 + 1) as i64;
+        assert_eq!(looked.get() as i64, side * side, "the rings did not cover the square exactly once");
     }
 }

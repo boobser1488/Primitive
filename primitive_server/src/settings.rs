@@ -17,6 +17,30 @@ pub struct ServerSettings {
     /// Shown to clients in `Welcome`, and in the console banner.
     pub server_name: String,
     pub world_seed: u32,
+    /// Which generator makes the terrain. See `worldgen::Preset`.
+    ///
+    /// A seed says *which* world of a kind; this says of what kind. It
+    /// lives beside the seed here for the same reason it lives beside
+    /// the seed in a singleplayer world's `world.toml`: the pair is what
+    /// the saved edits were written against, and changing either one
+    /// puts a player's buildings on ground that never existed.
+    pub world_preset: primitive_shared::worldgen::Preset,
+    /// Where on the planet the world is laid. See `worldgen::Zone`.
+    ///
+    /// Beside the seed and the preset for their reason, and like them not
+    /// something to change under a world with edits in it: the same
+    /// buildings laid at another latitude stand in another country.
+    pub world_zone: primitive_shared::worldgen::Zone,
+    /// Which scale the country is drawn at. See `worldgen::Scale`.
+    ///
+    /// **A file without it is an old world's**, and reads as
+    /// `Scale::Regional` -- the field's own default, not the struct's: a
+    /// server upgraded under an existing world keeps the ground its players
+    /// built on, and a server writing its first settings file writes the
+    /// newest generator's (`Scale::Landforms`). Not something to change under a world with edits in it, for
+    /// the seed's reason.
+    #[serde(default = "primitive_shared::worldgen::Scale::unrecorded")]
+    pub world_scale: primitive_shared::worldgen::Scale,
     /// Hard cap on simultaneous players. Beyond this, new connections are
     /// answered with `Rejected(ServerFull)` instead of being silently
     /// dropped, so the client can say something useful.
@@ -36,6 +60,14 @@ pub struct ServerSettings {
     pub view_distance_chunks: i32,
     /// Full in-game day length in real seconds. Drives the sun position,
     /// sky colour and skylight level on every client.
+    ///
+    /// Thirty minutes by default. It was fifteen, then twenty after "ночь
+    /// быстро наступает", and thirty is the number the player asked for
+    /// outright ("сделай сутки 30 минут"). A day is the clock every other slow thing in the world is
+    /// measured against -- rot, growth, a fire burning down -- so lengthening
+    /// it slows all of them together, which is the point. Dusk is the other
+    /// half of the same complaint and is the sky's: see `TWILIGHT_FALL` in
+    /// the client's `engine::sky`.
     pub day_length_seconds: f32,
     /// Time of day the world starts at (0.0 = midnight, 0.5 = noon).
     pub start_time_of_day: f32,
@@ -49,7 +81,31 @@ pub struct ServerSettings {
     pub max_cached_chunks: usize,
     /// Chunks sent to a single client per tick. Caps how much one player
     /// joining can starve everyone else's traffic.
+    ///
+    /// This is a *sending* budget and no longer a generation one: since
+    /// terrain moved onto its own pool (`logic::chunkgen`) a chunk that
+    /// is not ready yet costs the pump nothing, so this number can be
+    /// what it was always meant to be -- how much of one player's world
+    /// may go down the wire in a fiftieth of a second.
     pub chunk_send_budget_per_tick: usize,
+    /// Threads the terrain generator runs on. Zero means "one per core
+    /// less two", leaving a core for the async runtime driving the
+    /// sockets and one for the machine.
+    ///
+    /// Worth setting by hand in exactly two cases: a shared host, where
+    /// the server should not take every core it can see; and a
+    /// single-core box, where a value of 1 is what the default already
+    /// clamps to.
+    #[serde(default)]
+    pub generator_threads: usize,
+    /// Chunks generated around the spawn point at startup, as a radius
+    /// in chunks. Zero disables it.
+    ///
+    /// The first player to join asks for this exact area and waits for
+    /// it; making it while nobody is connected costs nothing and is the
+    /// difference between walking into a world and watching one appear.
+    #[serde(default = "default_pregenerate_radius")]
+    pub pregenerate_radius_chunks: i32,
     /// Depth of a client's outgoing queue. A client that can't keep up
     /// fills this; see `slow_client_drop_threshold`.
     pub outgoing_queue_capacity: usize,
@@ -77,6 +133,15 @@ pub struct ServerSettings {
     /// Folder scanned for plugins at startup. Each subfolder with a
     /// `plugin.toml` is one plugin.
     pub plugin_dir: String,
+    /// Where native mods live. See `logic::mods`.
+    ///
+    /// Its own directory rather than sharing the plugins' one, because
+    /// they are different things with different manifests and different
+    /// risks -- and because "drop this folder in and it runs native code
+    /// in my server" deserves to be a deliberate act rather than a file
+    /// that happened to land beside a script.
+    #[serde(default = "default_mod_dir")]
+    pub mod_dir: String,
     pub autosave_interval_secs: f32,
 
     // ---- observability ----
@@ -90,9 +155,16 @@ pub struct ServerSettings {
 #[serde(default)]
 pub struct AntiCheatSettings {
     pub enabled: bool,
-    /// Blocks per second a player may move horizontally. The client walks
-    /// at 5.5; the headroom absorbs lag spikes and the occasional
-    /// bunched-up update.
+    /// Blocks per second a player may move horizontally. The client
+    /// walks at 5.5 and *sprints at 8.8*, which is the number this has
+    /// to leave room for; the rest of the headroom absorbs lag spikes
+    /// and the occasional bunched-up update.
+    ///
+    /// The sprint is the half that gets forgotten, and forgetting it
+    /// rubber-bands every running player on the server. The client-side
+    /// test `the_fastest_an_honest_client_can_move_fits_inside_the_servers_limits`
+    /// measures what the collider actually produces and holds it against
+    /// this.
     pub max_horizontal_speed: f32,
     /// Downward speed is bounded by terminal velocity in the client's
     /// physics; upward is bounded by the jump impulse.
@@ -106,7 +178,16 @@ pub struct AntiCheatSettings {
     /// Seconds a client may claim to be airborne without losing height.
     pub max_hover_seconds: f32,
     /// Interaction range for breaking/placing, in blocks, measured from
-    /// the player's eyes. The client uses 6.0.
+    /// the player's eyes.
+    ///
+    /// The client reaches 4.0 (`INTERACT_RANGE`), and the gap is not
+    /// slack for its own sake: this is measured to the *centre* of the
+    /// cell, which is up to 0.87 further than the face the player
+    /// clicked, from the last position the server accepted, which is up
+    /// to a network update stale. The comment here used to say the
+    /// client used 6.0, which it has not for some time -- and a wrong
+    /// number in a comment beside a limit is an invitation to lower the
+    /// limit onto honest players.
     pub max_reach: f32,
     /// Reject a claimed `on_ground` when the block underneath is air *and*
     /// we already have that chunk cached (we never generate a chunk just
@@ -117,6 +198,13 @@ pub struct AntiCheatSettings {
 
     // ---- rate limits (token buckets, per client) ----
     pub max_messages_per_sec: f32,
+    /// **Sixty, and it was fifteen when a block was one edit.** A rock or
+    /// a soil comes away a quarter at a time now (`primitive_shared::dig`),
+    /// so a dig that used to send one message sends four -- and the fastest
+    /// ground in the game with the right tool is well under half a second,
+    /// which put an honest player with a shovel inside a bucket sized for
+    /// one edit a block. Four times the number is the same number of
+    /// *blocks* a second it always allowed.
     pub max_block_edits_per_sec: f32,
     pub max_chunk_requests_per_sec: f32,
     pub max_transform_updates_per_sec: f32,
@@ -130,22 +218,39 @@ pub struct AntiCheatSettings {
     pub violation_decay_per_sec: f32,
 }
 
+/// The spawn area, pre-made. Four chunks is a 9x9 block of terrain --
+/// enough that a player is standing in finished world the instant they
+/// arrive, small enough that it is a few dozen milliseconds of a pool
+/// that has nothing else to do yet.
+fn default_mod_dir() -> String {
+    "mods".to_string()
+}
+
+fn default_pregenerate_radius() -> i32 {
+    4
+}
+
 impl Default for ServerSettings {
     fn default() -> Self {
         Self {
             bind_addr: "0.0.0.0:7878".to_string(),
             server_name: "Primitive".to_string(),
             world_seed: 1337,
+            world_preset: primitive_shared::worldgen::Preset::Normal,
+            world_zone: primitive_shared::worldgen::Zone::Temperate,
+            world_scale: primitive_shared::worldgen::Scale::Landforms,
             max_players: 256,
 
             tick_rate_hz: 20.0,
             interest_radius_blocks: 160.0,
             view_distance_chunks: 8,
-            day_length_seconds: 900.0,
+            day_length_seconds: 1800.0,
             start_time_of_day: 0.3,
 
             max_cached_chunks: 8192,
-            chunk_send_budget_per_tick: 4,
+            chunk_send_budget_per_tick: 8,
+            generator_threads: 0,
+            pregenerate_radius_chunks: default_pregenerate_radius(),
             outgoing_queue_capacity: 512,
             chunk_queue_capacity: 1024,
             slow_client_drop_threshold: 256,
@@ -157,6 +262,7 @@ impl Default for ServerSettings {
 
             world_dir: "world".to_string(),
             plugin_dir: "plugins".to_string(),
+            mod_dir: default_mod_dir(),
             autosave_interval_secs: 120.0,
 
             stats_interval_secs: 30.0,
@@ -180,7 +286,7 @@ impl Default for AntiCheatSettings {
             world_border: 2_000_000.0,
 
             max_messages_per_sec: 200.0,
-            max_block_edits_per_sec: 15.0,
+            max_block_edits_per_sec: 60.0,
             max_chunk_requests_per_sec: 400.0,
             max_transform_updates_per_sec: 40.0,
             max_chat_per_sec: 2.0,
@@ -232,6 +338,8 @@ impl ServerSettings {
         self.max_players = self.max_players.clamp(1, 100_000);
         self.max_cached_chunks = self.max_cached_chunks.max(64);
         self.chunk_send_budget_per_tick = self.chunk_send_budget_per_tick.clamp(1, 256);
+        self.generator_threads = self.generator_threads.min(64);
+        self.pregenerate_radius_chunks = self.pregenerate_radius_chunks.clamp(0, 32);
         self.outgoing_queue_capacity = self.outgoing_queue_capacity.clamp(16, 65_536);
         self.chunk_queue_capacity = self.chunk_queue_capacity.clamp(16, 65_536);
         self.keepalive_interval_secs = self.keepalive_interval_secs.clamp(1.0, 300.0);

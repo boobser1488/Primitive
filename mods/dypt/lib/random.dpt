@@ -1,0 +1,106 @@
+// random — псевдослучайные числа на чистом dypt.
+//
+// Подключение:
+//     import "random" as random
+//     random.seed(42)
+//     print(random.between(1, 6))
+//
+// Ряд построен на xorshift: тот же зачин даёт ту же последовательность,
+// поэтому прогон программы воспроизводим. Для розыгрышей и перемешивания
+// этого достаточно; для чего-то, где важна непредсказуемость, — нет.
+
+// Состояние ряда. Ноль xorshift не переносит: с него ряд вырождается
+// в сплошные нули, поэтому зачин никогда не бывает нулевым.
+_состояние = 88172645463325252
+
+/// Задаёт зачин ряда.
+function seed(n) {
+    if n == 0 {
+        _состояние = 88172645463325252
+        return null
+    }
+    _состояние = n
+    return null
+}
+
+/// Следующее целое: любое, включая отрицательные.
+function next() {
+    x = _состояние
+    x = x + shl(x, 13)
+    x = x + shr(x, 7)
+    x = x + shl(x, 17)
+    _состояние = x
+    return x
+}
+
+/// Неотрицательное целое.
+function next_positive() {
+    n = next()
+    if n < 0 {
+        return -n
+    }
+    return n
+}
+
+/// Целое из промежутка [low, high] — оба края входят.
+function between(low, high) {
+    if high <= low {
+        return low
+    }
+    ширина = high - low + 1
+    return low + next_positive() % ширина
+}
+
+/// Дробное из промежутка [0, 1).
+function fraction() {
+    return (next_positive() % 1000000) / 1000000.0
+}
+
+/// Логическое: истина примерно в половине случаев.
+function boolean() {
+    return next_positive() % 2 == 0
+}
+
+/// Случайный элемент массива. Пустой массив даёт null.
+function choice(items) {
+    if length(items) == 0 {
+        return null
+    }
+    return items[next_positive() % length(items)]
+}
+
+/// Перемешивает копию массива и отдаёт её. Тасовка Фишера—Йетса:
+/// каждая перестановка выпадает с равной вероятностью.
+function shuffled(items) {
+    итог = []
+    i = 0
+    while i < length(items) {
+        push(итог, items[i])
+        i = i + 1
+    }
+    j = length(итог) - 1
+    while j > 0 {
+        k = next_positive() % (j + 1)
+        временное = итог[j]
+        set(итог, j, итог[k])
+        set(итог, k, временное)
+        j = j - 1
+    }
+    return итог
+}
+
+/// Выбирает count различных элементов. Если их просит больше, чем есть,
+/// отдаёт перемешанный массив целиком.
+function sample(items, count) {
+    перемешанное = shuffled(items)
+    if count >= length(перемешанное) {
+        return перемешанное
+    }
+    итог = []
+    i = 0
+    while i < count {
+        push(итог, перемешанное[i])
+        i = i + 1
+    }
+    return итог
+}

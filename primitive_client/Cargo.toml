@@ -11,31 +11,179 @@ publish = false
 name = "primitive_client"
 path = "src/main.rs"
 
+# The same game, twice over. A desktop runs the binary above; Android
+# has no such thing -- it loads a shared library into a process the
+# system already started and calls `android_main` in it. Both entry
+# points are in `src/main.rs`, which is why the library's path is the
+# binary's: see the `android_main` at the bottom of that file.
+# The game itself lives in the library; `src/main.rs` is a shim that
+# calls into it. Android needs it that way -- it loads a `cdylib` into a
+# process the system already started and calls `android_main` -- and a
+# desktop does not mind, so there is one arrangement rather than two.
+#
+# `rlib` alongside `cdylib` so that `cargo test` still has something to
+# link the tests against; a `cdylib` alone is not a Rust library as far
+# as the test harness is concerned.
+# `primitive`, not `primitive_client`, and the difference matters on
+# Windows: a bin and a lib with the same name in one package both want
+# to write `primitive_client.pdb`, which cargo reports as an output
+# filename collision and intends to make a hard error.
+#
+# The name is also what Android loads. `android.app.lib_name` in
+# `android/AndroidManifest.xml` names this, the loader prepends `lib`
+# and appends `.so`, and the packaging script puts exactly that file in
+# the APK -- three places that have to agree, which is why the manifest
+# says so too.
+[lib]
+name = "primitive"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
 primitive_shared = { path = "../primitive_shared" }
 # Singleplayer runs the real server in-process. `default-features =
 # false` turns off the `plugins` feature, so the game binary carries no
 # scripting engine: a local world has no plugins to run, and Rhai is a
 # large dependency to link into a client for nothing.
+#
+# **Mods are the other half of that sentence and they are on** -- see
+# the target-specific line below. The two used to be one decision and
+# are not: a plugin is a script the *server operator* installs for
+# players who did not ask for it, and a mod on a local world is a folder
+# the player put there on their own machine.
 primitive_server = { path = "../primitive_server", default-features = false }
 tokio = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 anyhow = { workspace = true }
 
-# winit's default features pull in Wayland support too, whose dependency
-# chain (wayland-scanner -> quick-xml, etc.) needed newer Cargo-edition
-# features than the toolchain this was built with supports. X11-only is
-# fine for this prototype (and irrelevant on Windows/macOS, where winit
-# uses a different backend entirely) -- drop this restriction if you want
-# Wayland on Linux and have a modern-enough toolchain.
-winit = { version = "0.29", default-features = false, features = ["rwh_06", "x11"] }
 wgpu = "0.19"
 pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.27"
 toml = { workspace = true }
 image = { version = "0.24", default-features = false, features = ["png"] }
+hound = "3.5"
+# The recorded sound effects are Ogg Vorbis, and this is what reads them:
+# pure Rust (nothing for the NDK to compile) and one small crate plus
+# `ogg`. `symphonia` was the other candidate and is a dozen crates for
+# the one format; WAV through `hound` would have needed no new crate and
+# made the recordings five times the size. See `audio::recorded`.
+lewton = "0.10"
+
+# winit, per platform, because the backends are not the same thing.
+#
+# A desktop gets X11 only: winit's default features pull in Wayland too,
+# whose dependency chain (wayland-scanner -> quick-xml, etc.) needed
+# newer Cargo-edition features than the toolchain this was built with
+# supports. X11-only is fine for this prototype, and irrelevant on
+# Windows/macOS where winit uses a different backend entirely -- drop
+# the restriction if you want Wayland on Linux and have a modern-enough
+# toolchain.
+#
+# Features are additive across target sections, so this cannot be one
+# entry with an extra feature: asking for `x11` in the shared table
+# would ask for it on Android too, where there is no X server to find.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+winit = { version = "0.29", default-features = false, features = ["rwh_06", "x11"] }
+cpal = "0.15"
+# Native mods in a singleplayer world -- and everywhere except a phone.
+#
+# The same entry as above with one feature added; cargo unions the two,
+# which is the only way to say "this feature, but not on Android" at
+# all. **Not on Android on purpose**: a mod is a `.so` a player drops
+# into a folder, an APK has no such folder that an ordinary person can
+# reach, and `libloading` in the package would be a dependency shipped
+# to every phone for a feature no phone can use.
+primitive_server = { path = "../primitive_server", default-features = false, features = [
+    "mods",
+] }
+
+# Android is not a smaller desktop. Three things differ, and all three
+# are here rather than behind a `cfg` in the source:
+#
+#   * winit talks to an *activity*, not a compositor, and the backend
+#     that does so is a feature rather than the default.
+#   * cpal reaches AAudio through `oboe`, which needs the JNI handle the
+#     activity was given -- see `audio::android`.
+#   * `ndk-*` is how a Rust library sees the APK it was loaded from:
+#     the assets are in a zip inside the package, not on a filesystem
+#     anything can `open`. See `platform::android::unpack_assets`.
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.29", default-features = false, features = [
+    "rwh_06",
+    # ## Why GameActivity and not NativeActivity
+    #
+    # This used to say `android-native-activity`, and the game could not
+    # be typed in. A `NativeActivity`'s content view is a plain `View`,
+    # so it does not implement `onCreateInputConnection` -- and a view
+    # with no input connection is described to the input method as
+    # `TYPE_NULL`. What a `TYPE_NULL` editor is sent is *key events*,
+    # not text.
+    #
+    # Key events carry keycodes, and **there is no keycode for `щ`**.
+    # The font in `engine::texture` declares ASCII, the whole of
+    # Cyrillic and Polish diacritics, and the interface ships in
+    # Russian: three of those four alphabets cannot be expressed as
+    # keycodes at all. That is not a bug to be tuned out of the
+    # NativeActivity path; it is the path being incapable.
+    #
+    # `GameActivity` is a real Java activity whose view *does* return an
+    # input connection -- GameTextInput's -- so the input method commits
+    # whole text rather than pressing keys at us. See
+    # `platform::winit_backend`'s `ime_text` for how the game reads it.
+    #
+    # The price is a Java class in the package, which is why
+    # `package-android.sh` now runs `d8` and the manifest says
+    # `hasCode="true"`. It is one 21 KB `classes.dex` and no Gradle.
+    #
+    # ## Why not `android-activity` 0.6
+    #
+    # Because winit 0.29 depends on 0.5, and the two crates must agree:
+    # winit's `EventLoopBuilder::with_android_app` takes *its own*
+    # `AndroidApp`, and a second copy of the glue in the graph is a
+    # second `ALooper`, a second input queue and a type mismatch at the
+    # one call site that matters. 0.6 arrives with winit 0.30, which is
+    # the `ApplicationHandler` rewrite of the whole event loop -- a
+    # migration that has nothing to do with typing Russian.
+    #
+    # So the version pair is decided by winit, and it decides the Java
+    # side too: android-activity 0.5.2 vendors GameActivity 2.0.2, and
+    # the `.aar` whose classes go in the package has to be that exact
+    # version. The C++ and the Java halves of GameActivity are one
+    # library split across two languages; mixing versions is a
+    # `NoSuchMethodError` on a background thread at startup. See
+    # `android/README-games-activity.txt`.
+    "android-game-activity",
+] }
+# cpal reaches AAudio through `oboe`, which is C++ -- hence the shared
+# stdc++ runtime, which is also what the NDK's own libraries link
+# against. Statically linking a second copy is how you get two C++
+# runtimes in one process and a crash nobody can read.
+cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }
+# For the two things that need a system call rather than a crate: the
+# pipe that carries the game's output to logcat, and `__android_log_write`
+# at the far end of it. See `platform::android::log_to_logcat`.
+libc = "0.2"
+
+# No `jni` and no `ndk-context` any more, and their going is the point
+# of this change.
+#
+# They were here for one thing: reaching into the Java framework to
+# make a `NativeActivity`'s content view focusable, so that
+# `showSoftInput` would stop being dropped with
+# `Ignoring showSoftInput() as view=NativeContentView is not served`.
+# That got a keyboard on screen and never got a letter out of it -- see
+# the note on `android-game-activity` above. GameActivity's view is
+# served and has an input connection because it is written to be one,
+# so there is nothing left here to reach through JNI for.
+
+# No `android-activity` or `ndk` entry here on purpose. winit already
+# depends on both, and naming them again is how you end up with two
+# versions in one graph and an `AndroidApp` that is not the `AndroidApp`
+# winit's own event loop will accept. The types come from
+# `winit::platform::android::activity` instead, which is winit's
+# re-export of exactly the version it was built against.
 
 [dev-dependencies]
 # Same shader compiler wgpu 0.19 uses internally. Pulled in so the WGSL

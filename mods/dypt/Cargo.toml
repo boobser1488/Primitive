@@ -1,0 +1,30 @@
+[package]
+name = "dypt"
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0 AND LicenseRef-Primitive-Assets"
+publish = false
+
+# A C dynamic library, like every native mod -- see the note in
+# `mods/greeter/Cargo.toml`. `dypt.dll` on Windows, `libdypt.so` on
+# Linux.
+[lib]
+name = "dypt"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+# The contract. Same rule as every other mod here: a mod builds against
+# this and against nothing the server happens to use.
+primitive_modapi = { path = "../../primitive_modapi", default-features = false }
+
+# ...and the one exception in this repository, with a reason.
+#
+# The language itself is **not** a dependency of this crate and must not
+# become one. dypt lives in its own repository; a `path = "C:/..."`
+# entry here would mean the game stops building on every machine that
+# does not happen to have that folder. So `dypt_embed.dll` is opened at
+# runtime, by name, out of the mod's own folder -- and `libloading` is
+# the portable `dlopen` that does it. It is the same crate, at the same
+# version, that the server uses to open this mod.
+libloading = { workspace = true }
