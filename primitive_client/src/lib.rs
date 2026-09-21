@@ -488,6 +488,9 @@ fn start(assets_override: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     if let Some(dir) = assets_override {
         settings.assets_dir = dir.to_string_lossy().into_owned();
     }
+    // See `apply_measurement_overrides`: the only way to change a
+    // phone's resolution or vsync without a thumb on it.
+    settings.apply_measurement_overrides(|key| std::env::var(key).ok());
     let settings = settings;
     let servers = menu::ServerList::load_or_default(&settings.server_addr);
     let worlds = worlds::Worlds::load(&settings.singleplayer_world_dir);

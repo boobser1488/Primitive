@@ -1477,6 +1477,44 @@ impl ClientSettings {
         self.clamp();
         self.keybinds.sanitize();
     }
+
+    /// `PRIMITIVE_RESOLUTION=<auto|60..100>` and `PRIMITIVE_VSYNC=<0|1>`
+    /// for this run only, read through `var` so a test can hand it a
+    /// map instead of the process environment.
+    ///
+    /// **Exists because a phone's settings cannot be changed by
+    /// anything but a thumb.** The file is readable through `run-as`
+    /// and not writable (SELinux on the test device refuses every
+    /// write), and the settings screen is taps nobody can send. So
+    /// "AUTO against 100%" and "vsync off while measuring" -- the two
+    /// questions every frame time on a phone raises first -- were
+    /// unanswerable without a person holding the device. Through
+    /// `/data/local/tmp/primitive.env` they are one line each.
+    ///
+    /// Applied after loading and never written by itself; a player who
+    /// opens the settings screen in the same run and leaves it does
+    /// save what they see, which is what they were shown. Unparseable
+    /// values are ignored and said so, rather than guessed at.
+    pub fn apply_measurement_overrides(&mut self, var: impl Fn(&str) -> Option<String>) {
+        if let Some(raw) = var("PRIMITIVE_RESOLUTION") {
+            let raw = raw.trim();
+            if raw.eq_ignore_ascii_case("auto") {
+                self.resolution_scale = None;
+            } else if let Ok(percent) = raw.trim_end_matches('%').parse::<f32>() {
+                self.resolution_scale = Some(percent / 100.0);
+            } else {
+                eprintln!("PRIMITIVE_RESOLUTION={raw} is neither auto nor a percentage; ignored");
+            }
+        }
+        if let Some(raw) = var("PRIMITIVE_VSYNC") {
+            match raw.trim() {
+                "0" => self.vsync = false,
+                "1" => self.vsync = true,
+                other => eprintln!("PRIMITIVE_VSYNC={other} is neither 0 nor 1; ignored"),
+            }
+        }
+        self.clamp();
+    }
 }
 
 /// Where a singleplayer world looks for native mods.
@@ -2427,6 +2465,28 @@ mod file_tests {
             parsed.sanitize();
             assert_eq!(parsed.resolution_scale, Some(got), "resolution_scale = {asked}");
         }
+    }
+
+    #[test]
+    fn the_environment_can_ask_a_phone_for_full_resolution_or_auto_and_vsync_off() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())
+            }
+        };
+        let mut settings = ClientSettings { resolution_scale: None, vsync: true, ..Default::default() };
+        settings.apply_measurement_overrides(env(&[("PRIMITIVE_RESOLUTION", "100"), ("PRIMITIVE_VSYNC", "0")]));
+        assert_eq!(settings.resolution_scale, Some(1.0));
+        assert!(!settings.vsync);
+        settings.apply_measurement_overrides(env(&[("PRIMITIVE_RESOLUTION", "auto")]));
+        assert_eq!(settings.resolution_scale, None);
+        // Out of range is clamped like a hand-edited file; nonsense is
+        // left alone rather than read as some number.
+        settings.apply_measurement_overrides(env(&[("PRIMITIVE_RESOLUTION", "30%")]));
+        assert_eq!(settings.resolution_scale, Some(0.6));
+        settings.apply_measurement_overrides(env(&[("PRIMITIVE_RESOLUTION", "big"), ("PRIMITIVE_VSYNC", "yes")]));
+        assert_eq!(settings.resolution_scale, Some(0.6));
+        assert!(!settings.vsync);
     }
 
     #[test]

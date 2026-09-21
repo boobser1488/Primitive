@@ -156,7 +156,7 @@ OUT="dist/primitive-$VERSION-android-arm64.apk"
 echo "=== building the game for $TARGET ($PROFILE) ==="
 cargo build -p primitive_client --lib --target "$TARGET" $CARGO_PROFILE_FLAG
 
-SO="target/$TARGET/$PROFILE/libprimitive.so"
+SO="${CARGO_TARGET_DIR:-target}/$TARGET/$PROFILE/libprimitive.so"
 [ -f "$SO" ] || { echo "cargo did not produce $SO" >&2; exit 1; }
 
 # --- laying out the package -------------------------------------------
