@@ -28,11 +28,11 @@ for exe in primitive_client primitive_server; do
     cp "$root/target/release/$exe" "$target/"
 done
 
-# Assets sit next to the executable; `resolve_assets_dir` looks there
-# first, so a packaged build finds them without any configuration.
-cp -r "$root/assets" "$target/assets"
+# No `assets` folder and no README or CHANGELOG: the assets are compiled
+# into the client, and a loose copy would both double them and override
+# the next release's -- see package.ps1 for the whole argument.
 cp -r "$root/plugins" "$target/plugins"
-cp "$root/GUIDE.md" "$root/README.md" "$root/CHANGELOG.md" "$root/LICENSE" "$target/"
+cp "$root/GUIDE.md" "$root/LICENSE" "$root/LICENSE-APACHE" "$root/LICENSE-ASSETS" "$root/NOTICE" "$target/"
 
 echo "packaged $target ($(du -sh "$target" | cut -f1))"
 

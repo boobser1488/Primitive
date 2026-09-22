@@ -27,14 +27,52 @@ pub struct WelcomeInfo {
     pub tick_rate_hz: f32,
     pub server_view_distance: i32,
     pub world_seed: u32,
-    pub spawn: (f32, f32, f32),
+    /// Which generator the server's world came out of. The client builds
+    /// its own copy for the foliage tint and the biome readout, and the
+    /// seed alone does not say which one to build.
+    pub preset: primitive_shared::worldgen::Preset,
+    /// ...and where on the planet, which neither of the other two says.
+    pub zone: primitive_shared::worldgen::Zone,
+    /// ...and at which scale, which none of the three says.
+    pub scale: primitive_shared::worldgen::Scale,
+    pub spawn: (f64, f64, f64),
     pub time_of_day: f32,
+    pub world_days: f32,
     pub day_length_seconds: f32,
 }
 
 pub struct NetworkHandle {
     pub from_game: mpsc::Sender<ClientMessage>,
-    pub to_game: mpsc::Receiver<ServerMessage>,
+    pub to_game: mpsc::Receiver<Incoming>,
+}
+
+/// What the socket hands the game loop.
+///
+/// **A chunk is packed here, on the network thread, and arrives at the
+/// frame already in the form it is kept in.** The client keeps chunks a
+/// section at a time (`primitive_shared::packed`), and packing one walks
+/// all 65,536 of its cells. There were three places to do that:
+///
+/// * in `drain_network`, on the main thread and outside every budget --
+///   a burst of chunks in the socket would be a burst of frame time;
+/// * in `integrate_chunks`, inside the chunk budget, which would then
+///   admit fewer chunks a frame and fill the world in more slowly;
+/// * **here**, where the decoder has just built the flat chunk anyway,
+///   on a runtime thread the frame never waits for.
+///
+/// One channel for both, rather than a second one for chunks, because
+/// order is meaning: a block update that follows a chunk on the wire is
+/// an edit *to* that chunk, and a separate queue drained first or second
+/// would apply it to a chunk that is not there yet -- and then the chunk
+/// would arrive without it.
+///
+/// Boxed, because a packed chunk carries its sixteen section headers
+/// inline -- six hundred bytes -- and an enum is the size of its largest
+/// variant: every ping and every block update in the channel would have
+/// paid for them.
+pub enum Incoming {
+    Chunk(Box<primitive_shared::packed::PackedChunk>),
+    Message(ServerMessage),
 }
 
 impl NetworkHandle {
@@ -82,8 +120,12 @@ pub async fn connect(addr: &str, username: &str) -> anyhow::Result<Connection> {
             tick_rate_hz,
             view_distance_chunks,
             world_seed,
+            preset,
+            zone,
+            scale,
             spawn,
             time_of_day,
+            world_days,
             day_length_seconds,
         } => {
             if protocol_version != PROTOCOL_VERSION {
@@ -97,8 +139,12 @@ pub async fn connect(addr: &str, username: &str) -> anyhow::Result<Connection> {
                 tick_rate_hz,
                 server_view_distance: view_distance_chunks,
                 world_seed,
+                preset,
+                zone,
+                scale,
                 spawn,
                 time_of_day,
+                world_days,
                 day_length_seconds,
             }
         }
@@ -111,7 +157,7 @@ pub async fn connect(addr: &str, username: &str) -> anyhow::Result<Connection> {
     // instead of fighting over one shared socket.
     let (mut read_half, mut write_half) = socket.into_split();
 
-    let (to_game_tx, to_game_rx) = mpsc::channel::<ServerMessage>(1024);
+    let (to_game_tx, to_game_rx) = mpsc::channel::<Incoming>(1024);
     let (from_game_tx, mut from_game_rx) = mpsc::channel::<ClientMessage>(256);
 
     // Outgoing: game loop -> server.
@@ -138,7 +184,16 @@ pub async fn connect(addr: &str, username: &str) -> anyhow::Result<Connection> {
                         eprintln!("[net] discarding a malformed message: {complaint}");
                         continue;
                     }
-                    if to_game_tx.send(msg).await.is_err() {
+                    // Only after `well_formed`: packing refuses a chunk
+                    // of the wrong length, and it is that check which
+                    // makes the refusal unreachable. See `Incoming`.
+                    let incoming = match msg {
+                        ServerMessage::ChunkData(chunk) => {
+                            Incoming::Chunk(Box::new(primitive_shared::packed::PackedChunk::pack(&chunk)))
+                        }
+                        other => Incoming::Message(other),
+                    };
+                    if to_game_tx.send(incoming).await.is_err() {
                         break; // game loop went away
                     }
                 }

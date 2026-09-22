@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use winit::keyboard::KeyCode;
+use crate::platform::Key as KeyCode;
 
 use crate::logic::inventory::HOTBAR_SLOTS;
 
@@ -22,6 +22,21 @@ pub struct InputState {
     /// frame loop needs to know the button is *still* down, not that it
     /// went down once.
     pub breaking: bool,
+    /// The use button, held. **Tracked as a state and not only as a press**
+    /// because the rod is wound back for as long as it is down: see
+    /// `logic::fishing::Hold`.
+    pub using: bool,
+    /// Where a thumb is pushing, if there is a thumb.
+    ///
+    /// `(right, forward)`, each in -1..=1, and `None` on anything with
+    /// a keyboard. Beside the keys rather than instead of them because
+    /// the two are not the same kind of thing: four keys have one
+    /// speed, and a thumb has every speed. Squashing the stick back
+    /// into the keys would take away the only way to walk quietly up to
+    /// a deer instead of charging at it.
+    ///
+    /// See `wish_direction`, which prefers this when it is there.
+    pub stick: Option<(f32, f32)>,
 }
 
 impl InputState {
@@ -91,6 +106,38 @@ impl InputState {
         };
     }
 
+    /// How hard the thumb is pushing, as a multiplier on walking speed.
+    ///
+    /// 1.0 on anything with a keyboard, because four keys have one
+    /// speed and always did. On glass it is how far the stick is from
+    /// its centre, which is what makes creeping up on an animal
+    /// possible with a thumb.
+    ///
+    /// Never zero when the stick is held at all: `touch::Touch::stick`
+    /// has already applied its dead zone and reports `(0, 0)` for a
+    /// thumb that is merely resting, and a direction of zero stops the
+    /// player without needing the speed to say so too.
+    pub fn stick_speed(&self) -> f32 {
+        match self.stick {
+            Some((x, y)) => (x * x + y * y).sqrt().clamp(0.0, 1.0),
+            None => 1.0,
+        }
+    }
+
+    /// Whether the thumb is pushed far enough to mean "run".
+    ///
+    /// There is no sprint key to hold on a phone, and adding a fifth
+    /// button for it would cost another piece of the world. Pushing the
+    /// stick to its rim is what every game with a stick already means
+    /// by running, so it is what this means too.
+    pub fn stick_sprinting(&self) -> bool {
+        // Not 1.0: a thumb cannot reliably reach the exact rim, and a
+        // sprint that only works when it does is a sprint that feels
+        // broken.
+        const RIM: f32 = 0.85;
+        self.stick.is_some() && self.stick_speed() >= RIM
+    }
+
     pub fn accumulate_mouse(&mut self, dx: f32, dy: f32) {
         self.mouse_dx += dx;
         self.mouse_dy += dy;
@@ -107,6 +154,9 @@ impl InputState {
         self.pressed_this_frame.clear();
         self.mouse_dx = 0.0;
         self.mouse_dy = 0.0;
+        // A thumb that was on the glass when the window went does not
+        // send a touch-up either.
+        self.stick = None;
         // Mouse-up does not arrive while the window is unfocused either,
         // so a player who alt-tabs mid-swing would come back still
         // mining whatever they were pointed at.

@@ -73,6 +73,13 @@ pub trait CellMechanic: Send {
     /// How much work is waiting. Reported in `/stats`, and the reason a
     /// growing queue is visible rather than mysterious.
     fn pending(&self) -> usize;
+
+    /// What this mechanic has taken out of the world since it was last asked
+    /// and the server has to put back as items: the handfuls running water
+    /// carried off a heap (`water::Carried`). Nothing, for anything else.
+    fn take_carried(&mut self) -> Vec<crate::logic::water::Carried> {
+        Vec::new()
+    }
 }
 
 /// Every mechanic the server is running, stepped together.
@@ -101,6 +108,11 @@ impl Mechanics {
     }
 
     /// Names and queue lengths, for `/stats`.
+    /// Everything every mechanic has carried off since the last call.
+    pub fn take_carried(&mut self) -> Vec<crate::logic::water::Carried> {
+        self.mechanics.iter_mut().flat_map(|m| m.take_carried()).collect()
+    }
+
     pub fn pending(&self) -> Vec<(&'static str, usize)> {
         self.mechanics
             .iter()
@@ -260,7 +272,10 @@ mod tests {
         let mut mechanics = Mechanics::new();
         mechanics.register(Box::new(FallingBlocks::new()));
         mechanics.on_block_changed(0, 6, 0);
-        assert_eq!(mechanics.pending(), vec![("falling blocks", 2)]);
+        // The cell, the cells a pit prop in it could have been holding
+        // (`falling::PROP_REACH`), and the cell again as a possible hole
+        // with rock over it -- see `FallingBlocks::on_block_changed`.
+        assert_eq!(mechanics.pending(), vec![("falling blocks", 2 + crate::logic::falling::PROP_REACH as usize)]);
 
         for _ in 0..200 {
             mechanics.step(&world, 1.0 / 20.0);

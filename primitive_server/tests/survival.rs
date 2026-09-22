@@ -70,7 +70,7 @@ impl Client {
 
         Self {
             socket,
-            spawn,
+            spawn: primitive_shared::geometry::narrow(spawn),
             sequence: 0,
             id,
         }
@@ -87,9 +87,9 @@ impl Client {
         self.sequence += 1;
         let (x, _, z) = self.spawn;
         self.send(ClientMessage::UpdateTransform {
-            x,
-            y,
-            z,
+            x: f64::from(x),
+            y: f64::from(y),
+            z: f64::from(z),
             yaw: 0.0,
             pitch: 0.0,
             on_ground,
@@ -222,9 +222,11 @@ async fn a_fatal_fall_kills_and_respawn_restores() {
     let address = server.address().to_string();
     let mut client = Client::connect(&address).await;
 
-    // Straight down from the top of the world.
-    client.move_to(63.0, false).await;
-    client.move_to(30.0, false).await;
+    // Straight down from the top of the world -- the real top, which
+    // was sixty-three while the world was sixty-four tall.
+    let top = primitive_shared::types::CHUNK_SIZE_Y as f32 - 1.0;
+    client.move_to(top, false).await;
+    client.move_to(top * 0.5, false).await;
     client.move_to(0.0, true).await;
 
     let cause = client
@@ -246,7 +248,7 @@ async fn a_fatal_fall_kills_and_respawn_restores() {
         })
         .await
         .expect("the server never respawned the player");
-    assert_eq!(respawned, spawn, "respawned somewhere other than spawn");
+    assert_eq!(respawned, primitive_shared::geometry::wide(spawn), "respawned somewhere other than spawn");
 
     let health = client
         .wait_for(|m| match m {
@@ -559,6 +561,7 @@ async fn placing_without_the_block_is_refused() {
     let refused = client
         .wait_for(|m| match m {
             ServerMessage::Error(text) => Some(text.clone()),
+            ServerMessage::Notice { what } => Some(format!("{what:?}")),
             _ => None,
         })
         .await
@@ -584,7 +587,7 @@ async fn an_unknown_recipe_is_refused_rather_than_crashing_the_server() {
         })
         .await;
     client
-        .wait_for(|m| matches!(m, ServerMessage::Error(_)).then_some(()))
+        .wait_for(|m| matches!(m, ServerMessage::Error(_) | ServerMessage::Notice { .. }).then_some(()))
         .await
         .expect("no answer to a nonsense recipe");
 
@@ -946,17 +949,19 @@ fn a_chest_is_worth_making_and_can_be_taken_home_again() {
 
 // ---- what a death leaves behind ----
 //
-// A backpack is a chest with a different picture on it, put down by the
-// server rather than by a player. Everything here is the wiring: the
-// block appearing, the pack emptying, and the two agreeing about what
-// went where. All of it is only observable from out here, because the
-// only thing the client ever hears about a container is where it is.
+// The player's own body, put down by the server rather than by a
+// player: a chest with a person drawn on it, which two days later is a
+// chest with a skeleton drawn on it (`types::BLOCK_CORPSE`). Everything
+// here is the wiring: the block appearing, the pack emptying, and the
+// two agreeing about what went where. All of it is only observable from
+// out here, because the only thing the client ever hears about a
+// container is where it is.
 
-use primitive_shared::types::BLOCK_BACKPACK;
+use primitive_shared::types::{BLOCK_BACKPACK, BLOCK_CORPSE, BLOCK_REMAINS};
 
 impl Client {
     /// Steps off the top of the world onto the ground. Returns the last
-    /// position the server was told about, which is where the pack
+    /// position the server was told about, which is where the body
     /// should end up.
     ///
     /// Deliberately does *not* wait for anything. A death produces an
@@ -966,15 +971,21 @@ impl Client {
     async fn step_off_the_world(&mut self) -> (f32, f32, f32) {
         let (x, _, z) = self.spawn;
         let ground = self.spawn.1.floor();
-        self.move_to(63.0, false).await;
-        self.move_to(30.0, false).await;
+        // **From the real top, not from sixty-three.** Sixty-three was
+        // the ceiling while the world was sixty-four tall; with the sea at
+        // sixty-four it is *under* the spawn, and "falling" from it to
+        // the ground was climbing -- no death, and two tests reporting
+        // that a fall from the top of the world had stopped being fatal.
+        let top = primitive_shared::types::CHUNK_SIZE_Y as f32 - 1.0;
+        self.move_to(top, false).await;
+        self.move_to((top + ground) * 0.5, false).await;
         self.move_to(ground, true).await;
         (x, ground, z)
     }
 }
 
 #[tokio::test]
-async fn dying_with_something_on_you_leaves_it_in_a_backpack() {
+async fn dying_with_something_on_you_leaves_it_on_your_body() {
     let server = primitive_server::start(test_settings(), RunOptions::embedded())
         .await
         .expect("start");
@@ -1029,7 +1040,7 @@ async fn dying_with_something_on_you_leaves_it_in_a_backpack() {
                 ServerMessage::InventoryState { inventory } if inventory.is_empty() => {
                     emptied = true
                 }
-                ServerMessage::BlockUpdate(change) if change.block_id == BLOCK_BACKPACK => {
+                ServerMessage::BlockUpdate(change) if change.block_id == BLOCK_CORPSE => {
                     placed = Some((change.global_x, change.global_y, change.global_z))
                 }
                 _ => {}
@@ -1037,7 +1048,7 @@ async fn dying_with_something_on_you_leaves_it_in_a_backpack() {
             (emptied && placed.is_some()).then_some(())
         })
         .await
-        .expect("dying neither emptied the pack nor put a bag in the world");
+        .expect("dying neither emptied the pack nor put a body in the world");
     let placed = placed.expect("checked above");
 
     let cell = (
@@ -1045,11 +1056,11 @@ async fn dying_with_something_on_you_leaves_it_in_a_backpack() {
         died_at.1.floor() as i32,
         died_at.2.floor() as i32,
     );
-    assert_eq!(placed.0, cell.0, "the bag is in the wrong column");
-    assert_eq!(placed.2, cell.2, "the bag is in the wrong column");
+    assert_eq!(placed.0, cell.0, "the body is in the wrong column");
+    assert_eq!(placed.2, cell.2, "the body is in the wrong column");
     assert!(
         (placed.1 - cell.1).abs() <= 3,
-        "the bag is at y={} and the body fell at y={}",
+        "the body is at y={} and the player fell at y={}",
         placed.1,
         cell.1
     );
@@ -1070,11 +1081,11 @@ async fn dying_with_something_on_you_leaves_it_in_a_backpack() {
     let inside = client
         .wait_for_chest()
         .await
-        .expect("the backpack would not open");
+        .expect("the body would not open");
     assert_eq!(
         inside.total_items(),
         carried_items,
-        "the bag holds {} of the {carried_items} things that went into it",
+        "the body holds {} of the {carried_items} things that went into it",
         inside.total_items()
     );
 
@@ -1082,9 +1093,99 @@ async fn dying_with_something_on_you_leaves_it_in_a_backpack() {
 }
 
 #[tokio::test]
+async fn the_way_back_points_at_the_body_and_is_forgotten_once_it_is_emptied() {
+    let server = primitive_server::start(test_settings(), RunOptions::embedded())
+        .await
+        .expect("start");
+    let address = server.address().to_string();
+    let mut client = Client::connect_as(&address, "wayfarer").await;
+    client.wait_for_inventory().await.expect("opening inventory");
+
+    // The same way `dying_with_something_on_you_leaves_it_on_your_body`
+    // fills a pack: the ground under the spawn, dug and walked over.
+    let (x, y, z) = client.spawn;
+    let cell = (x.floor() as i32, y.floor() as i32 - 1, z.floor() as i32);
+    client
+        .send(ClientMessage::RequestChunk(
+            primitive_shared::types::ChunkPos::from_global(cell.0, cell.2).0,
+        ))
+        .await;
+    client
+        .wait_for(|m| matches!(m, ServerMessage::ChunkData(_)).then_some(()))
+        .await
+        .expect("chunk");
+    client.break_block(cell).await;
+    for _ in 0..40 {
+        client.move_to(y - 1.0, true).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let mut carrying = false;
+    for _ in 0..8 {
+        let pack = client.wait_for_inventory().await.expect("no inventory");
+        if !pack.is_empty() {
+            carrying = true;
+            break;
+        }
+    }
+    if !carrying {
+        // Nothing to lose, nothing to point at. Terrain, not a fixture.
+        server.stop().await;
+        return;
+    }
+
+    client.step_off_the_world().await;
+
+    // The body goes into the world, and then -- to this player -- a list
+    // with it on.
+    let mut placed = None;
+    let pointed_at = client
+        .wait_for(|m| match m {
+            ServerMessage::BlockUpdate(change) if change.block_id == BLOCK_CORPSE => {
+                placed = Some((change.global_x, change.global_y, change.global_z));
+                None
+            }
+            ServerMessage::Landmarks { bags, .. } if !bags.is_empty() => Some(bags.clone()),
+            _ => None,
+        })
+        .await
+        .expect("dying told the player nothing about the way back");
+    let placed = placed.expect("the list arrived before the body was in the world");
+    assert_eq!(pointed_at, vec![placed], "the way back points somewhere the body is not");
+
+    // Back to life, into the body, and everything out of it.
+    client.send(ClientMessage::Respawn).await;
+    client
+        .wait_for(|m| matches!(m, ServerMessage::Respawned { .. }).then_some(()))
+        .await
+        .expect("never respawned");
+    client
+        .send(ClientMessage::OpenChest {
+            global_x: placed.0,
+            global_y: placed.1,
+            global_z: placed.2,
+        })
+        .await;
+    client.wait_for_chest().await.expect("the body would not open");
+    client.send(ClientMessage::ChestBulkMove { to_chest: false }).await;
+
+    let forgotten = client
+        .wait_for(|m| match m {
+            ServerMessage::Landmarks { bags, .. } => Some(bags.is_empty()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(forgotten, Some(true), "an emptied body stayed on the map");
+
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn dying_with_nothing_on_you_leaves_nothing_behind() {
-    // An empty bag is worse than no bag: a block to walk back to, break,
-    // and find empty.
+    // An empty body is worse than no body: a block to walk back to,
+    // break, and find empty. (A corpse for its own sake, as a marker of
+    // where you died, was considered: the map already marks that, and a
+    // world where every bad night leaves a body nobody will open is a
+    // world littered with rubbish that has to be cleared by hand.)
     let server = primitive_server::start(test_settings(), RunOptions::embedded())
         .await
         .expect("start");
@@ -1102,49 +1203,60 @@ async fn dying_with_nothing_on_you_leaves_nothing_behind() {
     let littered = tokio::time::timeout(
         Duration::from_millis(1200),
         client.wait_for(|m| match m {
-            ServerMessage::BlockUpdate(change) if change.block_id == BLOCK_BACKPACK => Some(()),
+            ServerMessage::BlockUpdate(change) if change.block_id == BLOCK_CORPSE => Some(()),
             _ => None,
         }),
     )
     .await;
     assert!(
         !matches!(littered, Ok(Some(()))),
-        "an empty death left a bag in the world"
+        "an empty death left a body in the world"
     );
 
     server.stop().await;
 }
 
 #[test]
-fn a_backpack_is_the_servers_to_place_and_nobody_elses() {
+fn a_body_is_the_servers_to_lay_and_nobody_elses() {
     // The block table's half of the feature, and every one of these is a
-    // way the bag could have become a free container.
-    assert!(primitive_shared::types::is_container(BLOCK_BACKPACK));
-    assert!(
-        !primitive_shared::types::is_placeable(BLOCK_BACKPACK),
-        "a player who can place one can stamp fake graves across a world"
-    );
-    assert_eq!(
-        block_drop(BLOCK_BACKPACK),
-        None,
-        "breaking a bag handed back a second bag"
-    );
-    assert!(
-        primitive_shared::types::is_breakable(BLOCK_BACKPACK),
-        "a bag you cannot open by breaking is a bag nobody gets back"
-    );
-    assert!(
-        !primitive_shared::crafting::RECIPES
-            .iter()
-            .any(|r| r.output.0 == BLOCK_BACKPACK),
-        "a bag you can make is a chest that costs nothing"
-    );
-    // ...and it is a real id, so the world can save one and a client can
-    // draw it.
-    assert!(primitive_shared::types::is_known_block(BLOCK_BACKPACK));
-    assert!(primitive_shared::types::ALL_BLOCK_IDS
-        .iter()
-        .any(|&(id, _)| id == BLOCK_BACKPACK));
+    // way a grave could have become a free container.
+    //
+    // **The backpack is in the loop and not in the past tense.** Nothing
+    // lays a new one -- a death lays a corpse -- but a world saved before
+    // this has bags standing in it with somebody's iron inside, so the
+    // row has to keep answering every one of these questions.
+    for block in [BLOCK_CORPSE, BLOCK_REMAINS, BLOCK_BACKPACK] {
+        let name = primitive_shared::types::block_name(block);
+        assert!(primitive_shared::types::is_container(block), "{name} cannot be opened");
+        assert!(
+            !primitive_shared::types::is_placeable(block),
+            "{name}: a player who can place one can stamp fake graves across a world"
+        );
+        assert_eq!(
+            block_drop(block),
+            None,
+            "{name}: breaking it handed back a second one"
+        );
+        assert!(
+            primitive_shared::types::is_breakable(block),
+            "{name}: one you cannot open by breaking is one nobody gets back"
+        );
+        assert!(
+            !primitive_shared::crafting::RECIPES
+                .iter()
+                .any(|r| r.output.0 == block),
+            "{name}: one you can make is a chest that costs nothing"
+        );
+        // ...and it is a real id, so the world can save one and a client
+        // can draw it.
+        assert!(primitive_shared::types::is_known_block(block), "{name} is not a real id");
+        assert!(
+            primitive_shared::types::ALL_BLOCK_IDS
+                .iter()
+                .any(|&(id, _)| id == block),
+            "{name} is missing from the table the anti-cheat validates against"
+        );
+    }
 }
 
 #[tokio::test]

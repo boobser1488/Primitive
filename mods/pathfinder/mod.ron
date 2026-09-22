@@ -1,0 +1,7 @@
+(
+    name: "pathfinder",
+    version: "0.1.0",
+    api: (major: 2, minor: 1),
+    dependencies: [],
+    settings: {},
+)

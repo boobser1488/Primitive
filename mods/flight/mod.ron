@@ -1,0 +1,70 @@
+// The flight mod: `/fly`.
+//
+// RON rather than TOML, and the reason is `settings` below: a mod
+// declares values whose types the host does not know, and RON is a
+// notation with types in it. See `primitive_modapi::manifest`.
+(
+    name: "flight",
+    version: "1.0.0",
+
+    // **2.0, and it moved for a reason that has nothing to do with this
+    // mod.** `PlayersApi::set_flying` -- the one call this mod exists
+    // for -- was appended in 1.1 and has not moved since. What moved is
+    // the meaning of a field this mod never reads: see the note beside
+    // `primitive_modapi::API_VERSION`. A major refuses every older mod
+    // at the manifest, so this line is the whole of what a mod that was
+    // right yesterday has to change.
+    //
+    // Declaring it here as well as returning it from the entry point is
+    // what lets the host refuse an incompatible mod *before the library
+    // is opened* -- opening one runs its initialisers.
+    api: (major: 2, minor: 0),
+
+    description: "Grants flight with /fly, and remembers who had it",
+    authors: ["Primitive"],
+    enabled: true,
+
+    // Works out the filename from the mod's name and the platform:
+    // flight.dll, libflight.so, libflight.dylib.
+    library: Auto,
+
+    dependencies: [],
+    load_after: [],
+    resources: [],
+
+    settings: {
+        // Blocks per second. Twice a walk and a little under a
+        // sprint-and-a-half: fast enough that flying somewhere beats
+        // walking, slow enough that the chunk streamer keeps up. The
+        // host clamps it to 1..80 whatever is written here.
+        "speed": F64(12.0),
+
+        // Who may turn it on for themselves.
+        //
+        // **True by default, and that is the safe default rather than
+        // the friendly one.** A mod that hands every player on a public
+        // server the ability to fly has changed the game for everybody
+        // who did not install it. Set it to false for a creative server
+        // or a private one.
+        //
+        // It never gates `/fly <player>`: turning it on for somebody
+        // else is an operator action either way.
+        "operators_only": Bool(true),
+
+        // Whether flight survives a disconnect and a server restart.
+        //
+        // Remembered by *name* rather than by player id, because an id
+        // is a connection number handed out fresh on every join -- a
+        // saved list of them would grant flight to whoever happened to
+        // reconnect into the same slot.
+        "remember": Bool(true),
+
+        // Whether dying takes it away.
+        //
+        // On, because the alternative is a corpse that respawns at the
+        // spawn point still in the air, and because a player who has
+        // just fallen out of the world will reach for `/fly` again
+        // knowing they meant to.
+        "drop_on_death": Bool(true),
+    },
+)

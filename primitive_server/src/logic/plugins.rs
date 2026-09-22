@@ -242,6 +242,26 @@ impl PluginHost {
     pub fn fire(&mut self, _hook: &str, _args: Vec<Value>, _view: &HostView) -> (bool, Vec<Effect>) {
         (true, Vec::new())
     }
+
+    /// One line per loaded plugin, for `/mods`. None, here.
+    ///
+    /// **The reason this exists in the no-scripting build at all**: the
+    /// caller in `run_command` is one piece of code compiled into both,
+    /// and a caller that walked `plugins()` -- a method whose return
+    /// type is `&[Plugin]`, and `Plugin` does not exist without the
+    /// feature -- could not be. Handing back rendered strings rather
+    /// than the plugins themselves is what lets the two builds share the
+    /// call site, which is the whole point of this type having "the same
+    /// surface, no behaviour".
+    pub fn describe(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The same list as columns rather than lines, for the extensions
+    /// screen. Empty here, for the reason `describe` is.
+    pub fn catalogue(&self) -> Vec<primitive_shared::protocol::ExtensionInfo> {
+        Vec::new()
+    }
 }
 
 #[cfg(feature = "plugins")]
@@ -256,6 +276,49 @@ pub struct Plugin {
     store: HashMap<String, String>,
     errors: u32,
     pub disabled: bool,
+}
+
+#[cfg(feature = "plugins")]
+impl Plugin {
+    /// Why this plugin is not running, in the server's own words, or
+    /// empty when it is.
+    ///
+    /// Two different silences, and a screen that ran them together
+    /// would be a screen an operator cannot debug from: a plugin
+    /// switched off in its manifest is a decision somebody made, and one
+    /// the host stopped calling is a plugin that threw ten times.
+    pub fn trouble(&self) -> String {
+        if self.errors >= MAX_ERRORS {
+            format!("stopped after {} error(s)", self.errors)
+        } else if self.disabled {
+            "disabled".to_string()
+        } else if self.errors > 0 {
+            format!("{} error(s)", self.errors)
+        } else {
+            String::new()
+        }
+    }
+
+    /// One line, for `/mods`.
+    ///
+    /// The same shape a native mod's line has, so an operator reading
+    /// the list sees one list rather than two vocabularies -- see
+    /// `commands::Command::Extensions`.
+    pub fn describe(&self) -> String {
+        format!(
+            "{} {}{}{}{}{}",
+            self.name,
+            self.version,
+            if self.disabled { " [disabled]" } else { "" },
+            if self.errors > 0 {
+                format!(" [{} error(s)]", self.errors)
+            } else {
+                String::new()
+            },
+            if self.description.is_empty() { "" } else { " -- " },
+            self.description
+        )
+    }
 }
 
 #[cfg(feature = "plugins")]
@@ -288,6 +351,49 @@ impl PluginHost {
 
     pub fn plugins(&self) -> &[Plugin] {
         &self.plugins
+    }
+
+    /// One line per loaded plugin, for `/mods`.
+    ///
+    /// Rendered here rather than by the caller so that the same call
+    /// site compiles in the build without a scripting engine, where
+    /// `Plugin` does not exist -- see the stub above.
+    pub fn describe(&self) -> Vec<String> {
+        self.plugins.iter().map(Plugin::describe).collect()
+    }
+
+    /// The same list as columns rather than as lines.
+    ///
+    /// Beside `describe` rather than replacing it: a console has no
+    /// screen and a screen has no business parsing a console line. See
+    /// `protocol::ExtensionList`.
+    pub fn catalogue(&self) -> Vec<primitive_shared::protocol::ExtensionInfo> {
+        use primitive_shared::protocol::{ExtensionInfo, ExtensionKind};
+        self.plugins
+            .iter()
+            .map(|p| ExtensionInfo {
+                kind: ExtensionKind::Script,
+                name: p.name.clone(),
+                version: p.version.clone(),
+                description: p.description.clone(),
+                // One author in a plugin manifest, a list on the wire.
+                // An empty author is no authors rather than one whose
+                // name is the empty string, which is a row with a blank
+                // where a name should be.
+                authors: if p.author.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![p.author.clone()]
+                },
+                enabled: !p.disabled,
+                reason: p.trouble(),
+                built_for: None,
+                // A plugin manifest declares no settings: a script's
+                // configuration is whatever the script reads out of its
+                // own store. Empty rather than invented.
+                settings: Vec::new(),
+            })
+            .collect()
     }
 
     pub fn active_count(&self) -> usize {
@@ -787,12 +893,16 @@ mod extended_api_tests {
         let (mut host, _dir) =
             host_with("fn on_tick(t) { fill(0, -50, 0, 0, 500, 0, 3); }");
         let (_, effects) = host.fire("on_tick", vec![Value::Int(1)], &view());
+        // The world's own height, not the number it used to be: a fill
+        // from -50 to 500 is clamped to the column, and the column was
+        // sixty-four tall when this was written and is `CHUNK_SIZE_Y` now.
+        let height = primitive_shared::types::CHUNK_SIZE_Y as i32;
         for effect in &effects {
             if let Effect::SetBlock { y, .. } = effect {
-                assert!((0..64).contains(y), "wrote outside the world at y={y}");
+                assert!((0..height).contains(y), "wrote outside the world at y={y}");
             }
         }
-        assert_eq!(effects.len(), 64);
+        assert_eq!(effects.len(), height as usize);
     }
 
     #[test]
@@ -831,7 +941,10 @@ mod extended_api_tests {
     #[test]
     fn an_unknown_block_name_is_minus_one_rather_than_a_valid_block() {
         let (mut host, _dir) =
-            host_with("fn on_tick(t) { log(\"\" + block_id(\"cheese\")); }");
+            // Not "cheese" any more: the game makes cheese now
+            // (`types::BLOCK_CHEESE`), and the unknown name has to stay
+            // unknown.
+            host_with("fn on_tick(t) { log(\"\" + block_id(\"moon_cheese\")); }");
         let (_, effects) = host.fire("on_tick", vec![Value::Int(1)], &view());
         let logged = effects.iter().find_map(|e| match e {
             Effect::Log { text, .. } => Some(text.clone()),
@@ -918,6 +1031,29 @@ mod tests {
         (host, dir)
     }
 
+    #[test]
+    fn two_plugin_folders_made_at_the_same_moment_are_never_the_same_folder() {
+        // The tests run on parallel threads, and every one of them asks
+        // for a folder the moment it starts. Sixteen at once, released
+        // together, is that moment made on purpose.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let makers: Vec<_> = (0..16)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    tempdir::TempDir::new()
+                })
+            })
+            .collect();
+        let dirs: Vec<tempdir::TempDir> =
+            makers.into_iter().map(|maker| maker.join().unwrap()).collect();
+        let mut paths: Vec<_> = dirs.iter().map(|dir| dir.path().to_path_buf()).collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), dirs.len(), "two tests were handed the same folder");
+    }
+
     /// Minimal temp directory helper -- no dev-dependency needed for
     /// something this small.
     mod tempdir {
@@ -925,13 +1061,23 @@ mod tests {
         pub struct TempDir(PathBuf);
         impl TempDir {
             pub fn new() -> Self {
+                // **A counter as well as the clock.** The name was the
+                // process and the time, and the tests run on parallel
+                // threads that all ask for a folder as they start: two in
+                // the same tick were handed one folder, wrote their
+                // scripts over each other's, and the first to finish
+                // deleted it under the second. It showed up as
+                // `fill_reports_how_much_it_actually_did` logging nothing
+                // and its neighbour failing to find its own `main.rhai`.
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let base = std::env::temp_dir().join(format!(
-                    "primitive-plugin-test-{}-{:?}",
+                    "primitive-plugin-test-{}-{:?}-{}",
                     std::process::id(),
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
-                        .as_nanos()
+                        .as_nanos(),
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 ));
                 std::fs::create_dir_all(&base).unwrap();
                 Self(base)

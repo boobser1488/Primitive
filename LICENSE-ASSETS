@@ -1,0 +1,57 @@
+© 2026 Primitive. All rights reserved.
+
+The art of this game is **not** under the Apache licence that covers the
+code (`LICENSE-APACHE`). It stays the author's own.
+
+## What this covers
+
+- **Pictures**: everything under `assets/textures/`, and any picture
+  generated from them by the code (`engine::pebble_art`, the per-wood
+  furniture pictures, the derived flame sheets).
+- **Models, wherever they are written**: the files under `assets/models/`
+  — every `.bbmodel` of an animal, a piece of furniture, a workstation or
+  a prop — and the shapes written in the source as numbers: the boxes an
+  animal is built from in `logic::animal_model`, the player's figure in
+  `logic::player_model`, and every table of corners in the mesher that
+  describes what a particular thing looks like.
+- **The font** (`assets/fonts/`), the icons, and the interface's artwork.
+- **The music** composed at run time by `audio::music`, and its score.
+- **The name "Primitive"** and the game's identity.
+
+None of it may be copied, changed, redistributed or used in another
+project without written permission from the author.
+
+## Why the split
+
+Taking the code that draws boxes is allowed and welcome. Taking the boxes
+that make this game's deer a deer is not: a fork with the same art is this
+game wearing someone else's name, while a fork with the code and its own
+art is a new game — which is what the code licence is for.
+
+## What is somebody else's, and is not covered here
+
+- **The sound recordings** under `assets/sounds/` are Creative Commons
+  Zero (CC0) and are listed one by one with their sources in
+  `assets/sounds/SOURCES.md`. They came from Freesound, they are free,
+  and this file claims nothing over them.
+- `android/games-activity-*.jar` is Google's GameActivity under the
+  Apache License 2.0, shipped unmodified.
+- The dependencies named in `Cargo.toml` are under their own licences.
+
+---
+
+# По-русски
+
+Всё нарисованное и записанное остаётся автору: текстуры и всё, что из них
+порождает код; модели — и файлы `.bbmodel`, и формы, записанные в коде
+числами (коробки зверей, фигура игрока, таблицы углов в мешере); шрифт,
+значки, оформление интерфейса; музыка; само название игры.
+
+Копировать, изменять и использовать это в другом проекте без письменного
+разрешения нельзя.
+
+Код при этом свободен: он под Apache 2.0 (`LICENSE-APACHE`), бери и
+указывай автора. Коротко: код — ваш строительный материал, картинки и
+модели — нет.
+
+Звуки — исключение: они под CC0, источники в `assets/sounds/SOURCES.md`.

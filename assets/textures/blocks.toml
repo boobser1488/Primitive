@@ -2,7 +2,7 @@
 #
 # Two forms are accepted:
 #
-#   stone = "stone.png"                       # the same image on all 6 faces
+#   stone = "terrain/stone.png"                       # the same image on all 6 faces
 #   grass = { top = "...", side = "...", bottom = "..." }
 #
 # Per-face keys: top, bottom, side (the 4 vertical faces at once),
@@ -32,54 +32,158 @@
 # the old behaviour and it read as a decal hanging in front of the
 # block.
 
-resolution = 16
+# Paths are relative to this folder, and they are grouped: a block's
+# pictures live with the other pictures of their kind. It is one folder
+# per *thing in the game* rather than per file type -- `animals/`,
+# `tools/`, `fire/` -- because the question anybody opening this folder
+# has is "where are the wolf's textures", never "where are the 16x16
+# PNGs".
+# How big one layer of the texture array is, in texels. Every picture is
+# resized to this on load, with nearest neighbour -- so the 16-texel art
+# this pack ships is doubled exactly rather than blurred, and a pack
+# drawn at 32 is finally shown at 32 instead of being halved.
+#
+# **Thirty-two, and the reason is the font.** The glyphs share layers
+# with each other (see `FontAtlas`), and how many fit is the layer
+# divided by an 8x10 cell: at sixteen that is *two*, so 179 characters of
+# Latin, Cyrillic and Polish ate 90 of the 256 layers the hardware
+# allows -- a third of the atlas, and the reason there was room for
+# exactly one more picture in the whole game. At thirty-two it is twelve
+# a layer and fifteen layers in total.
+#
+# The cost is a megabyte of video memory for the whole array. The gain is
+# seventy-five layers to draw things in.
+resolution = 32
 
 [textures]
-grass = { top = "grass_top.png", side = "grass_side.png", bottom = "dirt.png" }
-dirt = "dirt.png"
-stone = "stone.png"
-sand = "sand.png"
-snow = "snow.png"
-water = "water.png"
-log = { top = "log_top.png", bottom = "log_top.png", side = "log_side.png" }
-leaves = "leaves.png"
+grass = { top = "terrain/grass_top.png", side = "terrain/grass_side.png", bottom = "terrain/dirt.png" }
+dirt = "terrain/dirt.png"
+stone = "terrain/stone.png"
+sand = "terrain/sand.png"
+snow = "terrain/snow.png"
+water = "terrain/water.png"
+log = { top = "terrain/log_top.png", bottom = "terrain/log_top.png", side = "terrain/log_side.png" }
+leaves = "plants/leaves.png"
 # Birch: a second wood, not a variant of the first. See
 # `types::BLOCK_BIRCH_LOG` for why that is three ids and three files
 # rather than a bit in an id.
-birch_log = { top = "birch_log_top.png", bottom = "birch_log_top.png", side = "birch_log_side.png" }
-birch_leaves = "birch_leaves.png"
-birch_planks = "birch_planks.png"
-glowstone = "glowstone.png"
-planks = "planks.png"
-cobblestone = "cobblestone.png"
+birch_log = { top = "terrain/birch_log_top.png", bottom = "terrain/birch_log_top.png", side = "terrain/birch_log_side.png" }
+# The experimental trees' pieces: an oak's bark, and the same filenames the
+# log already uses, so they cost no layer. The world draws them as posts
+# cut from the bark (`mesh::branch_block`); these rows are what a chest
+# in the test world shows.
+twig = "terrain/log_side.png"
+bough = { top = "terrain/log_top.png", bottom = "terrain/log_top.png", side = "terrain/log_side.png" }
+# ...and the same pieces standing in a swamp pool (`types::BLOCK_DROWNED_BOUGH`):
+# the same bark, the same files, no layer.
+drowned_twig = "terrain/log_side.png"
+drowned_bough = { top = "terrain/log_top.png", bottom = "terrain/log_top.png", side = "terrain/log_side.png" }
+birch_leaves = "plants/birch_leaves.png"
+# ---- savanna ----
+# The acacia's plate: the oak's picture recoloured grey-green, and left
+# untinted -- see `types::BLOCK_ACACIA_LEAVES`. The termite mound: dirt
+# recoloured to red ochre -- see `types::BLOCK_TERMITE_MOUND`.
+acacia_leaves = "plants/acacia_leaves.png"
+termite_mound = "terrain/termite_mound.png"
+# The maple: the oak leaf recoloured red-orange, untinted -- see
+# `types::BLOCK_MAPLE_LEAVES`.
+maple_leaves = "plants/maple_leaves.png"
+# Sandy soil: the dirt picture's clods and the sand's fine grain in muted
+# khaki-ochre, with three small pebbles -- see `types::BLOCK_SANDY_SOIL`.
+sandy_soil = "terrain/sandy_soil.png"
+# Dry grass: the tall grass sprite's own silhouette in straw, untinted --
+# see `types::BLOCK_DRY_GRASS`.
+dry_grass = "plants/dry_grass.png"
+# Dry turf: the grass pictures' own grain in straw, the side's soil left as
+# it was -- see `types::BLOCK_DRY_TURF`.
+dry_turf = { top = "terrain/dry_turf_top.png", side = "terrain/dry_turf_side.png", bottom = "terrain/dirt.png" }
+birch_planks = "terrain/birch_planks.png"
+glowstone = "terrain/glowstone.png"
+planks = "terrain/planks.png"
+cobblestone = "terrain/cobblestone.png"
 # The cross-shaped plants: one texture, drawn on two crossed planes
 # rather than on six faces. See `is_cross` in primitive_shared::types.
-tall_grass = "grass_mesh.png"
-stick = "stick.png"
+tall_grass = "plants/grass_mesh.png"
+stick = "plants/stick.png"
+# Bait: the three that are things rather than food already in the game.
+# See `fishing::Bait`.
+worm = "plants/worm.png"
+grub = "plants/grub.png"
+roasted_grubs = "plants/roasted_grubs.png"
+fishing_fly = "plants/fishing_fly.png"
 
-cactus = { top = "cactus_top.png", bottom = "cactus_top.png", side = "cactus.png" }
+cactus = { top = "plants/cactus_top.png", bottom = "plants/cactus_top.png", side = "plants/cactus.png" }
 # Not a block: fibre is an item, and this is what it looks like lying on
 # the ground and in the pack. Opaque on purpose -- see `generate_fiber`.
-fiber = "fiber.png"
+fiber = "plants/fiber.png"
+# A sharpened pole, and slats crossed in a window frame: both sticks, drawn
+# from the log's own bark (`types::BLOCK_STAKE`). The stake wears a leaning
+# picture in the pack, or a pole stood straight up reads as a stick.
+stake = { all = "plants/stake.png", item = "plants/stake_item.png" }
+# A pit prop: a post of the same boards it is cut from.
+prop = { all = "terrain/planks.png", item = "plants/prop_item.png" }
+window_lattice = "plants/window_lattice.png"
+# Three leaves fanned from one stalk: what a hand tears out of a crown.
+leaf_handful = "plants/leaf_handful.png"
 
 # Loose stones lying on the ground, drawn as a single flat quad rather
 # than a cube or a cross. See `is_flat` in primitive_shared::types.
-pebble = "pebble.png"
+pebble = "terrain/pebble.png"
 # Nodules of flint, the same flat shape as a pebble. Dark and angular
 # where a pebble is grey and round -- the two lie side by side on a
 # stony hillside, so they have to be told apart at a glance.
-flint = "flint.png"
+flint = "tools/flint.png"
 
 # A chest. Its bottom is the planks it is made of -- nobody ever sees it,
 # and a face nobody sees is a face not worth a file.
-chest = { top = "chest_top.png", bottom = "planks.png", side = "chest_side.png" }
+#
+# **`north` is the front.** A block that has a front records which way it
+# is looking (see `types::Facing`), and the texture loader is handed the
+# face *after* that turn -- so the picture listed under `north` is the
+# one the player who placed it is looking at. Every side of a chest used
+# to carry the latch, which is four chests in a trench coat.
+# The chest is a model now (`mesh::Material::Iron`, `models::Prop::Chest`); its
+# faces are what the breaking crumbs wear, and the pack shows it whole.
+chest = { top = "terrain/chest_top.png", bottom = "terrain/planks.png", side = "terrain/chest_side.png", north = "terrain/chest_front.png", item = "furniture/chest_item.png" }
 
 # A dead player's pack. Two pictures rather than three: the flap is what
 # you see from above and the straps are what you see from every side, and
 # the underside of a bag standing on the ground is nobody's business --
 # it gets the side, because a bag has no boards to fall back on the way
 # the chest does.
-backpack = { top = "backpack_top.png", side = "backpack_side.png", bottom = "backpack_side.png" }
+#
+# **Its side is a half-height picture.** A bag fills half its cell (see
+# `blocks::BlockDef::thickness`), so the face is drawn half a block tall
+# and a sixteen-row image loses every second row of itself at draw time.
+# `backpack_side_flat.png` is eight rows, folded down from the drawn one
+# by the texture generator -- a hand-drawn eight-row bag should replace
+# it the moment somebody draws one. The original stays in the folder and
+# is what the flat one is derived from.
+backpack = { top = "terrain/backpack_top.png", side = "terrain/backpack_side_flat.png", bottom = "terrain/backpack_side_flat.png", item = "terrain/backpack_item.png" }
+
+# What a death leaves now: the player's own body, and the bones it rots
+# into two days later (`types::BLOCK_CORPSE`). The bag above is still
+# listed because worlds saved before this have bags standing in them --
+# nothing makes a new one.
+#
+# Two pictures each, on the bag's terms and for the bag's reason: what
+# you see of a body on the ground is the *top*, and every flank of it is
+# the same low profile. The side is eight rows, not sixteen, because both
+# blocks are short ones -- see the note on the backpack above for what a
+# sixteen-row picture loses at draw time.
+#
+# **No `item` picture for either, and that is deliberate.** Neither is
+# ever in anybody's hand: they cannot be placed, they drop no block of
+# their own, and what comes out of one is what was inside it. A carried
+# picture would be a layer of the atlas spent on a thing nobody can
+# carry.
+corpse = { top = "terrain/corpse_top.png", side = "terrain/corpse_side.png", bottom = "terrain/corpse_side.png" }
+# A thing set down by hand (`types::BLOCK_SET_DOWN`). The mesher draws the
+# cell as nothing and the frame draws what lies in it; this picture is only
+# what the cracks and the dust of taking it back are made of, so it is one
+# the atlas already holds and costs no layer.
+set_down = "terrain/dirt.png"
+remains = { top = "terrain/remains_top.png", side = "terrain/remains_side.png", bottom = "terrain/remains_side.png" }
 
 # What is left of a wood that burned. The same picture on every face: a
 # drift of it is a drift whichever way you look at it.
@@ -90,12 +194,12 @@ backpack = { top = "backpack_top.png", side = "backpack_side.png", bottom = "bac
 # grey square, indistinguishable from stone and from gravel and from
 # every other grey square, and a lie about what is in your hand besides.
 # The icon is a handful, seen against nothing.
-ash = { all = "ash.png", item = "ash_item.png" }
+ash = { all = "fire/ash.png", item = "fire/ash_item.png" }
 
 # Riverbank clay and river gravel. Both are the same picture on every
 # face for the same reason as ash: a deposit has no up.
-clay = "clay.png"
-gravel = "gravel.png"
+clay = "pottery/clay.png"
+gravel = "terrain/gravel.png"
 
 # ---- ore and metal ----
 #
@@ -104,19 +208,19 @@ gravel = "gravel.png"
 # the stone texture with nodules of its own colour stamped into it, which
 # is what makes them readable as ore *at a distance* -- the eye picks out
 # a speckle against known rock much faster than it picks out a new grey.
-coal_ore = "coal_ore.png"
-copper_ore = "copper_ore.png"
-tin_ore = "tin_ore.png"
-iron_ore = "iron_ore.png"
+coal_ore = "metal/coal_ore.png"
+copper_ore = "metal/copper_ore.png"
+tin_ore = "metal/tin_ore.png"
+iron_ore = "metal/iron_ore.png"
 
 # The things you carry. None of these is ever a face of anything -- they
 # are items -- so the single picture is the icon in the pack and the
 # object lying on the ground where it was dropped.
-coal = "coal.png"
-copper_ingot = "copper_ingot.png"
-tin_ingot = "tin_ingot.png"
-bronze_ingot = "bronze_ingot.png"
-iron_ingot = "iron_ingot.png"
+coal = "metal/coal.png"
+copper_ingot = "metal/copper_ingot.png"
+tin_ingot = "metal/tin_ingot.png"
+bronze_ingot = "metal/bronze_ingot.png"
+iron_ingot = "metal/iron_ingot.png"
 
 # ---- the stone age ----
 #
@@ -126,15 +230,1042 @@ iron_ingot = "iron_ingot.png"
 # shares a palette with `flint.png`, so a pack full of halfway-made
 # things reads as one project rather than as seven unrelated items.
 #
+# The flake is the one of them that is also found lying about -- the
+# generator leaves flakes at rock shelters and knapping floors -- so it is
+# a flat block like the nodule, and this one picture is both the icon and
+# the shard on the ground. As an item it was drawn as a cube in its icon,
+# which in a shelter's hearth was a pure black block.
+#
 # The copper, bronze and iron picks were here and are gone with the
 # blocks they drew. Their PNGs are left in this folder unlisted: the
 # metals are still in the game and the tools are the obvious next thing,
 # and a picture nobody is drawing costs a kilobyte of disk.
-flint_flake = "flint_flake.png"
-worked_stick = "worked_stick.png"
-flint_knife_head = "flint_knife_head.png"
-flint_axe_head = "flint_axe_head.png"
-flint_pick_head = "flint_pick_head.png"
-flint_knife = "flint_knife.png"
-flint_axe = "flint_axe.png"
-flint_pickaxe = "flint_pickaxe.png"
+flint_flake = "tools/flint_flake.png"
+worked_stick = "tools/worked_stick.png"
+flint_knife_head = "tools/flint_knife_head.png"
+stone_axe_head = "tools/stone_axe_head.png"
+stone_pick_head = "tools/stone_pick_head.png"
+# ---- 1.9: the torch ----
+#
+# Three pictures for one object at three points in its life -- see
+# `types::BLOCK_TORCH`. The *flame* is not among them: in the hand it is
+# the campfire's own six frames drawn over the head, which is why a
+# carried fire costs no layer of its own and cannot drift from the fire
+# it came from.
+torch = "tools/torch.png"
+torch_lit = "tools/torch_lit.png"
+torch_spent = "tools/torch_spent.png"
+
+flint_knife = "tools/flint_knife.png"
+stone_axe = "tools/stone_axe.png"
+stone_pickaxe = "tools/stone_pickaxe.png"
+
+# ---- 1.5: what grows, what you eat, and the fire ----
+#
+# The four plants are cross-shaped, so each is one picture drawn on two
+# crossed planes -- see `is_cross`. The berry bush and the picked one
+# share everything but the berries, which is what makes a bush you have
+# stripped read as the same plant rather than as a different one.
+berry_bush = "plants/berry_bush.png"
+bare_bush = "plants/bare_bush.png"
+mushroom = "food/mushroom.png"
+reeds = "plants/reeds.png"
+flower = "plants/flower.png"
+# The wild plants (`types::BLOCK_FIREWEED`). A tall plant is one row for its
+# two cells: the lower half and a shoot wear `side`, the upper half `top`
+# (`mesh::cross_face`). Three of the pictures are borrowed rather than drawn,
+# and cost no layer: a cattail's leaves are the reed bed's, and bracken's
+# frond on its stalk is the fern's frond, which is what bracken is. Thirteen
+# layers for eleven plants and their picked states.
+fireweed = { top = "plants/fireweed_top.png", side = "plants/fireweed.png" }
+cattail = { top = "plants/cattail_top.png", side = "plants/reeds.png" }
+# Giant reed: jointed cane under a pale plume. See `types::BLOCK_ARUNDO`.
+arundo = { top = "plants/arundo_top.png", side = "plants/arundo.png" }
+cane = "plants/cane.png"
+nettle = { top = "plants/nettle_top.png", side = "plants/nettle.png" }
+bracken = { top = "plants/fern.png", side = "plants/bracken.png" }
+bilberry = "plants/bilberry.png"
+bilberry_bare = "plants/bilberry_bare.png"
+strawberry = "plants/strawberry.png"
+strawberry_bare = "plants/strawberry_bare.png"
+plantain = "plants/plantain.png"
+fern = "plants/fern.png"
+sundew = "plants/sundew.png"
+
+# What you carry. Only raw meat and the hide are ever a face of anything --
+# a carcass at that stage -- and those name a face apart from the icon.
+berries = "food/berries.png"
+raw_meat = { all = "food/flesh.png", item = "food/raw_meat.png" }
+cooked_meat = "food/cooked_meat.png"
+human_flesh = "food/human_flesh.png"
+roast_human_flesh = "food/roast_human_flesh.png"
+dried_meat = "food/dried_meat.png"
+# The larder: salt boiled out of the sea, what it keeps, and what the rack
+# then dries. The `_side` pictures are what hangs on the rack.
+salt = "food/salt.png"
+salted_meat = "food/salted_meat.png"
+salted_fish = "food/salted_fish.png"
+dried_fish = "food/dried_fish.png"
+dried_salted_meat = "food/dried_salted_meat.png"
+dried_salted_fish = "food/dried_salted_fish.png"
+# A sheep at its hide stage wears this face, and the folded-hide icon
+# wrapped round a body read as a picture pasted on, the way raw meat's
+# icon did -- so the face is the stretched hide the rack already uses.
+hide = { all = "hide/stretched_hide.png", item = "food/hide.png" }
+
+# The fire. Two blocks, three pictures: only the *top* differs between a
+# laid fire and a burning one, because from the side you see the same
+# ring of stones and the same wood, and what tells you it is alight is
+# the light it throws.
+# The side is eight rows rather than sixteen, for the reason the bag's
+# is: the block is half a cell tall, so half a picture is what actually
+# reaches the screen.
+#
+# `item` on both, and it is not decoration. The side is *four rows* --
+# the block fills half its cell, so there is nothing to draw in the
+# other twelve -- and an icon is square, so the pack stretched four rows
+# of stones into a smear that read as a grey cube. The carried picture
+# is a laid hearth seen from the side, on nothing at all, because an
+# icon is an object and the eye reads an object by its outline.
+campfire = { top = "fire/campfire_top.png", side = "fire/campfire_side.png", bottom = "fire/campfire_side.png", item = "fire/campfire_item.png" }
+campfire_lit = { top = "fire/campfire_lit_top.png", side = "fire/campfire_side.png", bottom = "fire/campfire_side.png", item = "fire/campfire_lit_item.png" }
+
+# ---- the metal tools ----
+#
+# Nine files, in the ingots' own colours, so a player can tell at a
+# glance which bar their axe came out of. The three copper, bronze and
+# iron pickaxes are the same filenames the metal picks used before they
+# were taken out in 1.3 -- the pictures were left on disk unlisted then,
+# with a note saying the day they came back this would be a line rather
+# than a rewrite, and this is that line.
+copper_knife = "tools/copper_knife.png"
+copper_axe = "tools/copper_axe.png"
+copper_pickaxe = "tools/copper_pickaxe.png"
+bronze_knife = "tools/bronze_knife.png"
+bronze_axe = "tools/bronze_axe.png"
+bronze_pickaxe = "tools/bronze_pickaxe.png"
+iron_knife = "tools/iron_knife.png"
+iron_axe = "tools/iron_axe.png"
+iron_pickaxe = "tools/iron_pickaxe.png"
+
+# ---- 1.9: the copper bench ----
+#
+# Four castings and the two tools copper had no version of. Hand-drawn,
+# unlike the six generated rows above them -- which is why the copper axe
+# and pick are no longer in `gen_placeholder_textures`'s `METAL_TOOLS`:
+# a table naming a file that program is not the author of is a table that
+# would destroy artwork on a `--force` run.
+#
+# A head is an item and so is a hafted tool; none of these is ever a face
+# of anything, so the transparent texels round them are safe. See the
+# note on the wool block for what happens when that is not true.
+copper_axe_head = "tools/copper_axe_head.png"
+copper_pick_head = "tools/copper_pick_head.png"
+copper_shovel_head = "tools/copper_shovel_head.png"
+copper_hoe_head = "tools/copper_hoe_head.png"
+copper_shovel = "tools/copper_shovel.png"
+copper_hoe = "tools/copper_hoe.png"
+
+# ---- 1.6: the kiln, and what comes out of it ----
+#
+# Four pictures for two blocks, and the same split the campfire uses:
+# what tells you a kiln is alight is the stoke hole and the flue, so
+# those are the two faces that differ. Unlike the campfire the side
+# changes too -- a kiln is a whole cell tall and you feed it from the
+# front, so the mouth is on the side where you can see it.
+# The mouth is the front and the other three walls are plain daub -- a
+# kiln with a stoke hole on every side is a box with four mouths and no
+# back. See the note on the chest above for how the front is chosen.
+kiln = { top = "fire/kiln_top.png", side = "fire/kiln_side.png", bottom = "fire/kiln_side.png", north = "fire/kiln_front.png" }
+kiln_lit = { top = "fire/kiln_lit_top.png", side = "fire/kiln_lit_side.png", bottom = "fire/kiln_side.png", north = "fire/kiln_lit_front.png" }
+brick = "pottery/brick.png"
+bricks = "pottery/bricks.png"
+sandstone_bricks = "terrain/sandstone_bricks.png"
+
+# Not listed above and loaded all the same, like `break.N.png`: the
+# animal skins (`hare.png`, `deer.png`, `boar.png`) and the two
+# precipitation tiles (`rain.png`, `snow_fall.png`). None of them is a
+# block face -- an animal is an entity wearing one texture and the rain
+# is a quad standing in front of the camera -- so they have no row here
+# and are asked for by name. See the client's `texture::EXTRA_TEXTURES`.
+
+# ---- 1.6: the field ----
+#
+# The three crop stages are cross-shaped, like every other plant: one
+# picture drawn on two crossed planes. The seed and the first stage are
+# the same block -- see `types::BLOCK_SEEDS` -- so `seeds.png` is both
+# what a player carries and what has just been planted.
+hoe = "tools/hoe.png"
+# The planted picture is seven lit pixels -- one sprout, which is what a
+# just-sown cell looks like and is invisible in a hand. See `ash` above
+# for the same split and the same reason.
+seeds = { all = "plants/seeds.png", item = "plants/seeds_item.png" }
+farmland = "terrain/farmland.png"
+wheat = "plants/wheat.png"
+wheat_ripe = "plants/wheat_ripe.png"
+grain = "food/grain.png"
+dough = "food/dough.png"
+bread = "food/bread.png"
+
+# ---- 1.7: the copper age ----
+#
+# The pot and the mould are two pictures each, wet and fired, because
+# what the kiln does to them is the whole point of the kiln. Wet clay is
+# grey and fired clay is terracotta -- the same red as the brick and the
+# kiln's own daub, because it is the same clay.
+native_copper = "metal/native_copper.png"
+vessel_raw = "pottery/vessel_raw.png"
+vessel = "pottery/vessel.png"
+# The crucible with earth in it: a pot to grow a bush in (`types::BLOCK_PLANTER`).
+planter = { top = "pottery/planter_top.png", bottom = "pottery/planter_side.png", side = "pottery/planter_side.png" }
+mould_raw = "pottery/mould_raw.png"
+mould = "pottery/mould.png"
+iron_bloom = "metal/iron_bloom.png"
+bloomery = { top = "fire/bloomery_top.png", side = "fire/bloomery_side.png", bottom = "fire/bloomery_side.png", north = "fire/bloomery_front.png" }
+bloomery_lit = { top = "fire/bloomery_lit_top.png", side = "fire/bloomery_lit_side.png", bottom = "fire/bloomery_side.png", north = "fire/bloomery_lit_front.png" }
+
+# ---- 1.8: ice ----
+#
+# One picture on all six faces, like every other mineral: a frozen pool
+# has no up. Opaque in every texel -- what makes ice read as ice here is
+# the fractures drawn through it, not seeing the lake bed through the
+# block. Light does pass (see `blocks::BlockDef::opacity` for ice); sight
+# does not.
+ice = "terrain/ice.png"
+
+# ---- 1.7: the tannery, the jug, and what a person wears ----
+
+# Tanned leather, and the frame it was made on. The rack wears one
+# picture on all six faces: it is half a block tall and walked over, so
+# what a player actually sees is the top of it, and a distinct side
+# texture would be four pixels nobody looks at.
+leather = "hide/leather.png"
+# A fleece off a sheep, and two pictures of it, which is the same split
+# `ash` above makes and for a sharper reason.
+#
+# **A fleece and a bale are not the same shape.** The item picture is a
+# blob of wool on nothing: 107 of its 256 texels are opaque, and the
+# rest are there so a fleece in the hand is fleece-shaped rather than a
+# square. A cube face is drawn without any alpha test -- `fs_solid` has
+# no `discard`, that is the whole point of the split between it and
+# `fs_cutout` -- so those 149 empty texels came out **black**, and a
+# placed bale of wool was a black block with a smear of white on it.
+# Reported as exactly that.
+#
+# So the block gets a picture that covers its face, in the item's own
+# three colours so the bale and the fleece are recognisably the same
+# material. It tiles with itself, because a wall of wool is one image
+# repeated and `AddressMode::Repeat` would otherwise put a seam at every
+# block boundary.
+#
+# Two layers rather than one now. See `MAX_TERRAIN_LAYERS`: the budget
+# had 56 free.
+wool = { all = "hide/wool_block.png", item = "hide/wool.png" }
+# Two racks, two jobs (`rack::Trade`): the rack of two by two is the
+# larder, and its icon is what it is for -- an A-frame with strips and a
+# fish on the ridge. The hide frame keeps the old rack's picture for its
+# faces -- which nobody sees, since it is drawn as a model; they are what its
+# chips fly off as -- and naming the same file shares the layer. Its icon is
+# its own: a skin pegged out on the ground, which is what it is drawn as now
+# (`misc/hide_frame.bbmodel`), and a square of poles in the hand would be a
+# promise the thing put down does not keep.
+drying_rack = { all = "terrain/drying_rack.png", item = "furniture/meat_rack_item.png" }
+hide_frame = { all = "terrain/drying_rack.png", item = "furniture/hide_frame_item.png" }
+
+# ---- what there is to forage ----
+#
+# The plant is the sign and the root is the meal, so they are two
+# pictures: a rosette of leaves in the world, and the thing you dug up in
+# the pack. The toadstool shares the mushroom's silhouette and nothing
+# else -- see `generate_toadstool`, which draws the flecks that are the
+# whole difference between food and a mistake.
+roots = "plants/roots.png"
+root = "food/root.png"
+roasted_root = "food/roasted_root.png"
+toadstool = "plants/toadstool.png"
+
+# The tinder bracket, which grows on a fallen trunk and is a torch wad
+# rather than a meal. Drawn as a hard banded shelf and not as a cap on a
+# stalk, because the one thing a player must never do is mistake it for
+# something to eat.
+# The block picture is a crust that dresses the shelf model
+# (`mesh::bracket_block`); in a slot it reads as a scrap of bark, so the
+# icon is one bracket seen from the side.
+bracket_fungus = { all = "plants/bracket_fungus.png", item = "plants/bracket_fungus_item.png" }
+
+# Undergrowth. Recoloured from the canopy's leaf rather than drawn
+# fresh -- darker, denser, with a few woody pixels for stems -- because
+# a bush *is* the same leaf in worse light. See
+# `types::BLOCK_BUSH_LEAVES`.
+bush_leaves = "plants/bush_leaves.png"
+
+# A skeleton's icon is the bone the butchering has always dropped -- the
+# same file, no new layer. In the world it is not drawn in this picture:
+# it is that animal's skeleton (`animal_model::skeleton_parts`) in the
+# ivory of the boar's tusks, because this is an icon on a transparent
+# square, and a thin bone wears the corner of its picture -- which here
+# is empty.
+bones = "hide/bone.png"
+# The skeletons past the eighth species: the same row under a second id,
+# because the variant field names eight animals (`types::BLOCK_BONES_2`).
+bones_2 = "hide/bone.png"
+# ...and past the sixteenth (`types::BLOCK_BONES_3`). Three ids, one file,
+# no new layer -- the atlas has a ceiling and a skeleton is not drawn from
+# this picture anyway.
+bones_3 = "hide/bone.png"
+# ...and past the twenty-fourth (`types::BLOCK_BONES_4`), made before any
+# species needs it. Still the one file.
+bones_4 = "hide/bone.png"
+
+# Wild cereal, and it has its own picture now that there is a layer for
+# one (the two nests share theirs -- see `nest`). It shared the ripe
+# crop's, on the argument that one silhouette should mean "grain"
+# everywhere, and in the world that read as a planted field growing in
+# the middle of a steppe. What a wild stand actually is is *uneven*:
+# four stalks at four heights, leaning, with heavy nodding ears -- and
+# that is what tells it from the rank of even stems a farmer sowed.
+wild_wheat = "plants/wild_wheat.png"
+
+# ---- cotton, and what frost leaves of a field ----
+#
+# The wild stand wears wild wheat's uneven stalks with bolls where the
+# ears were, and the planted stages wear the wheat field's even rank --
+# the same split for the same reason: uneven means nobody planted it, a
+# rank means somebody did. Every picture is a recolour of one the game
+# already had (the sprout of `seeds`, the fleece of `wool` pinched into
+# a boll, the folded skin of `leather` in linen). The seed is two
+# pictures for the reason `seeds` is. The four garments share the
+# leather set's pictures and are told apart by `types::garment_tint`.
+wild_cotton = "plants/wild_cotton.png"
+cotton_seeds = { all = "plants/cotton_seeds.png", item = "plants/cotton_seeds_item.png" }
+cotton_plant = "plants/cotton_plant.png"
+cotton_ripe = "plants/cotton_ripe.png"
+cotton = "plants/cotton.png"
+# ---- millet ----
+#
+# The sown grain wears the wheat's shoot and the green stand the green wheat,
+# and cost no layer: nobody tells two cereals apart before they head. The
+# heads are millet's own -- a drooping panicle, not an ear.
+wild_millet = "plants/wild_millet.png"
+millet = { all = "plants/seeds.png", item = "food/millet.png" }
+millet_plant = "plants/wheat.png"
+millet_ripe = "plants/millet_ripe.png"
+millet_porridge = "food/millet_porridge.png"
+cloth = "hide/cloth.png"
+cloth_cap = "worn/cap.png"
+cloth_tunic = "worn/tunic.png"
+cloth_trousers = "worn/leggings.png"
+cloth_wraps = "worn/boots.png"
+# Wheat's stalks, dead and folded over. One picture for every crop that
+# froze -- see `types::BLOCK_WITHERED_CROP`.
+withered_crop = "plants/withered_crop.png"
+
+# The nest in a canopy, empty and with eggs in it, and what is in it.
+# One picture on every face: a bowl of twigs two eighths tall has no
+# side worth its own file, and what anybody ever sees of one is the top.
+# **One picture for both**, now that the eggs are geometry rather than
+# paint (see `mesh::nest_block`): what the two blocks differ in is
+# three little boxes in the bowl, and the bowl is the same weave
+# either way. That is a layer of the atlas back, and the atlas is at
+# its ceiling.
+nest = "plants/nest.png"
+nest_eggs = "plants/nest.png"
+egg = "food/egg.png"
+
+# Ground grain. Drawn as a heap seen against nothing, for the reason ash
+# has its own item picture: in the pack a tile of meal is a pale square
+# and a lie about what is in your hand.
+flour = "food/flour.png"
+
+# ---- furniture ----
+#
+# **One new picture between them, and it is straw.** A stool made of
+# boards should look like the boards it was made of, and it does. The
+# straw pallet wore `fiber.png` -- the icon of a hank, mostly holes --
+# and then the savanna turf's top, which is ground and not stalks: a
+# player looked at it and asked for a pallet that "looks like straw", and
+# nothing in the atlas was straw. There is room for it now (see
+# `texture::tests::the_whole_atlas_fits_in_a_texture_array`). The plank
+# bed's mattress wears it too, because it is stuffed with the same thing
+# (`mesh::Material::Straw`).
+straw_bed = "plants/straw.png"
+# The bed's top is the stretched hide the rack wears, not the leather
+# icon: `leather.png` is a rolled skin drawn on transparency, and a face
+# wearing it is a bed with holes in it. The stretched hide is opaque edge
+# to edge and already in the atlas, so this costs no layer.
+bed = { top = "hide/stretched_hide.png", side = "terrain/planks.png", bottom = "terrain/planks.png", item = "furniture/bed_item.png" }
+# **An icon of its own for each piece.** The pack showed a piece of furniture
+# by its south face, which for all four was a square of planks or bark -- a
+# chair and a table were the same tile. The icons are drawn in
+# `furniture/`, out of the same timber the models wear.
+stool = { top = "terrain/planks.png", side = "terrain/log_side.png", bottom = "terrain/planks.png", item = "furniture/stool_item.png" }
+# The chair wears what the stool wears, for the stool's reason: boards
+# and poles, drawn as a model out of the same two pictures.
+chair = { top = "terrain/planks.png", side = "terrain/log_side.png", bottom = "terrain/planks.png", item = "furniture/chair_item.png" }
+table = { all = "terrain/planks.png", item = "furniture/table_item.png" }
+# ---- the four workshops (`types::BLOCK_WORKBENCH`) ----
+#
+# Drawn as models of boxes (`assets/models/workstations`), so a face here is
+# only what the breaking crumbs wear: pictures already in the atlas, and a
+# layer each for the icon, which is the one picture of a workshop a player
+# looks at in the pack.
+workbench = { all = "terrain/planks.png", item = "furniture/workbench_item.png" }
+mason_block = { all = "terrain/stone.png", item = "furniture/mason_block_item.png" }
+potters_wheel = { all = "terrain/planks.png", item = "furniture/potters_wheel_item.png" }
+leather_bench = { all = "terrain/planks.png", item = "furniture/leather_bench_item.png" }
+# The barter stall: a model (`furniture/stall.bbmodel`), so its faces are the
+# crumbs' planks and its one picture of its own is the icon.
+stall = { all = "terrain/planks.png", item = "furniture/stall_item.png" }
+# The two stations of the edge: models (`workstations/sawhorse.bbmodel`,
+# `workstations/honing_stone.bbmodel`), so each face row is only the far
+# picture, and the one picture of each's own is the icon.
+sawhorse = { all = "terrain/planks.png", item = "furniture/sawhorse_item.png" }
+honing_stone = { all = "terrain/sandstone.png", item = "furniture/honing_stone_item.png" }
+# The lean-to: a model (`furniture/lean_to.bbmodel`, the whole hut of fifteen
+# cells) of the leaf litter's own picture and the log's bark, so the face row
+# is the litter -- no layer of its own -- and the icon is the one picture of
+# its own: the hut from its mouth, three quarters on, the fork crossed over
+# the dark door and the heap running down to its tail. The litter with the
+# earth painted in (the pit cover's), since the ground's own has holes: a
+# thatch is a heap, and a heap has no daylight through it.
+lean_to = { all = "plants/pit_cover.png", item = "furniture/lean_to_item.png" }
+
+# ---- the smith and the joiner ----
+#
+# The anvil wears one picture on every face -- the bronze it was cast from --
+# and that same picture is what `mesh::Material::Bronze` cuts the model's
+# boxes out of, exactly as `Stone` and `Clay` take theirs from the stone and
+# the clay blocks. A picture nothing places would have had to be an extra
+# texture with an index to keep in step; a block that *is* the metal needs no
+# such thing.
+anvil = { all = "furniture/bronze.png", item = "furniture/anvil_item.png" }
+# Three hammers and two chisels, in the ingots' own colours, so a player can
+# tell at a glance which bar a head came out of. The stone one has its lashing
+# drawn on: a stone head is tied to its haft, and the metal ones are driven
+# on to theirs (see the rows in `crafting`).
+stone_hammer = "tools/stone_hammer.png"
+bronze_hammer = "tools/bronze_hammer.png"
+iron_hammer = "tools/iron_hammer.png"
+flint_chisel = "tools/flint_chisel.png"
+bronze_chisel = "tools/bronze_chisel.png"
+# The saws: one picture recoloured three times, the knives' metals, because a
+# saw of another metal is the same saw.
+copper_saw = "tools/copper_saw.png"
+bronze_saw = "tools/bronze_saw.png"
+iron_saw = "tools/iron_saw.png"
+# Stairs and the three roofs (`types::BLOCK_PLANK_STAIRS`). A step wears one
+# picture on every face of its two boxes, cropped rather than squeezed, so
+# the planks and the cobbles are the wall's own and cost no layer; what a
+# step does cost is its icon, a side view of the step, because the top
+# picture alone would put a plank step in the pack as a plank.
+#
+# The roofs' pictures are reworked from the pack's own: the tiles out of the
+# brick's palette in scalloped courses, the thatch out of the straw's in
+# combed courses of strands, the branches out of the canopy darkened with
+# sticks laid across it. A slab's sides are the top rows of the same
+# picture, as a campfire's are.
+plank_stairs = { all = "terrain/planks.png", item = "roof/plank_stairs_item.png" }
+cobblestone_stairs = { all = "terrain/cobblestone.png", item = "roof/cobblestone_stairs_item.png" }
+tile_roof = { all = "roof/tiles.png", item = "roof/tile_roof_item.png" }
+tile_slab = { all = "roof/tiles.png", item = "roof/tile_slab_item.png" }
+thatch_roof = { all = "roof/thatch.png", item = "roof/thatch_roof_item.png" }
+thatch_slab = { all = "roof/thatch.png", item = "roof/thatch_slab_item.png" }
+branch_roof = { all = "roof/branches.png", item = "roof/branch_roof_item.png" }
+branch_slab = { all = "roof/branches.png", item = "roof/branch_slab_item.png" }
+# The door: boards stood on end between a rail and a ledge, with an iron
+# latch on the lower half -- the wall's own planks re-laid, generated from
+# `planks.png`, so a door in a plank wall is the same wood as the wall. Two
+# pictures because the halves are two different stretches of one door, and
+# a third for the pack, because a half is a square of boards and the icon
+# has to read as the whole thing standing up. See `types::BLOCK_DOOR`.
+door = { all = "terrain/door.png", item = "terrain/door_item.png" }
+door_top = "terrain/door_top.png"
+
+# The water barrel, in its three waters, all wearing the same pictures:
+# the water inside is drawn from the water's own layer, so a barrel of
+# the sea looks like a barrel of the river -- as it would, which is what
+# makes filling one at the shore a mistake rather than a choice. `top` is
+# the cord the hoops are bound with (`mesh::barrel_block` crops it);
+# `side` is drawn whole on each wall, bands and all, so it is a picture
+# of this one object and not a tiling.
+barrel = { top = "terrain/barrel_hoop.png", side = "terrain/barrel_side.png", bottom = "terrain/barrel_side.png", item = "terrain/barrel_item.png" }
+barrel_standing = { top = "terrain/barrel_hoop.png", side = "terrain/barrel_side.png", bottom = "terrain/barrel_side.png", item = "terrain/barrel_item.png" }
+barrel_salt = { top = "terrain/barrel_hoop.png", side = "terrain/barrel_side.png", bottom = "terrain/barrel_side.png", item = "terrain/barrel_item.png" }
+# ...and in its three grains. The staves are the same pictures; `bottom` is
+# the grain lying in it, which `mesh::barrel_block` draws at the level --
+# the barrel's model has its own floor of staves, so the block's bottom
+# face was a slot nothing read. Each surface is its grain's own picture laid
+# over itself until no gap shows, because a pack sprite has holes a heap
+# does not.
+barrel_grain = { top = "terrain/barrel_hoop.png", side = "terrain/barrel_side.png", bottom = "food/barrel_grain.png", item = "terrain/barrel_item.png" }
+barrel_seeds = { top = "terrain/barrel_hoop.png", side = "terrain/barrel_side.png", bottom = "food/barrel_seeds.png", item = "terrain/barrel_item.png" }
+barrel_millet = { top = "terrain/barrel_hoop.png", side = "terrain/barrel_side.png", bottom = "food/barrel_millet.png", item = "terrain/barrel_item.png" }
+
+# The jug, at the three points in its life the clay chain gives it.
+jug_raw = "pottery/jug_raw.png"
+# The fired jug is two pictures: the icon, and the clay its model is made
+# of. It was one, and a jug set down on the ground came out white with
+# black blotches -- `mesh::jug_block` crops its faces from the corner of
+# the picture, and the corner of an icon is the transparency round the
+# thing drawn. `jug_clay.png` is sampled from the icon's own colours, so
+# the jug in the hand and the jug on the floor are the same clay.
+jug = { all = "pottery/jug_clay.png", item = "pottery/jug.png" }
+jug_water = "pottery/jug_water.png"
+
+# The bowl, raw and fired, and a bowl with the stew in it. Carried only, so
+# one picture each: nothing crops a bowl's faces off its icon.
+bowl_raw = "pottery/bowl_raw.png"
+bowl = "pottery/bowl.png"
+stew = "food/stew.png"
+# Milk in the same bowl: the stew's picture with the surface whitened.
+bowl_milk = "food/bowl_milk.png"
+# Navigation. The cairn wears the cobble it is piled from and carries a
+# heap of the pebble picture as its icon; the lodestone is native copper's
+# lump in black iron; the compass is the milk bowl with water, a leaf and
+# a needle on it -- all recolours, the house rule.
+cairn = { all = "terrain/cobblestone.png", item = "terrain/cairn_item.png" }
+lodestone = "metal/lodestone.png"
+water_compass = "tools/water_compass.png"
+
+# Building in stages (`build`). Every picture a recolour: the handfuls are
+# flour's heap filled with the ground they came out of; quicklime is chalk
+# whitened, mortar lime beaten into sand, daub and cob clay and earth with
+# the straw's own flecks in them. The walls are what they are made of --
+# the cobble with its joints opened into shadow, the bricks with the mortar
+# gone dark, the planks' browns woven over and under.
+handful_earth = "terrain/handful_earth.png"
+handful_sand = "terrain/handful_sand.png"
+handful_gravel = "terrain/handful_gravel.png"
+handful_clay = "pottery/handful_clay.png"
+stone_chips = "terrain/stone_chips.png"
+quicklime = "pottery/quicklime.png"
+mortar = "pottery/mortar.png"
+daub = { all = "pottery/daub.png", item = "pottery/daub_item.png" }
+cob = "terrain/cob.png"
+brick_courses = "pottery/bricks.png"
+dry_bricks = "pottery/bricks_dry.png"
+dry_stone_wall = "terrain/dry_stone_wall.png"
+wattle = "terrain/wattle.png"
+cob_wall = "terrain/cob_wall.png"
+
+# **Twelve garments, four pictures.**
+#
+# Leather, bronze and iron in four slots apiece all point at the same
+# four greyscale shapes, and what tells them apart is the tint the icon
+# is drawn with -- see `types::garment_tint`. That is not thrift for its
+# own sake: the texture array is capped at 256 layers by the hardware
+# (a GTX 1050 Ti refuses to create one larger), and this build is within
+# a handful of it. Twelve images would not fit; twelve tints cost
+# nothing at all.
+#
+# The pictures are drawn in values rather than colours for the same
+# reason -- multiply a light grey by a leather brown and you get
+# leather; multiply a coloured picture by anything and you get mud.
+leather_cap = "worn/cap.png"
+leather_tunic = "worn/tunic.png"
+leather_leggings = "worn/leggings.png"
+leather_boots = "worn/boots.png"
+bronze_helm = "worn/cap.png"
+bronze_cuirass = "worn/tunic.png"
+bronze_greaves = "worn/leggings.png"
+bronze_boots = "worn/boots.png"
+iron_helm = "worn/cap.png"
+iron_cuirass = "worn/tunic.png"
+iron_greaves = "worn/leggings.png"
+iron_boots = "worn/boots.png"
+# ...and wool, which is a fourth set on the same four pictures. The tint
+# is an off-white; see `types::garment_tint`.
+wool_cap = "worn/cap.png"
+wool_tunic = "worn/tunic.png"
+wool_leggings = "worn/leggings.png"
+wool_boots = "worn/boots.png"
+
+# Fur, which shares the same two pictures the leather set uses and is
+# told apart by its tint alone (`types::garment_tint`). Two garments
+# rather than four: see `types::BLOCK_FUR_CLOAK`.
+fur_hood = "worn/cap.png"
+fur_cloak = "worn/tunic.png"
+
+# A trunk with the bark off it. The pale cut end of a log on every face,
+# which is what debarked timber looks like -- and because it is the same
+# *filename* the log already uses for its ends, it shares that texture
+# and costs no layer at all. With 255 of 256 layers spent, that is not a
+# nicety.
+stripped_log = "terrain/log_top.png"
+
+# ---- the rock under the soil, in three kinds ----
+#
+# Three plain speckled stones, each its own colour, because the colour
+# is what tells a player which country they are cutting into. See
+# `types::BLOCK_SANDSTONE`.
+sandstone = "terrain/sandstone.png"
+limestone = "terrain/limestone.png"
+granite = "terrain/granite.png"
+# Dripstone, standing and hanging: limestone washed pale and streaked down
+# its length, one picture for both and every size (the size is the variant,
+# see `dripstone`). Drawn cropped, so a thin tip wears two columns of it.
+stalagmite = "terrain/dripstone.png"
+stalactite = "terrain/dripstone.png"
+
+# ---- the bog's fuel ----
+# Three stages of one sod, and each is a thing (`types::BLOCK_DRYING_PEAT`):
+# dark fibrous bog earth when it is cut, lighter and cracking as it dries,
+# a pale cracked brick when it is fuel. Set down on the ground each lies as
+# its icon, so a field of peat reads at a glance; the faces are what a cube
+# of it shows in the bog and in the hand.
+peat = { all = "terrain/peat.png", item = "fire/peat_item.png" }
+drying_peat = { all = "fire/drying_peat_side.png", item = "fire/drying_peat.png" }
+dried_peat = { all = "fire/dried_peat_side.png", item = "fire/dried_peat.png" }
+
+# ---- what a carcass is made of, and the carcasses ----
+#
+# A carcass is never drawn from this table: the mesher draws the
+# animal's own model lying on its side (`animal_model::build_fallen`),
+# in the animal's own skins. The rows below exist because every block
+# id has a texture, and they point at a picture that is already loaded
+# so they cost no layer at all.
+sinew = "hide/sinew.png"
+bone = "hide/bone.png"
+carcass_hare = "food/hide.png"
+carcass_deer = "food/hide.png"
+carcass_boar = "food/hide.png"
+carcass_wolf = "food/hide.png"
+carcass_sheep = "food/hide.png"
+carcass_bear = "food/hide.png"
+carcass_fowl = "food/hide.png"
+carcass_zebra = "food/hide.png"
+carcass_antelope = "food/hide.png"
+carcass_lion = "food/hide.png"
+carcass_horse = "food/hide.png"
+
+# The floor of the world. Its own picture, because a rock a player
+# meets once and has to recognise from across a shaft is a rock that
+# has to look like nothing else down there.
+basalt = "terrain/basalt.png"
+
+# ---- the honest tool chain ----
+#
+# See `types::BLOCK_CORD` for what each is. The wedged axe and pick are
+# the stone ones' pictures with a dark collar at the joint, and they are
+# two files rather than a shared one -- two layers spent -- so a player
+# can tell from the pack which axe will fell a tree.
+cord = "tools/cord.png"
+
+# ---- the raft ----
+#
+# See `types::BLOCK_RAFT`. Three pictures, three layers, because the three
+# are three shapes: a pole with a blade, a square of hide on a yard, and a
+# deck with a mast. The oar is the copper shovel's haft carrying a board
+# where the spade was; the sail's hide is the stretched hide's own texels.
+# The raft on the water is drawn as a model out of the log, plank and hide
+# pictures that are already in the atlas (`logic::raft_model`).
+sail = "tools/sail.png"
+oar = "tools/oar.png"
+# The horse's tack, drawn in the copper tools' leather: a saddle seen from
+# the side with its stirrup hanging, and two panniers on their strap.
+saddle = "tools/saddle.png"
+saddlebags = "tools/saddlebags.png"
+raft = "tools/raft.png"
+wedged_axe = "tools/wedged_axe.png"
+wedged_pickaxe = "tools/wedged_pickaxe.png"
+flint_spear = "tools/flint_spear.png"
+# The other three spears and the bone one share it, told apart by the
+# colour of the head alone (`types::spear_tint`) -- the same trick the
+# twelve garments use, and the honest drawing besides: what differs
+# between them is a head that is four texels at hotbar size.
+bone_spear = "tools/flint_spear.png"
+copper_spear = "tools/flint_spear.png"
+bronze_spear = "tools/flint_spear.png"
+iron_spear = "tools/flint_spear.png"
+rusty_stone = "terrain/rusty_stone.png"
+iron_dust = "metal/iron_dust.png"
+# What an honest smelt leaves and what an edge is kept on. Four pictures,
+# four layers: the steel bar is the iron one recoloured (the same thing,
+# another metal), and the other three are different things with shapes of
+# their own -- slag is a stone face, stream tin a pebble, the whetstone a bar
+# with a hole for its thong.
+whetstone = "tools/whetstone.png"
+slag = "metal/slag.png"
+steel_ingot = "metal/steel_ingot.png"
+stream_tin = "metal/stream_tin.png"
+
+# ---- wild bees ----
+#
+# Three pictures, all repainted: the hive is the nest's woven twigs turned to
+# the gold of comb (the cells are the holes in the weave), honey is the lump
+# of resin gone amber, and beeswax is the lump of fat gone pale yellow -- the
+# thing it stands in for, in the torch rows.
+wild_hive = "plants/wild_hive.png"
+honey = "food/honey.png"
+beeswax = "food/beeswax.png"
+
+# ---- fishing ----
+#
+# Repainted from what the game already had, not drawn fresh: the rod is the
+# spear's haft with a cord grip, a line and a copper hook; the hook is the
+# copper knife's metal; the trap is the straw's reeds woven over stick-coloured
+# ribs, with holes in the weave (`is_cutout`) and a dark funnel mouth on top.
+# The float on the water is one texel of the rod's picture (`particles::FLOAT_TEXEL`),
+# so moving the float here moves it there.
+fish_trap = { top = "plants/fish_trap_top.png", bottom = "plants/fish_trap_side.png", side = "plants/fish_trap_side.png" }
+fishing_rod = "tools/fishing_rod.png"
+copper_hook = "tools/copper_hook.png"
+rotten = "food/rotten.png"
+
+# ---- 1.5: the orchard and the peg ----
+#
+# The bare apple canopy is the oak's own picture, named twice: two
+# entries pointing at one file share one layer (see the atlas note at
+# the top of this file), and a leaf with the fruit picked off it *is*
+# an ordinary leaf. Only the fruiting one costs a layer, and what it
+# costs it for is the thing the player is looking for from across a
+# meadow.
+apple_leaves = "plants/leaves.png"
+apple_leaves_fruit = "plants/apple_leaves.png"
+apple = "food/apple.png"
+peg = "tools/peg.png"
+# Nails are the iron knife's own greys on two drawn nails, and the frame is
+# the worked stick's wood and the peg's face laid round a square with a
+# joint at each corner. One frame picture for both fastenings, because it
+# is one item (`types::BLOCK_FRAME`).
+nails = "tools/nails.png"
+frame = "tools/frame.png"
+# Pegged boards are the wall's own picture with four heads driven into
+# it (generated from `planks.png` itself), because the player has to see
+# at a glance which joints are fastened and which are waiting to come
+# down -- and because a separately drawn board would read as a different
+# wood in the same wall.
+pegged_planks = "terrain/pegged_planks.png"
+pegged_birch_planks = "terrain/pegged_birch_planks.png"
+
+# ---- the fir and the saxaul ----
+# Two more woods, each the oak's four pictures repainted in its own colour
+# (`gen_placeholder_textures::repaint_wood`): a drawing of grain and rings is
+# the same drawing in any timber. Both crowns are untinted -- see
+# `types::BLOCK_FIR_NEEDLES` and `types::BLOCK_SAXAUL_LEAVES`.
+fir_log = { top = "terrain/fir_log_top.png", bottom = "terrain/fir_log_top.png", side = "terrain/fir_log_side.png" }
+fir_needles = "plants/fir_needles.png"
+fir_planks = "terrain/fir_planks.png"
+pegged_fir_planks = "terrain/pegged_fir_planks.png"
+saxaul_log = { top = "terrain/saxaul_log_top.png", bottom = "terrain/saxaul_log_top.png", side = "terrain/saxaul_log_side.png" }
+saxaul_leaves = "plants/saxaul_leaves.png"
+saxaul_planks = "terrain/saxaul_planks.png"
+pegged_saxaul_planks = "terrain/pegged_saxaul_planks.png"
+
+# ---- what an animal gives ----
+#
+# The four meats and the two skins share the pictures they always had:
+# a hare's haunch and a bear's are the same red on a 16x16 icon, and
+# the atlas has 256 layers to spend on things the eye can actually tell
+# apart (see the note at the top of this file). What tells them apart
+# is the name in the pack and the number in `food::nutrition`.
+hare_meat = "food/raw_meat.png"
+fowl_meat = "food/raw_meat.png"
+bear_meat = "food/raw_meat.png"
+wolf_meat = "food/raw_meat.png"
+pelt = "food/hide.png"
+bear_hide = "food/hide.png"
+# ...and the four that are genuinely new objects.
+feather = "hide/feather.png"
+fat = "food/fat.png"
+ribs = "food/ribs.png"
+roasted_ribs = "food/roasted_ribs.png"
+# ---- the sea floor ----
+#
+# Five things that stand in water, the two stones of a reef, and four
+# things a player brings up. The standing ones are sprites -- kelp,
+# seagrass and the two corals are crosses, the shell lies flat -- with
+# the sea drawn round them by the mesher (see `types::BLOCK_KELP`), so
+# their pictures are cut out on a transparent ground like any tuft.
+# Kelp and seagrass are untinted: the climate tint is the colour of land
+# plants, and a kelp forest the green of the meadow on the shore is not
+# kelp. The fish icons are one silhouette in two colours, raw and cooked,
+# which is the one case the pack recolours rather than redraws.
+kelp = "plants/kelp.png"
+kelp_top = "plants/kelp_top.png"
+seagrass = "plants/seagrass.png"
+sea_fan = "plants/sea_fan.png"
+staghorn_coral = "plants/staghorn_coral.png"
+brain_coral = "terrain/brain_coral.png"
+fire_coral = "terrain/fire_coral.png"
+shell = "terrain/shell.png"
+kelp_frond = "plants/kelp_frond.png"
+dried_kelp = "food/dried_kelp.png"
+raw_fish = "food/raw_fish.png"
+cooked_fish = "food/cooked_fish.png"
+# ---- the palm and the swamp ----
+#
+# Eight layers. The trunk is oak bark greyed and ringed with the scars of
+# old fronds; the fronds are cut-out leaflets on a midrib, and the fruiting
+# crown is the same picture with coconuts in it (drawn in, as the apple
+# tree's is, so only the fruiting cell costs a second layer over the
+# frond). The coconut is a round husked nut rather than the apple
+# recoloured -- a different food, a different silhouette. Mud is the peat
+# greyed and wet; the lily pad lies flat, notched; the moss hangs from the
+# top edge of its tile, because it hangs from the leaf above it.
+# Its ends are fibre with no rings, because a palm grows none -- and they
+# show only where the trunk ends or was broken through, not on the ledges
+# of its lean (`mesh::palm_trunk_block`).
+palm_trunk = { top = "plants/palm_top.png", bottom = "plants/palm_top.png", side = "plants/palm_trunk.png" }
+palm_fronds = "plants/palm_fronds.png"
+palm_coconuts = "plants/palm_coconuts.png"
+coconut = "food/coconut.png"
+mud = "terrain/mud.png"
+# A pat of dung: the mud recoloured darker and browner. See `types::BLOCK_DUNG`.
+dung = "soils/dung.png"
+lily_pad = "plants/lily_pad.png"
+hanging_moss = "plants/hanging_moss.png"
+# ---- what a wound is dressed with ----
+#
+# Three layers, and three different silhouettes rather than one picture
+# in three colours: a player reaching into the pack for the thing that
+# stops a cut bleeding has to find it by shape at a glance. A roll of
+# strip with its loose end hanging off (not the folded bolt of cloth, and
+# not the strapped roll of leather), two sticks bound twice, and a round
+# pad of fungus half wrapped in a leaf. See `types::BLOCK_BANDAGE`.
+bandage = "medicine/bandage.png"
+splint = "medicine/splint.png"
+poultice = "medicine/poultice.png"
+
+# What is slung over the shoulders (`types::BLOCK_RUCKSACK`).
+#
+# **The old death bag's own picture, named a second time and costing no
+# layer.** Entries naming the same file share a layer (see the atlas
+# note in `CLAUDE.md`), so the rucksack is free in the budget that
+# matters -- and it should look like the bag, because a player who has
+# seen one on the ground in an old world has already learned what the
+# shape means.
+rucksack = "terrain/backpack_item.png"
+# ---- fires in the ground: the pit kiln, the charcoal pit, the firepit ----
+#
+# Seven new layers for eleven blocks, every one a recolour of a picture
+# already here (see `primitive_shared::pit`). Hay is the fibre's hank dried
+# gold; the raw brick is the brick in wet clay; fired clay is the clay's
+# grain in terracotta, for the pots a burnt kiln leaves. A log pile is four
+# of the log's own ends, and alight the same ends with their rings glowing
+# (unlit, the world draws it as its logs in their own wood's pictures --
+# `mesh::log_pile_block` -- and this picture is only what else asks the row);
+# charcoal is the gravel's lumps gone black; a firepit's top is the
+# campfire's laid wood with the ring of stones burnt to ash.
+#
+# **The kiln's stages wear pictures that are already here**, because what
+# a pit kiln is made of is already here: clay pots, fibre, oak logs and a
+# fire's embers. `mesh::pit_kiln_block` reads each material off the stage's
+# own row -- the pot's raw clay off `pit_kiln`'s side and its fired clay off
+# its top, the fibre off `pit_kiln_fibre`, the bark and the cut ends off
+# `pit_kiln_logs`, the embers off `pit_kiln_lit`'s top -- so a picture
+# changed for the fibre or the log changes the kiln with it, and no stage
+# costs a layer.
+brick_raw = "pottery/brick_raw.png"
+pit_kiln = { top = "pottery/fired_clay.png", bottom = "pottery/clay.png", side = "pottery/clay.png" }
+pit_kiln_fibre = "plants/fiber.png"
+pit_kiln_logs = { top = "terrain/log_top.png", bottom = "terrain/log_top.png", side = "terrain/log_side.png" }
+pit_kiln_lit = { top = "fire/campfire_lit_top.png", bottom = "terrain/log_top.png", side = "terrain/log_side.png" }
+log_pile = "fire/log_pile.png"
+log_pile_lit = "fire/log_pile_lit.png"
+charcoal_pile = "fire/charcoal_pile.png"
+firepit = { top = "fire/firepit_top.png", side = "fire/campfire_side.png", bottom = "fire/campfire_side.png" }
+firepit_lit = { top = "fire/campfire_lit_top.png", side = "fire/campfire_side.png", bottom = "fire/campfire_side.png" }
+
+# ---- fire that got loose, and the standing torch ----
+#
+# See `primitive_shared::wildfire`. Five pictures for the char and the
+# burning, every one a recolour of the log and the planks it was
+# (`FIRE_RECOLOURS` in the generator), and one per wood is not needed: char
+# is the colour of char whatever tree it was. A burning log's cut ends are
+# the charred ends -- the glow is in the grain along its side, and the flame
+# stands on its top (`mesh::flame_block`).
+burning_log = { top = "fire/charred_log_top.png", bottom = "fire/charred_log_top.png", side = "fire/burning_log_side.png" }
+burning_planks = "fire/burning_planks.png"
+charred_log = { top = "fire/charred_log_top.png", bottom = "fire/charred_log_top.png", side = "fire/charred_log_side.png" }
+charred_planks = "fire/charred_planks.png"
+# The standing torch is a model (`mesh::standing_torch_block`): its pole
+# wears the oak's bark and costs nothing, and each top's own `all` is its
+# wad -- alight, the campfire's embers; burnt out, a knot of char. Only the
+# icon is new: the hand torch's picture with its wad gone to resin.
+standing_torch = { all = "terrain/log_side.png", item = "tools/standing_torch.png" }
+standing_torch_lit = { all = "fire/campfire_lit_top.png", item = "tools/standing_torch.png" }
+standing_torch_out = { all = "fire/charred_log_top.png", item = "tools/standing_torch.png" }
+# Snow lying on a meadow: the snow's own picture, so no new layer.
+snow_cover = "terrain/snow.png"
+# Fallen leaves: brown leaves scattered on nothing, so the earth shows
+# between them. See `types::BLOCK_LEAF_LITTER`.
+leaf_litter = "plants/leaf_litter.png"
+resin = "plants/resin.png"
+
+# ---- the ground: rocks and their rubble, soils, grasses (see `ground`) ----
+sandstone_cobble = "rocks/sandstone_cobble.png"
+sandstone_gravel = "rocks/sandstone_gravel.png"
+sandstone_pebble = "rocks/sandstone_pebble.png"
+limestone_cobble = "rocks/limestone_cobble.png"
+limestone_gravel = "rocks/limestone_gravel.png"
+limestone_sand = "rocks/limestone_sand.png"
+limestone_pebble = "rocks/limestone_pebble.png"
+granite_cobble = "rocks/granite_cobble.png"
+granite_gravel = "rocks/granite_gravel.png"
+granite_sand = "rocks/granite_sand.png"
+granite_pebble = "rocks/granite_pebble.png"
+basalt_cobble = "rocks/basalt_cobble.png"
+basalt_gravel = "rocks/basalt_gravel.png"
+basalt_sand = "rocks/basalt_sand.png"
+basalt_pebble = "rocks/basalt_pebble.png"
+shale = "rocks/shale.png"
+shale_cobble = "rocks/shale_cobble.png"
+shale_gravel = "rocks/shale_gravel.png"
+shale_sand = "rocks/shale_sand.png"
+shale_pebble = "rocks/shale_pebble.png"
+chalk = "rocks/chalk.png"
+chalk_cobble = "rocks/chalk_cobble.png"
+chalk_gravel = "rocks/chalk_gravel.png"
+chalk_sand = "rocks/chalk_sand.png"
+chalk_pebble = "rocks/chalk_pebble.png"
+dolomite = "rocks/dolomite.png"
+dolomite_cobble = "rocks/dolomite_cobble.png"
+dolomite_gravel = "rocks/dolomite_gravel.png"
+dolomite_sand = "rocks/dolomite_sand.png"
+dolomite_pebble = "rocks/dolomite_pebble.png"
+marble = "rocks/marble.png"
+marble_cobble = "rocks/marble_cobble.png"
+marble_gravel = "rocks/marble_gravel.png"
+marble_sand = "rocks/marble_sand.png"
+marble_pebble = "rocks/marble_pebble.png"
+quartzite = "rocks/quartzite.png"
+quartzite_cobble = "rocks/quartzite_cobble.png"
+quartzite_gravel = "rocks/quartzite_gravel.png"
+quartzite_sand = "rocks/quartzite_sand.png"
+quartzite_pebble = "rocks/quartzite_pebble.png"
+gneiss = "rocks/gneiss.png"
+gneiss_cobble = "rocks/gneiss_cobble.png"
+gneiss_gravel = "rocks/gneiss_gravel.png"
+gneiss_sand = "rocks/gneiss_sand.png"
+gneiss_pebble = "rocks/gneiss_pebble.png"
+diorite = "rocks/diorite.png"
+diorite_cobble = "rocks/diorite_cobble.png"
+diorite_gravel = "rocks/diorite_gravel.png"
+diorite_sand = "rocks/diorite_sand.png"
+diorite_pebble = "rocks/diorite_pebble.png"
+gabbro = "rocks/gabbro.png"
+gabbro_cobble = "rocks/gabbro_cobble.png"
+gabbro_gravel = "rocks/gabbro_gravel.png"
+gabbro_sand = "rocks/gabbro_sand.png"
+gabbro_pebble = "rocks/gabbro_pebble.png"
+andesite = "rocks/andesite.png"
+andesite_cobble = "rocks/andesite_cobble.png"
+andesite_gravel = "rocks/andesite_gravel.png"
+andesite_sand = "rocks/andesite_sand.png"
+andesite_pebble = "rocks/andesite_pebble.png"
+tuff = "rocks/tuff.png"
+tuff_cobble = "rocks/tuff_cobble.png"
+tuff_gravel = "rocks/tuff_gravel.png"
+tuff_sand = "rocks/tuff_sand.png"
+tuff_pebble = "rocks/tuff_pebble.png"
+loam = "soils/loam.png"
+chernozem = "soils/chernozem.png"
+podzol = "soils/podzol.png"
+laterite = "soils/laterite.png"
+solonchak = "soils/solonchak.png"
+loess = "soils/loess.png"
+gley = "soils/gley.png"
+rendzina = "soils/rendzina.png"
+andosol = "soils/andosol.png"
+permafrost = "soils/permafrost.png"
+feather_grass = "plants/feather_grass.png"
+sedge = "plants/sedge.png"
+cotton_grass = "plants/cotton_grass.png"
+fescue = "plants/fescue.png"
+marram = "plants/marram.png"
+elephant_grass = "plants/elephant_grass.png"
+bluegrass = "plants/bluegrass.png"
+timothy = "plants/timothy.png"
+tussock_grass = "plants/tussock_grass.png"
+spinifex = "plants/spinifex.png"
+
+# The pine and the willow. See `wood`.
+pine_log = { top = "terrain/pine_log_top.png", bottom = "terrain/pine_log_top.png", side = "terrain/pine_log_side.png" }
+pine_needles = "plants/pine_needles.png"
+pine_planks = "terrain/pine_planks.png"
+pegged_pine_planks = "terrain/pegged_pine_planks.png"
+willow_log = { top = "terrain/willow_log_top.png", bottom = "terrain/willow_log_top.png", side = "terrain/willow_log_side.png" }
+willow_leaves = "plants/willow_leaves.png"
+willow_planks = "terrain/willow_planks.png"
+pegged_willow_planks = "terrain/pegged_willow_planks.png"
+
+# Each wood's own twig and bough: its log's bark. See `types::is_twig`.
+fir_twig = "terrain/fir_log_side.png"
+fir_bough = { top = "terrain/fir_log_top.png", bottom = "terrain/fir_log_top.png", side = "terrain/fir_log_side.png" }
+saxaul_twig = "terrain/saxaul_log_side.png"
+saxaul_bough = { top = "terrain/saxaul_log_top.png", bottom = "terrain/saxaul_log_top.png", side = "terrain/saxaul_log_side.png" }
+pine_twig = "terrain/pine_log_side.png"
+pine_bough = { top = "terrain/pine_log_top.png", bottom = "terrain/pine_log_top.png", side = "terrain/pine_log_side.png" }
+willow_twig = "terrain/willow_log_side.png"
+willow_bough = { top = "terrain/willow_log_top.png", bottom = "terrain/willow_log_top.png", side = "terrain/willow_log_side.png" }
+moss = "plants/moss.png"
+
+# ---- the larder, the trapline and the pack (`types::BLOCK_CURD`) ----
+#
+# Every picture here is an older one recoloured, the copper tools' way: the
+# cheeses are the loaf, the jugs the jug of water with its mouth changed, the
+# barks the leather, the tar the fat, the bast the sinew, the snares the cord.
+curd = "food/curd.png"
+cheese = "food/cheese.png"
+jug_must = "food/jug_must.png"
+jug_mead = "food/jug_mead.png"
+pemmican = "food/pemmican.png"
+birch_bark = "plants/birch_bark.png"
+tar = "food/tar.png"
+willow_bark = "plants/willow_bark.png"
+nettle_bast = "hide/nettle_bast.png"
+# The two garments wear the worn set's pictures and are told apart by their
+# tint (`types::garment_tint`), as every garment is.
+tarred_tunic = "worn/tunic.png"
+snowshoes = "worn/boots.png"
+# A snare lies on the ground, drawn from above: the noose, the noose with a
+# hare in it, the noose pulled loose.
+snare = "tools/snare.png"
+snare_caught = "tools/snare_caught.png"
+snare_sprung = "tools/snare_sprung.png"
+# **A pit's cover is the forest floor's own picture**, on purpose: a pit that
+# could be told from the leaf litter round it is a pit nothing walks into
+# (`pitfall`). **With the earth between the leaves painted in**, where the
+# litter's own picture has holes now ("опавшую листву сделай прозрачной"): a
+# cover is drawn in the cut-out pass, and holes in it were holes into the pit.
+# It is the litter on bare earth to the texel, and it costs one layer.
+pit_cover = "plants/pit_cover.png"
+# A salt pan is puddled clay; what is in it is its top.
+salt_pan = "pottery/clay.png"
+salt_pan_brine = { top = "pottery/salt_pan_brine.png", all = "pottery/clay.png" }
+salt_pan_salt = { top = "pottery/salt_pan_salt.png", all = "pottery/clay.png" }
+
+# ---- the shore: the mussel beds, the starfish and what comes off them ----
+#
+# The two rocks are one picture and the same picture with the mussels on it,
+# which is what makes over-gathering something a player can see from the dune
+# (`types::BLOCK_MUSSEL_BED`): a headland of bare grey rock is a headland
+# somebody has been along. Both are the cobble's own light and shade over a
+# wetter grey, so a bed reads as part of the sea floor rather than as a thing
+# placed on it -- and neither is tinted: the climate tint is the colour of
+# land plants, and a rock under the tide is not a plant (the kelp's rule).
+mussel_rock = "terrain/mussel_rock.png"
+# **The mussels are the top of the rock and its sides are rock**, because
+# that is what a bed is: a crust on the surface the tide covers. The block is
+# a whole cell of the sea floor (`types::BLOCK_MUSSEL_BED`), so the picture
+# has to say which face a player is looking at -- and a cube of mussels on
+# all six sides would read as a lump of ore.
+mussel_bed = { top = "terrain/mussel_bed.png", all = "terrain/mussel_rock.png" }
+starfish = "terrain/starfish.png"
+mussels = "food/mussels.png"
+cooked_mussels = "food/cooked_mussels.png"
+# A crab is drawn whole on both icons rather than as a cut of meat, because
+# one of these *is* one crab -- and raw and cooked are the same silhouette in
+# two colours, which is the one case this pack recolours rather than redraws
+# (see the fish above).
+crab_meat = "food/crab_meat.png"
+cooked_crab = "food/cooked_crab.png"
+
+# Winter feed. **Both recoloured, neither drawn**: hay is the fibre's hank
+# and a haystack the straw pallet's stalks, each pushed from pale straw
+# toward the green-gold of grass dried while it was still green -- which is
+# what tells hay from fibre in the pack at a glance, and a stack in a pen
+# from a bed in a house. See `types::BLOCK_HAY`.
+hay = "plants/hay.png"
+haystack = "plants/haystack.png"

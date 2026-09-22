@@ -240,7 +240,19 @@ async fn a_player_made_an_operator_has_the_rights_on_their_next_line() {
     // reconnecting. A unit test of the parser cannot see any of it --
     // the interesting part is the connection asking the profiles who
     // this is, on a real socket, while the player is standing there.
-    let server = primitive_server::start(test_settings(), RunOptions::embedded())
+    //
+    // **Explicitly not a local world.** This test is about a *shared*
+    // server -- the only kind where `/op` means anything -- and it used
+    // `embedded()` because that was simply the quiet option set. Since
+    // a local world makes its only player an operator by construction
+    // (see `RunOptions::local_operator`), that shortcut would skip the
+    // whole lookup this test exists to exercise, and the refusal below
+    // would never come.
+    let options = RunOptions {
+        local_operator: false,
+        ..RunOptions::embedded()
+    };
+    let server = primitive_server::start(test_settings(), options)
         .await
         .expect("should start");
     let address = server.address().to_string();
@@ -303,6 +315,49 @@ async fn a_player_made_an_operator_has_the_rights_on_their_next_line() {
     assert!(
         refusal.contains("operator-only"),
         "a demoted player kept their rights: {refusal}"
+    );
+
+    server.stop().await;
+}
+
+/// The only player in a local world is an operator, without asking.
+///
+/// The other half of the test above, and the reason it exists is that
+/// the two are one decision seen from two sides. A shared server makes
+/// nobody an operator until somebody says so; a world running inside
+/// the game client makes its only player one immediately, because there
+/// is nobody else and no `/op` to type -- and because without it every
+/// mod that sensibly defaults to operator-only would refuse the only
+/// person there is, in the world that was just made able to load mods.
+///
+/// Over a real socket rather than by reading the flag: what has to hold
+/// is that the *command path* honours it, which is a different question
+/// from what `RunOptions` says.
+#[tokio::test]
+async fn the_only_player_in_a_local_world_needs_no_one_to_op_them() {
+    let server = primitive_server::start(test_settings(), RunOptions::embedded())
+        .await
+        .expect("should start");
+    let address = server.address().to_string();
+
+    let mut socket = TcpStream::connect(&address).await.expect("connect");
+    write_message(
+        &mut socket,
+        &ClientMessage::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            username: "tester".to_string(),
+        },
+    )
+    .await
+    .expect("hello");
+
+    write_message(&mut socket, &ClientMessage::Chat("/say hello".to_string()))
+        .await
+        .expect("chat");
+    let answer = next_chat(&mut socket).await;
+    assert_eq!(
+        answer, "hello",
+        "the only player in their own world was refused an operator command"
     );
 
     server.stop().await;

@@ -18,7 +18,11 @@
 //! binding that silently does nothing.
 
 use serde::{Deserialize, Serialize};
-use winit::keyboard::KeyCode;
+// The game's own key type, not the window library's. Aliased to the
+// name the table below already used, because every entry means exactly
+// what it did before -- a physical position -- and renaming sixty rows
+// to say so would be churn. See `crate::platform::Key`.
+use crate::platform::Key as KeyCode;
 
 use crate::ui::lang::{Language, Msg};
 
@@ -31,32 +35,79 @@ pub enum Action {
     Right,
     Jump,
     Sprint,
+    /// **On a horse: walk, and get down.** Held with forward, the horse
+    /// walks rather than trots (`horse::Gait`); pressed with the horse
+    /// standing, the rider gets off. A key of its own because the two it
+    /// might have borrowed are the horse's: the jump key jumps it and the
+    /// sprint key gallops it. On foot it does nothing -- see `Keybinds`'s
+    /// note on keys that mean something only somewhere.
+    Rein,
     /// Held to lay a *single layer* of loose material instead of a
     /// whole block. See `types::layer_placement`.
     Inventory,
     Drop,
+    /// Eat whatever is in the selected hotbar slot.
+    ///
+    /// A key rather than a gesture on the food itself, and that is the
+    /// decision worth writing down. The alternatives were right-click
+    /// while holding it -- which collides with placing a block, and
+    /// every food here is unplaceable but *some future one might not
+    /// be* -- and a button on the inventory screen, which means opening
+    /// a screen to do the most ordinary thing in the game. A key you
+    /// press while walking is what eating actually is.
+    Eat,
     Respawn,
     ToggleFog,
     ToggleStats,
     /// Borderless fullscreen, on and off.
     ToggleFullscreen,
+    /// The journal, open at the map.
+    Map,
+    /// The journal, open at the recipe book.
+    ///
+    /// Two keys for one screen, because the two pages are asked for by
+    /// two different questions -- "where am I" and "how do I make this"
+    /// -- and a player should not have to open the map to reach the book.
+    /// Tab turns between them once either is open.
+    Recipes,
+    /// The journal, open at the give menu.
+    ///
+    /// Its own key for the same reason the book has one: a screen only
+    /// reachable by opening another and turning the page is a screen
+    /// nobody opens. See `ui::give_screen` for why the menu is a page of
+    /// the journal at all.
+    Give,
+    /// The whole heads-up display off and on: hotbar, gauges, notices.
+    ///
+    /// Tab, and outside the journal only -- inside it Tab turns the page, as
+    /// it always has. A player taking a picture, or just looking at the
+    /// world, wants the world with nothing over it; a key that does the same
+    /// thing the pause menu would need three clicks for is what the request
+    /// ("скрытие и открытие hud на tab") was for.
+    ToggleHud,
 }
 
 impl Action {
     /// Every action, in the order the controls screen lists them.
-    pub const ALL: [Action; 12] = [
+    pub const ALL: [Action; 18] = [
         Action::Forward,
         Action::Back,
         Action::Left,
         Action::Right,
         Action::Jump,
         Action::Sprint,
+        Action::Rein,
         Action::Inventory,
         Action::Drop,
+        Action::Eat,
         Action::Respawn,
         Action::ToggleFog,
         Action::ToggleStats,
         Action::ToggleFullscreen,
+        Action::Map,
+        Action::Recipes,
+        Action::Give,
+        Action::ToggleHud,
     ];
 
     /// What the controls screen calls this action, in the language the
@@ -75,12 +126,18 @@ impl Action {
             Action::Right => Msg::StrafeRight,
             Action::Jump => Msg::Jump,
             Action::Sprint => Msg::Sprint,
+            Action::Rein => Msg::Rein,
             Action::Inventory => Msg::Inventory,
             Action::Drop => Msg::DropItem,
+            Action::Eat => Msg::Eat,
             Action::Respawn => Msg::Respawn,
             Action::ToggleFog => Msg::ToggleFog,
             Action::ToggleStats => Msg::ToggleStats,
             Action::ToggleFullscreen => Msg::Fullscreen,
+            Action::Map => Msg::MapTab,
+            Action::Recipes => Msg::RecipesTab,
+            Action::Give => Msg::GiveTab,
+            Action::ToggleHud => Msg::ToggleHud,
         }
     }
 
@@ -93,12 +150,18 @@ impl Action {
             Action::Right => "right",
             Action::Jump => "jump",
             Action::Sprint => "sprint",
+            Action::Rein => "rein",
             Action::Inventory => "inventory",
             Action::Drop => "drop",
+            Action::Eat => "eat",
             Action::Respawn => "respawn",
             Action::ToggleFog => "toggle_fog",
             Action::ToggleStats => "toggle_stats",
             Action::ToggleFullscreen => "toggle_fullscreen",
+            Action::Map => "map",
+            Action::Recipes => "recipes",
+            Action::Give => "give",
+            Action::ToggleHud => "toggle_hud",
         }
     }
 
@@ -110,12 +173,27 @@ impl Action {
             Action::Right => KeyCode::KeyD,
             Action::Jump => KeyCode::Space,
             Action::Sprint => KeyCode::ShiftLeft,
+            // C, where a crouch lives in every game that has one: the
+            // gesture a hand makes toward the reins.
+            Action::Rein => KeyCode::KeyC,
             Action::Inventory => KeyCode::KeyI,
             Action::Drop => KeyCode::KeyQ,
+            // Next to the drop key, because the two are the same
+            // gesture aimed at opposite ends: get rid of this, or use
+            // it up.
+            Action::Eat => KeyCode::KeyE,
             Action::Respawn => KeyCode::KeyR,
             Action::ToggleFog => KeyCode::KeyF,
             Action::ToggleStats => KeyCode::F3,
             Action::ToggleFullscreen => KeyCode::F11,
+            // M for the map because every game with one uses it, and B
+            // for the book beside it on the bottom row.
+            Action::Map => KeyCode::KeyM,
+            Action::Recipes => KeyCode::KeyB,
+            // G for give, which is the word the command has always used
+            // and the letter nothing else on the board wanted.
+            Action::Give => KeyCode::KeyG,
+            Action::ToggleHud => KeyCode::Tab,
         }
     }
 }
@@ -270,6 +348,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_bindable_key_is_one_a_backend_can_actually_produce() {
+        // The failure this guards against: a row on the controls screen
+        // offering a key that no platform backend ever emits, so the
+        // binding takes and then never fires. The table below is the
+        // game's promise; the backend has to be able to keep it.
+        for (key, label) in KEYS {
+            assert!(
+                crate::platform::winit_backend::can_produce(*key),
+                "{label} ({key:?}) is offered as a binding but winit never reports it",
+            );
+        }
+    }
+
+    #[test]
     fn the_defaults_are_the_layout_the_game_shipped_with() {
         let binds = Keybinds::default();
         assert_eq!(binds.key(Action::Forward), Some(KeyCode::KeyW));
@@ -380,22 +472,27 @@ mod tests {
     }
 
     #[test]
-    fn the_controls_screen_still_has_room_for_all_of_them() {
-        // The controls list is drawn as one row per action inside a
-        // fixed panel, with no scrolling: the rows simply run off the
-        // bottom when there are too many, and the one that vanishes is
-        // whichever was added last. See `menu::build_controls`, which
-        // is where these numbers come from.
+    fn another_binding_costs_a_scroll_and_never_a_shorter_row() {
+        // **This test used to say the opposite.** It checked that every
+        // binding still fitted one fixed panel, because the screen drew
+        // all of them at once and divided the panel between them -- so
+        // the assertion that "passed" was the rows being squeezed, and
+        // the day it failed the answer would have been to squeeze them
+        // further. The list scrolls now (`menu::ListRows`), so what has
+        // to hold is the reverse: the row height owes nothing to how
+        // many bindings there are, and a nineteenth binding is one more
+        // row below the fold rather than a thinner row for everybody.
         const PANEL_HEIGHT: f32 = 0.76 - -0.62;
         let row = crate::ui::menu::controls_row_height();
-        let used = 0.060 + Action::ALL.len() as f32 * (row + 0.010);
+        assert!(row >= 0.055, "the rows are too short to read");
+        // A window worth scrolling: several full-size rows at once, not
+        // a slot showing one.
+        let visible = ((PANEL_HEIGHT - 0.06) / (row + 0.014)) as usize;
         assert!(
-            used <= PANEL_HEIGHT,
-            "{} actions need {used} of {PANEL_HEIGHT} at a row height of {row} --              the rows have shrunk as far as they can and this screen now needs to scroll",
+            visible >= 8,
+            "only {visible} of the {} bindings are on screen at a time",
             Action::ALL.len()
         );
-        // ...and not by making the print unreadable.
-        assert!(row >= 0.055, "the rows are too short to read");
     }
 
     #[test]

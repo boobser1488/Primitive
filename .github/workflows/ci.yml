@@ -28,25 +28,83 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      # winit is built X11-only, so the client needs the X11 headers to
+      # winit is built X11-only, so the client needs the X11 headers, and
+      # cpal reaches the sound card through ALSA, whose -sys crate finds
+      # the library with pkg-config: without both the build dies in a
+      # build script two minutes in. Needed to
       # compile on Linux even though nothing here opens a window.
-      - name: Install X11 development headers
+      - name: Install X11 and ALSA development headers
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libx11-dev
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libasound2-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
         run: cargo build --workspace --all-targets
 
+      # **A failure is written where it can be read without signing in.**
+      # The job log of a public repository asks for an account; the run's
+      # annotations do not. So every failing test and every panic is also
+      # printed as an `::error::` line, and "the tests failed on the
+      # runner" stops being a failure nobody can see the cause of.
+      # `--no-fail-fast`: the first red binary used to hide every other one.
       - name: Test
-        run: cargo test --workspace
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set +e
+          cargo test --workspace --no-fail-fast 2>&1 | tee test.log
+          status=${PIPESTATUS[0]}
+          # Windows writes CR LF, and `FAILED$` never matched a line ending
+          # in a carriage return.
+          tr -d '\r' < test.log > test.txt && mv test.txt test.log
+          grep -E "^test .* FAILED$|panicked at|^error(\[|:)|process didn't exit|STATUS_" test.log | head -30 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          grep -A3 'panicked at' test.log | grep -v 'panicked at\|^--$\|RUST_BACKTRACE' | head -20 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit $status
+
+      # **Which test it was.** A test binary that dies without a panic --
+      # an exit code and nothing else, which is how a crash under a driver
+      # looks -- names no test at all. Run again one test at a time, the
+      # harness prints each name before it runs it, so the last line is
+      # the one that took the process down.
+      - name: Say which test broke
+        if: failure()
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          grep -o 'to rerun pass `[^`]*`' test.log | sed 's/.*`\(.*\)`/\1/' | sort -u | while read -r args; do
+            cargo test $args -- --test-threads=1 2>&1 | tr -d '\r' > one.log
+            grep -E "^test .* FAILED$|panicked at" one.log | head -5 | while IFS= read -r l; do echo "::error::$args: $l"; done
+            grep -A2 'panicked at' one.log | grep -v 'panicked at' | head -4 | while IFS= read -r l; do echo "::error::$l"; done
+            tail -n 5 one.log | while IFS= read -r l; do echo "::warning::$args, last lines: $l"; done
+          done
 
       # Singleplayer builds the server without its scripting engine, and
       # that configuration has broken on its own before -- a type used by
       # both builds ended up imported only by the one with plugins on.
       - name: Build the server without plugins
         run: cargo build -p primitive_server --no-default-features
+
+      # **And the client on its own, which is not the same build.**
+      #
+      # `cargo build --workspace` above unifies features across the whole
+      # graph: the server binary asks for `plugins` and `mods`, so the
+      # copy the *client* links gets them too, and a call site that only
+      # compiles with the scripting engine on passes. `cargo run -p
+      # primitive_client` -- which is what a player types -- resolves
+      # features for that package alone, and there the server has none of
+      # its defaults.
+      #
+      # That gap has now bitten twice. This step is the one that closes
+      # it, because it is the same command a player runs.
+      - name: Build the client on its own
+        run: cargo build -p primitive_client
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

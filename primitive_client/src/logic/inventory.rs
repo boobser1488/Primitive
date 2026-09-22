@@ -14,7 +14,7 @@
 //! The type itself is shared, so the two sides cannot drift on what a
 //! stack is or how much one weighs.
 
-pub use primitive_shared::inventory::{Inventory, HOTBAR_SLOTS, MAX_STACK, SLOTS};
+pub use primitive_shared::inventory::{Inventory, HOTBAR_SLOTS, SLOTS};
 
 /// The bar is the front of the pack, so the pack has to be at least as
 /// long as the bar. Checked at compile time rather than in a test: it is
@@ -24,6 +24,7 @@ const _: () = assert!(SLOTS >= HOTBAR_SLOTS);
 
 #[cfg(test)]
 mod tests {
+    use primitive_shared::inventory::MAX_STACK;
     use super::*;
     use primitive_shared::types::{BLOCK_DIRT, BLOCK_STONE};
 

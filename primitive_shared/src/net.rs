@@ -112,6 +112,7 @@ mod tests {
         let msg = ServerMessage::TimeSync {
             tick: 12345,
             time_of_day: 0.25,
+            world_days: 7.25,
         };
         let frame = frame_message(&msg).expect("framing failed");
 

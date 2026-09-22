@@ -26,6 +26,23 @@ use std::path::PathBuf;
 /// unzipped and the one they can find again. The working directory of a
 /// double-clicked game is wherever the shell felt like.
 pub fn log_path() -> PathBuf {
+    // **Not beside the executable on Android**, where the executable is
+    // `/system/bin/app_process64` -- the system's, not ours, and in a
+    // directory no app may write to. A crash there wrote its log
+    // nowhere and said it had written it to `/system/bin/crash.log`,
+    // which is the one situation this file exists to avoid: a fatal
+    // error with no artefact and a misleading line about where to find
+    // one.
+    //
+    // The working directory instead, which `platform::android::bootstrap`
+    // points at the app's own data folder before anything can fail. The
+    // gap between the panic handler being installed and that call is a
+    // few statements wide; a crash inside it lands in whatever the
+    // system's working directory was, which is no worse than the
+    // nothing this used to produce.
+    if cfg!(target_os = "android") {
+        return PathBuf::from(FILENAME);
+    }
     std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join(FILENAME)))
