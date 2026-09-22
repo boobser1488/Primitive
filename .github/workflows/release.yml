@@ -38,7 +38,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # **The compiler the code was written against, not whatever is newest
+      # today.** `@stable` moved to 1.98 under a finished release and its
+      # clippy brought a new style lint seventy call sites deep, so a tag
+      # that was green on the machine it was made on went red here for a
+      # reason that had nothing to do with the game. Moving this line is a
+      # deliberate step, taken with the lints it brings.
+      - uses: dtolnay/rust-toolchain@1.97.1
 
       # winit is built X11-only, so the client needs the X11 headers, and
       # cpal reaches the sound card through ALSA, whose -sys crate finds

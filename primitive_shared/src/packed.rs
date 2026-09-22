@@ -409,7 +409,7 @@ impl PackedChunk {
     /// The flat block array alone.
     pub fn to_blocks(&self) -> Vec<BlockId> {
         let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
-        for (section, cells) in self.sections.iter().zip(blocks.chunks_exact_mut(SECTION_CELLS)) {
+        for (section, cells) in self.sections.iter().zip(blocks.as_chunks_mut::<SECTION_CELLS>().0.iter_mut()) {
             section.copy_run(0, cells);
         }
         blocks
@@ -629,7 +629,7 @@ impl PackedLight {
     /// The flat array back.
     pub fn to_vec(&self) -> Vec<u8> {
         let mut flat = vec![0u8; CHUNK_VOLUME];
-        for (section, cells) in self.sections.iter().zip(flat.chunks_exact_mut(SECTION_CELLS)) {
+        for (section, cells) in self.sections.iter().zip(flat.as_chunks_mut::<SECTION_CELLS>().0.iter_mut()) {
             match section {
                 Light::Uniform(value) => cells.fill(*value),
                 Light::Dense(dense) => cells.copy_from_slice(&dense[..]),

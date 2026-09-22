@@ -24,7 +24,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # **The compiler the code was written against, not whatever is newest
+      # today.** `@stable` moved to 1.98 under a finished release and its
+      # clippy brought a new style lint seventy call sites deep, so a tag
+      # that was green on the machine it was made on went red here for a
+      # reason that had nothing to do with the game. Moving this line is a
+      # deliberate step, taken with the lints it brings.
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy, rustfmt
 
@@ -106,5 +112,18 @@ jobs:
       - name: Build the client on its own
         run: cargo build -p primitive_client
 
+      # Its complaints go to the annotations too, for the same reason the
+      # tests' do: a lint that only fires on one platform is otherwise a
+      # red cross and nothing else to anyone without an account.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set +e
+          cargo clippy --workspace --all-targets --message-format short -- -D warnings 2>&1 | tee clippy.log
+          status=${PIPESTATUS[0]}
+          grep -E '^[^ ]+:[0-9]+:[0-9]+: (warning|error)' clippy.log | head -10 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit $status
