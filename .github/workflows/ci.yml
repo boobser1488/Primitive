@@ -59,13 +59,31 @@ jobs:
           # Windows writes CR LF, and `FAILED$` never matched a line ending
           # in a carriage return.
           tr -d '\r' < test.log > test.txt && mv test.txt test.log
-          grep -E "^test .* FAILED$|panicked at|^error(\[|:)|process didn't exit|STATUS_|overflow" test.log | head -30 | while IFS= read -r line; do
+          grep -E "^test .* FAILED$|panicked at|^error(\[|:)|process didn't exit|STATUS_" test.log | head -30 | while IFS= read -r line; do
             echo "::error::$line"
           done
           grep -A3 'panicked at' test.log | grep -v 'panicked at\|^--$\|RUST_BACKTRACE' | head -20 | while IFS= read -r line; do
             echo "::error::$line"
           done
           exit $status
+
+      # **Which test it was.** A test binary that dies without a panic --
+      # an exit code and nothing else, which is how a crash under a driver
+      # looks -- names no test at all. Run again one test at a time, the
+      # harness prints each name before it runs it, so the last line is
+      # the one that took the process down.
+      - name: Say which test broke
+        if: failure()
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          grep -o 'to rerun pass `[^`]*`' test.log | sed 's/.*`\(.*\)`/\1/' | sort -u | while read -r args; do
+            cargo test $args -- --test-threads=1 2>&1 | tr -d '\r' > one.log
+            grep -E "^test .* FAILED$|panicked at" one.log | head -5 | while IFS= read -r l; do echo "::error::$args: $l"; done
+            grep -A2 'panicked at' one.log | grep -v 'panicked at' | head -4 | while IFS= read -r l; do echo "::error::$l"; done
+            tail -n 5 one.log | while IFS= read -r l; do echo "::warning::$args, last lines: $l"; done
+          done
 
       # Singleplayer builds the server without its scripting engine, and
       # that configuration has broken on its own before -- a type used by
