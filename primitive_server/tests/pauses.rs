@@ -68,7 +68,15 @@ async fn stay_awake(socket: &mut TcpStream, how_long: Duration) -> Option<String
             Ok(Err(e)) => return Some(format!("the connection closed: {e}")),
             Ok(Ok(ServerMessage::Kick(reason))) => return Some(reason.to_string()),
             Ok(Ok(ServerMessage::Ping { nonce })) => {
-                write_message(socket, &ClientMessage::Pong { nonce }).await.expect("pong");
+                // A ping read out of the buffer can be older than the
+                // server's decision to hang up: the answer then goes into a
+                // socket that is already shut, and on Linux that is a broken
+                // pipe. That *is* the session ending, not the test failing --
+                // `expect` here made the timeout test red on a runner that
+                // happened to schedule the kick between the two.
+                if let Err(e) = write_message(socket, &ClientMessage::Pong { nonce }).await {
+                    return Some(format!("the connection closed: {e}"));
+                }
             }
             Ok(Ok(_)) => {}
         }
