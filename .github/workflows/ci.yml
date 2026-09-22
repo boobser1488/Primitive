@@ -28,19 +28,41 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      # winit is built X11-only, so the client needs the X11 headers to
+      # winit is built X11-only, so the client needs the X11 headers, and
+      # cpal reaches the sound card through ALSA, whose -sys crate finds
+      # the library with pkg-config: without both the build dies in a
+      # build script two minutes in. Needed to
       # compile on Linux even though nothing here opens a window.
-      - name: Install X11 development headers
+      - name: Install X11 and ALSA development headers
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libx11-dev
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libasound2-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
         run: cargo build --workspace --all-targets
 
+      # **A failure is written where it can be read without signing in.**
+      # The job log of a public repository asks for an account; the run's
+      # annotations do not. So every failing test and every panic is also
+      # printed as an `::error::` line, and "the tests failed on the
+      # runner" stops being a failure nobody can see the cause of.
+      # `--no-fail-fast`: the first red binary used to hide every other one.
       - name: Test
-        run: cargo test --workspace
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set +e
+          cargo test --workspace --no-fail-fast 2>&1 | tee test.log
+          status=${PIPESTATUS[0]}
+          grep -E '^test .* FAILED$|panicked at|^error(\[|:)' test.log | head -30 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          grep -A3 'panicked at' test.log | grep -v 'panicked at\|^--$\|RUST_BACKTRACE' | head -20 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit $status
 
       # Singleplayer builds the server without its scripting engine, and
       # that configuration has broken on its own before -- a type used by
