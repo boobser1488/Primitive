@@ -3993,7 +3993,7 @@ fn lie_down_on(s: &mut Scenario, bed: (i32, i32, i32)) {
     );
 }
 
-/// **A night by a lit firepit.** A pair of wolves put down in the dark sixteen
+/// **A night by a lit firepit.** A pair of wolves put down in the dark twelve
 /// blocks off: the fire is what they see, so they come -- and it is what
 /// stops them, so they walk the edge of its light and never step in, and
 /// nobody is bitten. Then the player lies down on straw beside it with the
@@ -4009,9 +4009,12 @@ fn a_night_by_a_lit_firepit_keeps_the_wolves_at_the_edge_of_its_light_and_the_sl
     s.server().place_block(fire.0, fire.1, fire.2, t::BLOCK_FIREPIT_LIT);
     let fire_at = DVec3::new(fire.0 as f64 + 0.5, fire.1 as f64, fire.2 as f64 + 0.5);
     let ground = (GROUND + 1) as f32;
+    // Twelve blocks off, well inside the twenty a fire is seen from: at
+    // sixteen a slow runner once had the pair stand eighteen blocks out for
+    // the whole ninety seconds, never having turned towards it at all.
     for dz in [0.5, 2.5] {
         s.server()
-            .spawn_animal(primitive_shared::animals::Species::Wolf, (x0 as f32 + 16.5, ground, z as f32 + dz))
+            .spawn_animal(primitive_shared::animals::Species::Wolf, (x0 as f32 + 12.5, ground, z as f32 + dz))
             .expect("no room for a wolf");
     }
     let health = s.health;
