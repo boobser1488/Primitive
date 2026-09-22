@@ -106,6 +106,16 @@ pub fn test_gpu() -> Option<&'static (wgpu::Device, wgpu::Queue)> {
                     compatible_surface: None,
                     force_fallback_adapter: false,
                 }))?;
+            // **A software rasteriser is not a GPU.** A Windows runner has
+            // no graphics card but does have WARP, and wgpu hands it out as
+            // an adapter like any other: every GPU test then ran on the
+            // processor, and the client's test binary died on the runner
+            // with a bare exit code and no test named -- while passing on
+            // any machine with a real card. `None` is what this function
+            // promises a machine without one.
+            if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+                return None;
+            }
             // **The limits the game asks for, not wgpu's defaults.**
             // A test device made with the defaults is capped at 256
             // texture array layers while the real one is not (see
