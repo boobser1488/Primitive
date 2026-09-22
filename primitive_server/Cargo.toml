@@ -21,11 +21,21 @@ name = "primitive_server"
 path = "src/main.rs"
 
 [features]
-default = ["plugins"]
+default = ["plugins", "mods"]
 # Scripted plugins. On for the standalone server; the game client embeds
 # this crate with `default-features = false` so a singleplayer world
 # doesn't ship a scripting engine it has no use for.
 plugins = ["dep:rhai"]
+# Native mods: compiled libraries loaded at runtime. On for the
+# standalone server **and for the game client**, which asks for it back
+# by name -- see `primitive_client/Cargo.toml`.
+#
+# It used to be off there, on the argument that a local world has no
+# operator to install mods for. That argument was wrong about who
+# installs a mod: it is the person playing, on their own machine, into a
+# folder they can see. The feature stays separable because a build
+# without it links no `libloading` at all, which is what Android wants.
+mods = ["dep:libloading", "dep:primitive_modapi"]
 
 [dependencies]
 primitive_shared = { path = "../primitive_shared" }
@@ -35,3 +45,13 @@ bincode = { workspace = true }
 anyhow = { workspace = true }
 toml = { workspace = true }
 rhai = { version = "1.16", features = ["sync"], optional = true }
+libloading = { workspace = true, optional = true }
+primitive_modapi = { path = "../primitive_modapi", optional = true }
+
+[dev-dependencies]
+# The integration test in `tests/mods.rs` builds a mod folder and points
+# a real host at it, so it needs the contract's own names for the
+# platform library and the events. Not a runtime dependency of the test:
+# it is the same crate the server already links when `mods` is on.
+primitive_modapi = { path = "../primitive_modapi" }
+primitive_shared = { path = "../primitive_shared" }

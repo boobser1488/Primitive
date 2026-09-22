@@ -34,8 +34,9 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use primitive_shared::packed::PackedChunk;
 use primitive_shared::types::{
-    is_collidable, BlockId, Chunk, ChunkPos, BLOCK_AIR, CHUNK_SIZE_Y, CHUNK_VOLUME,
+    is_collidable, BlockId, Chunk, ChunkPos, BLOCK_AIR, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z, CHUNK_VOLUME,
 };
 use primitive_shared::worldgen::WorldGen;
 
@@ -61,7 +62,15 @@ const SPAWN_CLEARANCE: f32 = 0.1;
 const SAVE_FORMAT_VERSION: u32 = 1;
 
 struct CachedChunk {
-    chunk: Arc<Chunk>,
+    /// Kept packed, a section at a time (`primitive_shared::packed`).
+    ///
+    /// A flat chunk is 131 KB at the world's height of 256 and the cache
+    /// holds up to `max_cached_chunks` of them. Measured flat: 224 MB for
+    /// the 1793 chunks one player at render distance 24 is sent, and a
+    /// gigabyte for a full default cache -- which in singleplayer is the
+    /// same process as the client and its own copy of the same world. See
+    /// `tests/chunk_cache_memory.rs`.
+    chunk: Arc<PackedChunk>,
     /// When this chunk was last read, as milliseconds since the world
     /// was created.
     ///
@@ -94,6 +103,17 @@ struct SaveFile {
     edits: Vec<(ChunkPos, Vec<(u32, BlockId)>)>,
 }
 
+/// What runs over a freshly generated chunk before the player edits go
+/// back on top of it.
+///
+/// **A boxed closure rather than the mod API's own function-pointer
+/// type**, for one reason: this file is compiled with and without the
+/// `mods` feature, and without it `primitive_modapi` does not exist at
+/// all. The server installs one of these that reaches the loaded mods
+/// (see `crate::install_chunk_decorators`); a build with no mod host
+/// installs nothing and the `Option` stays `None`.
+pub type Decorator = Box<dyn Fn(ChunkPos, u32, &mut [BlockId]) + Send + Sync>;
+
 pub struct World {
     shards: Vec<RwLock<Shard>>,
     /// Sparse player edits, applied on top of generated terrain.
@@ -117,7 +137,51 @@ pub struct World {
     /// tick, which is fifty times finer than an eviction policy that
     /// measures ages in minutes needs.
     coarse_now: AtomicU64,
+    /// Installed once, after the mods have loaded, and read on every
+    /// generation from whatever thread is doing it.
+    ///
+    /// **An `RwLock` and not a `OnceLock`**: the client embeds this
+    /// crate and starts and stops a world per singleplayer session, and
+    /// a cell that could only ever be written once would be a cell the
+    /// second world could not write. Read-uncontended in every case that
+    /// matters -- one read per chunk, against a writer that runs once at
+    /// startup.
+    decorator: RwLock<Option<Decorator>>,
+    /// How many edits there have ever been, and where the last
+    /// [`RECENT_EDITS`] of them were: what a cache of something worked out
+    /// *from* the blocks asks to find out whether it is stale
+    /// ([`World::edited_since`]).
+    ///
+    /// **Here, at the one door every edit comes through**, and not a
+    /// notification each mechanic that edits has to remember to send. The
+    /// rooms (`logic::shelters`) were the first such cache, and the edits
+    /// that change a room come from a player, a fire burning a wall
+    /// through, a door swung, sand falling -- a cache invalidated by the
+    /// paths that remember to invalidate it is a hut that stays sealed
+    /// after the fire has eaten its wall.
+    edit_serial: AtomicU64,
+    recent_edits: std::sync::Mutex<std::collections::VecDeque<Edit>>,
+    /// Chunks with player edits in them that have come into the cache since
+    /// the tick last asked ([`World::take_arrivals`]): what a list of cells
+    /// that must match the blocks -- the wet walls (`logic::walls`) -- reads
+    /// to find what a crash left it without. Only chunks with edits, because
+    /// only an edit can be one of those cells, and capped so a world nobody
+    /// ticks (a test) cannot grow it without end.
+    arrivals: std::sync::Mutex<Vec<ChunkPos>>,
 }
+
+/// The most chunk arrivals kept between two ticks. A tick drains them all;
+/// past this a burst is dropped rather than held, and what it held is found
+/// the next time the chunk comes in.
+const MAX_ARRIVALS: usize = 4096;
+
+/// How many edits [`World::edited_since`] can look back over. Past it, a
+/// cache older than the oldest is told it is stale, which is always safe:
+/// the cost of a wrong "stale" is one recomputation.
+pub const RECENT_EDITS: usize = 1024;
+
+/// One entry of the journal: the edit's serial and its cell.
+type Edit = (u64, (i32, i32, i32));
 
 #[derive(Debug, Clone, Copy)]
 pub struct WorldStats {
@@ -131,11 +195,47 @@ pub struct WorldStats {
 
 impl World {
     pub fn new(seed: u32, max_cached_chunks: usize) -> Self {
+        Self::with_preset(
+            seed,
+            primitive_shared::worldgen::Preset::Normal,
+            max_cached_chunks,
+        )
+    }
+
+    /// The same, for a world that was generated by something other than
+    /// the ordinary terrain generator. See `worldgen::Preset`.
+    pub fn with_preset(
+        seed: u32,
+        preset: primitive_shared::worldgen::Preset,
+        max_cached_chunks: usize,
+    ) -> Self {
+        Self::with_zone(seed, preset, primitive_shared::worldgen::Zone::default(), max_cached_chunks)
+    }
+
+    /// The same, laid somewhere on the planet. See `worldgen::Zone`.
+    pub fn with_zone(
+        seed: u32,
+        preset: primitive_shared::worldgen::Preset,
+        zone: primitive_shared::worldgen::Zone,
+        max_cached_chunks: usize,
+    ) -> Self {
+        Self::with_scale(seed, preset, zone, primitive_shared::worldgen::Scale::Landforms, max_cached_chunks)
+    }
+
+    /// The same, drawn at a scale: the Earth's for a new world, the
+    /// regional one for a world made before it. See `worldgen::Scale`.
+    pub fn with_scale(
+        seed: u32,
+        preset: primitive_shared::worldgen::Preset,
+        zone: primitive_shared::worldgen::Zone,
+        scale: primitive_shared::worldgen::Scale,
+        max_cached_chunks: usize,
+    ) -> Self {
         let mut shards = Vec::with_capacity(SHARD_COUNT);
         for _ in 0..SHARD_COUNT {
             shards.push(RwLock::new(Shard::default()));
         }
-        let gen = WorldGen::new(seed);
+        let gen = WorldGen::with_scale(seed, preset, zone, scale);
         // Found once, at startup: the search walks outwards over a few
         // thousand columns, and every join and every respawn asks for
         // the same answer.
@@ -151,7 +251,76 @@ impl World {
             evicted_total: AtomicU64::new(0),
             epoch: Instant::now(),
             coarse_now: AtomicU64::new(0),
+            decorator: RwLock::new(None),
+            edit_serial: AtomicU64::new(0),
+            recent_edits: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(RECENT_EDITS)),
+            arrivals: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Every edited chunk that has arrived in the cache since the last call.
+    pub fn take_arrivals(&self) -> Vec<ChunkPos> {
+        std::mem::take(&mut *self.arrivals.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// The player edits in one chunk, as global cells and what is in them.
+    pub fn edits_in(&self, pos: ChunkPos) -> Vec<((i32, i32, i32), BlockId)> {
+        let edits = self.edits.read().unwrap_or_else(|e| e.into_inner());
+        let Some(chunk) = edits.get(&pos) else {
+            return Vec::new();
+        };
+        chunk
+            .iter()
+            .filter(|&(&index, _)| (index as usize) < CHUNK_VOLUME)
+            .map(|(&index, &block)| {
+                let index = index as usize;
+                // `Chunk::index` undone, as `insert` undoes it.
+                let (x, z, y) = (index % CHUNK_SIZE_X, index / CHUNK_SIZE_X % CHUNK_SIZE_Z, index / (CHUNK_SIZE_X * CHUNK_SIZE_Z));
+                let (gx, gz) = (pos.x * CHUNK_SIZE_X as i32 + x as i32, pos.z * CHUNK_SIZE_Z as i32 + z as i32);
+                ((gx, y as i32, gz), block)
+            })
+            .collect()
+    }
+
+    /// The count of every edit so far: take it with a computed answer, and
+    /// hand it back to [`World::edited_since`] to ask whether the answer
+    /// still holds.
+    pub fn edit_serial(&self) -> u64 {
+        self.edit_serial.load(Ordering::Acquire)
+    }
+
+    /// Has any cell from `low` to `high` (corners inclusive) been written
+    /// since `serial`? `true` too when the answer is no longer known -- the
+    /// edits since then have run off the end of [`RECENT_EDITS`].
+    ///
+    /// Nothing but an atomic load when nothing has been written, which on
+    /// a quiet server is almost every time it is asked.
+    pub fn edited_since(&self, serial: u64, low: (i32, i32, i32), high: (i32, i32, i32)) -> bool {
+        if self.edit_serial() == serial {
+            return false;
+        }
+        let recent = self.recent_edits.lock().unwrap_or_else(|e| e.into_inner());
+        if recent.front().is_none_or(|&(oldest, _)| oldest > serial + 1) {
+            return true;
+        }
+        recent.iter().rev().take_while(|&&(at, _)| at > serial).any(|&(_, (x, y, z))| {
+            (low.0..=high.0).contains(&x) && (low.1..=high.1).contains(&y) && (low.2..=high.2).contains(&z)
+        })
+    }
+
+    /// Hands terrain to something else before the edits go back on.
+    ///
+    /// Called once, after the mods are loaded, and replaces whatever was
+    /// there. See `GenerationApi::register_decorator` for the contract a
+    /// decorator is held to -- above all that it must be a pure function
+    /// of the coordinates, the seed and the blocks it was given, because
+    /// **a chunk is evicted and regenerated whenever the cache is
+    /// full**, and a decorator that drew on anything else would produce
+    /// a world that changes shape when you walk away from it and come
+    /// back.
+    pub fn set_decorator(&self, decorator: Decorator) {
+        let mut slot = self.decorator.write().unwrap_or_else(|e| e.into_inner());
+        *slot = Some(decorator);
     }
 
     /// Refresh the coarse clock `cached()` stamps accesses with. Called
@@ -169,6 +338,71 @@ impl World {
 
     pub fn seed(&self) -> u32 {
         self.gen.seed()
+    }
+
+    /// The surface height of a column, straight through to the
+    /// generator. See `climate_at` for why these live here.
+    pub fn height_at(&self, gx: i32, gz: i32) -> i32 {
+        self.gen.height_at(gx, gz)
+    }
+
+    /// Which biome a column belongs to.
+    pub fn biome_at(&self, gx: i32, gz: i32) -> primitive_shared::worldgen::Biome {
+        self.gen.biome_at(gx, gz)
+    }
+
+    /// Whether the generator laid a cave lake in this cell, straight through
+    /// for `biome_at`'s reason. What makes that water clean to drink is in
+    /// `worldgen::cave_water`.
+    pub fn cave_water_at(&self, gx: i32, gy: i32, gz: i32) -> bool {
+        self.gen.cave_water_at(gx, gy, gz)
+    }
+
+    /// How good the ground is for growing things, in three grades.
+    ///
+    /// Straight through to the generator for the same reason
+    /// `climate_at` is: it is a pure function of the seed and the place,
+    /// and the world is the thing the server already hands around. See
+    /// `worldgen::Fertility` for what decides it, and
+    /// `logic::growth::Soil` for what reads it.
+    pub fn fertility_at(&self, gx: i32, gz: i32) -> primitive_shared::worldgen::Fertility {
+        self.gen.fertility_at(gx, gz)
+    }
+
+    /// The climate at a cell: how warm and how wet, both 0..1.
+    ///
+    /// Straight through to the generator, because that is where the two
+    /// fields are and they are pure functions of the seed. Exposed here
+    /// rather than by handing `logic::climate` a `WorldGen` because the
+    /// world is what the server hands around, and one accessor is
+    /// cheaper than threading a second reference through the tick loop.
+    pub fn climate_at(&self, gx: i32, gy: i32, gz: i32) -> (f32, f32) {
+        self.gen.climate_at(gx, gy, gz)
+    }
+
+    /// The latitude of a row of this world, which is how much of a winter
+    /// it gets. See `WorldGen::latitude_degrees`, `season::seasonal_swing`.
+    pub fn latitude_degrees(&self, gz: i32) -> Option<f32> {
+        self.gen.latitude_degrees(gz)
+    }
+
+    /// Where on the planet this world is laid. Sent in the handshake
+    /// beside the preset, for the preset's reason. See `worldgen::Zone`.
+    pub fn zone(&self) -> primitive_shared::worldgen::Zone {
+        self.gen.zone()
+    }
+
+    /// Which scale the country is drawn at. Sent in the handshake beside
+    /// the zone, for the zone's reason. See `worldgen::Scale`.
+    pub fn scale(&self) -> primitive_shared::worldgen::Scale {
+        self.gen.scale()
+    }
+
+    /// Which generator made it. Sent in the handshake, because the
+    /// client builds a generator of its own and the seed alone does not
+    /// say which one to build.
+    pub fn preset(&self) -> primitive_shared::worldgen::Preset {
+        self.gen.preset()
     }
 
     /// Where to put a player down, in the world as it actually is.
@@ -229,10 +463,10 @@ impl World {
     /// two metres higher -- and only the height moves. A column with no
     /// room in it at all gives up and returns the spawn point, which is
     /// the one position this server guarantees.
-    pub fn safe_position(&self, wanted: (f32, f32, f32)) -> (f32, f32, f32) {
+    pub fn safe_position(&self, wanted: (f64, f64, f64)) -> (f64, f64, f64) {
         let (x, y, z) = wanted;
         if !x.is_finite() || !y.is_finite() || !z.is_finite() {
-            return self.spawn_point();
+            return primitive_shared::geometry::wide(self.spawn_point());
         }
         let (gx, gz) = (x.floor() as i32, z.floor() as i32);
         let column = self.read_column(gx, gz);
@@ -246,8 +480,8 @@ impl World {
         }
 
         match Self::standing_in(&column, feet.max(0)) {
-            Some(gy) => (x, gy as f32 + SPAWN_CLEARANCE, z),
-            None => self.spawn_point(),
+            Some(gy) => (x, f64::from(gy as f32 + SPAWN_CLEARANCE), z),
+            None => primitive_shared::geometry::wide(self.spawn_point()),
         }
     }
 
@@ -306,7 +540,14 @@ impl World {
     /// different questions and only the first of them always has an
     /// answer. A player over a hole should be dropped into it rather
     /// than refused a spawn.
-    fn standing_height(&self, gx: i32, gz: i32) -> f32 {
+    /// **Public because the spawn is no longer the only place somebody
+    /// is put down on the ground**: `/biometp` lands a player a kilometre
+    /// away in country nobody has loaded, and it has to answer the same
+    /// question this does. Answering it with "the generator's height,
+    /// plus one" put them inside the turf -- the generator's height is
+    /// the *ground*, and what is standing on it (a tuft, a lip of snow,
+    /// a fallen log) is exactly what these two passes are for.
+    pub fn standing_height(&self, gx: i32, gz: i32) -> f32 {
         // The column, read once. A respawn is not a hot path, but it
         // does happen while the tick loop is holding things, and the
         // difference between one chunk lookup and thirty is free.
@@ -353,7 +594,7 @@ impl World {
     /// the anti-cheat's ground check (which must not be able to trigger
     /// terrain generation, or a malicious client could make the server
     /// generate chunks at will).
-    pub fn cached(&self, pos: ChunkPos) -> Option<Arc<Chunk>> {
+    pub fn cached(&self, pos: ChunkPos) -> Option<Arc<PackedChunk>> {
         let shard = &self.shards[Self::shard_index(pos)];
         let guard = shard.read().unwrap_or_else(|e| e.into_inner());
         let entry = guard.chunks.get(&pos)?;
@@ -368,6 +609,19 @@ impl World {
     /// worker thread.
     pub fn generate(&self, pos: ChunkPos) -> Chunk {
         let mut chunk = self.gen.generate_chunk(pos);
+        // **Between the generator and the overlay, and that order is the
+        // whole of it.** A decorator that ran after the edits would
+        // bulldoze whatever the player has built there since; one that
+        // ran before the generator would have nothing to decorate. The
+        // lock is let go before the edits are taken, so a decorator that
+        // calls back into the host never meets a world lock this thread
+        // is holding.
+        {
+            let decorator = self.decorator.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(decorate) = decorator.as_ref() {
+                decorate(pos, self.gen.seed(), &mut chunk.blocks);
+            }
+        }
         let edits = self.edits.read().unwrap_or_else(|e| e.into_inner());
         if let Some(chunk_edits) = edits.get(&pos) {
             for (&index, &block) in chunk_edits {
@@ -385,15 +639,52 @@ impl World {
     /// deterministic and the overlay is applied to both, so they're
     /// identical anyway, and keeping the existing `Arc` avoids
     /// invalidating handles other tasks are already holding.
-    pub fn insert(&self, chunk: Chunk) -> Arc<Chunk> {
+    pub fn insert(&self, chunk: Chunk) -> Arc<PackedChunk> {
         let pos = chunk.pos;
+        // Packed before the shard lock is taken, not under it. Packing
+        // walks every cell of the chunk, and this is the lock every block
+        // read in the shard waits on -- item physics, water, the
+        // anticheat. When another task published the same chunk first
+        // the packing is thrown away, which is the rare race and a
+        // fraction of a millisecond.
+        let packed = PackedChunk::pack(&chunk);
+        drop(chunk);
         let shard = &self.shards[Self::shard_index(pos)];
         let mut guard = shard.write().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = guard.chunks.get(&pos) {
             existing.last_access.store(self.stamp(), Ordering::Relaxed);
             return Arc::clone(&existing.chunk);
         }
-        let arc = Arc::new(chunk);
+        // **The overlay again, under the shard's lock.** `generate` read it
+        // before this chunk existed anywhere, and an edit that landed in
+        // between -- overlay written, then no cached chunk for `set_block`
+        // to update -- was lost from the cache: the chunk went in as the
+        // generator drew it, and every read said grass where water had been
+        // placed. A scenario that filled a river on a field hit it in one full
+        // run of two. Read here, a `set_block` is either already in the
+        // overlay or takes this lock after us and finds the chunk cached.
+        let mut packed = packed;
+        {
+            let edits = self.edits.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(chunk_edits) = edits.get(&pos).filter(|edits| !edits.is_empty()) {
+                let mut arrivals = self.arrivals.lock().unwrap_or_else(|e| e.into_inner());
+                if arrivals.len() < MAX_ARRIVALS {
+                    arrivals.push(pos);
+                }
+                drop(arrivals);
+                for (&index, &block) in chunk_edits {
+                    let index = index as usize;
+                    if index < CHUNK_VOLUME {
+                        // `Chunk::index` undone: x fastest, then z, then y.
+                        let (x, z, y) = (index % CHUNK_SIZE_X, index / CHUNK_SIZE_X % CHUNK_SIZE_Z, index / (CHUNK_SIZE_X * CHUNK_SIZE_Z));
+                        if packed.get(x, y, z) != block {
+                            packed.set(x, y, z, block);
+                        }
+                    }
+                }
+            }
+        }
+        let arc = Arc::new(packed);
         guard.chunks.insert(
             pos,
             CachedChunk {
@@ -442,6 +733,16 @@ impl World {
             edits.entry(pos).or_default().insert(index, block);
         }
         self.dirty.fetch_add(1, Ordering::Relaxed);
+        {
+            // Under the journal's lock, so a serial and the entry that
+            // carries it are never seen apart.
+            let mut recent = self.recent_edits.lock().unwrap_or_else(|e| e.into_inner());
+            let serial = self.edit_serial.fetch_add(1, Ordering::AcqRel) + 1;
+            if recent.len() == RECENT_EDITS {
+                recent.pop_front();
+            }
+            recent.push_back((serial, (gx, gy, gz)));
+        }
 
         // Update the cached copy if we have one. `Arc::make_mut` clones
         // only when another task is mid-send with the old version, which
@@ -454,6 +755,27 @@ impl World {
             *entry.last_access.get_mut() = self.stamp();
         }
         true
+    }
+
+    /// Whether anything has ever been written to this cell since the
+    /// world was generated -- by a player, a fire, falling sand, or a
+    /// ruin chest being opened (see `unseal_ruin_chest`, which is what
+    /// asks). An edit that wrote the same block back still counts: that
+    /// is the whole use of it.
+    pub fn is_edited(&self, gx: i32, gy: i32, gz: i32) -> bool {
+        if gy < 0 || gy as usize >= CHUNK_SIZE_Y {
+            return false;
+        }
+        let (pos, lx, lz) = ChunkPos::from_global(gx, gz);
+        let index = Chunk::index(lx, gy as usize, lz) as u32;
+        let edits = self.edits.read().unwrap_or_else(|e| e.into_inner());
+        edits.get(&pos).is_some_and(|chunk| chunk.contains_key(&index))
+    }
+
+    /// The generator this world's terrain comes from, for a question
+    /// only it can answer -- what a ruin's chest was left holding.
+    pub fn generator(&self) -> &WorldGen {
+        &self.gen
     }
 
     /// Block lookup that only consults the cache; `None` means "not
@@ -556,15 +878,148 @@ impl World {
         }
 
         let mut count = 0;
-        let mut edits = self.edits.write().unwrap_or_else(|e| e.into_inner());
-        for (pos, blocks) in save.edits {
-            let entry = edits.entry(pos).or_default();
-            for (index, block) in blocks {
-                entry.insert(index, block);
-                count += 1;
+        {
+            let mut edits = self.edits.write().unwrap_or_else(|e| e.into_inner());
+            for (pos, blocks) in save.edits {
+                let entry = edits.entry(pos).or_default();
+                for (index, block) in blocks {
+                    entry.insert(index, block);
+                    count += 1;
+                }
             }
         }
+        let framed = self.frame_lone_racks();
+        if framed > 0 {
+            println!("[world] {framed} lone drying rack(s) from an older save are hide frames now");
+        }
+        let cleared = self.clear_old_lean_tos();
+        if cleared > 0 {
+            println!("[world] {cleared} cell(s) of two-cell lean-tos from an older build are gone");
+        }
         Ok(count)
+    }
+
+    /// **A lean-to of two cells, from a build before the hut had fifteen, is
+    /// taken down** as the world is read. Answers how many cells.
+    ///
+    /// Its two cells read now as the hut's mouth and middle (`lean_to::PARTS`),
+    /// and the middle draws the whole hut: fifteen cells of thatch over two
+    /// that collide, a roof a player walks through. Growing it into fifteen
+    /// is the rack's rejected answer again -- a tent put up against a wall
+    /// has no room to grow -- and a one-night shelter is worth less than the
+    /// question: it would have fallen in the next morning anyway. Only edits
+    /// are asked, because nothing generates a lean-to.
+    fn clear_old_lean_tos(&self) -> usize {
+        use primitive_shared::lean_to;
+        let mut old = Vec::new();
+        {
+            let edits = self.edits.read().unwrap_or_else(|e| e.into_inner());
+            let at_of = |pos: &ChunkPos, index: u32| {
+                let index = index as usize;
+                let x = index % CHUNK_SIZE_X;
+                let z = (index / CHUNK_SIZE_X) % CHUNK_SIZE_Z;
+                let y = index / (CHUNK_SIZE_X * CHUNK_SIZE_Z);
+                (pos.x * CHUNK_SIZE_X as i32 + x as i32, y as i32, pos.z * CHUNK_SIZE_Z as i32 + z as i32)
+            };
+            let edited = |cell: (i32, i32, i32)| {
+                if cell.1 < 0 || cell.1 as usize >= CHUNK_SIZE_Y {
+                    return None;
+                }
+                let (pos, lx, lz) = ChunkPos::from_global(cell.0, cell.2);
+                edits.get(&pos).and_then(|chunk| chunk.get(&(Chunk::index(lx, cell.1 as usize, lz) as u32))).copied()
+            };
+            for (pos, cells) in edits.iter() {
+                for (&index, &block) in cells {
+                    let at = at_of(pos, index);
+                    if lean_to::is_lean_to(block) && !lean_to::whole(at, block, edited) {
+                        old.push(at);
+                    }
+                }
+            }
+        }
+        for &(x, y, z) in &old {
+            self.set_block(x, y, z, primitive_shared::types::BLOCK_AIR);
+        }
+        old.len()
+    }
+
+    /// **Every lone cell of a drying rack becomes a hide frame**, as the
+    /// world is read. Answers how many.
+    ///
+    /// A save from before the rack of two by two -- or from before the hide
+    /// frame came back -- holds racks of one cell, which were the frame in
+    /// all but id (`types::BLOCK_HIDE_FRAME`). They become it here, with
+    /// their facing and their skin bit (`RACK_LOADED` is the same bit on
+    /// both), in the same cell: the container store and the rack file key by
+    /// the cell, so whatever was laced in one is still in it and still
+    /// drying, and nothing else has to be told.
+    ///
+    /// **Here, once, and not wherever a rack is next touched.** The lazy
+    /// way was the first sketch -- rewrite a lone cell the next time the
+    /// server looks at it -- and it leaves an untouched old rack to be
+    /// broken as the big rack's item, opened at the wrong cell (a loaded
+    /// lone cell carries `RACK_TOP`, and `rack_anchor` reads that as "the
+    /// cell under me"), and taking larder goods it was never built for.
+    ///
+    /// **Whole is asked of the world as it will be**, edits over terrain:
+    /// a rack a player built is four edits, but the test world's generator
+    /// draws whole racks of its own, and a cell of one of those that a
+    /// player's goods rewrote is an edit whose partners are terrain. The
+    /// terrain is generated only for a rack cell that needs it -- a handful
+    /// of chunks in the rare save that has one -- and kept for the pass.
+    fn frame_lone_racks(&self) -> usize {
+        use primitive_shared::types::{
+            block_kind, rack_whole, BLOCK_DRYING_RACK, BLOCK_HIDE_FRAME, KIND_MASK,
+        };
+        // A cell: `rack_whole` asks through an `Fn`, and the terrain it fills
+        // on the way is a cache, not a result.
+        let terrain: std::cell::RefCell<HashMap<ChunkPos, Chunk>> = std::cell::RefCell::new(HashMap::new());
+        let mut lone = Vec::new();
+        {
+            let edits = self.edits.read().unwrap_or_else(|e| e.into_inner());
+            let racks: Vec<((i32, i32, i32), BlockId)> = edits
+                .iter()
+                .flat_map(|(pos, cells)| {
+                    cells.iter().filter(|(_, &block)| block_kind(block) == BLOCK_DRYING_RACK).map(move |(&index, &block)| {
+                        let index = index as usize;
+                        let x = index % CHUNK_SIZE_X;
+                        let z = (index / CHUNK_SIZE_X) % CHUNK_SIZE_Z;
+                        let y = index / (CHUNK_SIZE_X * CHUNK_SIZE_Z);
+                        let at = (
+                            pos.x * CHUNK_SIZE_X as i32 + x as i32,
+                            y as i32,
+                            pos.z * CHUNK_SIZE_Z as i32 + z as i32,
+                        );
+                        (at, block)
+                    })
+                })
+                .collect();
+            for (at, block) in racks {
+                let whole = rack_whole(at, block, |cell| {
+                    if cell.1 < 0 || cell.1 as usize >= CHUNK_SIZE_Y {
+                        return None;
+                    }
+                    let (pos, lx, lz) = ChunkPos::from_global(cell.0, cell.2);
+                    let index = Chunk::index(lx, cell.1 as usize, lz);
+                    if let Some(&edited) = edits.get(&pos).and_then(|chunk| chunk.get(&(index as u32))) {
+                        return Some(edited);
+                    }
+                    let mut terrain = terrain.borrow_mut();
+                    let chunk = terrain.entry(pos).or_insert_with(|| self.gen.generate_chunk(pos));
+                    chunk.blocks.get(index).copied()
+                });
+                if !whole {
+                    lone.push((at, block));
+                }
+            }
+        }
+        for &(at, block) in &lone {
+            // The kind swapped and every bit above it kept: the facing and
+            // the skin. `RACK_FAR` and the goods bits are never set on a
+            // lone cell -- `rack_goods` is only written on a whole rack.
+            self.set_block(at.0, at.1, at.2, (block & !KIND_MASK) | BLOCK_HIDE_FRAME);
+        }
+        lone.len()
     }
 }
 
@@ -578,12 +1033,41 @@ impl crate::logic::falling::BlockWorld for World {
     fn set(&self, gx: i32, gy: i32, gz: i32, block: BlockId) {
         self.set_block(gx, gy, gz, block);
     }
+
+    /// Straight from the generator: a pure function of the seed and the
+    /// column, so it costs noise and no lock. The spawner asks it once per
+    /// attempt -- see `BlockWorld::biome`.
+    fn biome(&self, gx: i32, gz: i32) -> Option<primitive_shared::worldgen::Biome> {
+        Some(self.biome_at(gx, gz))
+    }
+
+    /// The same, for the two numbers the biome is made of. See
+    /// `BlockWorld::climate` for why the wildfire asks this at all.
+    fn climate(&self, gx: i32, gy: i32, gz: i32) -> Option<(f32, f32)> {
+        Some(self.climate_at(gx, gy, gz))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use primitive_shared::types::{BLOCK_AIR, BLOCK_GLOWSTONE};
+
+    /// **An edit made while its chunk was being generated is not lost.** The
+    /// generator read the overlay before the edit, the edit found no cached
+    /// chunk to update, and the chunk went in as drawn -- which is what put
+    /// grass back where a scenario had placed water. `insert` reads the
+    /// overlay again.
+    #[test]
+    fn an_edit_made_while_its_chunk_was_generating_is_in_the_chunk_that_goes_in() {
+        let world = World::new(99, 64);
+        let pos = ChunkPos::new(2, 3);
+        let (x, y, z) = (2 * 16 + 5, 40, 3 * 16 + 7);
+        let stale = world.generate(pos);
+        assert!(world.set_block(x, y, z, BLOCK_GLOWSTONE));
+        world.insert(stale);
+        assert_eq!(world.cached_block(x, y, z), Some(BLOCK_GLOWSTONE), "the edit was lost to the chunk generated under it");
+    }
 
     #[test]
     fn edits_survive_eviction_and_regeneration() {
@@ -603,6 +1087,34 @@ mod tests {
         // Simulate eviction by regenerating from scratch.
         let regenerated = world.generate(pos);
         assert_eq!(regenerated.get(5, 30, 7), BLOCK_GLOWSTONE);
+    }
+
+    /// **The cache keeps a chunk packed, and it is still the chunk the
+    /// generator made, cell for cell.** The server hands chunks from here
+    /// to every player and reads them for water, items and the anticheat,
+    /// so a packing that lost a cell would be a world the server and its
+    /// clients disagree about. And the saving has to be real: a flat
+    /// chunk was 131 KB in this cache whatever was in it.
+    #[test]
+    fn the_cache_keeps_a_chunk_packed_and_answers_for_every_cell_as_generated() {
+        let world = World::new(4242, 64);
+        let pos = ChunkPos::new(0, 0);
+        let generated = world.generate(pos);
+        let flat = generated.blocks.clone();
+        let cached = world.insert(generated);
+        assert_eq!(cached.to_blocks(), flat, "the cache changed the chunk");
+        let flat_bytes = flat.len() * std::mem::size_of::<BlockId>();
+        assert!(
+            cached.heap_bytes() * 4 < flat_bytes,
+            "a cached chunk keeps {} bytes against {flat_bytes} flat",
+            cached.heap_bytes()
+        );
+
+        // ...and an edit reaches the packed copy the way it reached the
+        // flat one, high up where the sections are sky.
+        assert!(world.set_block(5, 200, 7, BLOCK_GLOWSTONE));
+        assert_eq!(world.cached_block(5, 200, 7), Some(BLOCK_GLOWSTONE));
+        assert_eq!(world.cached_block(5, 201, 7), Some(BLOCK_AIR));
     }
 
     #[test]
@@ -651,6 +1163,77 @@ mod tests {
         assert_eq!(b.cached_block(10, 25, -30), Some(BLOCK_GLOWSTONE));
         assert_eq!(b.cached_block(11, 25, -30), Some(BLOCK_AIR));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_old_lone_rack_loads_as_a_hide_frame_and_a_whole_rack_stays_the_larder() {
+        use primitive_shared::types::{
+            block_facing, block_kind, faced, rack_cells, rack_is_loaded, rack_with_hide, Facing, BLOCK_DRYING_RACK,
+            BLOCK_HIDE_FRAME,
+        };
+        let dir = std::env::temp_dir().join(format!("primitive_test_frames_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let a = World::new(7, 128);
+        // A lone rack with a skin in it, as a save from before the rack of
+        // two by two has one -- and one without.
+        let skinned = rack_with_hide(faced(BLOCK_DRYING_RACK, Facing::East), true);
+        a.set_block(40, 200, 40, skinned);
+        a.set_block(44, 200, 40, faced(BLOCK_DRYING_RACK, Facing::West));
+        // ...and a whole rack, four cells.
+        for ((x, y, z), cell) in rack_cells((50, 200, 50), Facing::North) {
+            a.set_block(x, y, z, cell);
+        }
+        a.save(&dir).unwrap();
+
+        let b = World::new(7, 128);
+        b.load(&dir).unwrap();
+        for at in [(40, 200, 40), (50, 200, 50)] {
+            b.insert(b.generate(ChunkPos::from_global(at.0, at.2).0));
+        }
+        let frame = b.cached_block(40, 200, 40).unwrap();
+        assert_eq!(block_kind(frame), BLOCK_HIDE_FRAME, "a lone rack loaded as {frame}");
+        assert!(rack_is_loaded(frame), "the skin in the frame was lost on the way");
+        assert_eq!(block_facing(frame), Facing::East, "the frame turned round");
+        assert_eq!(block_kind(b.cached_block(44, 200, 40).unwrap()), BLOCK_HIDE_FRAME);
+        for ((x, y, z), cell) in rack_cells((50, 200, 50), Facing::North) {
+            assert_eq!(b.cached_block(x, y, z), Some(cell), "a cell of a whole rack changed");
+        }
+        // ...and it is written back, so the next start has nothing to do.
+        assert!(b.has_unsaved_changes(), "the frames would be framed again every start");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A two-cell lean-to from an older build is taken down on load, and a
+    /// whole hut is left standing.** The old tent's two cells are the hut's
+    /// mouth and middle to the rules now, and the middle would draw fifteen
+    /// cells of thatch over the two that collide.
+    #[test]
+    fn an_old_two_cell_lean_to_is_taken_down_on_load_and_a_whole_one_stands() {
+        use primitive_shared::types::{bed_half_of, Facing, BLOCK_AIR, BLOCK_LEAN_TO};
+        let dir = std::env::temp_dir().join(format!("primitive_test_lean_to_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let a = World::new(7, 128);
+        a.set_block(40, 200, 40, bed_half_of(BLOCK_LEAN_TO, Facing::South, false));
+        a.set_block(40, 200, 39, bed_half_of(BLOCK_LEAN_TO, Facing::South, true));
+        let hut = primitive_shared::lean_to::cells((60, 200, 60), Facing::East);
+        for ((x, y, z), cell) in hut {
+            a.set_block(x, y, z, cell);
+        }
+        a.save(&dir).unwrap();
+
+        let b = World::new(7, 128);
+        b.load(&dir).unwrap();
+        for at in [(40, 200, 40), (60, 200, 60)] {
+            b.insert(b.generate(ChunkPos::from_global(at.0, at.2).0));
+        }
+        assert_eq!(b.cached_block(40, 200, 40), Some(BLOCK_AIR), "the old tent's foot stayed");
+        assert_eq!(b.cached_block(40, 200, 39), Some(BLOCK_AIR), "the old tent's head stayed");
+        for ((x, y, z), cell) in hut {
+            assert_eq!(b.cached_block(x, y, z), Some(cell), "a cell of a whole hut changed");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -776,8 +1359,8 @@ mod tests {
             assert!(world.set_block(gx, gy, gz, BLOCK_STONE));
         }
 
-        let (sx, sy, sz) = world.safe_position((x, y, z));
-        assert_eq!((sx, sz), (x, z), "it moved them off their own column");
+        let (sx, sy, sz) = world.safe_position((f64::from(x), f64::from(y), f64::from(z)));
+        assert_eq!((sx, sz), (f64::from(x), f64::from(z)), "it moved them off their own column");
         for offset in 0..PLAYER_CELLS {
             let block = world.cached_block(gx, sy as i32 + offset, gz).unwrap();
             assert!(
@@ -786,7 +1369,7 @@ mod tests {
                 sy as i32 + offset
             );
         }
-        assert!(sy > y, "it put them below the pillar rather than on it");
+        assert!(sy > f64::from(y), "it put them below the pillar rather than on it");
     }
 
     #[test]
@@ -797,12 +1380,12 @@ mod tests {
         // time.
         let world = World::new(77, 256);
         let spawn = world.spawn_point();
-        assert_eq!(world.safe_position(spawn), spawn);
+        assert_eq!(world.safe_position(primitive_shared::geometry::wide(spawn)), primitive_shared::geometry::wide(spawn));
 
         // ...including well up in the air, which is a legal place to be
         // and not this function's business to correct.
         let flying = (spawn.0, spawn.1 + 20.0, spawn.2);
-        assert_eq!(world.safe_position(flying), flying);
+        assert_eq!(world.safe_position(primitive_shared::geometry::wide(flying)), primitive_shared::geometry::wide(flying));
     }
 
     #[test]
@@ -818,8 +1401,8 @@ mod tests {
         for gy in 0..CHUNK_SIZE_Y as i32 {
             world.set_block(gx, gy, gz, BLOCK_STONE);
         }
-        let answer = world.safe_position((gx as f32 + 0.5, 30.0, gz as f32 + 0.5));
-        assert_eq!(answer, world.spawn_point());
+        let answer = world.safe_position((f64::from(gx as f32 + 0.5), 30.0, f64::from(gz as f32 + 0.5)));
+        assert_eq!(answer, primitive_shared::geometry::wide(world.spawn_point()));
     }
 
     #[test]
@@ -830,7 +1413,7 @@ mod tests {
             (0.0, f32::INFINITY, 0.0),
             (0.0, 40.0, f32::NAN),
         ] {
-            assert_eq!(world.safe_position(bad), world.spawn_point());
+            assert_eq!(world.safe_position(primitive_shared::geometry::wide(bad)), primitive_shared::geometry::wide(world.spawn_point()));
         }
     }
 

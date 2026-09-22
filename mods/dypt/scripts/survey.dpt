@@ -1,0 +1,29 @@
+// Что вокруг: биом, свет, соседи, вещи на земле.
+//
+//   /dypt survey
+//
+// Ничего не меняет — с этого стоит начинать знакомство со словарём.
+
+где = pos()
+x = где[0]
+y = где[1]
+z = где[2]
+
+print("биом: " + biome(x, z) + ", поверхность на " + surface(x, z))
+print("свет: небесный " + sky_light(x, y, z) + ", от блоков " + block_light(x, y, z))
+print("температура: " + temperature(x, y, z))
+
+тело = vitals()
+print("здоровье " + тело["health"] + " из " + тело["max_health"] + ", несёт " + тело["carried_kg"] + " кг")
+
+рядом = entities_near(x, y, z, 24)
+print("живности в 24 блоках: " + length(рядом))
+for id in рядом {
+    print("  " + entity_species(id) + " (" + entity_health(id) + " здоровья)")
+}
+
+вещи = items_near(x, y, z, 16)
+print("вещей на земле рядом: " + length(вещи))
+for стопка in вещи {
+    print("  " + стопка["name"] + " x" + стопка["count"])
+}

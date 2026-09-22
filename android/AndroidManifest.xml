@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What Android is told about the game.
+
+  ## Why GameActivity, and why there is now 21 KB of Java in here
+
+  There is still no Java *source tree*. There is one compiled class,
+  `com.google.androidgamesdk.GameActivity`, taken from Google's own
+  `games-activity` release and turned into a `classes.dex` by `d8` —
+  see `package-android.sh` and `README-games-activity.txt`.
+
+  This used to be `android.app.NativeActivity`, which needs no Java at
+  all, and the reason it is not any more is the on-screen keyboard.
+  A NativeActivity's content view is a plain `View`: it does not
+  implement `onCreateInputConnection`, so the input method is told the
+  editor is `TYPE_NULL`, and what a `TYPE_NULL` editor is sent is key
+  events. Key events carry keycodes, and **there is no keycode for
+  `щ`** — so a game whose interface is in Russian, and whose font
+  declares ASCII, the whole of Cyrillic and Polish diacritics, could
+  not be typed into in three of its four alphabets. It was not a bug
+  to be tuned out; NativeActivity cannot do it.
+
+  `GameActivity` is a real activity whose view returns GameTextInput's
+  `InputConnection`, so the input method commits whole text instead of
+  pressing keys at us. The game reads that text through
+  `AndroidApp::text_input_state` — see `platform::winit_backend`.
+
+  The native half of GameActivity is compiled from C++ that the
+  `android-activity` crate vendors and builds itself with `cc`; no
+  Gradle is involved in any of this. The Java half has to match it
+  exactly, which is why the version is pinned in two places at once.
+
+  ## Why landscape only
+
+  The world is drawn in a first-person view with a hotbar across the
+  bottom and thumb controls in both corners. Held upright there is no
+  room for the corners to be far enough apart to hold, and the view
+  becomes a slot. Rotating is a thing the player would do once.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.primitive.game"
+    android:versionCode="1"
+    android:versionName="1.5.0">
+
+    <!--
+      24 is the floor everything this game needs shares: Vulkan arrived
+      there, and so did the native-activity glue. See the note in
+      `.cargo/config.toml`, which has to agree with this number — the
+      library is *linked* against the API named there and *declared*
+      here, and a build where those differ is one that installs and then
+      cannot find a symbol.
+    -->
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="36" />
+
+    <!-- Multiplayer. Singleplayer runs the server in-process and needs
+         nothing, but the server browser is on the main menu either way. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+      Required, not merely preferred. A device that cannot do GLES 3.0
+      cannot draw this world, and saying so here means the store never
+      offers the game to one — which is better than the game installing
+      and then showing a black screen.
+    -->
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="true" />
+
+    <!--
+      `hasCode="true"`, and it is not optional now.
+
+      It used to say `false`, which is the honest declaration for a
+      package with no `classes.dex` in it — and with `false` the system
+      never loads one, so `GameActivity` would be a class name that
+      resolves to nothing and the app dies on launch with
+      `ClassNotFoundException`. The dex is put in by `package-android.sh`
+      after `aapt2 link`; this line is what makes Android look for it.
+    -->
+    <!--
+      ## Why the package says it is a game, twice
+
+      **Because the phone decides what this is, and acts on it.** On a
+      device whose panel does 60, 90 and 120, the game ran at 60 under
+      vsync however it asked otherwise: a window mode request
+      (`preferredDisplayModeId`) was sent and refused, and a surface
+      frame-rate request (`ANativeWindow_setFrameRate`) was *accepted*,
+      logged as `status 0`, and changed nothing. The reason was one
+      line of `adb shell settings get system peak_refresh_rate`: **60**.
+      A system-wide ceiling no application can ask its way past.
+
+      What can move that ceiling on this class of phone is the vendor's
+      game mode, and the way in is the category. `appCategory` is the
+      platform's own answer (API 26 and up) and is what a modern launcher
+      and the battery accounting read. `isGame` is the older boolean; it
+      is deprecated, and it is still what several vendor shells look at,
+      so both are here rather than the tidier one alone.
+
+      Neither is a promise from the platform, and this is not a
+      performance fix it is the app answering a question it was
+      previously silent about. The measurement that decides whether the
+      refresh rate followed lives in the `[display]` lines the game
+      already logs.
+    -->
+    <application
+        android:label="Primitive"
+        android:icon="@mipmap/ic_launcher"
+        android:appCategory="game"
+        android:isGame="true"
+        android:hasCode="true"
+        android:allowBackup="true">
+
+        <!--
+          ## What the on-screen keyboard is allowed to do to the game
+
+          `windowSoftInputMode` below, and it is `adjustResize` now
+          because GameActivity changed what the alternatives mean.
+
+          Under NativeActivity this said `adjustPan|stateAlwaysHidden`.
+          Panning needs a focused view to keep on screen and a
+          NativeActivity has none, so nothing moved and the keyboard was
+          simply drawn over the bottom of a full-size window — which
+          suited a game that puts its own text fields wherever it likes.
+
+          GameActivity *has* a focused view: that is the entire point of
+          it. So `adjustPan` would now really pan, sliding the surface
+          up by however much the input method decided, and the game
+          would be drawing a world it no longer knows the position of —
+          a hotbar off the bottom of the glass and touch coordinates
+          that no longer match what is under the finger.
+
+          `adjustResize` instead. The surface shrinks to the strip above
+          the keyboard, which arrives as an ordinary `Resized` and goes
+          through the same swapchain rebuild as a rotation — a path
+          this game already has and already tests. The interface is laid
+          out in its own space against the aspect it is given (see
+          `widgets::Layout`), so the form re-lays itself into the strip
+          and the field being typed into stays on screen, which is the
+          whole requirement.
+
+          `stateAlwaysHidden` is gone with it. It was there because the
+          keyboard came up when a field was tapped and at no other time,
+          and the system would otherwise put one back after a rotation.
+          It is now actively wrong: with a served view and a real input
+          connection, `stateAlwaysHidden` tells the system to suppress
+          the window that `showSoftInput` is asking for, and the two
+          requests fight — intermittently, which is worse than losing.
+          The game raises and dismisses the keyboard itself, on the
+          frame the focus changes; see the `AboutToWait` arm of the
+          frame loop.
+
+          ## Why a theme at all
+
+          `NativeActivity` came with the framework's own bare theme.
+          `GameActivity` extends `Activity` and gets the device default,
+          which has a title bar and a status bar — so without this the
+          game comes up with a strip of Android furniture across the top
+          of a landscape world. `NoTitleBar.Fullscreen` is a framework
+          style, which matters: a style of our own would need a
+          `res/values` and a generated `R` class, and this package has
+          neither.
+        -->
+        <activity
+            android:name="com.primitive.game.PrimitiveActivity"
+            android:label="Primitive"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|uiMode"
+            android:windowSoftInputMode="adjustResize"
+            android:launchMode="singleTask"
+            android:exported="true">
+
+            <!--
+              Which library to load. `lib` is prepended and `.so`
+              appended by the loader, so this names
+              `lib/arm64-v8a/libprimitive.so` in the package.
+
+              Read by `GameActivity.onCreate` rather than by the
+              framework, but spelled exactly the same as NativeActivity
+              spells it — the Java class was written to be a drop-in for
+              it.
+            -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="primitive" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

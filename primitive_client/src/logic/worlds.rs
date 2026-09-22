@@ -27,6 +27,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use primitive_shared::worldgen::{Preset, Scale, Zone};
+
 use crate::ui::lang::{Language, Msg};
 
 /// What `world.toml` holds.
@@ -42,6 +44,34 @@ struct WorldMeta {
     /// world than the one they asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     seed: Option<u32>,
+    /// Which generator built it. See `worldgen::Preset`.
+    ///
+    /// Not an `Option`, unlike the seed: a world written before presets
+    /// existed was made by the only generator there was, and `Normal` is
+    /// exactly that answer. The seed cannot say the same, because the
+    /// seed it was made with is genuinely unknown.
+    #[serde(default)]
+    preset: Preset,
+    /// Where on the planet it was laid. See `worldgen::Zone`.
+    ///
+    /// Not an `Option`, for the preset's reason: a world written before
+    /// zones existed woke its player at forty-five degrees, and `Temperate`
+    /// is that answer. Its explored chunks keep the banded climate they
+    /// were generated in; the country beyond them is the real-scale
+    /// temperate zone, and where the two meet a far edge of the old world
+    /// can show a seam -- a savanna chunk against a meadow -- which is the
+    /// price of a planet that is not twenty kilometres round.
+    #[serde(default)]
+    zone: Zone,
+    /// Which scale its country is drawn at. See `worldgen::Scale`.
+    ///
+    /// **Absent means regional**, and that is not `Scale::default()`: every
+    /// world written before the field existed was drawn at the regional
+    /// scale, and its edits -- the only thing a save keeps -- stand on that
+    /// ground. Reading it as the Earth's would regenerate every chunk under
+    /// the player's buildings. A new world writes `earth` (`create_in`).
+    #[serde(default = "Scale::unrecorded")]
+    scale: Scale,
     /// Unix seconds, for sorting most-recent-first.
     last_played: u64,
 }
@@ -51,6 +81,9 @@ impl Default for WorldMeta {
         Self {
             name: "World".to_string(),
             seed: None,
+            preset: Preset::Normal,
+            zone: Zone::Temperate,
+            scale: Scale::unrecorded(),
             last_played: 0,
         }
     }
@@ -62,6 +95,14 @@ pub struct World {
     /// `None` for a world from before seeds were recorded; the caller
     /// supplies its configured default in that case.
     pub seed: Option<u32>,
+    /// Which generator built it: the other half of what makes a world a
+    /// world. See `worldgen::Preset`.
+    pub preset: Preset,
+    /// Where on the planet it was laid: the third thing, beside the seed
+    /// and the preset, that its saved edits were written against.
+    pub zone: Zone,
+    /// Which scale its country is drawn at: the fourth. See `worldgen::Scale`.
+    pub scale: Scale,
     pub directory: PathBuf,
     pub last_played: u64,
 }
@@ -121,6 +162,9 @@ impl Worlds {
                     Some(meta) => worlds.push(World {
                         name: meta.name,
                         seed: meta.seed,
+                        preset: meta.preset,
+                        zone: meta.zone,
+                        scale: meta.scale,
                         directory,
                         last_played: meta.last_played,
                     }),
@@ -159,7 +203,19 @@ impl Worlds {
     /// The directory is derived from the name but never collides: a
     /// second "My World" becomes `my-world-2`, so two worlds with the
     /// same name are two worlds rather than one shared save.
-    pub fn create(&mut self, name: &str, seed: u32) -> Result<usize, String> {
+    ///
+    /// Tests only: the new-world form always says where the world is laid,
+    /// and a second way in that quietly picks the zone is a way for a later
+    /// caller to forget to ask.
+    #[cfg(test)]
+    pub fn create(&mut self, name: &str, seed: u32, preset: Preset) -> Result<usize, String> {
+        self.create_in(name, seed, preset, Zone::default())
+    }
+
+    /// Creates a world laid in a zone, and returns its index. What the
+    /// new-world form calls; `create` is this in the temperate zone, which
+    /// is every world the tests make.
+    pub fn create_in(&mut self, name: &str, seed: u32, preset: Preset, zone: Zone) -> Result<usize, String> {
         let seed = Some(seed);
         let name = name.trim();
         if name.is_empty() {
@@ -170,9 +226,16 @@ impl Worlds {
         std::fs::create_dir_all(&directory)
             .map_err(|e| format!("could not create {}: {e}", directory.display()))?;
 
+        // Every new world is drawn by the newest generator -- the Earth's
+        // scale with its landforms; a world that already has edits on older
+        // ground stays on the generator that drew it (`Scale`).
+        let scale = Scale::Landforms;
         let meta = WorldMeta {
             name: name.to_string(),
             seed,
+            preset,
+            zone,
+            scale,
             last_played: 0,
         };
         write_meta(&directory, &meta)?;
@@ -182,6 +245,9 @@ impl Worlds {
             World {
                 name: meta.name,
                 seed,
+                preset,
+                zone,
+                scale,
                 directory,
                 last_played: 0,
             },
@@ -200,6 +266,9 @@ impl Worlds {
         let meta = WorldMeta {
             name: world.name.clone(),
             seed: world.seed,
+            preset: world.preset,
+            zone: world.zone,
+            scale: world.scale,
             last_played: now,
         };
         if let Err(e) = write_meta(&world.directory, &meta) {
@@ -307,6 +376,12 @@ fn adopt(directory: &Path) -> Option<World> {
     Some(World {
         name,
         seed: None,
+        // The only generator there was when this layout was in use.
+        preset: Preset::Normal,
+        // ...laid where every world then was.
+        zone: Zone::Temperate,
+        // ...and drawn at the only scale there was.
+        scale: Scale::unrecorded(),
         directory: directory.to_path_buf(),
         last_played: 0,
     })
@@ -362,12 +437,119 @@ mod tests {
     fn a_created_world_can_be_found_again() {
         let dir = TempDir::new("roundtrip");
         let mut worlds = Worlds::load(dir.path());
-        worlds.create("My World", 4242).unwrap();
+        worlds.create("My World", 4242, Preset::Normal).unwrap();
 
         let reloaded = Worlds::load(dir.path());
         assert_eq!(reloaded.list().len(), 1);
         assert_eq!(reloaded.list()[0].name, "My World");
         assert_eq!(reloaded.list()[0].seed, Some(4242));
+    }
+
+    #[test]
+    fn the_world_type_survives_a_round_trip_to_disk() {
+        // The preset is written into `world.toml` beside the seed, and
+        // it has to come back: a test world that reloaded as an ordinary
+        // one would drop the player's buildings onto terrain that never
+        // existed, which is the same failure a forgotten seed causes.
+        let dir = TempDir::new("presets");
+        let mut worlds = Worlds::load(dir.path());
+        worlds.create("Lab", 5, Preset::Test).unwrap();
+        worlds.create("Home", 5, Preset::Normal).unwrap();
+
+        let reloaded = Worlds::load(dir.path());
+        let preset_of = |name: &str| {
+            reloaded
+                .list()
+                .iter()
+                .find(|w| w.name == name)
+                .unwrap()
+                .preset
+        };
+        assert_eq!(preset_of("Lab"), Preset::Test);
+        assert_eq!(preset_of("Home"), Preset::Normal);
+    }
+
+    #[test]
+    fn a_world_remembers_where_on_the_planet_it_was_laid() {
+        // At real scale nobody walks from one zone into another, so the
+        // zone a world was made in is its climate for ever -- and a world
+        // that forgot it on the next launch would put a tropical player's
+        // hut in the snow.
+        let dir = TempDir::new("zones");
+        let mut worlds = Worlds::load(dir.path());
+        worlds.create_in("Coast", 5, Preset::Normal, Zone::Tropics).unwrap();
+        worlds.create_in("Home", 5, Preset::Normal, Zone::Temperate).unwrap();
+        let zone_of = |name: &str| {
+            Worlds::load(dir.path()).list().iter().find(|w| w.name == name).unwrap().zone
+        };
+        assert_eq!(zone_of("Coast"), Zone::Tropics);
+        assert_eq!(zone_of("Home"), Zone::Temperate);
+    }
+
+    #[test]
+    fn a_world_from_before_zones_reads_as_temperate() {
+        // Every world made before the zone existed woke its player at
+        // forty-five degrees.
+        let dir = TempDir::new("before-zones");
+        let old = dir.path().join("old");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join(META), "name = \"Old\"\nseed = 3\npreset = \"normal\"\nlast_played = 0\n").unwrap();
+        assert_eq!(Worlds::load(dir.path()).list()[0].zone, Zone::Temperate);
+    }
+
+    #[test]
+    fn a_world_from_before_the_earth_scale_stays_on_the_ground_its_buildings_stand_on() {
+        // A save is edits over regenerated chunks. A world that never wrote
+        // a scale down was drawn at the regional one, and reading it as the
+        // Earth's would put every house in it inside a new hillside -- while
+        // a world made now writes the Earth's and keeps it over a reload.
+        let dir = TempDir::new("before-scale");
+        let old = dir.path().join("old");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join(META), "name = \"Old\"\nseed = 3\npreset = \"normal\"\nzone = \"temperate\"\nlast_played = 0\n")
+            .unwrap();
+        assert_eq!(Worlds::load(dir.path()).list()[0].scale, Scale::Regional);
+
+        let mut worlds = Worlds::load(dir.path());
+        worlds.create_in("New", 3, Preset::Normal, Zone::Temperate).unwrap();
+        let reloaded = Worlds::load(dir.path());
+        let scale_of = |name: &str| reloaded.list().iter().find(|w| w.name == name).unwrap().scale;
+        assert_eq!(scale_of("New"), Scale::Landforms);
+        assert_eq!(scale_of("Old"), Scale::Regional);
+    }
+
+    #[test]
+    fn a_world_from_before_the_landforms_keeps_the_earth_generator_over_a_reload() {
+        // The same promise one generator later: a world that wrote `earth`
+        // was drawn without hills and steppe, and its unexplored chunks have
+        // to come out of that generator or they meet the explored ones at a
+        // seam (`worldgen::landforms`).
+        let dir = TempDir::new("before-landforms");
+        let earth = dir.path().join("earth");
+        std::fs::create_dir_all(&earth).unwrap();
+        std::fs::write(
+            earth.join(META),
+            "name = \"Earth\"\nseed = 3\npreset = \"normal\"\nzone = \"temperate\"\nscale = \"earth\"\nlast_played = 0\n",
+        )
+        .unwrap();
+        assert_eq!(Worlds::load(dir.path()).list()[0].scale, Scale::Earth);
+        let mut worlds = Worlds::load(dir.path());
+        worlds.mark_played(0);
+        assert_eq!(Worlds::load(dir.path()).list()[0].scale, Scale::Earth, "a reload moved it to the new generator");
+    }
+
+    #[test]
+    fn a_world_from_before_presets_reads_as_an_ordinary_one() {
+        // There was one generator when those worlds were written, and
+        // `Normal` is exactly what they were made with -- unlike the
+        // seed, which such a world genuinely does not record.
+        let dir = TempDir::new("oldworld");
+        let directory = dir.path().join("old");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(META), "name = \"Old\"
+seed = 3
+").unwrap();
+        assert_eq!(Worlds::load(dir.path()).list()[0].preset, Preset::Normal);
     }
 
     #[test]
@@ -377,8 +559,8 @@ mod tests {
         // regenerate the first one's landscape under its saved edits.
         let dir = TempDir::new("seeds");
         let mut worlds = Worlds::load(dir.path());
-        worlds.create("Alpha", 1).unwrap();
-        worlds.create("Beta", 2).unwrap();
+        worlds.create("Alpha", 1, Preset::Normal).unwrap();
+        worlds.create("Beta", 2, Preset::Normal).unwrap();
 
         let reloaded = Worlds::load(dir.path());
         let alpha = reloaded.list().iter().find(|w| w.name == "Alpha").unwrap();
@@ -393,8 +575,8 @@ mod tests {
         // Otherwise the second one silently opens the first one's save.
         let dir = TempDir::new("collide");
         let mut worlds = Worlds::load(dir.path());
-        worlds.create("My World", 1).unwrap();
-        worlds.create("My World", 2).unwrap();
+        worlds.create("My World", 1, Preset::Normal).unwrap();
+        worlds.create("My World", 2, Preset::Normal).unwrap();
 
         let dirs: Vec<_> = worlds.list().iter().map(|w| w.directory.clone()).collect();
         assert_eq!(dirs.len(), 2);
@@ -417,7 +599,7 @@ mod tests {
         // check that matters most.
         let dir = TempDir::new("traversal");
         let mut worlds = Worlds::load(dir.path());
-        worlds.create("../../../evil", 1).unwrap();
+        worlds.create("../../../evil", 1, Preset::Normal).unwrap();
         let created = &worlds.list()[0].directory;
         assert_eq!(created.parent(), Some(dir.path()));
     }
@@ -426,7 +608,7 @@ mod tests {
     fn an_empty_name_is_refused() {
         let dir = TempDir::new("noname");
         let mut worlds = Worlds::load(dir.path());
-        assert!(worlds.create("   ", 1).is_err());
+        assert!(worlds.create("   ", 1, Preset::Normal).is_err());
         assert!(worlds.list().is_empty());
     }
 
@@ -434,7 +616,7 @@ mod tests {
     fn deleting_removes_the_folder_and_the_entry() {
         let dir = TempDir::new("delete");
         let mut worlds = Worlds::load(dir.path());
-        worlds.create("Doomed", 1).unwrap();
+        worlds.create("Doomed", 1, Preset::Normal).unwrap();
         let path = worlds.list()[0].directory.clone();
         assert!(path.is_dir());
 
@@ -458,6 +640,9 @@ mod tests {
         worlds.worlds.push(World {
             name: "fake".to_string(),
             seed: None,
+            preset: Preset::Normal,
+            zone: Zone::Temperate,
+            scale: Scale::Earth,
             directory: stray.clone(),
             last_played: 0,
         });
@@ -476,6 +661,9 @@ mod tests {
         worlds.worlds.push(World {
             name: "escape".to_string(),
             seed: None,
+            preset: Preset::Normal,
+            zone: Zone::Temperate,
+            scale: Scale::Earth,
             directory: elsewhere.path().to_path_buf(),
             last_played: 0,
         });
@@ -495,8 +683,8 @@ mod tests {
     fn the_most_recently_played_world_comes_first() {
         let dir = TempDir::new("order");
         let mut worlds = Worlds::load(dir.path());
-        worlds.create("Old", 1).unwrap();
-        worlds.create("New", 2).unwrap();
+        worlds.create("Old", 1, Preset::Normal).unwrap();
+        worlds.create("New", 2, Preset::Normal).unwrap();
         let new_index = worlds.list().iter().position(|w| w.name == "New").unwrap();
         worlds.mark_played(new_index);
 
@@ -510,7 +698,7 @@ mod tests {
         // generate a different world for anyone who types 0 in.
         let dir = TempDir::new("zeroseed");
         let mut worlds = Worlds::load(dir.path());
-        worlds.create("Zero", 0).unwrap();
+        worlds.create("Zero", 0, Preset::Normal).unwrap();
         assert_eq!(Worlds::load(dir.path()).list()[0].seed, Some(0));
     }
 
@@ -561,7 +749,7 @@ mod tests {
     fn a_normal_saves_root_is_not_adopted_as_a_world_itself() {
         let dir = TempDir::new("normal-root");
         let mut worlds = Worlds::load(dir.path());
-        worlds.create("Only", 1).unwrap();
+        worlds.create("Only", 1, Preset::Normal).unwrap();
         assert_eq!(Worlds::load(dir.path()).list().len(), 1);
     }
 
@@ -577,6 +765,9 @@ mod tests {
         let world = World {
             name: "w".to_string(),
             seed: None,
+            preset: Preset::Normal,
+            zone: Zone::Temperate,
+            scale: Scale::Earth,
             directory: PathBuf::new(),
             last_played: 1_000_000,
         };
@@ -607,6 +798,9 @@ mod tests {
         let world = World {
             name: "w".to_string(),
             seed: None,
+            preset: Preset::Normal,
+            zone: Zone::Temperate,
+            scale: Scale::Earth,
             directory: PathBuf::new(),
             last_played: 5_000,
         };

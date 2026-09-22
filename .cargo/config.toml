@@ -1,0 +1,40 @@
+# How the Android targets find a linker.
+#
+# Rust knows how to *compile* for Android the moment `rustup target add`
+# has run, and then cannot link, because linking needs the NDK's clang
+# wrapper -- the one that knows which sysroot and which API level. There
+# is no way to discover that from inside cargo, so it is written down
+# here.
+#
+# ## Why the paths are not absolute
+#
+# They are relative to nothing: cargo runs the linker as a command, so a
+# bare name is looked up on `PATH`. `package.sh --android` and
+# `package.ps1 -Android` put the NDK's `bin` on `PATH` before calling
+# cargo, which keeps the NDK's location out of a file that is committed
+# and lets a machine with the NDK somewhere else still build.
+#
+# ## Why API 24
+#
+# The floor for everything this game needs: Vulkan (24), the
+# GameActivity glue android-activity is built on (24), and a
+# `libc` new enough for the `std` Rust ships. Oboe reaches AAudio at 26
+# and OpenSL ES below it, so audio works either way -- it is the one
+# subsystem that does not set the floor.
+
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android24-clang.cmd"
+
+[target.armv7-linux-androideabi]
+linker = "armv7a-linux-androideabi24-clang.cmd"
+
+[target.x86_64-linux-android]
+linker = "x86_64-linux-android24-clang.cmd"
+
+# **Инкрементальная сборка выключена.** Шесть агентов держат свои папки
+# сборки, и у каждой `debug/incremental` разрастается до семи гигабайт:
+# на этой машине диск кончался посреди прогона, и rustc падал с
+# внутренней ошибкой. Полная сборка без инкрементальности чуть дольше,
+# но тесты и так гоняются целиком, а места хватает всем.
+[build]
+incremental = false

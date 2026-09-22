@@ -1,0 +1,267 @@
+// arrays — операции над массивами.
+//
+// Подключение:
+//     import "arrays" as arrays
+//     print(arrays.fold([1, 2, 3], 0, add_two))
+//
+// Функции, принимающие функцию, ждут её значением: в dypt имя функции —
+// обычное значение, поэтому передавать можно и обычную, и вложенную.
+
+/// Новый массив из результатов f для каждого элемента.
+function apply(a, f) {
+    out = []
+    for v in a {
+        push(out, f(v))
+    }
+    return out
+}
+
+/// Элементы, для которых f вернула истину.
+function keep(a, f) {
+    out = []
+    for v in a {
+        if f(v) {
+            push(out, v)
+        }
+    }
+    return out
+}
+
+/// Свёртка слева: f(накопитель, элемент).
+function fold(a, start, f) {
+    acc = start
+    for v in a {
+        acc = f(acc, v)
+    }
+    return acc
+}
+
+/// Первый элемент, для которого f истинна, иначе null.
+function first_where(a, f) {
+    for v in a {
+        if f(v) {
+            return v
+        }
+    }
+    return null
+}
+
+/// Истинна ли f хотя бы для одного элемента.
+function any_of(a, f) {
+    for v in a {
+        if f(v) {
+            return true
+        }
+    }
+    return false
+}
+
+/// Истинна ли f для всех элементов.
+function all_of(a, f) {
+    for v in a {
+        if not f(v) {
+            return false
+        }
+    }
+    return true
+}
+
+/// Номер первого равного элемента или -1.
+function position_of(a, value) {
+    i = 0
+    while i < length(a) {
+        if a[i] == value {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+function includes(a, value) {
+    return position_of(a, value) >= 0
+}
+
+function reverse_list(a) {
+    out = []
+    i = length(a) - 1
+    while i >= 0 {
+        push(out, a[i])
+        i = i - 1
+    }
+    return out
+}
+
+function concat_list(a, b) {
+    out = []
+    for v in a {
+        push(out, v)
+    }
+    for v in b {
+        push(out, v)
+    }
+    return out
+}
+
+/// Первые n элементов.
+function take(a, n) {
+    out = []
+    i = 0
+    while i < n and i < length(a) {
+        push(out, a[i])
+        i = i + 1
+    }
+    return out
+}
+
+/// Всё, кроме первых n элементов.
+function drop(a, n) {
+    out = []
+    i = n
+    while i < length(a) {
+        push(out, a[i])
+        i = i + 1
+    }
+    return out
+}
+
+function sum_list(a) {
+    total = 0
+    for v in a {
+        total = total + v
+    }
+    return total
+}
+
+function min_list(a) {
+    if length(a) == 0 {
+        return null
+    }
+    best = a[0]
+    for v in a {
+        if v < best {
+            best = v
+        }
+    }
+    return best
+}
+
+function max_list(a) {
+    if length(a) == 0 {
+        return null
+    }
+    best = a[0]
+    for v in a {
+        if v > best {
+            best = v
+        }
+    }
+    return best
+}
+
+/// Копия массива без повторов, порядок первого появления сохраняется.
+function unique_list(a) {
+    out = []
+    for v in a {
+        if not includes(out, v) {
+            push(out, v)
+        }
+    }
+    return out
+}
+
+/// Массив массивов превращается в один массив.
+function flatten_list(a) {
+    out = []
+    for row in a {
+        for v in row {
+            push(out, v)
+        }
+    }
+    return out
+}
+
+/// Массив чисел от 0 до n (не включая).
+function range_list(n) {
+    out = []
+    i = 0
+    while i < n {
+        push(out, i)
+        i = i + 1
+    }
+    return out
+}
+
+/// Массив чисел от start до stop (не включая) с шагом step.
+function range_step(start, stop, step) {
+    out = []
+    i = start
+    if step > 0 {
+        while i < stop {
+            push(out, i)
+            i = i + step
+        }
+    } elif step < 0 {
+        while i > stop {
+            push(out, i)
+            i = i + step
+        }
+    }
+    return out
+}
+
+/// Новый отсортированный массив. Сортировка вставками: она устойчива и на
+/// небольших массивах, ради которых всё это и пишется, ведёт себя предсказуемо.
+function sort_list(a) {
+    out = []
+    for v in a {
+        push(out, v)
+    }
+    i = 1
+    while i < length(out) {
+        current = out[i]
+        j = i - 1
+        while j >= 0 and out[j] > current {
+            out[j + 1] = out[j]
+            j = j - 1
+        }
+        out[j + 1] = current
+        i = i + 1
+    }
+    return out
+}
+
+/// То же, но порядок задаёт функция: less(a, b) истинна, если a идёт раньше b.
+function sort_by(a, less) {
+    out = []
+    for v in a {
+        push(out, v)
+    }
+    i = 1
+    while i < length(out) {
+        current = out[i]
+        j = i - 1
+        while j >= 0 and less(current, out[j]) {
+            out[j + 1] = out[j]
+            j = j - 1
+        }
+        out[j + 1] = current
+        i = i + 1
+    }
+    return out
+}
+
+/// Пары соответствующих элементов двух массивов.
+function zip_lists(a, b) {
+    out = []
+    i = 0
+    n = length(a)
+    if length(b) < n {
+        n = length(b)
+    }
+    while i < n {
+        push(out, [a[i], b[i]])
+        i = i + 1
+    }
+    return out
+}

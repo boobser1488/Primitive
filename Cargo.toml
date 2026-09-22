@@ -2,14 +2,41 @@
 resolver = "2"
 members = [
     "primitive_shared",
+    "primitive_modapi",
     "primitive_server",
     "primitive_client",
+    # The worked example. In the workspace rather than beside it, so a
+    # change to the mod API that breaks a mod breaks the *build* -- an
+    # extension point exercised only by the code that implements it is an
+    # extension point whose first real user finds the mistakes.
+    "mods/greeter",
+    # ...and the one that adds something. The greeter proves the
+    # boundary works; this one uses it to ship a feature, which is the
+    # other half of the same argument -- an extension point whose only
+    # user is a demonstration is an extension point nobody has tried to
+    # build anything with.
+    "mods/flight",
+    # ...and the one that calls everything. The greeter proves the
+    # boundary works and the flight mod proves it carries a feature;
+    # this one is the answer to a hole neither could find. Nine of the
+    # events the API declared were never fired by the server and a
+    # registered chunk decorator was never run -- every one of which
+    # compiled, and every one of which would have been caught the first
+    # time somebody on the other side of the boundary said "I subscribed
+    # and nothing called me". That is what /sandbox says out loud.
+    "mods/sandbox",
+    # ...и тот, который приводит с собой чужой язык. Он в рабочем
+    # пространстве по той же причине, что и остальные, и **только он
+    # один** не тянет за собой ничего снаружи: сам dypt живёт в другом
+    # репозитории и открывается на ходу, по имени файла. Иначе сборка
+    # игры зависела бы от каталога, которого на чужой машине нет.
+    "mods/dypt",
 ]
 
 [workspace.package]
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
-license = "LicenseRef-Proprietary"
+license = "Apache-2.0 AND LicenseRef-Primitive-Assets"
 authors = ["Primitive"]
 repository = ""
 
@@ -37,6 +64,11 @@ bincode = "1"
 anyhow = "1"
 toml = "0.8"
 noise = "0.8"
+# The native mod boundary. `libloading` is the portable `dlopen`;
+# `ron` is what a mod manifest is written in -- see
+# `primitive_modapi::manifest` for why not TOML.
+libloading = "0.8"
+ron = "0.8"
 
 # Release builds are what players get, so they are tuned for the game
 # rather than for build time: one codegen unit and fat LTO across the

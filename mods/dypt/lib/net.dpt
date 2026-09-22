@@ -1,0 +1,1282 @@
+// net — сокеты, TCP, UDP, HTTP и свой сервер.
+//
+// Подключение:
+//     import "net" as net
+//
+//     // клиент
+//     s = net.connect("example.com", 80)
+//     net.send_text(s, "GET / HTTP/1.0\r\n\r\n")
+//     print(net.receive_text(s, 4096))
+//     net.close(s)
+//
+//     // свой сервер
+//     function отдать(запрос) {
+//         return net.reply_text(200, "привет, " + запрос["path"])
+//     }
+//     net.serve(8080, отдать)
+//
+// Работа идёт через ws2_32.dll — те же сокеты Berkeley, что и везде,
+// только под именами Windows. Только Windows.
+//
+// Чем этот модуль отличается от http: там запросы уходят через wininet
+// и потому умеют https, а здесь всё пишется в сокет своими руками —
+// зато можно свой протокол, UDP и свой сервер. Защиты соединения тут
+// нет: за https по-прежнему в http, а если нужен свой протокол поверх
+// сокета — берите ключ из crypto и шифруйте тело сами (так сделано
+// в примере с шахматами).
+//
+// Двоичные данные, как и в crypto, — массив чисел от 0 до 255.
+
+import "crypto" as ncrypto
+import "json" as njson
+
+extern "ws2_32.dll" {
+    function WSAStartup(версия: int, данные: int): int
+    function WSACleanup(): int
+    function WSAGetLastError(): int
+    function socket(семейство: int, вид: int, протокол: int): int
+    function bind(s: int, адрес: int, длина: int): int
+    function listen(s: int, очередь: int): int
+    function accept(s: int, адрес: int, длина: int): int
+    function connect(s: int, адрес: int, длина: int): int
+    function send(s: int, буфер: int, длина: int, флаги: int): int
+    function recv(s: int, буфер: int, длина: int, флаги: int): int
+    function sendto(s: int, буфер: int, длина: int, флаги: int, адрес: int, длина_адреса: int): int
+    function recvfrom(s: int, буфер: int, длина: int, флаги: int, адрес: int, длина_адреса: int): int
+    function closesocket(s: int): int
+    function shutdown(s: int, как: int): int
+    function ioctlsocket(s: int, что: int, значение: int): int
+    function setsockopt(s: int, уровень: int, имя: int, значение: int, длина: int): int
+    function select(n: int, чтение: int, запись: int, ошибки: int, время: int): int
+    function gethostbyname(имя: string): int
+    function getpeername(s: int, адрес: int, длина: int): int
+    function getsockname(s: int, адрес: int, длина: int): int
+}
+
+extern "kernel32.dll" {
+    function RtlMoveMemory(куда: int, откуда: int, сколько: int): int
+    function CreateFileW(имя: int, доступ: int, общий: int, охрана: int, как: int, свойства: int, образец: int): int
+    function ReadFile(файл: int, буфер: int, сколько: int, прочитано: int, нахлёст: int): int
+    function WriteFile(файл: int, буфер: int, сколько: int, записано: int, нахлёст: int): int
+    function GetFileSize(файл: int, старшее: int): int
+    function CloseHandle(h: int): int
+}
+
+_NET_AF_INET = 2
+_NET_STREAM = 1
+_NET_DGRAM = 2
+_NET_TCP = 6
+_NET_UDP = 17
+_NET_FIONBIO = 2147772030
+_NET_WOULDBLOCK = 10035
+
+_net_started = false
+_net_addr = 0
+_net_addr2 = 0
+_net_small = 0
+_net_fdset = 0
+_net_time = 0
+_net_last = ""
+
+/// Готовит сокеты к работе. Зовётся сама при первом же действии,
+/// поэтому обычно её звать не нужно.
+function start() {
+    if _net_started {
+        return true
+    }
+    данные = raw_alloc(512)
+    вышло = _net_i32(WSAStartup(514, данные))
+    raw_free(данные)
+    if вышло != 0 {
+        _net_last = "не удалось начать работу с сокетами (" + вышло + ")"
+        return false
+    }
+    _net_addr = raw_alloc(32)
+    _net_addr2 = raw_alloc(32)
+    _net_small = raw_alloc(64)
+    _net_fdset = raw_alloc(528)
+    _net_time = raw_alloc(8)
+    _net_started = true
+    return true
+}
+
+/// Пояснение к последней неудаче.
+function last_error() {
+    return _net_last
+}
+
+/// Имя узла в четыре числа адреса: "localhost" — [127, 0, 0, 1].
+/// Ответ null, если имя не разрешилось.
+function resolve(имя) {
+    if start() == false {
+        return null
+    }
+    прямо = _net_parse_ip(имя)
+    if прямо != null {
+        return прямо
+    }
+    h = gethostbyname(имя)
+    if h == 0 {
+        _net_last = "узел не найден: " + имя
+        return null
+    }
+    // hostent: h_addr_list лежит по смещению 24, за ним список указателей
+    список = _net_peek_ptr(h + 24)
+    if список == 0 {
+        return null
+    }
+    первый = _net_peek_ptr(список)
+    if первый == 0 {
+        return null
+    }
+    RtlMoveMemory(_net_small, первый, 4)
+    return [raw_get8(_net_small, 0), raw_get8(_net_small, 1),
+            raw_get8(_net_small, 2), raw_get8(_net_small, 3)]
+}
+
+/// Адрес числами в привычную запись: [127, 0, 0, 1] — "127.0.0.1".
+function ip_text(адрес) {
+    return адрес[0] + "." + адрес[1] + "." + адрес[2] + "." + адрес[3]
+}
+
+// ------------------------------------------------------------ TCP клиент
+
+/// Соединение с узлом. Ответ — сокет или 0.
+function connect_to(узел, порт) {
+    if start() == false {
+        return 0
+    }
+    адрес = resolve(узел)
+    if адрес == null {
+        return 0
+    }
+    s = socket(_NET_AF_INET, _NET_STREAM, _NET_TCP)
+    if s < 0 {
+        _net_last = "не удалось завести сокет (" + WSAGetLastError() + ")"
+        return 0
+    }
+    _net_fill_addr(_net_addr, адрес, порт)
+    if connect(s, _net_addr, 16) != 0 {
+        _net_last = "не удалось соединиться с " + узел + ":" + порт + " (" + WSAGetLastError() + ")"
+        closesocket(s)
+        return 0
+    }
+    return s
+}
+
+/// Отправить байты целиком. Ответ — сколько ушло, или -1.
+function send_bytes(s, байты) {
+    n = length(байты)
+    if n == 0 {
+        return 0
+    }
+    буфер = raw_alloc(n)
+    i = 0
+    while i < n {
+        raw_set8(буфер, i, and(байты[i], 255))
+        i = i + 1
+    }
+    ушло = 0
+    while ушло < n {
+        сколько = _net_i32(send(s, буфер + ушло, n - ушло, 0))
+        if сколько <= 0 {
+            _net_last = "обрыв при отправке (" + WSAGetLastError() + ")"
+            raw_free(буфер)
+            return -1
+        }
+        ушло = ушло + сколько
+    }
+    raw_free(буфер)
+    return ушло
+}
+
+/// Отправить строку (в UTF-8).
+function send_text(s, текст) {
+    return send_bytes(s, ncrypto.utf8_bytes(текст))
+}
+
+/// Принять до «максимум» байтов. Пустой массив — пока ничего нет,
+/// null — соединение закрыто или сломалось.
+function receive(s, максимум) {
+    буфер = raw_alloc(максимум)
+    n = _net_i32(recv(s, буфер, максимум, 0))
+    if n == 0 {
+        raw_free(буфер)
+        return null
+    }
+    if n < 0 {
+        raw_free(буфер)
+        if WSAGetLastError() == _NET_WOULDBLOCK {
+            return []
+        }
+        _net_last = "обрыв при приёме (" + WSAGetLastError() + ")"
+        return null
+    }
+    out = []
+    i = 0
+    while i < n {
+        push(out, raw_get8(буфер, i))
+        i = i + 1
+    }
+    raw_free(буфер)
+    return out
+}
+
+/// То же строкой; null — соединение закрыто.
+function receive_text(s, максимум) {
+    байты = receive(s, максимум)
+    if байты == null {
+        return null
+    }
+    return ncrypto.utf8_text(байты)
+}
+
+/// Принять ровно столько байтов, сколько сказано, — сколько бы кусков
+/// на это ни ушло. null, если соединение закрылось раньше.
+function receive_exact(s, сколько, ждать_мс) {
+    out = []
+    предел = clock() + ждать_мс
+    while length(out) < сколько {
+        if wait_readable(s, 50) {
+            кусок = receive(s, сколько - length(out))
+            if кусок == null {
+                return null
+            }
+            i = 0
+            while i < length(кусок) {
+                push(out, кусок[i])
+                i = i + 1
+            }
+        } elif clock() > предел {
+            return null
+        }
+    }
+    return out
+}
+
+/// Ждать, пока в сокете появится что читать. true — появилось.
+function wait_readable(s, мс) {
+    if _net_started == false {
+        return false
+    }
+    raw_set32(_net_fdset, 0, 1)
+    raw_set32(_net_fdset, 8, and(s, 4294967295))
+    raw_set32(_net_fdset, 12, shr(s, 32))
+    raw_set32(_net_time, 0, мс / 1000)
+    raw_set32(_net_time, 4, (мс % 1000) * 1000)
+    return _net_i32(select(0, _net_fdset, 0, 0, _net_time)) > 0
+}
+
+/// Ждать ли ответа сокета или сразу возвращать управление.
+function set_blocking(s, ждать) {
+    режим = 1
+    if ждать {
+        режим = 0
+    }
+    raw_set32(_net_small, 0, режим)
+    return ioctlsocket(s, _NET_FIONBIO, _net_small) == 0
+}
+
+/// Закрыть сокет.
+function close(s) {
+    if s != 0 {
+        shutdown(s, 2)
+        closesocket(s)
+    }
+    return null
+}
+
+/// Адрес того, кто на другом конце: [127, 0, 0, 1].
+function peer_address(s) {
+    raw_set32(_net_small, 0, 16)
+    if getpeername(s, _net_addr2, _net_small) != 0 {
+        return [0, 0, 0, 0]
+    }
+    return [raw_get8(_net_addr2, 4), raw_get8(_net_addr2, 5),
+            raw_get8(_net_addr2, 6), raw_get8(_net_addr2, 7)]
+}
+
+/// Порт, на котором в самом деле сидит сокет: пригодится, если при
+/// открытии был задан ноль и порт выбрала система.
+function local_port(s) {
+    raw_set32(_net_small, 0, 16)
+    if getsockname(s, _net_addr2, _net_small) != 0 {
+        return 0
+    }
+    return raw_get8(_net_addr2, 2) * 256 + raw_get8(_net_addr2, 3)
+}
+
+// ------------------------------------------------------------ TCP сервер
+
+/// Слушать порт. Ответ — сокет или 0. Сокет неблокирующий: accept
+/// сразу возвращает 0, если никто не пришёл.
+function listen_on(порт) {
+    if start() == false {
+        return 0
+    }
+    s = socket(_NET_AF_INET, _NET_STREAM, _NET_TCP)
+    if s < 0 {
+        _net_last = "не удалось завести сокет (" + WSAGetLastError() + ")"
+        return 0
+    }
+    // SO_REUSEADDR: иначе после остановки порт держится ещё минуту
+    raw_set32(_net_small, 0, 1)
+    setsockopt(s, 65535, 4, _net_small, 4)
+    _net_fill_addr(_net_addr, [0, 0, 0, 0], порт)
+    if bind(s, _net_addr, 16) != 0 {
+        _net_last = "порт " + порт + " занят (" + WSAGetLastError() + ")"
+        closesocket(s)
+        return 0
+    }
+    if listen(s, 16) != 0 {
+        _net_last = "не удалось слушать порт " + порт + " (" + WSAGetLastError() + ")"
+        closesocket(s)
+        return 0
+    }
+    set_blocking(s, false)
+    return s
+}
+
+/// Принять соединение, если оно есть. Ответ — сокет или 0.
+function accept_now(s) {
+    клиент = accept(s, 0, 0)
+    if клиент < 0 {
+        return 0
+    }
+    return клиент
+}
+
+/// Подождать соединения до «мс» миллисекунд.
+function accept_wait(s, мс) {
+    if wait_readable(s, мс) == false {
+        return 0
+    }
+    return accept_now(s)
+}
+
+// ------------------------------------------------------------------- UDP
+
+/// Открыть UDP-сокет на порту; ноль — пусть порт выберет система.
+function udp_open(порт) {
+    if start() == false {
+        return 0
+    }
+    s = socket(_NET_AF_INET, _NET_DGRAM, _NET_UDP)
+    if s < 0 {
+        _net_last = "не удалось завести сокет (" + WSAGetLastError() + ")"
+        return 0
+    }
+    _net_fill_addr(_net_addr, [0, 0, 0, 0], порт)
+    if bind(s, _net_addr, 16) != 0 {
+        _net_last = "порт " + порт + " занят (" + WSAGetLastError() + ")"
+        closesocket(s)
+        return 0
+    }
+    set_blocking(s, false)
+    return s
+}
+
+/// Отправить письмо по адресу. Ответ — сколько ушло, или -1.
+function send_to(s, узел, порт, байты) {
+    адрес = resolve(узел)
+    if адрес == null {
+        return -1
+    }
+    n = length(байты)
+    буфер = raw_alloc(n + 1)
+    i = 0
+    while i < n {
+        raw_set8(буфер, i, and(байты[i], 255))
+        i = i + 1
+    }
+    _net_fill_addr(_net_addr, адрес, порт)
+    ушло = _net_i32(sendto(s, буфер, n, 0, _net_addr, 16))
+    raw_free(буфер)
+    if ушло < 0 {
+        _net_last = "письмо не ушло (" + WSAGetLastError() + ")"
+        return -1
+    }
+    return ушло
+}
+
+/// То же строкой.
+function send_text_to(s, узел, порт, текст) {
+    return send_to(s, узел, порт, ncrypto.utf8_bytes(текст))
+}
+
+/// Принять письмо. Ответ — словарь с bytes, host и port, или null,
+/// если писем нет.
+function receive_from(s, максимум) {
+    буфер = raw_alloc(максимум)
+    raw_set32(_net_small, 0, 16)
+    n = _net_i32(recvfrom(s, буфер, максимум, 0, _net_addr2, _net_small))
+    if n < 0 {
+        raw_free(буфер)
+        return null
+    }
+    байты = []
+    i = 0
+    while i < n {
+        push(байты, raw_get8(буфер, i))
+        i = i + 1
+    }
+    raw_free(буфер)
+    return {"bytes": байты,
+            "host": ip_text([raw_get8(_net_addr2, 4), raw_get8(_net_addr2, 5),
+                             raw_get8(_net_addr2, 6), raw_get8(_net_addr2, 7)]),
+            "port": raw_get8(_net_addr2, 2) * 256 + raw_get8(_net_addr2, 3)}
+}
+
+// ---------------------------------------------------------- HTTP клиентом
+
+/// Запрос по http своими руками. Только http: защищённое соединение
+/// здесь не устроено — за https идите в модуль http.
+///
+/// Ответ — тот же словарь, что у http.fetch: ok, status, headers, body.
+function http_request(метод, url, headers, body) {
+    адрес = parse_url(url)
+    ответ = {"ok": false, "status": 0, "headers": {}, "body": "", "error": "", "url": url}
+    if адрес["secure"] {
+        ответ["error"] = "net умеет только http; для https возьмите модуль http"
+        _net_last = ответ["error"]
+        return ответ
+    }
+    s = connect_to(адрес["host"], адрес["port"])
+    if s == 0 {
+        ответ["error"] = _net_last
+        return ответ
+    }
+    тело = []
+    if body != null and body != "" {
+        тело = ncrypto.utf8_bytes(body)
+    }
+    строка = метод + " " + адрес["path"] + " HTTP/1.1\r\n"
+    строка = строка + "Host: " + адрес["host"] + "\r\n"
+    строка = строка + "Connection: close\r\n"
+    if headers != null {
+        имена = keys(headers)
+        i = 0
+        while i < length(имена) {
+            строка = строка + имена[i] + ": " + headers[имена[i]] + "\r\n"
+            i = i + 1
+        }
+    }
+    if length(тело) > 0 {
+        строка = строка + "Content-Length: " + length(тело) + "\r\n"
+    }
+    строка = строка + "\r\n"
+    запрос = ncrypto.utf8_bytes(строка)
+    i = 0
+    while i < length(тело) {
+        push(запрос, тело[i])
+        i = i + 1
+    }
+    if send_bytes(s, запрос) < 0 {
+        close(s)
+        ответ["error"] = _net_last
+        return ответ
+    }
+
+    // Ответ читается до закрытия соединения — мы сами просили Connection: close.
+    всё = []
+    while true {
+        if wait_readable(s, 15000) == false {
+            break
+        }
+        кусок = receive(s, 16384)
+        if кусок == null {
+            break
+        }
+        i = 0
+        while i < length(кусок) {
+            push(всё, кусок[i])
+            i = i + 1
+        }
+    }
+    close(s)
+    return _net_parse_response(всё, ответ)
+}
+
+/// GET по адресу.
+function http_get(url) {
+    return http_request("GET", url, null, null)
+}
+
+/// POST с указанием вида тела.
+function http_post(url, body, вид) {
+    return http_request("POST", url, {"Content-Type": вид}, body)
+}
+
+/// POST значением dypt, переведённым в JSON; ответ тоже разбирается,
+/// если служба отдала JSON, и кладётся в поле json.
+function http_post_json(url, значение) {
+    ответ = http_request("POST", url, {"Content-Type": "application/json"}, njson.encode(значение))
+    ответ["json"] = null
+    if ответ["body"] != "" {
+        try {
+            ответ["json"] = njson.decode(ответ["body"])
+        } catch (e) {
+            ответ["json"] = null
+        }
+    }
+    return ответ
+}
+
+/// Разбор адреса: словарь со scheme, host, port, path и secure.
+function parse_url(url) {
+    остаток = url
+    схема = "http"
+    защита = false
+    if _net_starts(остаток, "https://") {
+        схема = "https"
+        защита = true
+        остаток = _net_after(остаток, 8)
+    } elif _net_starts(остаток, "http://") {
+        остаток = _net_after(остаток, 7)
+    }
+    косая = _net_find(остаток, "/")
+    узел = остаток
+    путь = "/"
+    if косая >= 0 {
+        узел = _net_cut(остаток, 0, косая)
+        путь = _net_after(остаток, косая)
+    }
+    порт = 80
+    if защита {
+        порт = 443
+    }
+    двоеточие = _net_find(узел, ":")
+    if двоеточие >= 0 {
+        число = _net_int(_net_after(узел, двоеточие + 1))
+        узел = _net_cut(узел, 0, двоеточие)
+        if число != null {
+            порт = число
+        }
+    }
+    return {"scheme": схема, "host": узел, "port": порт, "path": путь, "secure": защита}
+}
+
+// ------------------------------------------------------------ свой сервер
+
+/// Слушать порт под HTTP. Ответ — словарь сервера или null.
+function server_start(порт) {
+    s = listen_on(порт)
+    if s == 0 {
+        return null
+    }
+    return {"socket": s, "port": порт, "запросов": 0}
+}
+
+/// Разобрать всё, что пришло, и не ждать, если не пришло ничего.
+/// «обработчик» получает словарь запроса и возвращает словарь ответа
+/// (см. reply_text и его товарищей). Ответ — сколько запросов разобрано.
+///
+/// Этим можно держать сервер прямо в игровом витке: он не остановит
+/// рисование, если никто не стучится.
+function server_poll(сервер, обработчик) {
+    разобрано = 0
+    while true {
+        клиент = accept_now(сервер["socket"])
+        if клиент == 0 {
+            return разобрано
+        }
+        _net_handle(клиент, обработчик)
+        сервер["запросов"] = сервер["запросов"] + 1
+        разобрано = разобрано + 1
+    }
+    return разобрано
+}
+
+/// Подождать одного запроса до «мс» миллисекунд. Ответ — разобран ли он.
+function server_wait(сервер, обработчик, мс) {
+    клиент = accept_wait(сервер["socket"], мс)
+    if клиент == 0 {
+        return false
+    }
+    _net_handle(клиент, обработчик)
+    сервер["запросов"] = сервер["запросов"] + 1
+    return true
+}
+
+/// Закрыть сервер.
+function server_stop(сервер) {
+    if сервер != null {
+        close(сервер["socket"])
+    }
+    return null
+}
+
+/// Простейший случай: слушать порт и разбирать запросы, пока не
+/// остановят. Возвращает управление, только если порт не открылся или
+/// обработчик вернул строку "стоп".
+function serve(порт, обработчик) {
+    сервер = server_start(порт)
+    if сервер == null {
+        return false
+    }
+    _net_serving = true
+    while _net_serving {
+        server_wait(сервер, обработчик, 250)
+    }
+    server_stop(сервер)
+    return true
+}
+
+_net_serving = false
+
+/// Прекратить serve — например, из самого обработчика.
+function serve_stop() {
+    _net_serving = false
+    return null
+}
+
+// ------------------------------------------------------------- ответы
+
+/// Ответ со своим видом тела.
+function reply(код, вид, тело) {
+    return {"код": код, "вид": вид, "тело": ncrypto.utf8_bytes(тело), "заголовки": {}}
+}
+
+/// Ответ обычным текстом.
+function reply_text(код, текст) {
+    return reply(код, "text/plain; charset=utf-8", текст)
+}
+
+/// Ответ разметкой.
+function reply_html(код, текст) {
+    return reply(код, "text/html; charset=utf-8", текст)
+}
+
+/// Ответ значением dypt, переведённым в JSON.
+function reply_json(код, значение) {
+    return reply(код, "application/json; charset=utf-8", njson.encode(значение))
+}
+
+/// Ответ готовыми байтами — картинкой, например.
+function reply_bytes(код, вид, байты) {
+    return {"код": код, "вид": вид, "тело": байты, "заголовки": {}}
+}
+
+/// Ответ содержимым файла; null вместо вида — угадать по расширению.
+function reply_file(путь, вид) {
+    байты = file_bytes(путь)
+    if байты == null {
+        return reply_text(404, "нет такого файла")
+    }
+    if вид == null {
+        вид = mime_type(путь)
+    }
+    return reply_bytes(200, вид, байты)
+}
+
+/// «Не найдено».
+function not_found() {
+    return reply_text(404, "не найдено")
+}
+
+/// Вид содержимого по расширению имени.
+function mime_type(путь) {
+    точка = _net_last_find(путь, ".")
+    if точка < 0 {
+        return "application/octet-stream"
+    }
+    р = lower(_net_after(путь, точка + 1))
+    if р == "html" or р == "htm" { return "text/html; charset=utf-8" }
+    if р == "txt" { return "text/plain; charset=utf-8" }
+    if р == "json" { return "application/json; charset=utf-8" }
+    if р == "css" { return "text/css; charset=utf-8" }
+    if р == "js" { return "text/javascript; charset=utf-8" }
+    if р == "bmp" { return "image/bmp" }
+    if р == "png" { return "image/png" }
+    if р == "jpg" or р == "jpeg" { return "image/jpeg" }
+    if р == "gif" { return "image/gif" }
+    if р == "ico" { return "image/x-icon" }
+    if р == "svg" { return "image/svg+xml; charset=utf-8" }
+    if р == "webp" { return "image/webp" }
+    if р == "woff2" { return "font/woff2" }
+    if р == "woff" { return "font/woff" }
+    if р == "wav" { return "audio/wav" }
+    return "application/octet-stream"
+}
+
+/// Содержимое файла байтами — в отличие от read(), который читает текст
+/// и на двоичном файле портит данные. null, если файла нет.
+function file_bytes(путь) {
+    широкий = _net_wide(путь)
+    файл = CreateFileW(широкий, 2147483648, 1, 0, 3, 128, 0)
+    raw_free(широкий)
+    if файл == -1 {
+        return null
+    }
+    размер = _net_i32(GetFileSize(файл, 0))
+    if размер <= 0 {
+        CloseHandle(файл)
+        return []
+    }
+    буфер = raw_alloc(размер)
+    прочитано = raw_alloc(4)
+    ReadFile(файл, буфер, размер, прочитано, 0)
+    n = raw_get32(прочитано, 0)
+    out = []
+    i = 0
+    while i < n {
+        push(out, raw_get8(буфер, i))
+        i = i + 1
+    }
+    raw_free(буфер)
+    raw_free(прочитано)
+    CloseHandle(файл)
+    return out
+}
+
+/// Записать байты в файл. Нужна по двум причинам: встроенная write
+/// пишет текст и портит двоичные данные, а в собранном через --exe файле
+/// она к тому же кладёт имя файла не в UTF-8 — русское имя выходит
+/// кракозябрами. Здесь имя уходит широким, поэтому и там и там
+/// получается один и тот же файл.
+function write_file(путь, байты) {
+    широкий = _net_wide(путь)
+    // GENERIC_WRITE, CREATE_ALWAYS
+    файл = CreateFileW(широкий, 1073741824, 0, 0, 2, 128, 0)
+    raw_free(широкий)
+    if файл == -1 {
+        _net_last = "не удалось создать файл " + путь
+        return false
+    }
+    n = length(байты)
+    вышло = true
+    if n > 0 {
+        буфер = raw_alloc(n)
+        i = 0
+        while i < n {
+            raw_set8(буфер, i, and(байты[i], 255))
+            i = i + 1
+        }
+        записано = raw_alloc(4)
+        if WriteFile(файл, буфер, n, записано, 0) == 0 {
+            _net_last = "не удалось записать " + путь
+            вышло = false
+        }
+        raw_free(буфер)
+        raw_free(записано)
+    }
+    CloseHandle(файл)
+    return вышло
+}
+
+/// То же строкой: текст уходит в файл в UTF-8.
+function write_text_file(путь, текст) {
+    return write_file(путь, ncrypto.utf8_bytes(текст))
+}
+
+/// Содержимое файла строкой — пара к write_text_file.
+function read_text_file(путь) {
+    байты = file_bytes(путь)
+    if байты == null {
+        return null
+    }
+    return ncrypto.utf8_text(байты)
+}
+
+// -------------------------------------------------------------- разбор
+
+// Один запрос от начала до конца: прочитать, разобрать, ответить, закрыть.
+function _net_handle(клиент, обработчик) {
+    set_blocking(клиент, false)
+    заголовок = []
+    предел = clock() + 5000
+    конец = -1
+    while конец < 0 {
+        if wait_readable(клиент, 100) {
+            кусок = receive(клиент, 8192)
+            if кусок == null {
+                close(клиент)
+                return null
+            }
+            i = 0
+            while i < length(кусок) {
+                push(заголовок, кусок[i])
+                i = i + 1
+            }
+            конец = _net_find_break(заголовок)
+        }
+        if clock() > предел {
+            close(клиент)
+            return null
+        }
+    }
+
+    запрос = _net_parse_request(заголовок, конец)
+    if запрос == null {
+        _net_write(клиент, reply_text(400, "негодный запрос"))
+        close(клиент)
+        return null
+    }
+    запрос["ip"] = ip_text(peer_address(клиент))
+
+    // тело: то, что уже прочитано, плюс недостающее
+    нужно = 0
+    if has(запрос["headers"], "content-length") {
+        число = _net_int(запрос["headers"]["content-length"])
+        if число != null {
+            нужно = число
+        }
+    }
+    тело = []
+    i = конец + 4
+    while i < length(заголовок) {
+        push(тело, заголовок[i])
+        i = i + 1
+    }
+    while length(тело) < нужно {
+        if wait_readable(клиент, 100) == false {
+            if clock() > предел {
+                break
+            }
+            continue
+        }
+        кусок = receive(клиент, нужно - length(тело))
+        if кусок == null {
+            break
+        }
+        i = 0
+        while i < length(кусок) {
+            push(тело, кусок[i])
+            i = i + 1
+        }
+    }
+    запрос["bytes"] = тело
+    запрос["body"] = ncrypto.utf8_text(тело)
+
+    ответ = обработчик(запрос)
+    if ответ == null {
+        ответ = not_found()
+    }
+    _net_write(клиент, ответ)
+    close(клиент)
+    return null
+}
+
+function _net_write(клиент, ответ) {
+    тело = ответ["тело"]
+    строка = "HTTP/1.1 " + ответ["код"] + " " + _net_status_text(ответ["код"]) + "\r\n"
+    строка = строка + "Content-Type: " + ответ["вид"] + "\r\n"
+    строка = строка + "Content-Length: " + length(тело) + "\r\n"
+    строка = строка + "Connection: close\r\n"
+    if has(ответ, "заголовки") {
+        имена = keys(ответ["заголовки"])
+        i = 0
+        while i < length(имена) {
+            строка = строка + имена[i] + ": " + ответ["заголовки"][имена[i]] + "\r\n"
+            i = i + 1
+        }
+    }
+    строка = строка + "\r\n"
+    всё = ncrypto.utf8_bytes(строка)
+    i = 0
+    while i < length(тело) {
+        push(всё, тело[i])
+        i = i + 1
+    }
+    send_bytes(клиент, всё)
+    return null
+}
+
+function _net_status_text(код) {
+    if код == 200 { return "OK" }
+    if код == 201 { return "Created" }
+    if код == 204 { return "No Content" }
+    if код == 400 { return "Bad Request" }
+    if код == 401 { return "Unauthorized" }
+    if код == 403 { return "Forbidden" }
+    if код == 404 { return "Not Found" }
+    if код == 409 { return "Conflict" }
+    if код == 500 { return "Internal Server Error" }
+    return "OK"
+}
+
+// Место двойного перевода строки — конца заголовка.
+function _net_find_break(байты) {
+    n = length(байты)
+    i = 0
+    while i + 3 < n {
+        if байты[i] == 13 and байты[i + 1] == 10 and байты[i + 2] == 13 and байты[i + 3] == 10 {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+function _net_parse_request(байты, конец) {
+    голова = []
+    i = 0
+    while i < конец {
+        push(голова, байты[i])
+        i = i + 1
+    }
+    строки = split(ncrypto.utf8_text(голова), "\r\n")
+    if length(строки) == 0 {
+        return null
+    }
+    части = split(строки[0], " ")
+    if length(части) < 2 {
+        return null
+    }
+    путь = части[1]
+    вопрос = _net_find(путь, "?")
+    поля = {}
+    if вопрос >= 0 {
+        поля = _net_parse_query(_net_after(путь, вопрос + 1))
+        путь = _net_cut(путь, 0, вопрос)
+    }
+    // Путь приходит с заменой %XX: браузер так пишет всё, что не латиница.
+    // Обработчику удобнее получить его уже разобранным.
+    путь = url_decode(путь)
+    заголовки = {}
+    i = 1
+    while i < length(строки) {
+        двоеточие = _net_find(строки[i], ":")
+        if двоеточие > 0 {
+            имя = lower(_net_cut(строки[i], 0, двоеточие))
+            заголовки[имя] = _net_trim(_net_after(строки[i], двоеточие + 1))
+        }
+        i = i + 1
+    }
+    return {"method": части[0], "path": путь, "query": поля,
+            "headers": заголовки, "body": "", "bytes": [], "ip": ""}
+}
+
+function _net_parse_query(строка) {
+    поля = {}
+    куски = split(строка, "&")
+    i = 0
+    while i < length(куски) {
+        кусок = куски[i]
+        i = i + 1
+        if кусок == "" {
+            continue
+        }
+        равно = _net_find(кусок, "=")
+        if равно < 0 {
+            поля[url_decode(кусок)] = ""
+        } else {
+            поля[url_decode(_net_cut(кусок, 0, равно))] = url_decode(_net_after(кусок, равно + 1))
+        }
+    }
+    return поля
+}
+
+function _net_parse_response(байты, ответ) {
+    конец = _net_find_break(байты)
+    if конец < 0 {
+        ответ["error"] = "ответ без заголовка"
+        return ответ
+    }
+    голова = []
+    i = 0
+    while i < конец {
+        push(голова, байты[i])
+        i = i + 1
+    }
+    строки = split(ncrypto.utf8_text(голова), "\r\n")
+    части = split(строки[0], " ")
+    if length(части) >= 2 {
+        код = _net_int(части[1])
+        if код != null {
+            ответ["status"] = код
+        }
+    }
+    заголовки = {}
+    i = 1
+    while i < length(строки) {
+        двоеточие = _net_find(строки[i], ":")
+        if двоеточие > 0 {
+            имя = lower(_net_cut(строки[i], 0, двоеточие))
+            заголовки[имя] = _net_trim(_net_after(строки[i], двоеточие + 1))
+        }
+        i = i + 1
+    }
+    ответ["headers"] = заголовки
+
+    тело = []
+    i = конец + 4
+    while i < length(байты) {
+        push(тело, байты[i])
+        i = i + 1
+    }
+    if has(заголовки, "transfer-encoding") and заголовки["transfer-encoding"] == "chunked" {
+        тело = _net_unchunk(тело)
+    }
+    ответ["bytes"] = тело
+    ответ["body"] = ncrypto.utf8_text(тело)
+    ответ["ok"] = ответ["status"] > 0 and ответ["status"] < 400
+    return ответ
+}
+
+// Тело, разбитое на куски: перед каждым куском его длина
+// шестнадцатеричной записью, в конце — кусок нулевой длины.
+function _net_unchunk(байты) {
+    out = []
+    место = 0
+    n = length(байты)
+    while место < n {
+        строка = ""
+        while место < n and байты[место] != 13 {
+            строка = строка + chr(байты[место])
+            место = место + 1
+        }
+        место = место + 2
+        точка = _net_find(строка, ";")
+        if точка >= 0 {
+            строка = _net_cut(строка, 0, точка)
+        }
+        длина = _net_hex(строка)
+        if длина <= 0 {
+            return out
+        }
+        i = 0
+        while i < длина and место < n {
+            push(out, байты[место])
+            место = место + 1
+            i = i + 1
+        }
+        место = место + 2
+    }
+    return out
+}
+
+/// Обратное превращение %XX и «+» — то же, что в модуле http.
+function url_decode(s) {
+    байты = []
+    n = length(s)
+    i = 0
+    while i < n {
+        c = s[i]
+        if c == "%" and i + 2 < n {
+            пара = ncrypto.hex_decode(s[i + 1] + s[i + 2])
+            if пара == null {
+                push(байты, ord(c))
+                i = i + 1
+            } else {
+                push(байты, пара[0])
+                i = i + 3
+            }
+        } elif c == "+" {
+            push(байты, 32)
+            i = i + 1
+        } else {
+            куски = ncrypto.utf8_bytes(c)
+            k = 0
+            while k < length(куски) {
+                push(байты, куски[k])
+                k = k + 1
+            }
+            i = i + 1
+        }
+    }
+    return ncrypto.utf8_text(байты)
+}
+
+/// Знаки, которые нельзя ставить в адрес, — в %XX.
+function url_encode(s) {
+    байты = ncrypto.utf8_bytes(s)
+    цифры = "0123456789ABCDEF"
+    out = ""
+    i = 0
+    n = length(байты)
+    while i < n {
+        b = байты[i]
+        if (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 45 or b == 46 or b == 95 or b == 126 {
+            out = out + chr(b)
+        } else {
+            out = out + "%" + цифры[b / 16] + цифры[b % 16]
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ------------------------------------------------------------ внутреннее
+
+// Сокетные вызовы отдают 32-разрядное число, а внешний вызов dypt читает
+// все 64 разряда регистра: старшая половина там — что осталось от прошлых
+// вычислений. Поэтому -1 приходит как 4294967295, и его нужно вернуть
+// на место, иначе неудача выглядит очень большим успехом.
+function _net_i32(v) {
+    if v > 2147483647 and v <= 4294967295 {
+        return v - 4294967296
+    }
+    return v
+}
+
+function _net_fill_addr(куда, адрес, порт) {
+    raw_set32(куда, 0, 0)
+    raw_set32(куда, 4, 0)
+    raw_set32(куда, 8, 0)
+    raw_set32(куда, 12, 0)
+    raw_set8(куда, 0, 2)
+    raw_set8(куда, 2, порт / 256)
+    raw_set8(куда, 3, порт % 256)
+    raw_set8(куда, 4, адрес[0])
+    raw_set8(куда, 5, адрес[1])
+    raw_set8(куда, 6, адрес[2])
+    raw_set8(куда, 7, адрес[3])
+    return null
+}
+
+// Указатель, лежащий по указателю: сырая память dypt проверяет границы
+// своих кусков, поэтому чужую читаем копированием к себе.
+function _net_peek_ptr(откуда) {
+    RtlMoveMemory(_net_small, откуда, 8)
+    return raw_get32(_net_small, 0) + raw_get32(_net_small, 4) * 4294967296
+}
+
+function _net_parse_ip(строка) {
+    куски = split(строка, ".")
+    if length(куски) != 4 {
+        return null
+    }
+    out = []
+    i = 0
+    while i < 4 {
+        v = _net_int(куски[i])
+        if v == null or v < 0 or v > 255 {
+            return null
+        }
+        push(out, v)
+        i = i + 1
+    }
+    return out
+}
+
+function _net_wide(s) {
+    n = length(s)
+    буфер = raw_alloc(n * 4 + 4)
+    место = 0
+    i = 0
+    while i < n {
+        код = ord(s[i])
+        if код >= 65536 {
+            остаток = код - 65536
+            место = _net_put16(буфер, место, 55296 + shr(остаток, 10))
+            место = _net_put16(буфер, место, 56320 + and(остаток, 1023))
+        } else {
+            место = _net_put16(буфер, место, код)
+        }
+        i = i + 1
+    }
+    _net_put16(буфер, место, 0)
+    return буфер
+}
+
+function _net_put16(буфер, место, значение) {
+    raw_set8(буфер, место, and(значение, 255))
+    raw_set8(буфер, место + 1, and(shr(значение, 8), 255))
+    return место + 2
+}
+
+function _net_int(s) {
+    n = length(s)
+    if n == 0 {
+        return null
+    }
+    v = 0
+    i = 0
+    while i < n {
+        k = ord(s[i])
+        if k < 48 or k > 57 {
+            return null
+        }
+        v = v * 10 + (k - 48)
+        i = i + 1
+    }
+    return v
+}
+
+function _net_hex(s) {
+    v = 0
+    i = 0
+    n = length(s)
+    if n == 0 {
+        return -1
+    }
+    while i < n {
+        k = ord(s[i])
+        ц = -1
+        if k >= 48 and k <= 57 { ц = k - 48 }
+        if k >= 97 and k <= 102 { ц = k - 87 }
+        if k >= 65 and k <= 70 { ц = k - 55 }
+        if ц < 0 {
+            return -1
+        }
+        v = v * 16 + ц
+        i = i + 1
+    }
+    return v
+}
+
+function _net_starts(s, начало) {
+    n = length(начало)
+    if length(s) < n {
+        return false
+    }
+    return _net_cut(s, 0, n) == начало
+}
+
+function _net_cut(s, начало, конец) {
+    out = ""
+    i = начало
+    n = length(s)
+    if конец < n {
+        n = конец
+    }
+    while i < n {
+        out = out + s[i]
+        i = i + 1
+    }
+    return out
+}
+
+function _net_after(s, место) {
+    return _net_cut(s, место, length(s))
+}
+
+function _net_find(s, что) {
+    n = length(s)
+    m = length(что)
+    i = 0
+    while i + m <= n {
+        if _net_cut(s, i, i + m) == что {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+function _net_last_find(s, что) {
+    n = length(s)
+    m = length(что)
+    i = n - m
+    while i >= 0 {
+        if _net_cut(s, i, i + m) == что {
+            return i
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+function _net_trim(s) {
+    n = length(s)
+    начало = 0
+    while начало < n and (s[начало] == " " or s[начало] == "\t") {
+        начало = начало + 1
+    }
+    конец = n
+    while конец > начало and (s[конец - 1] == " " or s[конец - 1] == "\t" or s[конец - 1] == "\r") {
+        конец = конец - 1
+    }
+    return _net_cut(s, начало, конец)
+}

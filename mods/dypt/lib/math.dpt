@@ -1,0 +1,352 @@
+// math — математика на чистом dypt.
+//
+// Подключение:
+//     import "math" as math
+//     print(math.sqrt(2))
+//
+// Всё считается рядами и итерациями, без обращения к системным библиотекам:
+// собранная программа остаётся самодостаточной.
+
+pi = 3.141592653589793
+tau = 6.283185307179586
+e = 2.718281828459045
+ln2 = 0.6931471805599453
+ln10 = 2.302585092994046
+
+// ---------------------------------------------------------------- знак и края
+
+function abs(x) {
+    if x < 0 {
+        return -x
+    }
+    return x
+}
+
+function sign(x) {
+    if x < 0 {
+        return -1
+    }
+    if x > 0 {
+        return 1
+    }
+    return 0
+}
+
+function min(a, b) {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+function max(a, b) {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+function clamp(x, lo, hi) {
+    if x < lo {
+        return lo
+    }
+    if x > hi {
+        return hi
+    }
+    return x
+}
+
+// -------------------------------------------------------------- целая часть
+//
+// Дробная часть отбрасывается разложением по степеням двойки: столько шагов,
+// сколько разрядов в числе, а не сколько в нём единиц.
+
+function floor(x) {
+    if x < 0 {
+        y = -x
+        t = floor(y)
+        // Сравнивать -t с x нельзя: целое и дробное в dypt не равны даже
+        // при одинаковом значении. Признак целого — нулевая дробная часть.
+        if y - t > 0.0 {
+            return -t - 1
+        }
+        return -t
+    }
+    p = 1
+    while p * 2 <= x {
+        p = p * 2
+    }
+    n = 0
+    y = x
+    while p >= 1 {
+        if y >= p {
+            y = y - p
+            n = n + p
+        }
+        p = p / 2
+    }
+    return n
+}
+
+function ceil(x) {
+    return -floor(-x)
+}
+
+function round(x) {
+    return floor(x + 0.5)
+}
+
+/// Отбрасывание дробной части в сторону нуля.
+function trunc(x) {
+    if x < 0 {
+        return -floor(-x)
+    }
+    return floor(x)
+}
+
+/// Дробная часть числа.
+function frac(x) {
+    return x - trunc(x)
+}
+
+// ------------------------------------------------------------------- корни
+
+function sqrt(x) {
+    v = x * 1.0
+    if v < 0 {
+        return 0.0 - 1.0
+    }
+    if v == 0.0 {
+        return 0.0
+    }
+    // Начальное приближение: половина числа для больших, единица для малых.
+    g = 1.0
+    if v > 1.0 {
+        g = v / 2.0
+    }
+    // Останавливаемся, когда приближение перестало меняться. Итерация Ньютона
+    // у самого ответа может застрять на паре соседних значений, поэтому конец
+    // цикла ловится и по повтору через шаг.
+    prev = 0.0
+    i = 0
+    while i < 100 {
+        next = (g + v / g) / 2.0
+        if next == g {
+            return next
+        }
+        if next == prev {
+            return min(next, g)
+        }
+        prev = g
+        g = next
+        i = i + 1
+    }
+    return g
+}
+
+function hypot(a, b) {
+    return sqrt(a * a + b * b)
+}
+
+// ------------------------------------------------------ показательная и логарифм
+
+/// Возведение в целую степень умножением по разрядам показателя.
+function int_pow(base, n) {
+    if n < 0 {
+        return 1.0 / int_pow(base, -n)
+    }
+    result = 1.0
+    b = base * 1.0
+    k = n
+    while k > 0 {
+        if k % 2 == 1 {
+            result = result * b
+        }
+        b = b * b
+        k = k / 2
+    }
+    return result
+}
+
+function exp(x) {
+    v = x * 1.0
+    if v < 0.0 {
+        return 1.0 / exp(-v)
+    }
+    // Приведение к малому остатку: e^x = 2^k * e^r, где |r| <= ln2.
+    k = floor(v / ln2)
+    r = v - k * ln2
+    term = 1.0
+    sum = 1.0
+    i = 1
+    while i < 30 {
+        term = term * r / i
+        sum = sum + term
+        if abs(term) < 0.000000000000001 {
+            i = 30
+        } else {
+            i = i + 1
+        }
+    }
+    return sum * int_pow(2.0, k)
+}
+
+function ln(x) {
+    v = x * 1.0
+    if v <= 0.0 {
+        return 0.0
+    }
+    // Приведение к отрезку [1, 2): ln(x) = k*ln2 + ln(m).
+    k = 0
+    while v >= 2.0 {
+        v = v / 2.0
+        k = k + 1
+    }
+    while v < 1.0 {
+        v = v * 2.0
+        k = k - 1
+    }
+    // Ряд для ареатангенса сходится быстро около единицы.
+    z = (v - 1.0) / (v + 1.0)
+    z2 = z * z
+    term = z
+    sum = z
+    i = 1
+    while i < 60 {
+        term = term * z2
+        sum = sum + term / (2 * i + 1)
+        i = i + 1
+    }
+    return k * ln2 + 2.0 * sum
+}
+
+function log10(x) {
+    return ln(x) / ln10
+}
+
+function log2(x) {
+    return ln(x) / ln2
+}
+
+function log(x, base) {
+    return ln(x) / ln(base)
+}
+
+function pow(base, power) {
+    // Целый показатель считается точно, дробный — через логарифм.
+    if power == trunc(power) {
+        return int_pow(base, trunc(power))
+    }
+    return exp(power * ln(base))
+}
+
+// ------------------------------------------------------------ тригонометрия
+
+/// Приведение угла к отрезку [-pi, pi].
+function wrap_angle(x) {
+    v = x * 1.0
+    turns = round(v / tau)
+    return v - turns * tau
+}
+
+function sin(x) {
+    a = wrap_angle(x)
+    term = a
+    sum = a
+    i = 1
+    while i < 20 {
+        term = -term * a * a / ((2 * i) * (2 * i + 1))
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+function cos(x) {
+    a = wrap_angle(x)
+    term = 1.0
+    sum = 1.0
+    i = 1
+    while i < 20 {
+        term = -term * a * a / ((2 * i - 1) * (2 * i))
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+function tan(x) {
+    c = cos(x)
+    if c == 0.0 {
+        return 0.0
+    }
+    return sin(x) / c
+}
+
+function atan(x) {
+    v = x * 1.0
+    if v > 1.0 {
+        return pi / 2.0 - atan(1.0 / v)
+    }
+    if v < -1.0 {
+        return -pi / 2.0 - atan(1.0 / v)
+    }
+    // Ряд около единицы сходится крайне медленно, поэтому аргумент четырежды
+    // уменьшается тождеством atan(x) = 2*atan(x / (1 + sqrt(1 + x*x))):
+    // отсюда и множитель 16 в ответе.
+    halvings = 0
+    while halvings < 4 {
+        v = v / (1.0 + sqrt(1.0 + v * v))
+        halvings = halvings + 1
+    }
+    term = v
+    sum = v
+    i = 1
+    while i < 40 {
+        term = -term * v * v
+        sum = sum + term / (2 * i + 1)
+        i = i + 1
+    }
+    return sum * 16.0
+}
+
+// ------------------------------------------------------------- целые числа
+
+function gcd(a, b) {
+    x = abs(a)
+    y = abs(b)
+    while y != 0 {
+        t = x % y
+        x = y
+        y = t
+    }
+    return x
+}
+
+function lcm(a, b) {
+    if a == 0 or b == 0 {
+        return 0
+    }
+    return abs(a * b) / gcd(a, b)
+}
+
+function factorial(n) {
+    if n < 0 {
+        return 0
+    }
+    result = 1
+    i = 2
+    while i <= n {
+        result = result * i
+        i = i + 1
+    }
+    return result
+}
+
+function is_even(n) {
+    return n % 2 == 0
+}
+
+function is_odd(n) {
+    return n % 2 != 0
+}

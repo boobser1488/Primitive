@@ -42,9 +42,95 @@ struct Globals {
     // whole pass rests on this: without it a fragment knows where it is
     // on the screen and nothing about where it is looking.
     inv_view_proj: mat4x4<f32>,
-    // x: time of day 0..1, y: how cloudy, z: seconds since start, w: spare
+    // x: time of day 0..1, y: how cloudy, z: seconds since start,
+    // w: how overcast the weather has made it
     sky_params: vec4<f32>,
+    // Where the frame's origin is in the world. Only the cloud layer
+    // wants it: everything else here is happier measured from the eye,
+    // and a cloud has to stay over the same field as the origin moves
+    // under it.
+    render_origin: vec4<f32>,
+    // Declared and unread, down to the two this shader wants: a uniform
+    // block is an offset table, and leaving a field out shifts every one
+    // after it. See `shader.wgsl`, which reads them.
+    hand_view_proj: mat4x4<f32>,
+    anim: vec4<f32>,
+    sun_color: vec4<f32>,
+    fill_color: vec4<f32>,
+    shadow_view_proj: mat4x4<f32>,
+    shadow_params: vec4<f32>,
+    shadow_bias: vec4<f32>,
+    // The sunset and the halo. See `glow_over` below.
+    horizon_glow: vec4<f32>,
+    sun_haze: vec4<f32>,
+    // The sun's compass bearing, flat and unit length, in x and z. See
+    // `glow_lobe`. y and w are the cloud deck's drift -- see the cloud below.
+    glow_dir: vec4<f32>,
+    // The moon: xyz the direction its light travels, w the night floor's
+    // scale less one. See the moon below, and `Sky::moon_uniform`.
+    moon: vec4<f32>,
 };
+
+// Which lighting step this module was compiled for. See the same line in
+// `shader.wgsl`; the two are rewritten together.
+const LIGHTING: u32 = 0u;
+
+// ---- the horizon, shared with sky.wgsl ----
+//
+// **Both shaders carry this block, character for character**, and
+// `the_sky_and_the_terrain_draw_the_same_horizon` in `engine::lighting`
+// compares the two copies. The terrain fades into this colour and the sky
+// is this colour at its horizon; if the two ever computed it differently
+// the edge of the world would show as a line -- and toward a sunset,
+// where the colour is changing fastest, as a bright one.
+
+// How fast the sunset fades going up the sky: `1 / (1 + GLOW_RISE * up)^2`
+// of the sine of the height above the horizon, so it is a third as strong
+// fourteen degrees up and an eighth by thirty-five. A squared rational
+// rather than the `exp` it replaced, which drew nearly the same curve for
+// a transcendental function on every pixel of fog and sky.
+const GLOW_RISE: f32 = 3.0;
+
+// How much of the sunset stands in direction `dir`, 0..1: a lobe round the
+// sun's compass bearing, fading upward. Wide on purpose -- still a third
+// at sixty degrees off -- because a sunset lights a quarter of the sky,
+// not a disc of it.
+//
+// **`dir` need not be normalised, and the bearing arrives flat and unit
+// length** (`glow_dir.xz`, once a frame on the CPU). The first version
+// normalised both here -- two square roots a pixel, one of them of a
+// number that was the same for every pixel of the frame -- and Balanced
+// measured 0.7 ms dearer than Simple in the view with the most fragments.
+fn glow_lobe(dir: vec3<f32>) -> f32 {
+    let across = dot(dir.xz, dir.xz) + 1e-8;
+    let facing = dot(dir.xz, globals.glow_dir.xz) * inverseSqrt(across) * 0.5 + 0.5;
+    let wide = facing * facing;
+    let up = max(dir.y, 0.0) * inverseSqrt(across + dir.y * dir.y);
+    let rise = 1.0 / (1.0 + GLOW_RISE * up);
+    return globals.horizon_glow.w * wide * wide * rise * rise;
+}
+
+// `base` -- the fog colour, or the sky -- as it looks in direction `dir`
+// once the sunset and the sun's halo are put in. `dir` need not be
+// normalised. Returns `base` untouched at the Simple step.
+fn glow_over(base: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
+    var colour = base;
+    if (LIGHTING >= 1u) {
+        colour = mix(colour, globals.horizon_glow.rgb, glow_lobe(dir));
+    }
+    if (LIGHTING >= 2u) {
+        // Two powers of the angle to the sun rather than one `pow`: a
+        // wide soft skirt and a tighter bright core, the shape a real halo
+        // has, from multiplies alone.
+        let c = max(dot(dir, -globals.sun.xyz), 0.0) * inverseSqrt(dot(dir, dir) + 1e-8);
+        let c2 = c * c;
+        let c4 = c2 * c2;
+        let c16 = c4 * c4 * c4 * c4;
+        colour = colour + globals.sun_haze.rgb * (c4 * 0.45 + c16 * 0.55);
+    }
+    return colour;
+}
+// ---- end of the shared horizon ----
 
 @group(0) @binding(0)
 var<uniform> globals: Globals;
@@ -161,9 +247,30 @@ fn cloud_field(p: vec2<f32>) -> vec3<f32> {
     return textureSampleLevel(cloud_texture, cloud_sampler, p / CLOUD_TILE, 0.0).rgb;
 }
 
-/// How many squares across one face of the sky is. Chosen so a star is
-/// a dozen-odd screen pixels at an ordinary field of view: a deliberate
-/// pixel, the size the blocks are drawn from.
+/// How many squares across one face of the sky is.
+///
+/// **What this is worth in pixels, worked out rather than asserted.**
+/// One face runs -1..1 in the projected coordinate, so it holds `2 *
+/// STAR_GRID` cells; at the middle of a face a cell is `1 / STAR_GRID`
+/// radians across, and toward its corner the same cell is squeezed to
+/// about 0.47 of that, because a cube face is not equal-angle. A screen
+/// `h` pixels tall at field of view `f` puts `(h / 2) / tan(f / 2)`
+/// pixels in a radian. At 150, 1080 and 70 degrees that is a star of
+/// 5.1 screen pixels in the middle of a face and 2.4 at its corner.
+///
+/// This comment used to claim a dozen-odd pixels, which was never true
+/// of any size anybody plays at -- and the number matters, because the
+/// whole reason the stars were rebuilt on cube faces was that a star
+/// narrower than a pixel crawls between them when the camera turns. Two
+/// pixels is the floor; `every_star_is_wide_enough_to_hold_still` in
+/// `engine::renderer` does the arithmetic above and fails if a change
+/// here takes a star under it.
+///
+/// It is a floor and not a comfortable margin. At 720p and a 95 degree
+/// field of view the corner cell is 1.6 pixels and stars do crawl;
+/// curing that means about 62 here, which is 2.4 times the star and a
+/// fifth as many of them -- a different night sky, not a bug fix, so it
+/// is written down rather than done.
 const STAR_GRID: f32 = 150.0;
 
 /// Which square of the sky a direction falls in.
@@ -201,23 +308,57 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     // The direction this pixel is looking, in world space: the far
     // plane point the rasterizer handed over, less the eye. See
     // `SkyOut` for why neither the matrix nor the near plane is here.
+    // Both of these are measured from the point the frame is drawn
+    // around, and both are therefore small. **They used to be absolute
+    // world coordinates**, and the subtraction of two seven-digit
+    // numbers whose difference is a few hundred is where most of the
+    // precision in this shader went: the reconstructed direction wobbled
+    // by a fraction of a degree that changed every frame, which is the
+    // sky visibly trembling.
     let dir = normalize(in.far_point.xyz / in.far_point.w - globals.camera_pos.xyz);
 
     let daylight = globals.sun.w;
     // The sun's *position*, which is the opposite of the direction its
     // light travels.
     let to_sun = -globals.sun.xyz;
-    let to_moon = -to_sun;
 
-    // ---- the gradient ----
+    // How far the weather has come in, 0..1, eased on the CPU -- see
+    // `Sky::overcast`. Read once here because four separate things in
+    // this function want it: the stars go out behind cloud, the sun and
+    // moon stop being discs, the deck spreads, and its colour drops
+    // toward slate.
+    let overcast = clamp(globals.sky_params.w, 0.0, 1.0);
+    // What is left of a body in the sky once there is weather in front
+    // of it. Not zero at the top: even a storm has a bright patch where
+    // the sun is, and taking it to nothing makes a storm sky perfectly
+    // flat -- which is the one thing an actual storm sky never is.
+    let through_cloud = 1.0 - overcast * 0.88;
+
+    // ---- the sky colour ----
     //
-    // Toward the horizon it becomes the fog colour exactly, because that
-    // is what the terrain fades into: any difference between the two
-    // shows up as a visible line where the world ends.
+    // **One colour, not a gradient.** It used to run from the fog colour
+    // at the horizon to a deeper blue at the zenith along `pow(up,
+    // 0.65)`, so the sky's tint changed with how high in it you looked
+    // -- and the player asked for that to stop: a sky that is one shade
+    // above the horizon, the way the rest of this world is flat colour
+    // with hard edges. What is kept is the band at the horizon, where
+    // the sky still becomes the fog colour exactly, because that is what
+    // the terrain fades into: any difference between the two shows up
+    // as a visible line where the world ends. The band is narrow --
+    // about seven degrees -- so it reads as haze on the horizon rather
+    // than as the gradient coming back.
     let height = clamp(dir.y, -1.0, 1.0);
     let up = clamp(height, 0.0, 1.0);
-    let zenith = globals.fog_color.rgb * vec3<f32>(0.62, 0.74, 1.06);
-    var colour = mix(globals.fog_color.rgb, zenith, pow(up, 0.65));
+    let sky_blue = globals.fog_color.rgb * vec3<f32>(0.62, 0.74, 1.06);
+    var colour = mix(globals.fog_color.rgb, sky_blue, smoothstep(0.0, 0.12, up));
+    // **The one gradient this sky has, and only while the sun is low.**
+    // The flat colour above is what the player asked for and it is what
+    // noon still is; the glow is zero there (`Sky::horizon_glow`). Under
+    // a low sun it rises out of the horizon toward the sun's bearing and
+    // is gone forty degrees up, so what reads is a sunset rather than the
+    // old zenith gradient come back. At the horizon `colour` is exactly
+    // the fog colour, so this is exactly what the terrain fades into.
+    colour = glow_over(colour, dir);
 
     // Below the horizon there is no sky, only the haze the ground fades
     // into -- otherwise flying up and looking down shows a second sun.
@@ -262,26 +403,46 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     }
     // Only at night, and never below the horizon.
     let night = clamp(1.0 - daylight * 2.2, 0.0, 1.0);
-    colour = colour + vec3<f32>(stars * night * above);
+    // Cloud is what a starless night actually is. The deck below is
+    // drawn *over* the stars, but only where it is thick enough to
+    // survive the threshold, so without this a storm night is a field
+    // of stars with holes punched in it.
+    colour = colour + vec3<f32>(stars * night * above * through_cloud);
 
     // ---- the moon ----
     //
-    // Opposite the sun, so it is up exactly when the sun is not. The
-    // phase is carved out by a second disc offset a little way across
-    // it, which is how the shape actually works and costs one more
-    // distance test.
+    // **Where the moon really is, lit from where the sun really is.** It used
+    // to stand opposite the sun every night with its "phase" a second disc
+    // swung across it on the hour -- `sin(time_of_day * 0.5)`, so the moon
+    // changed shape during a night and was full on no night in particular. It
+    // is placed by its month now (`Sky::moon_direction`,
+    // `primitive_shared::moon`): full opposite the sun, new beside it, rising
+    // later every night. The lit part is worked out rather than carved: each
+    // pixel of the disc is a point on a sphere, lit where that point faces the
+    // sun, so a crescent always points at the sun that lights it. The dark part
+    // keeps a sixteenth of the light -- earthshine -- so a thin moon is still
+    // a whole disc against the stars.
+    var to_moon = -globals.moon.xyz;
+    if (dot(to_moon, to_moon) < 0.5) {
+        // A tool that filled the globals itself has no moon: opposite the
+        // sun, where it always was.
+        to_moon = globals.sun.xyz;
+    }
     let moon_cos = dot(dir, to_moon);
     if (moon_cos > 0.995) {
         let d = acos(clamp(moon_cos, -1.0, 1.0));
         let radius = 0.055;
         let disc = smoothstep(radius, radius * 0.86, d);
-        // Where the shadow falls, swung slowly over many days.
-        let phase = sin(globals.sky_params.x * 0.5);
         let across = normalize(cross(to_moon, vec3<f32>(0.0, 1.0, 0.0)));
-        let shadow_dir = normalize(to_moon + across * phase * 0.09);
-        let shadow = smoothstep(radius * 0.95, radius * 1.05, acos(clamp(dot(dir, shadow_dir), -1.0, 1.0)));
-        let lit = disc * mix(1.0, shadow, abs(phase));
-        colour = colour + vec3<f32>(0.86, 0.88, 0.95) * lit * night * above;
+        let upward = cross(across, to_moon);
+        let offset = (dir - to_moon * moon_cos) / radius;
+        let u = dot(offset, across);
+        let v = dot(offset, upward);
+        let facing = sqrt(max(1.0 - u * u - v * v, 0.0));
+        let surface = across * u + upward * v - to_moon * facing;
+        let sunward = smoothstep(-0.08, 0.08, dot(surface, to_sun));
+        let lit = disc * mix(0.06, 1.0, sunward);
+        colour = colour + vec3<f32>(0.86, 0.88, 0.95) * lit * night * above * through_cloud;
     }
 
     // ---- the sun ----
@@ -291,11 +452,15 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     // the sky it is in warms up.
     let sun_cos = dot(dir, to_sun);
     let glow = pow(clamp(sun_cos, 0.0, 1.0), 220.0);
-    colour = colour + vec3<f32>(1.0, 0.72, 0.42) * glow * daylight * 0.8 * above;
+    // The glow keeps rather more of itself than the disc does, because
+    // that is what a sun behind weather looks like: no edge to it at
+    // all, and a wide bright smear where it stands.
+    let glow_through = 1.0 - overcast * 0.55;
+    colour = colour + vec3<f32>(1.0, 0.72, 0.42) * glow * daylight * 0.8 * above * glow_through;
     if (sun_cos > 0.9975) {
         let d = acos(clamp(sun_cos, -1.0, 1.0));
         let disc = smoothstep(0.042, 0.032, d);
-        colour = colour + vec3<f32>(1.0, 0.96, 0.86) * disc * above;
+        colour = colour + vec3<f32>(1.0, 0.96, 0.86) * disc * above * through_cloud;
     }
 
     // ---- cloud ----
@@ -322,19 +487,27 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     //   by sampling it again a little way toward the sun -- if there is
     //   more cloud between this point and the light, this point is
     //   darker.
+    // In *world* height and world x/z, which is what the origin is added
+    // back for: a cloud belongs to the sky over a place, and a deck that
+    // was measured from a moving origin would slide across the world
+    // every time the origin caught up with the player.
+    let eye = globals.camera_pos.xyz + globals.render_origin.xyz;
     let layer_height = 190.0;
-    let below = globals.camera_pos.y < layer_height;
+    let below = eye.y < layer_height;
     // Toward the layer: up if it is over us, down if we have climbed
     // above it. Rays going the other way never reach it at all.
     let toward = select(-dir.y, dir.y, below);
     if (toward > 0.015) {
-        let travel = abs(layer_height - globals.camera_pos.y) / max(toward, 1e-4);
-        let at = (globals.camera_pos.xz + dir.xz * travel) * 0.0022;
-        // A slow drift, and a second one at a different rate for the
-        // warp, so the shapes deform as they move rather than sliding
-        // past as a rigid sheet.
-        let seconds = globals.sky_params.z;
-        let drift = vec2<f32>(seconds * 0.0035, seconds * 0.0012);
+        let travel = abs(layer_height - eye.y) / max(toward, 1e-4);
+        let at = (eye.xz + dir.xz * travel) * 0.0022;
+        // **Carried by the wind, not by the clock** (`Sky::blow_the_clouds`):
+        // it was `seconds` times one fixed slant, so a storm deck crawled
+        // toward the same corner as a fair one whatever the rain below it
+        // was slanting in. The CPU integrates the world's wind into this, so
+        // a gale runs the deck across the sky and a calm nearly stops it.
+        // The warp takes three times the drift, so the shapes deform as they
+        // move rather than sliding past as a rigid sheet.
+        let drift = vec2<f32>(globals.glow_dir.y, globals.glow_dir.w);
 
         // The warp is **one octave**, not a stack of them.
         //
@@ -378,7 +551,14 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
         // lands *within* one cell, so all it does is make some pixels
         // half-transparent. Sharp edges are the whole point of drawing
         // this on a grid.
-        let cover = globals.sky_params.y;
+        //
+        // Weather is the *other* half of where it lands. A player's
+        // cloud setting says what a fair sky looks like; the front says
+        // how far it has been overrun. So the two are combined rather
+        // than one winning: rain takes a sparse sky to nearly solid, and
+        // a player who turned clouds down still gets weather, because a
+        // downpour out of an empty sky is worse than either setting.
+        let cover = mix(globals.sky_params.y, 0.94, overcast);
         let floor_edge = 0.60 - cover * 0.40;
         let amount = smoothstep(floor_edge, floor_edge + 0.03, density);
 
@@ -412,12 +592,39 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
             // cloud pixel.
             mottle = (hash2(floor(smooth_at / CLOUD_PIXEL)) - 0.5) * 0.06;
         }
-        let sunlit = vec3<f32>(1.02, 0.99, 0.95);
-        let shaded = vec3<f32>(0.48, 0.52, 0.62);
-        var cloud = mix(sunlit, shaded, shadow * 0.85) + mottle;
+        // ---- what colour a cloud is, which is what the weather is ----
+        //
+        // A fair-weather cloud is a white thing with a grey underside.
+        // A rain cloud is neither: it is dark all over, blue-grey rather
+        // than white-grey, and it has *less* contrast across it, not
+        // more -- the shape stops reading because there is no gap for
+        // the light to come through. All three of those are here, and
+        // together they are most of what makes rain look like rain from
+        // inside it.
+        let sunlit = mix(vec3<f32>(1.02, 0.99, 0.95), vec3<f32>(0.40, 0.42, 0.48), overcast);
+        let shaded = mix(vec3<f32>(0.48, 0.52, 0.62), vec3<f32>(0.20, 0.21, 0.26), overcast);
+        // Flatter under weather: the self-shadow is a sun that is no
+        // longer getting through.
+        let relief = shadow * mix(0.85, 0.45, overcast);
+        var cloud = mix(sunlit, shaded, relief) + mottle;
         // Warmed by a low sun, like everything else in the sky is.
         cloud = cloud * mix(vec3<f32>(0.30, 0.33, 0.42), vec3<f32>(1.0), daylight);
-        cloud = cloud + vec3<f32>(0.35, 0.16, 0.06) * glow * (1.0 - shadow);
+        // **Past the Simple step, the deck catches the sunset.** Cloud on
+        // the sun's side of a low sky is lit from underneath by light that
+        // has crossed the most air, and that underside is the colour of
+        // the glow, only brighter than the sky beside it -- which is the
+        // one sight that makes a sunset worth stopping for. Its own
+        // brightness is kept (the mix is toward the glow at the cloud's
+        // luminance) so a grey rain cloud is not turned into a lamp.
+        if (LIGHTING >= 1u) {
+            let luma = dot(cloud, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let lit_from_below = globals.horizon_glow.rgb * luma * 1.7;
+            cloud = mix(cloud, lit_from_below, clamp(glow_lobe(vec3<f32>(dir.x, 0.0, dir.z)) * 0.9, 0.0, 1.0));
+        }
+        // The bright rim where the sun stands behind the deck. Fades
+        // with the weather along with the glow it comes from -- a storm
+        // has no sunlit edges.
+        cloud = cloud + vec3<f32>(0.35, 0.16, 0.06) * glow * (1.0 - shadow) * glow_through;
 
         // Two fades, and they are different questions. The first is
         // geometric: near the horizon the layer is edge-on and a long
@@ -427,16 +634,23 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
         // reads as a ceiling painted directly overhead.
         let edge_on = smoothstep(0.015, 0.30, toward);
         let haze = clamp(travel / 26000.0, 0.0, 0.75);
-        cloud = mix(cloud, globals.fog_color.rgb, haze);
+        // Toward the air's colour in *this* direction, sunset included,
+        // or a distant cloud on the sun's side would fade to lavender
+        // against an orange horizon.
+        cloud = mix(cloud, glow_over(globals.fog_color.rgb, dir), haze);
         colour = mix(colour, cloud, amount * edge_on * 0.96);
     }
 
     // Under water the sky is not the sky: it is the surface seen from
     // below, and the terrain shader already tints everything toward the
     // water colour. Matching it here keeps the two from disagreeing at
-    // the waterline.
+    // the waterline -- and it is the fog colour *exactly*, because that is
+    // what the terrain finishes on at the fog's end. At 55% of it, which is
+    // what this was, everything past eighteen blocks was brighter than the
+    // sky behind it and a swimmer saw the far bed and the lid in bands.
+    // `fog::UNDERWATER` holds the old 55% now.
     if (globals.extra.z > 0.5) {
-        colour = globals.fog_color.rgb * 0.55;
+        colour = globals.fog_color.rgb;
     }
 
     return vec4<f32>(colour, 1.0);

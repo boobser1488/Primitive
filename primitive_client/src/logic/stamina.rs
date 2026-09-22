@@ -51,6 +51,19 @@ pub const MAX_STAMINA: f32 = 22.0;
 /// ground is a decision, cheap enough that jumping a fence never is.
 pub const JUMP_COST: f32 = 1.8;
 
+/// A pull up a tree, in jumps. See `Stamina::climb_cost`.
+pub const CLIMB_COST_JUMPS: f32 = 3.0;
+
+/// Seconds between one pull up a tree and the next, unladen; twice that at
+/// capacity.
+///
+/// **This is what makes a climb slow**, and the breath is what makes it
+/// short. A pull is still a jump to the physics -- the same push onto the
+/// next bough -- so without a rest a climber with a full tank went up at
+/// the pace of their key presses. A second and a half a bough puts the top
+/// of a tall oak twenty seconds away, which is a climb.
+pub const CLIMB_REST: f32 = 1.5;
+
 /// What a second of digging costs, in the same units.
 ///
 /// Digging is the other thing in this game that is *work*, and it was
@@ -118,6 +131,14 @@ pub struct Stamina {
     /// Set when the tank empties, cleared once `RECOVERED_ENOUGH` is
     /// back. See the note on exhaustion.
     exhausted: bool,
+    /// Seconds before the next pull up a tree may start. See `CLIMB_REST`.
+    climb_rest: f32,
+    /// What the player's hidden comfort is worth to recovery, as the server
+    /// last said (`ServerMessage::Body::recovery`). Multiplies `RECOVERY`
+    /// and nothing else: comfort is how fast the breath comes *back*, not
+    /// what a sprint costs, so a cold camp is a slower rest rather than a
+    /// shorter run.
+    recovery_scale: f32,
 }
 
 impl Default for Stamina {
@@ -131,6 +152,45 @@ impl Stamina {
         Self {
             current: MAX_STAMINA,
             exhausted: false,
+            climb_rest: 0.0,
+            recovery_scale: 1.0,
+        }
+    }
+
+    /// Takes the server's comfort multiplier. Sanitised like everything off
+    /// a socket, and held to the range the server's own rule allows, so a
+    /// hostile number cannot hand anybody an endless sprint.
+    pub fn set_recovery(&mut self, scale: f32) {
+        use primitive_shared::comfort::{FASTEST_RECOVERY, SLOWEST_RECOVERY};
+        self.recovery_scale = if scale.is_finite() { scale.clamp(SLOWEST_RECOVERY, FASTEST_RECOVERY) } else { 1.0 };
+    }
+
+    /// What one pull up a tree costs under this load.
+    ///
+    /// **Three jumps unladen, and up to three times that at capacity.**
+    /// Getting up a tree was a run of free hops from bough to bough -- the
+    /// crown of an oak in two seconds, with a pack of stone -- and the player
+    /// asked for it to be slow, tiring and heavy: "пусть это тратит стамину
+    /// довольно сильно и пусть это будет медленно и зависит от веса". A
+    /// climb is a pull with the arms, which is why it is dearer than a jump
+    /// on the ground, and the load is lifted with every pull, which is why
+    /// it multiplies.
+    pub fn climb_cost(kilograms: f32) -> f32 {
+        JUMP_COST * CLIMB_COST_JUMPS * (1.0 + 2.0 * primitive_shared::load::load_fraction(kilograms))
+    }
+
+    /// Whether a pull up a tree may start: breath for it, and the rest after
+    /// the last one taken.
+    pub fn can_climb(&self, kilograms: f32) -> bool {
+        !self.exhausted && self.climb_rest <= 0.0 && self.current >= Self::climb_cost(kilograms)
+    }
+
+    /// Bills one pull up a tree, and starts the rest before the next.
+    pub fn spend_climb(&mut self, kilograms: f32) {
+        self.current = (self.current - Self::climb_cost(kilograms)).max(0.0);
+        self.climb_rest = CLIMB_REST * (1.0 + primitive_shared::load::load_fraction(kilograms));
+        if self.current <= 0.0 {
+            self.exhausted = true;
         }
     }
 
@@ -224,6 +284,7 @@ impl Stamina {
     pub fn update(&mut self, dt: f32, load: f32, sprinting: bool) {
         let dt = dt.clamp(0.0, 0.1);
         let load = load.clamp(0.0, 1.0);
+        self.climb_rest = (self.climb_rest - dt).max(0.0);
 
         if sprinting {
             self.current -= (SPRINT_DRAIN + SPRINT_LOAD_DRAIN * load) * dt;
@@ -231,7 +292,13 @@ impl Stamina {
             // A load costs something even at rest, but never more than
             // the recovery -- otherwise a heavily laden player can never
             // get their breath back and the game deadlocks.
-            let recovery = RECOVERY * (1.0 - RECOVERY_LOAD_PENALTY * load);
+            //
+            // Comfort scales the recovery, and only the recovery: the
+            // carry drain is the pack's weight, which a warm room does not
+            // lighten. At the slowest (a half) a full load still nets
+            // `0.5 * 1.3 * 0.6 - 0.25 = 0.14` a second -- slow, and not
+            // the lockout `RECOVERY_LOAD_PENALTY` warns about.
+            let recovery = RECOVERY * self.recovery_scale * (1.0 - RECOVERY_LOAD_PENALTY * load);
             self.current += (recovery - CARRY_DRAIN * load) * dt;
         }
         self.current = self.current.clamp(0.0, MAX_STAMINA);
@@ -246,6 +313,36 @@ impl Stamina {
 
 #[cfg(test)]
 mod tests {
+    // --- climbing ---
+
+    #[test]
+    fn a_climb_is_dearer_than_a_jump_heavier_under_a_load_and_rests_between_pulls() {
+        let light = Stamina::climb_cost(0.0);
+        let laden = Stamina::climb_cost(primitive_shared::load::CARRY_CAPACITY_KG);
+        assert!(light >= JUMP_COST * 2.0, "a pull up a tree costs no more than a hop: {light}");
+        assert!(laden > light * 2.0, "a pack of stone made a climb no harder: {laden} against {light}");
+
+        let mut stamina = Stamina::new();
+        assert!(stamina.can_climb(0.0));
+        stamina.spend_climb(0.0);
+        assert!(!stamina.can_climb(0.0), "a second pull came straight after the first");
+        stamina.update(CLIMB_REST * 0.5, 0.0, false);
+        assert!(!stamina.can_climb(0.0), "the rest between pulls was cut short");
+        for _ in 0..20 {
+            stamina.update(0.1, 0.0, false);
+        }
+        assert!(stamina.can_climb(0.0), "the climber never got their breath for the next pull");
+
+        // A full tank is a few pulls, not a tree.
+        let mut stamina = Stamina::new();
+        let mut pulls = 0;
+        while stamina.current() >= Stamina::climb_cost(0.0) && pulls < 100 {
+            stamina.spend_climb(0.0);
+            pulls += 1;
+        }
+        assert!(pulls <= 5, "a full tank took {pulls} pulls up a tree");
+    }
+
     // --- digging ---
 
     #[test]
@@ -319,6 +416,28 @@ mod tests {
         let stamina = Stamina::new();
         assert!(stamina.can_sprint());
         assert_eq!(stamina.fraction(), 1.0);
+    }
+
+    #[test]
+    fn a_comfortable_player_gets_their_breath_back_faster_than_a_miserable_one() {
+        let mut snug = Stamina::new();
+        let mut cold = Stamina::new();
+        snug.set_recovery(primitive_shared::comfort::FASTEST_RECOVERY);
+        cold.set_recovery(primitive_shared::comfort::SLOWEST_RECOVERY);
+        for stamina in [&mut snug, &mut cold] {
+            stamina.current = 0.0;
+            for _ in 0..20 {
+                stamina.update(0.05, 1.0, false);
+            }
+        }
+        assert!(cold.current() > 0.0, "a fully laden miserable player never recovered");
+        assert!(snug.current() > cold.current() * 2.0, "comfort did not speed recovery");
+        // ...and a hostile number off the socket is held to the rule's range.
+        let mut cheat = Stamina::new();
+        cheat.set_recovery(1000.0);
+        assert_eq!(cheat.recovery_scale, primitive_shared::comfort::FASTEST_RECOVERY);
+        cheat.set_recovery(f32::NAN);
+        assert_eq!(cheat.recovery_scale, 1.0);
     }
 
     #[test]

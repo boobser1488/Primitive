@@ -1,0 +1,22 @@
+[package]
+name = "greeter"
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0 AND LicenseRef-Primitive-Assets"
+publish = false
+
+# A native mod is a **C dynamic library**, not a Rust one: the server
+# loads it with `dlopen`/`LoadLibrary` and finds one exported symbol by
+# name. `cdylib` is what produces `greeter.dll` on Windows and
+# `libgreeter.so` on Linux with a C-compatible export table.
+[lib]
+name = "greeter"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+# **The only dependency, and that is the point.** A mod builds against
+# the contract and against nothing else -- not the server, not the shared
+# crate. `default-features = false` drops the RON manifest reader, which
+# is the host's business rather than a mod's.
+primitive_modapi = { path = "../../primitive_modapi", default-features = false }

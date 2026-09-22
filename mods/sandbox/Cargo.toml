@@ -1,0 +1,20 @@
+[package]
+name = "sandbox"
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0 AND LicenseRef-Primitive-Assets"
+publish = false
+
+# A C dynamic library, like every native mod -- see the note in
+# `mods/greeter/Cargo.toml`. `sandbox.dll` on Windows, `libsandbox.so`
+# on Linux, `libsandbox.dylib` on macOS.
+[lib]
+name = "sandbox"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+# The contract, and nothing else. This mod is the one that touches the
+# most of it, which makes it the one where a dependency on the server
+# would be hardest to notice and worst to have.
+primitive_modapi = { path = "../../primitive_modapi", default-features = false }

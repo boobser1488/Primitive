@@ -96,12 +96,17 @@ impl Frustum {
 
     /// A whole chunk column: full world height, so a chunk stays visible
     /// when only its treetops or its cave floor are on screen.
-    pub fn contains_chunk(&self, pos: ChunkPos) -> bool {
+    /// `origin` is the point the view matrix was built around -- see
+    /// `Camera::view_proj_about`. The chunk's corners are measured from
+    /// it for the same reason everything else is: a box tested against
+    /// planes that were derived from a shifted matrix has to be shifted
+    /// too, or the culling quietly starts disagreeing with the drawing.
+    pub fn contains_chunk(&self, pos: ChunkPos, origin: Vec3) -> bool {
         let min = Vec3::new(
             (pos.x * CHUNK_SIZE_X as i32) as f32,
             0.0,
             (pos.z * CHUNK_SIZE_Z as i32) as f32,
-        );
+        ) - origin;
         let max = min + Vec3::new(CHUNK_SIZE_X as f32, CHUNK_SIZE_Y as f32, CHUNK_SIZE_Z as f32);
         self.intersects_aabb(min, max)
     }
@@ -124,9 +129,9 @@ mod tests {
     #[test]
     fn a_chunk_straight_ahead_is_visible() {
         let f = Frustum::from_view_proj(looking_down_neg_z());
-        assert!(f.contains_chunk(ChunkPos::new(0, -3)), "directly in front");
+        assert!(f.contains_chunk(ChunkPos::new(0, -3), Vec3::ZERO), "directly in front");
         assert!(
-            f.contains_chunk(ChunkPos::new(0, 0)),
+            f.contains_chunk(ChunkPos::new(0, 0), Vec3::ZERO),
             "the chunk the camera is standing in"
         );
     }
@@ -135,7 +140,7 @@ mod tests {
     fn a_chunk_directly_behind_is_culled() {
         let f = Frustum::from_view_proj(looking_down_neg_z());
         assert!(
-            !f.contains_chunk(ChunkPos::new(0, 8)),
+            !f.contains_chunk(ChunkPos::new(0, 8), Vec3::ZERO),
             "a chunk well behind the camera must be culled"
         );
     }
@@ -144,7 +149,7 @@ mod tests {
     fn a_chunk_far_off_to_the_side_is_culled() {
         let f = Frustum::from_view_proj(looking_down_neg_z());
         assert!(
-            !f.contains_chunk(ChunkPos::new(40, -3)),
+            !f.contains_chunk(ChunkPos::new(40, -3), Vec3::ZERO),
             "way outside the horizontal field of view"
         );
     }
@@ -157,7 +162,7 @@ mod tests {
         let f = Frustum::from_view_proj(looking_down_neg_z());
         for z in -6..=0 {
             assert!(
-                f.contains_chunk(ChunkPos::new(0, z)),
+                f.contains_chunk(ChunkPos::new(0, z), Vec3::ZERO),
                 "chunk at z={z} should be visible"
             );
         }
@@ -168,7 +173,7 @@ mod tests {
         let view = Mat4::look_to_rh(Vec3::new(8.0, 32.0, 8.0), Vec3::Z, Vec3::Y);
         let proj = Mat4::perspective_rh(70f32.to_radians(), 16.0 / 9.0, 0.05, 1000.0);
         let f = Frustum::from_view_proj(proj * view);
-        assert!(f.contains_chunk(ChunkPos::new(0, 5)), "now in front");
-        assert!(!f.contains_chunk(ChunkPos::new(0, -8)), "now behind");
+        assert!(f.contains_chunk(ChunkPos::new(0, 5), Vec3::ZERO), "now in front");
+        assert!(!f.contains_chunk(ChunkPos::new(0, -8), Vec3::ZERO), "now behind");
     }
 }
