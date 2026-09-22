@@ -61,6 +61,12 @@ jobs:
       # The archives are what players run, so they are built from a tree
       # that passed its own tests rather than from one that merely
       # compiled.
+      # **Everything but the scenarios.** They are the game played in real
+      # time, and `ci` has already run them on this very commit before a tag
+      # is pushed; running them again here, on a runner packaging two
+      # platforms at once, only added a second chance for a slow machine to
+      # fail a finished release -- which is what happened to 1.5.0.
+      #
       # **A failure is written where it can be read without signing in.**
       # The job log of a public repository asks for an account; the run's
       # annotations do not. So every failing test and every panic is also
@@ -73,7 +79,7 @@ jobs:
           CARGO_TERM_COLOR: never
         run: |
           set +e
-          cargo test --workspace --no-fail-fast 2>&1 | tee test.log
+          cargo test --workspace --no-fail-fast -- --skip scenario:: 2>&1 | tee test.log
           status=${PIPESTATUS[0]}
           # Windows writes CR LF, and `FAILED$` never matched a line ending
           # in a carriage return.
