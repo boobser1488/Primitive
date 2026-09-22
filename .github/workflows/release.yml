@@ -135,4 +135,7 @@ jobs:
           # thousands of lines of mechanism for whoever works on the game,
           # and the release page is read by whoever is about to play it.
           body_path: RELEASE_NOTES.md
-          draft: true
+          # Published at once: a tag is pushed only when the release is
+          # meant, and a draft was one more click for a person to make
+          # after every build that had already passed its own tests.
+          draft: false
