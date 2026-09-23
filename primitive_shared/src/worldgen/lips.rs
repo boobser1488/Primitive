@@ -64,6 +64,32 @@
 //! feature it had to meet put back on the whole block it was laid on, is to
 //! the block the chunk from before lips existed.
 //!
+//! ## Why there is still a lip on very nearly every slope
+//!
+//! A player looked at this ground and called it layers: "слои ландшафта
+//! странные и слишком гладкие". The lips were half of what they were looking
+//! at. A shelf twenty columns wide -- which is what the landforms' country
+//! was, measured (`landforms::GRAIN_HEIGHT`) -- gets a rim of 1/4, 1/2, 3/4
+//! round its edge and stays flat in the middle, and a hillside of those from
+//! a distance is a contour map with the lines drawn in.
+//!
+//! *Rejected: fewer lips* -- a lip on some slopes and not others, by a hash
+//! or a field. It reads as damage rather than as ground, and it costs
+//! exactly what the lips were made to buy: a column left whole at the edge
+//! of a terrace is a block-high step, and a block is more than a body climbs
+//! (`geometry::PLAYER_STEP_HEIGHT`). The ramp is not the fault. The fault
+//! was that a shelf twenty wide has no ramp in it to speak of -- three
+//! columns of quarters and seventeen of plain -- and the answer is to stop
+//! drawing shelves twenty wide. The grain does that: the landforms' bands
+//! are now three to seven columns, which is the width a lip *is* a ramp, and
+//! the rim and the slope became the same thing.
+//!
+//! What the grain does change here is that a lip is no longer laid on every
+//! rise. A grain crest on hard rock is a drop of more than a block, and a
+//! column beside one of those keeps its edge by the rule above: the
+//! landforms now have small faces in open country, which is where the
+//! outcrops and the scree at their feet come from.
+//!
 //! ## What stands on a lip
 //!
 //! This runs after everything that stands or lies on the ground, and it used

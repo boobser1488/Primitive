@@ -157,6 +157,10 @@ PRIMITIVE_TEST_SPAWN=<x>,<z>            put a new player of any world there
                                         instead of the plaza or the spawn search
 PRIMITIVE_DEBUG_PANEL=0                 keep the F3 panel off the screen (the
                                         console line still prints)
+PRIMITIVE_GRAIN=<blocks>                how tall the landforms' fine relief
+                                        stands; 0 draws the ground as it was
+                                        before it had any, which is the
+                                        "before" of a before-and-after
 PRIMITIVE_IME_TYPE=<text>               type <text> into a new world's name,
                                         the way an input method commits it,
                                         and create the world

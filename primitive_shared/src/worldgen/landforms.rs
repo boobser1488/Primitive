@@ -102,6 +102,80 @@ const LANDFORM_EDGE: (f64, f64) = (0.10, 0.34);
 const DOWNS_HEIGHT: f64 = 30.0;
 const DOWNS_FREQUENCY: f64 = 0.0026;
 
+/// How tall the grain of open country stands, in blocks, and how far apart
+/// its crests are.
+///
+/// ## What the grain is for
+///
+/// "Слои ландшафта странные и слишком гладкие". The ground is a height field
+/// rounded to whole blocks, so every slope is a set of contour bands, and how
+/// wide those bands are is entirely a question of how fast the field changes.
+/// Measured on the landforms before this existed
+/// (`probe_banding`, seed 1337): on a steppe **80 per cent** of columns had
+/// all four neighbours at their own height and a band ran **22 blocks** along
+/// a line; in a forest 89 per cent and 18 blocks. That is not a hillside, it
+/// is a contour map -- wide flat shelves with a rim of quarter steps round
+/// each (`lips`), which from the ground reads as terraces nobody cut. The
+/// player saw exactly that and called them layers.
+///
+/// The cause is that every term of the old relief is a *country-sized* field.
+/// The one term with a few blocks' wavelength in it is `detail`, and `detail`
+/// is scaled by `unworn` -- so on worn lowland, which is all of the country a
+/// landform is, it is six tenths of a block: less than the rounding, and
+/// therefore nothing. A worn lowland was drawn as the algebra says a worn
+/// lowland is, a plane, and forgot that a real one is still made of soil that
+/// slumps, rock that stands out of it and water that has run over it.
+///
+/// So: one more band of scale, about twenty blocks to a crest and a block or
+/// so either way of the ground -- five at the field's fullest, which is rare
+/// and is what a knuckle of rock on a hillside is -- laid over the landforms'
+/// country and *not* turned off by `unworn`. It does not change where a hill
+/// is -- the quarter-kilometre relief of a steppe moves from nine to eleven
+/// blocks and a down's stays at thirty-five -- but it breaks every contour
+/// line into a coast. Measured (`probe_banding`, seed 1337, before → after):
+///
+/// ```text
+///          shelf share     band, blocks    grain
+///  steppe  80.3% → 56.3%   21.9 → 7.2    0.23 → 0.53
+///  forest  88.8% → 59.1%   17.6 → 7.1    0.28 → 0.47
+///   downs  52.0% → 45.1%    7.7 → 5.7    0.40 → 0.48
+///  meadow  42.7% → 24.8%    4.9 → 3.1    0.40 → 0.65
+/// ```
+///
+/// **The wavelength is chosen so the lips can still do their work.** A lip
+/// ramps a terrace up to four columns wide (`lips::REACH`) and leaves a
+/// narrower one the stair it is. The grain's own bands come out three to
+/// seven columns across, which is that width: the country gained its shape
+/// back and every rise in it is still a ramp rather than a hop. At five
+/// blocks to a crest the same height is a seam of a block *everywhere*,
+/// every one of them a terrace one column wide that no lip can ramp --
+/// gravel to walk over, not ground.
+///
+/// **Five, and seven and a half was too many.** The bound is
+/// `a_hillside_is_a_stack_of_shelves_rather_than_a_flight_of_walls`: no seam
+/// over five blocks anywhere, and under three per cent of the *lowland's*
+/// seams needing more than a jump, because the lowland is where people walk.
+/// Measured over its three seeds (`probe_slopes`, before → after): the worst
+/// seam in a wide sample 2 / 4 / 3 blocks → 4 / 4 / 4, and 0.3 / 1.4 / 1.1
+/// per cent of seams two or more → 0.9 / 1.6 / 2.1. At seven and a half a
+/// seam came out six blocks tall and the test went red. Six passed and
+/// bought a tenth of a block of band for half the remaining margin, which is
+/// not a trade.
+///
+/// And the ground is still mostly flat underfoot: 70 per cent of seams in a
+/// world are no step at all, against 78 before, and what the grain turned
+/// into steps it turned into steps of one -- which is a quarter-block ramp
+/// wherever a lip can reach it.
+const GRAIN_HEIGHT: f64 = 5.0;
+const GRAIN_FREQUENCY: f64 = 0.048;
+
+/// How much of the grain the softest rock keeps and how much the hardest
+/// adds: a vale of shale is worn smooth and a hard-rock hillside stands in
+/// knuckles and small outcrops. The same region field as `hardness`, so the
+/// rough country and the high country are one country and a player reading a
+/// hillside is reading its rock.
+const GRAIN_BY_ROCK: (f64, f64) = (0.55, 0.9);
+
 /// How much higher the ridges stand on the hardest rock than on the rest.
 ///
 /// **Up on hard rock, never down on soft.** A factor from 0.8 on shale to
@@ -220,6 +294,47 @@ impl WorldGen {
         1.0 + HARD_ROCK_GAIN * smoothstep(0.0, 0.4, region)
     }
 
+    /// How tall the grain stands, which is `GRAIN_HEIGHT` unless
+    /// **`PRIMITIVE_GRAIN=<blocks>`** says otherwise.
+    ///
+    /// The hook exists because the whole of this change is a before and an
+    /// after of the same country, and a before that has to be reached by
+    /// checking out an older tree is a before nobody re-runs. With
+    /// `PRIMITIVE_GRAIN=0` the generator draws the ground it drew before the
+    /// grain existed, to the block, and
+    /// `scenario::tests::a_picture_of_the_open_country` renders the same
+    /// four bearings from the same pinned spawn in either -- which is how
+    /// the pictures in `CHANGELOG.md` were made, and how the numbers in
+    /// `GRAIN_HEIGHT` were chosen. It reads the variable once for the life
+    /// of the process, so no chunk of one world is drawn at two settings.
+    ///
+    /// This is the same kind of hook as `PRIMITIVE_TEST_SCALE`, and it is
+    /// there for the same reason: a thing that can only be checked by hand
+    /// is a thing that stops being checked.
+    fn grain_height() -> f64 {
+        static TUNE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+        *TUNE.get_or_init(|| std::env::var("PRIMITIVE_GRAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(GRAIN_HEIGHT))
+    }
+
+    /// The grain of the country: the fine relief a worn lowland keeps, in
+    /// blocks either way. See `GRAIN_HEIGHT` for what it is for and what the
+    /// ground looked like without it.
+    ///
+    /// **A field of its own, not another octave of `detail`.** `detail` is
+    /// scaled by `unworn` from end to end -- that is the whole of what makes
+    /// a floodplain read as a floodplain and a ridge line as a ridge line --
+    /// and the grain is the opposite claim: it is the relief that survives
+    /// being worn down, because soil slumps and rock stands out of it long
+    /// after the hill they are on has gone. Carried as one more octave it
+    /// would have had to be exempted from the one factor that term exists
+    /// for; and two octave bands a factor apart in one `fbm` line up into a
+    /// ridge where their crests agree.
+    pub(super) fn grain(&self, gx: i32, gz: i32, region: f64) -> f64 {
+        let field = fbm(&self.grain_noise, gx as f64 - 2_221.0, gz as f64 + 6_133.0, GRAIN_FREQUENCY, 3);
+        let (soft, hard) = GRAIN_BY_ROCK;
+        field * Self::grain_height() * (soft + hard * smoothstep(-0.35, 0.35, region))
+    }
+
     /// The downs of hill country: rounded domes 0 .. `DOWNS_HEIGHT`, higher
     /// on hard rock. Before the hill country's weight is laid on.
     ///
@@ -228,8 +343,18 @@ impl WorldGen {
     /// through a smoothstep its low half is a flat fold between the hills and
     /// its high half a rounded crown, which is what a rolling country is --
     /// convex tops, concave feet.
+    ///
+    /// **Three octaves, and it was two.** Two octaves of Perlin eased through
+    /// a smoothstep is a field of domes that are all the same dome: the same
+    /// round crown, the same even flank, the same two hundred metres from
+    /// fold to fold, and a player crossing a down country walked over one
+    /// hill eleven times. The third octave is a quarter of the height at a
+    /// quarter of the wavelength -- four blocks of swell over fifty -- which
+    /// is too little to steepen a flank into a climb and enough to give each
+    /// dome a shoulder, a false crest and a side that falls away faster than
+    /// the other.
     pub(super) fn downs(&self, gx: i32, gz: i32, region: f64) -> f64 {
-        let field = fbm(&self.hill_noise, gx as f64 + 7_717.0, gz as f64 - 5_503.0, DOWNS_FREQUENCY, 2);
+        let field = fbm(&self.hill_noise, gx as f64 + 7_717.0, gz as f64 - 5_503.0, DOWNS_FREQUENCY, 3);
         smoothstep(-0.45, 0.45, field) * DOWNS_HEIGHT * (0.75 + 0.5 * smoothstep(-0.35, 0.35, region))
     }
 
