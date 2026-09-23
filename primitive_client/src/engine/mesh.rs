@@ -3238,13 +3238,23 @@ pub fn build_mesh(
                     // **A wild hive is a comb on a trunk**, drawn against the
                     // wall its bits name and not as a cube of its cell. See
                     // `types::hive_side`.
+                    //
+                    // **Written against the north wall (z 0..9), not the
+                    // south one.** It was written at z 7..16, which is the
+                    // half *away* from the side the bits name, and a hive
+                    // hung on the near side of a trunk was drawn on the far
+                    // side of its own cell: half a cell of sky between comb
+                    // and bark, from every flank ("улей не прикреплён к
+                    // дереву"). `geometry::block_box` collides the same half,
+                    // and `a_wild_hive_is_drawn_against_the_bark_it_hangs_on`
+                    // holds the two together.
                     if primitive_shared::bees::is_hive(id) {
                         let light = model_light(cache, cell, y, cover_table);
                         let quarters = turned_from_north(primitive_shared::types::hive_side(id));
                         push_box_faces(
                             [x as f32, y as f32, z as f32],
-                            [2.0, 0.0, 7.0],
-                            [14.0, 16.0, 16.0],
+                            [2.0, 0.0, 0.0],
+                            [14.0, 16.0, 9.0],
                             quarters,
                             std::array::from_fn(|face| textures.layer_for_face(id, face)),
                             true,
@@ -13132,6 +13142,85 @@ mod transparency_tests {
         assert_eq!(out.solid_index_count % 3, 0, "each split must be on a triangle boundary");
         assert_eq!(out.sprite_end % 3, 0);
         let _ = CHUNK_VOLUME;
+    }
+
+    #[test]
+    fn a_wild_hive_is_drawn_against_the_bark_it_hangs_on() {
+        // **"Улей не прикреплён к дереву."** A hive lives in the air cell
+        // beside a trunk and is half a cell of comb inside it
+        // (`types::hive_side`), so which half decides whether it is stuck to
+        // the tree or hanging a hand's width off it. The mesher wrote the comb
+        // into the half *away* from the side the bits name: from either flank
+        // there was sky between comb and bark, and the collider
+        // (`geometry::block_box`) had it in the same wrong place.
+        //
+        // Checked on what is emitted, with the trunk in the neighbourhood, for
+        // every side a hive can grow on: the drawn comb has to reach the plane
+        // it shares with the trunk, and it has to be inside the box a climbing
+        // player is stopped by.
+        use primitive_shared::types::{hive_against, Facing, BLOCK_LOG};
+        const TRUNK: (i32, i32, i32) = (8, 6, 8);
+        let slack = BITE * T + 1e-4;
+        for (dx, dz, toward_trunk) in [
+            (1i32, 0i32, Facing::West),
+            (-1, 0, Facing::East),
+            (0, 1, Facing::North),
+            (0, -1, Facing::South),
+        ] {
+            let at = (TRUNK.0 + dx, TRUNK.1, TRUNK.2 + dz);
+            let hive = hive_against(
+                primitive_shared::bees::hive_holding(primitive_shared::bees::HIVE_FULL),
+                toward_trunk,
+            );
+            let mesh = mesh_of(&cache_of(|x, y, z| {
+                if (x, y, z) == at {
+                    hive
+                } else if (x, z) == (TRUNK.0, TRUNK.2) && (1..=8).contains(&y) {
+                    BLOCK_LOG
+                } else {
+                    BLOCK_AIR
+                }
+            }));
+            assert!(!mesh.vertices.is_empty(), "a hive on a {toward_trunk:?} trunk drew nothing");
+            // The trunk is cubes on its own cells, so everything drawn inside
+            // the hive's cell is comb.
+            let comb: Vec<_> = mesh
+                .vertices
+                .iter()
+                .filter(|v| {
+                    v.position[0] >= at.0 as f32 - slack
+                        && v.position[0] <= at.0 as f32 + 1.0 + slack
+                        && v.position[2] >= at.2 as f32 - slack
+                        && v.position[2] <= at.2 as f32 + 1.0 + slack
+                        && v.position[1] >= at.1 as f32 - slack
+                        && v.position[1] <= at.1 as f32 + 1.0 + slack
+                })
+                .collect();
+            assert!(!comb.is_empty(), "nothing was drawn in the hive's own cell");
+            let (min, max) = primitive_shared::geometry::block_box(hive, at.0, at.1, at.2)
+                .expect("a hive is collided");
+            for v in &comb {
+                for axis in 0..3 {
+                    assert!(
+                        v.position[axis] >= min[axis] - slack && v.position[axis] <= max[axis] + slack,
+                        "a hive on a {toward_trunk:?} trunk is drawn at {:?}, outside {min:?}..{max:?}",
+                        v.position
+                    );
+                }
+            }
+            // ...and it touches the bark: the wall it shares with the trunk is
+            // the wall the comb reaches. The trunk is one step back from the
+            // hive's cell, so that plane is the hive cell's near wall.
+            let (axis, step, cell) = if dx != 0 { (0, dx, at.0) } else { (2, dz, at.2) };
+            let shared = if step > 0 { cell as f32 } else { cell as f32 + 1.0 };
+            let lo = comb.iter().fold(f32::MAX, |a, v| a.min(v.position[axis]));
+            let hi = comb.iter().fold(f32::MIN, |a, v| a.max(v.position[axis]));
+            let touching = if step > 0 { lo } else { hi };
+            assert!(
+                (touching - shared).abs() <= slack,
+                "a hive on a {toward_trunk:?} trunk is drawn {lo}..{hi} and the bark is at {shared}"
+            );
+        }
     }
 
     #[test]

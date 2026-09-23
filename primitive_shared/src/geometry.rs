@@ -129,15 +129,22 @@ pub fn for_each_block_box(
     // **A wild hive is a comb against a trunk**, not a cube of its cell: the
     // box is the half of the cell next to the tree (`types::hive_side`), so
     // a player climbing brushes the comb where the comb is drawn.
+    //
+    // **The half toward the wall the bits name, and that is the whole of a
+    // bug report.** These four arms used to be turned by two quarters --
+    // north named the +z half -- so the comb sat against the far wall of its
+    // cell and the trunk was seven sixteenths behind it, with daylight in
+    // between ("улей не прикреплён к дереву"). `hive_side` is the side it is
+    // stuck to, not the way it looks: north is -z, and north is the -z half.
     if crate::bees::is_hive(block) {
         let (x, y, z) = (bx as f32, by as f32, bz as f32);
         const THIN: f32 = 9.0 / 16.0;
         const EDGE: f32 = 2.0 / 16.0;
         let (min, max) = match block_facing_of_hive(block) {
-            0 => ([EDGE, 0.0, 1.0 - THIN], [1.0 - EDGE, 1.0, 1.0]),
-            1 => ([0.0, 0.0, EDGE], [THIN, 1.0, 1.0 - EDGE]),
-            2 => ([EDGE, 0.0, 0.0], [1.0 - EDGE, 1.0, THIN]),
-            _ => ([1.0 - THIN, 0.0, EDGE], [1.0, 1.0, 1.0 - EDGE]),
+            0 => ([EDGE, 0.0, 0.0], [1.0 - EDGE, 1.0, THIN]),
+            1 => ([1.0 - THIN, 0.0, EDGE], [1.0, 1.0, 1.0 - EDGE]),
+            2 => ([EDGE, 0.0, 1.0 - THIN], [1.0 - EDGE, 1.0, 1.0]),
+            _ => ([0.0, 0.0, EDGE], [THIN, 1.0, 1.0 - EDGE]),
         };
         visit([x + min[0], y + min[1], z + min[2]], [x + max[0], y + max[1], z + max[2]]);
         return;
@@ -1142,6 +1149,37 @@ pub fn narrow(p: (f64, f64, f64)) -> (f32, f32, f32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_wild_hives_comb_is_collided_against_the_very_wall_its_bits_name() {
+        // **"Улей не прикреплён к дереву."** `types::hive_side` is the wall
+        // the comb is stuck to -- the trunk is on the other side of it -- and
+        // these four arms were turned by two quarters, so a hive whose bits
+        // said "north" filled the +z half and left seven sixteenths of air
+        // between itself and the bark. The property, in the language of the
+        // cell: the box reaches the named wall and stops short of the
+        // opposite one.
+        use crate::types::{hive_against, Facing};
+        for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+            let hive = hive_against(crate::bees::hive_holding(crate::bees::HIVE_FULL), facing);
+            let mut boxes = Vec::new();
+            for_each_block_box(hive, 0, 0, 0, |_, _, _| crate::types::BLOCK_AIR, |a, b| boxes.push((a, b)));
+            assert_eq!(boxes.len(), 1, "a hive is one box of comb");
+            let (min, max) = boxes[0];
+            let (dx, dz) = facing.step();
+            let axis = if dx != 0 { 0 } else { 2 };
+            let step = if dx != 0 { dx } else { dz };
+            // Toward the wall the facing names, the comb is flush with the
+            // cell; away from it, it stops half way.
+            let (near, far) = if step > 0 { (max[axis], min[axis]) } else { (min[axis], max[axis]) };
+            let wall = if step > 0 { 1.0 } else { 0.0 };
+            assert!((near - wall).abs() < 1e-6, "a {facing:?} hive does not touch its wall: {min:?}..{max:?}");
+            assert!(
+                (far - wall).abs() > 0.4,
+                "a {facing:?} hive fills its whole cell instead of the half against the trunk: {min:?}..{max:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_window_lattice_is_a_thin_panel_across_the_middle_of_its_cell_and_is_collided_where_it_is() {
         use crate::types::{lattice_box, placed, BLOCK_WINDOW_LATTICE};

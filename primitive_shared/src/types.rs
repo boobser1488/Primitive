@@ -5639,7 +5639,15 @@ pub fn hive_against(id: BlockId, facing: Facing) -> BlockId {
     (id & !(0b11 << HIVE_SIDE_SHIFT)) | ((facing as BlockId) << HIVE_SIDE_SHIFT)
 }
 
-/// Which way a hive's comb faces: the trunk it grew on is behind it.
+/// Which wall of its cell a hive's comb is stuck to: the trunk it grew on is
+/// *that* way, and the comb looks out of the cell the other way.
+///
+/// Spelled out because the other reading of it cost a bug report. This is the
+/// direction toward the bark -- what `worldgen::place_hives` writes and what
+/// `hive_against` takes -- and the drawing and the collider both fill the half
+/// of the cell on this side. Read as "the way the comb looks", the mesher put
+/// the comb against the far wall of the cell and left seven sixteenths of
+/// daylight between it and the trunk ("улей не прикреплён к дереву").
 #[inline]
 pub fn hive_side(id: BlockId) -> Facing {
     match (id >> HIVE_SIDE_SHIFT) & 0b11 {
@@ -8124,9 +8132,15 @@ pub fn ripens_into(id: BlockId) -> Option<BlockId> {
         // forage when they fly (`bees::BEES_FLY_C`). A comb at a time rather
         // than full in one step, so a hive raided early is worth less than
         // one left alone -- and a full one ripens into nothing.
-        BLOCK_WILD_HIVE if crate::bees::honey_in(id) < crate::bees::HIVE_FULL => {
-            Some(crate::bees::hive_holding(crate::bees::honey_in(id) + 1))
-        }
+        // The comb it is stuck to the tree by comes with it: `hive_holding`
+        // builds a hive out of its honey alone, so a filling hive used to
+        // forget its wall (`hive_side`) and snap to north -- and on a trunk
+        // that was not north of it, that is a comb hanging in the air a
+        // hand's width from the bark ("улей не прикреплён к дереву").
+        BLOCK_WILD_HIVE if crate::bees::honey_in(id) < crate::bees::HIVE_FULL => Some(hive_against(
+            crate::bees::hive_holding(crate::bees::honey_in(id) + 1),
+            hive_side(id),
+        )),
         // ...and a mussel bed fills a mussel at a time, as a raided hive
         // fills a comb at a time and for exactly the hive's reason: a bed
         // picked over early is worth less than one left alone, and a rock
@@ -9449,8 +9463,12 @@ pub fn block_residue(id: BlockId) -> BlockId {
     // leaves nothing. Not a `leaves_behind` row, because one kind is both:
     // the row would have to say "the empty hive" for the empty hive too, and
     // a hive nobody could ever take down is a hive that is not a choice.
+    // The empty comb is stuck to the same tree the full one was: carried
+    // over, because `hive_holding` knows only about honey, and a robbed hive
+    // that forgot its wall (`hive_side`) came back snapped to north -- off
+    // the bark and hanging in the air on any trunk that was not north of it.
     if crate::bees::honey_in(id) > 0 {
-        return crate::bees::hive_holding(0);
+        return hive_against(crate::bees::hive_holding(0), hive_side(id));
     }
     crate::blocks::definition(id)
         .leaves_behind
@@ -9764,6 +9782,35 @@ impl Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A hive is stuck to one tree for as long as it is a hive.** The wall
+    /// it is stuck to lives in the spare wood bits (`hive_side`) and the
+    /// honey lives in the variant, and every step of a hive's life rebuilt
+    /// the block out of the honey alone (`bees::hive_holding`): robbing it
+    /// and filling it again both threw the wall away, and a hive that had
+    /// forgotten its wall snapped to north -- comb on the far side of its
+    /// cell, seven sixteenths of daylight between it and a trunk that was
+    /// anywhere but north ("улей не прикреплён к дереву").
+    #[test]
+    fn a_hive_stays_on_the_tree_it_grew_on_through_being_robbed_and_filling_again() {
+        use crate::bees::{hive_holding, honey_in, HIVE_FULL};
+        for facing in [Facing::North, Facing::East, Facing::South, Facing::West] {
+            let full = hive_against(hive_holding(HIVE_FULL), facing);
+            assert_eq!(hive_side(full), facing);
+            // Robbed: the empty comb left in the cell is on the same wall.
+            let empty = block_residue(full);
+            assert_eq!(honey_in(empty), 0, "a robbed hive kept its honey");
+            assert_eq!(hive_side(empty), facing, "a robbed {facing:?} hive changed trees");
+            // ...and filling again, a comb at a time, never moves it either.
+            let mut hive = empty;
+            while let Some(next) = ripens_into(hive) {
+                hive = next;
+                assert_eq!(hive_side(hive), facing, "a filling {facing:?} hive changed trees");
+                assert!(is_known_block(hive), "a filling {facing:?} hive became a block nobody knows");
+            }
+            assert_eq!(honey_in(hive), HIVE_FULL, "a hive stopped filling before it was full");
+        }
+    }
 
     /// **A pot of earth grows what a pot grows**: the berries, the herbs and
     /// the sown crops, and nothing that would be a tree on a windowsill.

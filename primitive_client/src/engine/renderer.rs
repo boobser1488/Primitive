@@ -23181,6 +23181,12 @@ mod rack_repro;
 #[path = "lean_to_repro.rs"]
 mod lean_to_repro;
 
+/// A wild hive on a trunk, walked round, through the chunk mesher. A child
+/// for the reason `lod_repro` is.
+#[cfg(test)]
+#[path = "hive_repro.rs"]
+mod hive_repro;
+
 /// **A raft on a lake with two people aboard**, through the game's own
 /// pipelines: the chunk mesher's lake and shore, the water through the
 /// blended pass, the raft through the entity list the network fills, and a

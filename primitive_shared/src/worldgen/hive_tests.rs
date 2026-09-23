@@ -63,6 +63,36 @@ fn hives_hang_on_trunks_in_warm_woods_and_never_in_the_desert_or_the_tundra() {
                     let ground = gen.height_at(gx + dx, gz + dz);
                     assert_eq!(y - ground, 5, "a hive at ({gx},{y},{gz}) hangs at the wrong height");
                     assert_eq!(crate::bees::honey_in(chunk.get(lx, ly, lz)), crate::bees::HIVE_FULL, "a wild hive grew empty");
+                    // ...and the comb rests on that trunk rather than beside
+                    // it. **"Улей не прикреплён к дереву."** The hive's own
+                    // cell is air; what makes it part of the tree is the half
+                    // of the cell it fills, and that half is named by
+                    // `types::hive_side`. Asked of the collider, because the
+                    // collider and the drawing are the same half
+                    // (`geometry::block_box`,
+                    // `mesh::a_wild_hive_is_drawn_against_the_bark_it_hangs_on`):
+                    // a hive whose bits point away from its trunk hangs seven
+                    // sixteenths off the bark with daylight in between.
+                    let hive = chunk.get(lx, ly, lz);
+                    assert_eq!(
+                        crate::types::hive_side(hive).step(),
+                        (dx, dz),
+                        "a hive at ({gx},{y},{gz}) of seed {seed} names a wall the trunk is not on"
+                    );
+                    let mut boxes = Vec::new();
+                    crate::geometry::for_each_block_box(hive, gx, y, gz, |_, _, _| crate::types::BLOCK_AIR, |a, b| {
+                        boxes.push((a, b))
+                    });
+                    let (min, max) = boxes[0];
+                    let (axis, step, cell) = if dx != 0 { (0, dx, gx) } else { (2, dz, gz) };
+                    // The trunk is one cell that way, so the bark is the hive
+                    // cell's own wall on that side.
+                    let bark = if step > 0 { cell as f32 + 1.0 } else { cell as f32 };
+                    let touching = if step > 0 { max[axis] } else { min[axis] };
+                    assert!(
+                        (touching - bark).abs() < 1e-4,
+                        "a hive at ({gx},{y},{gz}) of seed {seed} sits at {min:?}..{max:?} and the bark is at {bark}"
+                    );
                     warm_hives += 1;
                 }
                 if wood {
