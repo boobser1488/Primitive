@@ -178,6 +178,37 @@ fn gentle_rise(s: &Scenario) -> (i32, i32, Vec<(i32, f64, BlockId)>) {
     panic!("no gentle rise of two blocks round the spawn of a landforms world");
 }
 
+/// How many columns the walk across the country runs over.
+const CROSS_RUN: i32 = 24;
+
+/// A straight line of open meadow along +x round the spawn, [`CROSS_RUN`]
+/// columns long, with room for a body over every column of it and at least
+/// `shape` whole blocks between its lowest and its highest: its first
+/// column, its z, and the surface of each column.
+///
+/// The `shape` is what makes this a line of *country* rather than a line of
+/// floor. Before the landforms' ground had a grain in it
+/// (`worldgen::landforms::GRAIN_HEIGHT`) a meadow line this long was
+/// commonly flat from end to end -- a band of one height ran twenty-two
+/// blocks on a steppe -- so a run with three blocks of shape in it is also
+/// the thing the grain was added to produce.
+fn open_run(s: &Scenario, shape: i32) -> (i32, i32, Vec<(i32, f64, BlockId)>) {
+    let spawn = cell_of(s.feet());
+    for z in spawn.2 - 40..spawn.2 + 40 {
+        for x0 in spawn.0 - 40..spawn.0 + 40 - CROSS_RUN {
+            let Some(line) = (0..CROSS_RUN).map(|k| meadow_top(s, x0 + k, z)).collect::<Option<Vec<_>>>() else {
+                continue;
+            };
+            let low = line.iter().map(|c| c.0).min().expect("a line of columns");
+            let high = line.iter().map(|c| c.0).max().expect("a line of columns");
+            if high - low >= shape {
+                return (x0, z, line);
+            }
+        }
+    }
+    panic!("no open run of {CROSS_RUN} columns with {shape} blocks of shape round the spawn of a landforms world");
+}
+
 /// Forward held up the rise from its foot, the jump never pressed: says the
 /// player reached the top, and that no one frame lifted them more than a
 /// step.
@@ -250,6 +281,104 @@ fn a_generated_hill_is_walked_up_without_a_jump() {
         s.camera.pitch = -0.25;
         s.shot("smooth_before");
     }
+}
+
+/// What the landforms' open country looks like from standing height, from a
+/// place the environment pins so two builds can be put side by side.
+///
+/// ```text
+/// PRIMITIVE_TEST_SPAWN=-13300,-14000 PRIMITIVE_SCENARIO_SHOTS=<dir> \
+///   cargo test -p primitive_client --lib -- --ignored a_picture_of_the_open_country
+/// ```
+///
+/// With `PRIMITIVE_GRAIN=0` in front of it the same command draws the ground
+/// as it was before the country had a grain
+/// (`worldgen::landforms::grain_height`), from the same spot and the same
+/// bearings: the before of the before-and-after in `CHANGELOG.md`. The spawn
+/// above is the steppe patch where a band of one height ran thirty-nine
+/// blocks, found by `worldgen::landforms_tests::probe_banding`.
+#[test]
+#[ignore = "a picture, not an assertion"]
+fn a_picture_of_the_open_country() {
+    let mut s = landforms_world();
+    // Where the world put the player, which is ground of the world's own
+    // making -- `feet_on` is the test world's flat field and would leave the
+    // camera inside a hill here.
+    let home = (s.feet().x, s.feet().y, s.feet().z);
+    // Four ways from one place: a slope reads as terraces from across it and
+    // as a ramp from up it, and one picture of one bearing proves neither.
+    // From standing height, and again from twenty-five blocks over the same
+    // spot -- the bands of a hillside are a thing seen *across* ground, and
+    // at eye height the grass in front of the camera is most of the frame.
+    use std::f32::consts::{FRAC_PI_2, PI};
+    for (name, yaw) in [("country_e", 0.0), ("country_n", -FRAC_PI_2), ("country_w", PI), ("country_s", FRAC_PI_2)] {
+        s.stand_at(home);
+        s.face(yaw);
+        s.camera.pitch = -0.10;
+        s.frames(2);
+        s.shot(name);
+        s.stand_at((home.0, home.1 + 25.0, home.2));
+        s.face(yaw);
+        s.camera.pitch = -0.45;
+        s.shot(&format!("over_{name}"));
+    }
+}
+
+#[test]
+fn the_grain_of_the_open_country_is_walked_over_and_never_walked_into() {
+    // **"Слои ландшафта странные и слишком гладкие."** The answer was to put
+    // a grain back into the landforms' country
+    // (`worldgen::landforms::GRAIN_HEIGHT`), which is a block or two of
+    // relief every twenty blocks in ground that used to be a plane -- and
+    // the thing a player pays for relief with is jumping. So: a straight
+    // line of open meadow twenty-four columns long with three blocks of
+    // shape in it, walked end to end with forward held and the jump never
+    // pressed.
+    //
+    // What is claimed is that the grain is *walked over*. Its rises are a
+    // block at most and the lips ramp them (`worldgen::lips`), so a body
+    // crosses them at a walk; a wall the grain built in the middle of a
+    // meadow would stop the body here and this would say where.
+    let mut s = landforms_world();
+    let (x0, z, line) = open_run(&s, 3);
+    s.stand_at((x0 as f64 + 0.5, line[0].1, z as f64 + 0.5));
+    s.face(0.0);
+    s.camera.pitch = -0.2;
+    s.shot("grain_walk");
+    let step = f64::from(primitive_shared::geometry::PLAYER_STEP_HEIGHT);
+    let last_column = x0 + CROSS_RUN - 1;
+    s.hold(Action::Forward);
+    let (mut rises, mut stalled, mut worst_stall) = (Vec::new(), 0u32, 0u32);
+    let (mut last_y, mut last_x) = (s.feet().y, s.feet().x);
+    for _ in 0..(20.0 / FRAME) as usize {
+        s.frame();
+        let (x, y) = (s.feet().x, s.feet().y);
+        if y > last_y + 1e-4 {
+            rises.push(y - last_y);
+        }
+        // A frame that carried the body less than a tenth of what a walk
+        // carries it is a frame spent against something.
+        stalled = if x - last_x < 0.02 { stalled + 1 } else { 0 };
+        worst_stall = worst_stall.max(stalled);
+        (last_y, last_x) = (y, x);
+        if x > last_column as f64 + 0.5 {
+            break;
+        }
+    }
+    s.release_all();
+    s.seconds(0.25);
+    let at = s.feet();
+    assert!(
+        at.x > last_column as f64,
+        "the walk across the country stopped at {at:?}, {:.1} columns short of the far end at {last_column}",
+        last_column as f64 - at.x
+    );
+    // Half a second of standing still against the ground is being stuck;
+    // the odd frame lost to a lip's corner is not.
+    assert!(worst_stall < 30, "the body stood against the ground for {worst_stall} frames on the way across");
+    let biggest = rises.iter().copied().fold(0.0, f64::max);
+    assert!(biggest <= step + 0.02, "one frame lifted the player {biggest:.3} of a block: {rises:?}");
+    no_corrections(&s);
 }
 
 #[test]

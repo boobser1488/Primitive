@@ -15488,6 +15488,20 @@ mod merging_tests {
                 if lo(n).fract() != 0.0 {
                     continue;
                 }
+                // **And a quad off the grid across its own plane is a
+                // model's box, not a cube's face.** `push_box` grows every
+                // model by `BITE` of a sixteenth past its cell, so a
+                // boulder's underside runs 10.99875 .. 12.00125 -- and
+                // truncated toward zero that starts at cell ten, which is
+                // the cell *beside* the one it belongs to. The cell it
+                // wrongly claimed then had two faces over it and this test
+                // said the mesher drew one twice. It never found it until
+                // the landforms' ground got its grain
+                // (`worldgen::landforms::GRAIN_HEIGHT`) and put a boulder
+                // beside an overhang; the mesh was right the whole time.
+                if lo(a).fract() != 0.0 || hi(a).fract() != 0.0 || lo(b).fract() != 0.0 || hi(b).fract() != 0.0 {
+                    continue;
+                }
                 let plane = lo(n) as i32 - face_defs[face].corners[0][n] as i32;
                 if !(0..CHUNK_SIZE_Y.max(CHUNK_SIZE_X) as i32).contains(&plane) {
                     continue;

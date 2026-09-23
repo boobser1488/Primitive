@@ -232,20 +232,23 @@ fn an_old_worlds_new_chunks_are_the_old_generators_to_the_block() {
 /// at every depth, and a cave wall now shows the bands it is cut through.
 /// The old scales' prints above did not move, which is what says the change
 /// belongs to the new generator alone.
+///
+/// **All eight taken again when the country got its grain** and the beds of
+/// the deep rock stopped being one thickness (`landforms::GRAIN_HEIGHT`,
+/// `Beds::at`). Both move the new world's ground on purpose and neither
+/// moves an older world's: the Regional and Earth prints above are the same
+/// numbers they were, which is what says so.
 #[test]
 fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
     let held: [((i32, i32), u64); 8] = [
-        ((0, 0), 0xc1b2_3ce7_5051_149c),
-        ((5, -3), 0x7d71_38ac_74ab_3526),
-        // Four taken again when the crowns were made to hold on to their
-        // wood (`branches::blob`, a fork with no arms growing on): trees
-        // stand in these, and nothing else of the ground moved.
-        ((-40, 90), 0x1a03_6043_184b_7c21),
-        ((313, -77), 0x7a5c_8bd0_2eb1_9d17),
-        ((-1875, -1875), 0x6119_5bbe_53c5_e027),
-        ((-1868, -1872), 0x49ce_371a_7b0d_a380),
-        ((-1864, -1864), 0xca42_bd16_4d6b_d01d),
-        ((-1873, -1866), 0xeada_69ce_25f2_4caa),
+        ((0, 0), 0x97b3_43ff_fad1_8dec),
+        ((5, -3), 0xcf83_1c9b_c2f9_14eb),
+        ((-40, 90), 0x844e_9b4e_9783_f206),
+        ((313, -77), 0xdc81_e29b_9c13_a260),
+        ((-1875, -1875), 0x533f_3977_1909_dda6),
+        ((-1868, -1872), 0x396e_628e_6c7d_adb3),
+        ((-1864, -1864), 0xba6b_a426_448c_80a1),
+        ((-1873, -1866), 0xd37f_bd17_a9fd_b7cd),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(true));
@@ -272,15 +275,13 @@ fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
 #[test]
 fn the_landforms_lay_the_same_lips_every_time() {
     let held: [((i32, i32), u64); 4] = [
-        // Taken again on the merge of the lips under the trees with the beds
-        // of the deep rock: both move this ground on purpose, and the old
-        // scales' prints above did not move.
-        ((0, 0), 0x9187_d283_ea52_b9b8),
-        ((5, -3), 0x05f4_c29d_70d4_d892),
-        // ...and again when the crowns held on to their wood: a tree stands
-        // in it.
-        ((-1875, -1875), 0x017b_d630_8e7e_d0b1),
-        ((-1868, -1872), 0x8653_33f3_497c_c219),
+        // Taken again with the rest when the country got its grain
+        // (`landforms::GRAIN_HEIGHT`): a slope with a grain in it is a slope
+        // with other lips on it, which is most of the point.
+        ((0, 0), 0x5642_2980_e2f9_8834),
+        ((5, -3), 0x2a3b_08c1_65f9_d83b),
+        ((-1875, -1875), 0x4bdb_23ae_c2bd_e84f),
+        ((-1868, -1872), 0x04ec_b72a_5331_6d27),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     for ((x, z), print) in held {
@@ -626,5 +627,177 @@ fn what_the_landforms_cost_a_chunk() {
             spent[index][0] * 1000.0 / (5.0 * 144.0),
             spent[index][1] * 1000.0 / (5.0 * 144.0)
         );
+    }
+}
+
+/// How banded a patch of ground is, and how much grain it has: three numbers
+/// off a square `2 * reach + 1` across, dry land only.
+///
+/// The ground is a height field rounded to whole blocks, so every slope is a
+/// set of contour bands, and how those bands read is the whole of what the
+/// player called "слои ландшафта".
+///
+/// * **The shelf share** -- the columns whose four neighbours all stand at
+///   their own height. That is the inside of a band; on a field smooth enough
+///   it is nearly all of the ground, and a hillside of wide flat steps is
+///   what that looks like from the ground.
+/// * **The band** -- the mean length of a run of one height along an
+///   east-west line, in blocks. A band four wide is a ramp (`lips` puts three
+///   quarter steps in it); a band ten wide is a terrace with a rim.
+/// * **The grain** -- the root mean square of a column against the mean of
+///   its four neighbours four blocks off. A plane has none of it and a dome
+///   next to none: only detail at a few blocks' wavelength shows here, which
+///   is the thing that breaks a contour line into a coast instead of a curve.
+fn banding_round(gen: &WorldGen, gx: i32, gz: i32, reach: i32) -> Option<Banding> {
+    const WAYS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+    let at = |x: i32, z: i32| gen.height_at(x, z);
+    let (mut shelves, mut counted, mut runs, mut grain) = (0u32, 0u32, 0u32, 0f64);
+    for dz in -reach..=reach {
+        let mut last: Option<i32> = None;
+        for dx in -reach..=reach {
+            let (x, z) = (gx + dx, gz + dz);
+            let h = at(x, z);
+            // Dry ground only: a channel is cut level at the sea wherever it
+            // runs, so a band across one is the water's and not the country's.
+            if h <= SEA_LEVEL + 1 {
+                last = None;
+                continue;
+            }
+            counted += 1;
+            shelves += u32::from(WAYS.iter().all(|&(ox, oz)| at(x + ox, z + oz) == h));
+            if last != Some(h) {
+                runs += 1;
+            }
+            last = Some(h);
+            let far: i32 = WAYS.iter().map(|&(ox, oz)| at(x + ox * 4, z + oz * 4)).sum();
+            let curve = f64::from(h) - f64::from(far) / 4.0;
+            grain += curve * curve;
+        }
+    }
+    (counted >= 400).then(|| {
+        (
+            f64::from(shelves) / f64::from(counted),
+            f64::from(counted) / f64::from(runs.max(1)),
+            (grain / f64::from(counted)).sqrt(),
+        )
+    })
+}
+
+/// The same three numbers per biome, over the first `patches` columns of each
+/// biome found in a coarse sweep of a world, a square 49 across at each.
+fn banding_by_biome(gen: &WorldGen, want: &[Biome], patches: usize) -> Vec<(Biome, Banding, usize)> {
+    want.iter().map(|&biome| biome_banding(gen, biome, patches).0).collect()
+}
+
+/// A patch's shelf share, mean band in blocks and grain. See `banding_round`.
+type Banding = (f64, f64, f64);
+
+/// A biome's three numbers over the patches measured, with how many there
+/// were -- and where each patch was and what its band came out as.
+type BiomeBanding = ((Biome, Banding, usize), Vec<(i32, i32, f64)>);
+
+/// The same, and where each patch was: a probe that will not say where it
+/// looked cannot be looked at.
+fn biome_banding(gen: &WorldGen, biome: Biome, patches: usize) -> BiomeBanding {
+    let (mut sum, mut where_) = ((0.0, 0.0, 0.0), Vec::new());
+    for k in 0..1_600i32 {
+        if where_.len() >= patches {
+            break;
+        }
+        let (gx, gz) = ((k % 40) * 700 - 14_000, (k / 40) * 700 - 14_000);
+        if gen.biome_at(gx, gz) != biome {
+            continue;
+        }
+        if let Some((shelf, band, grain)) = banding_round(gen, gx, gz, 24) {
+            sum = (sum.0 + shelf, sum.1 + band, sum.2 + grain);
+            where_.push((gx, gz, band));
+        }
+    }
+    let d = where_.len().max(1) as f64;
+    ((biome, (sum.0 / d, sum.1 / d, sum.2 / d), where_.len()), where_)
+}
+
+/// ```text
+/// cargo test -p primitive_shared --lib -- --ignored --nocapture probe_banding
+/// ```
+#[test]
+#[ignore = "a measurement, not an assertion"]
+fn probe_banding() {
+    for seed in [1337u32, 99] {
+        let gen = WorldGen::new(seed);
+        println!("seed {seed}");
+        for want in [Biome::Hills, Biome::Steppe, Biome::Plains, Biome::Forest] {
+            let ((biome, (shelf, band, grain), n), patches) = biome_banding(&gen, want, 5);
+            println!(
+                "  {:>13} ({n} patches)  shelf {:5.1}%  band {band:5.2}  grain {grain:5.3}",
+                biome.name(),
+                shelf * 100.0
+            );
+            for (gx, gz, band) in patches {
+                println!("      at {gx:>7},{gz:>7}  band {band:5.2}");
+            }
+        }
+    }
+}
+
+/// **Open country is not a flight of terraces.** The ground is a height field
+/// rounded to whole blocks and the bands that rounding leaves are what a
+/// player reads a hillside by -- the complaint that began this was "слои
+/// ландшафта странные и слишком гладкие", and it was about these bands.
+///
+/// What is asserted is the thing that was wrong, measured
+/// (`banding_round`): a band that ran **twenty-two blocks** along a line in a
+/// steppe and eighteen in a forest, with four columns in five having all
+/// their neighbours at their own height. A country like that has one scale
+/// of shape in it and the other is the rounding.
+///
+/// Each bound sits between what was measured before the grain
+/// (`landforms::GRAIN_HEIGHT`) and what is measured after it, with the
+/// margin on the side of the ground that is there now: the widest band
+/// before was 21.9 and the widest after is 10.9; the fullest shelf share
+/// before was 88.8 per cent and after 65.2; the least grain before was 0.23
+/// and the least after 0.46.
+#[test]
+fn open_country_is_not_a_flight_of_terraces() {
+    for seed in [1337u32, 99] {
+        let gen = WorldGen::new(seed);
+        for (biome, (shelf, band, grain), n) in
+            banding_by_biome(&gen, &[Biome::Hills, Biome::Steppe, Biome::Plains, Biome::Forest], 5)
+        {
+            let name = biome.name();
+            assert!(n >= 3, "seed {seed}: only {n} patches of {name} to measure");
+            assert!(band < 13.0, "seed {seed}: a band of {name} runs {band:.1} blocks -- a terrace, not a slope");
+            assert!(shelf < 0.72, "seed {seed}: {:.0}% of a {name} has every neighbour at its own height", shelf * 100.0);
+            // ...and the ground has detail at a few blocks' wavelength at
+            // all, which is what a smooth field of any amplitude has none
+            // of, whatever its bands come out as.
+            assert!(grain > 0.42, "seed {seed}: a {name} has a grain of {grain:.2} -- a smooth field, whatever its size");
+        }
+    }
+}
+
+/// The thickness of each bed of the deep rock over a sweep of columns.
+///
+/// ```text
+/// cargo test -p primitive_shared --lib -- --ignored --nocapture probe_beds
+/// ```
+#[test]
+#[ignore = "a measurement, not an assertion"]
+fn probe_beds() {
+    let gen = WorldGen::new(1337);
+    let mut thick: [Vec<i32>; 3] = Default::default();
+    for k in 0..900i32 {
+        let (gx, gz) = ((k % 30) * 53 - 800, (k / 30) * 61 - 800);
+        let beds = gen.beds_at(gx, gz, gen.stratum(gx, gz, Biome::Plains, Biome::Plains.surface()).2);
+        for (which, rock) in [BLOCK_GRANITE, BLOCK_SANDSTONE, BLOCK_LIMESTONE].into_iter().enumerate() {
+            let n = (BEDROCK_TOP..SEA_LEVEL).filter(|&y| WorldGen::bedded_rock(y, beds) == rock).count();
+            thick[which].push(n as i32);
+        }
+    }
+    for (which, name) in ["granite", "sandstone", "limestone"].iter().enumerate() {
+        let v = &thick[which];
+        let mean = f64::from(v.iter().sum::<i32>()) / v.len() as f64;
+        let sd = (v.iter().map(|&t| (f64::from(t) - mean).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+        println!("{name:>10}: {:>3}..{:<3} mean {mean:5.2} sd {sd:4.2}", v.iter().min().unwrap(), v.iter().max().unwrap());
     }
 }

@@ -1378,7 +1378,20 @@ mod tests {
                 crate::types::block_name(step)
             );
             assert_eq!(block_kind(block_at(&chunks, tx, site.ground + 2, tz)), site.material, "seed {seed}: no trunk top");
-            assert_eq!(block_at(&chunks, lx, site.ground + 2, lz), BLOCK_AIR, "seed {seed}: nothing to stand on the step in");
+            // **Room for the body, not an empty cell.** This read
+            // `== BLOCK_AIR` until the ground round a giant got its grain
+            // (`landforms::GRAIN_HEIGHT`) and the step beside one was more
+            // often the hump itself: a hump is ground, the cover pass runs
+            // after the finds (`generate_chunk`) and plants a tuft on it,
+            // and a tuft is walked through (`types::is_collidable`). What
+            // the climb needs is that a player's feet fit where they land;
+            // grass growing round their boots is a wood.
+            let over_step = block_at(&chunks, lx, site.ground + 2, lz);
+            assert!(
+                !crate::types::is_collidable(over_step),
+                "seed {seed}: nothing to stand on the step in, only {}",
+                crate::types::block_name(over_step)
+            );
         }
     }
 

@@ -466,7 +466,67 @@ const BEDROCK_TOP: i32 = 2;
 const BED_LIMESTONE: i32 = SEA_LEVEL - 14;
 const BED_SANDSTONE: i32 = SEA_LEVEL - 28;
 const BED_GRANITE: i32 = SEA_LEVEL - 42;
-const _: () = assert!(BED_GRANITE - 3 > BEDROCK_TOP);
+/// The lowest a boundary can be laid: the basin's dip and the bed's own
+/// swing both at their fullest (`Beds::at`).
+const _: () = assert!(BED_GRANITE - 6 > BEDROCK_TOP);
+
+/// Where each bed of the deep rock ends in one column: the top of the granite
+/// basement, of the sandstone over it and of the limestone over that. See
+/// `WorldGen::bedded_rock`.
+///
+/// Worked out once for the column rather than at every cell of it: the rock
+/// loop is the hottest in the generator, and three comparisons against three
+/// numbers already in a register is less work than the arithmetic that used
+/// to run per cell.
+#[derive(Clone, Copy, Debug)]
+struct Beds {
+    granite: i32,
+    sandstone: i32,
+    limestone: i32,
+}
+
+impl Beds {
+    /// A column with no beds in it at all: an older scale's, where the deep
+    /// rock is the grey stone it always was (`Scale`).
+    const NONE: Self = Self { granite: i32::MIN, sandstone: i32::MIN, limestone: i32::MIN };
+
+    /// The three boundaries of a column whose granite line is `granite_from`
+    /// and whose bed field reads `swell`.
+    ///
+    /// **The whole basin dips together** with the granite line, halved so no
+    /// two boundaries cross on that account alone -- a player who finds the
+    /// granite low here finds the limestone low too, which is what one basin
+    /// means. **Each boundary then swells on its own**, and the two
+    /// boundaries of a bed take the field opposite ways, so a bed that is
+    /// thick here is thin a cave's length away instead of every bed being
+    /// thick together. See `WorldGen::bedded_rock` for the measurements and
+    /// for why it is one field and not three.
+    ///
+    /// **Four layers and three, and the size is not free.** The beds are
+    /// fourteen apart (`BED_LIMESTONE`), so the middle of each is seven from
+    /// either boundary, and
+    /// `a_shaft_driven_down_passes_stone_then_limestone_then_sandstone_then_granite`
+    /// asks that the middle of a bed is still that bed nearly everywhere: a
+    /// swing of four plus the basin's three is seven, which reaches that
+    /// middle only where the two fields are at their fullest together and at
+    /// odds -- a column in some hundreds. A swing of six would put the
+    /// middle of the sandstone in the granite over whole districts, and a
+    /// bed that is missing is a bed that teaches nothing. Measured
+    /// (`probe_beds`): the sandstone runs 8 to 20 layers and the limestone
+    /// 7 to 20, where both were 14 in every column of every world.
+    fn at(granite_from: i32, swell: f64) -> Self {
+        // The line wanders by `swing(6.0)` about `SEA_LEVEL + 55`
+        // (`WorldGen::stratum`); halved, so the basin dips by up to three
+        // layers.
+        let dip = (granite_from - SEA_LEVEL - 55) / 2;
+        let swing = |layers: f64| (swell * layers).round().clamp(-layers, layers) as i32;
+        Self {
+            granite: BED_GRANITE + dip + swing(3.0),
+            sandstone: BED_SANDSTONE + dip - swing(3.0),
+            limestone: BED_LIMESTONE + dip + swing(4.0),
+        }
+    }
+}
 
 /// How many blocks make one degree of latitude: a block is a metre, and a
 /// degree along a meridian is a hundred and eleven kilometres.
@@ -1387,6 +1447,9 @@ pub struct WorldGen {
     deposit_noise: Perlin,
     /// The middle of the world's three scales. See `hills`.
     hill_noise: Perlin,
+    /// The smallest scale the ground has, and the only one a worn lowland
+    /// keeps: the landforms' grain. See `landforms::grain`.
+    grain_noise: Perlin,
     /// Where the rock is mineralised at all. What is *in* a vein is a
     /// second question, and one only asked of rock that passed this one
     /// -- see `ore_at`.
@@ -2846,6 +2909,7 @@ impl WorldGen {
             ash_noise: Perlin::new(seed.wrapping_add(17)),
             deposit_noise: Perlin::new(seed.wrapping_add(23)),
             hill_noise: Perlin::new(seed.wrapping_add(29)),
+            grain_noise: Perlin::new(seed.wrapping_add(0x6C1B)),
             vein_noise: Perlin::new(seed.wrapping_add(31)),
             lake_noise: Perlin::new(seed.wrapping_add(0x1A4E)),
             province_noise: Perlin::new(seed.wrapping_add(37)),
@@ -3926,6 +3990,36 @@ impl WorldGen {
             let hills = hills * (1.0 - 0.85 * plain) * (1.0 - 0.5 * hill);
             let detail = detail * (1.0 - 0.8 * plain - 0.3 * hill);
             let rolling = self.rolling(gx, gz, highland) * (1.0 - 0.6 * plain);
+            // **The grain**, which is what a worn country keeps when every
+            // other term of the relief has been worn out of it
+            // (`landforms::GRAIN_HEIGHT`): the one scale in the field small
+            // enough to break a contour band, and the answer to a hillside
+            // that read as a flight of terraces.
+            //
+            // **It leans on `unworn` the way `roughness` does, and far less
+            // steeply.** `detail` runs from 0.6 to 4.6 with the age of the
+            // ground; the grain runs from three quarters to five fourths,
+            // because the claim it makes is not that young ground is rough
+            // -- `detail` makes that one -- but that *old* ground is not a
+            // plane. It still has to lean: the young upland has to come out
+            // rougher than the worn lowland or the world is one texture at
+            // every scale, which is the tell this file has been fighting
+            // since the roughness term was written
+            // (`a_worn_lowland_is_smoother_than_a_young_upland`). Measured
+            // without the lean: a worn lowland averaged 0.31 blocks of slope
+            // against a young upland's 0.40, and that test went red.
+            //
+            // Turned down on a down and on a steppe, because a chalk dome is
+            // rounded and a steppe is flat and both are *promises*
+            // (`a_down_country_rolls_and_a_steppe_lies_flat`) -- half the
+            // grain still breaks their bands. And faded at the waterline
+            // with everything else at this scale: two blocks of noise there
+            // is the difference between a beach and the sea, and a coast of
+            // speckle.
+            let grain = self.grain(gx, gz, region)
+                * shore_fade
+                * (0.75 + 0.5 * unworn)
+                * (1.0 - 0.45 * hill - 0.3 * plain);
             // **Downs on low ground only.** Rolling hill country is a
             // lowland's shape; laid over an upland already forty blocks up,
             // the crowns stood over the mountain line and a hill country
@@ -3936,7 +4030,7 @@ impl WorldGen {
             } else {
                 0.0
             };
-            self.soft_ceiling(base + relief + hills + detail + (rolling + downs) * land)
+            self.soft_ceiling(base + relief + hills + detail + grain + (rolling + downs) * land)
         } else {
             self.soft_ceiling(base + relief + hills + detail + self.rolling(gx, gz, highland) * land)
         };
@@ -4377,7 +4471,7 @@ impl WorldGen {
     /// (`dripstone::forms_in`), so a chamber hung with spikes is a chamber
     /// at a depth a player can learn.
     ///
-    /// ## Why it costs no noise
+    /// ## Why it costs one sample a column and not three
     ///
     /// **The beds dip with the granite line**, which the column has already
     /// paid a sample for: one basin, one set of beds, and a player who has
@@ -4386,6 +4480,8 @@ impl WorldGen {
     /// do. Rejected: a field of its own per bed. Three more `fbm` reads a
     /// column, in the hottest loop in the generator, to make beds wander
     /// out of step with a line nobody can see from inside the same cave.
+    /// One field, read once a column, moves all three boundaries and does
+    /// not (see below) move them the same way.
     ///
     /// Measured, against the Earth's generator on the same chunks in the
     /// same binary (`what_the_landforms_cost_a_chunk`): 4.16 / 4.40 ms a
@@ -4397,16 +4493,51 @@ impl WorldGen {
     /// A bed is a sheet laid down before the hill was worn into shape; one
     /// that followed the ground would rise into every mountain and read as
     /// a paint job on the terrain instead of as geology.
-    fn bedded_rock(y: i32, granite_from: i32) -> BlockId {
-        // The line wanders by `swing(6.0)` about `SEA_LEVEL + 55`
-        // (`stratum`); halved, so a bed dips by up to three layers and two
-        // beds never cross.
-        let dip = (granite_from - SEA_LEVEL - 55) / 2;
-        if y < BED_GRANITE + dip {
+    ///
+    /// ## Why the beds stopped being one thickness
+    ///
+    /// Every boundary used to dip by the same `dip`, so every bed came out
+    /// **exactly fourteen layers thick in every column of every world** --
+    /// measured (`probe_beds`): the sandstone 14..14, the limestone 14..14,
+    /// a standard deviation of nought. A cave wall showed three bands of one
+    /// width lying parallel, which is a paint job by another route: real beds
+    /// were laid down by a sea that came and went, so one swells where the
+    /// next pinches, and a bed can run out altogether against a rise in the
+    /// one under it. So each boundary now carries its own swing off a field
+    /// that turns over in about sixty blocks -- a cave's length, not a
+    /// province's -- and the swings are taken **opposite ways**, so where the
+    /// sandstone's floor rises its ceiling falls and the bed pinches.
+    /// Measured after: the sandstone runs 8 to 20 layers with a standard
+    /// deviation of 2.0, the limestone 7 to 20 with 2.3.
+    ///
+    /// One sample a column for the three of them, not three: the beds of one
+    /// basin were laid by one sea, and three fields would make three
+    /// unrelated sheets that happen to be stacked. See `Beds::at`.
+    /// Where the beds end under a column, or `Beds::NONE` in a world of a
+    /// scale that has no beds. One `fbm` read, paid once a column in
+    /// `build_column_tile` and nowhere else.
+    ///
+    /// **Its own field and its own offset, not the strata's own `wander`.**
+    /// `stratum` reads that field at 0.021 to pick the thickness of the
+    /// *upper* rock, the dozen layers under the soil -- so beds keyed to it
+    /// would swell exactly where the soil's rock ran deep, forty blocks
+    /// overhead and for no reason a player could ever see. The offset and
+    /// the frequency are the bed's own; the Perlin is shared because a
+    /// permutation table read at another place and another scale is another
+    /// field.
+    fn beds_at(&self, gx: i32, gz: i32, granite_from: i32) -> Beds {
+        if self.scale != Scale::Landforms {
+            return Beds::NONE;
+        }
+        Beds::at(granite_from, fbm(&self.strata_noise, gx as f64 + 1_657.0, gz as f64 - 4_871.0, 0.017, 2))
+    }
+
+    fn bedded_rock(y: i32, beds: Beds) -> BlockId {
+        if y < beds.granite {
             BLOCK_GRANITE
-        } else if y < BED_SANDSTONE + dip {
+        } else if y < beds.sandstone {
             BLOCK_SANDSTONE
-        } else if y < BED_LIMESTONE + dip {
+        } else if y < beds.limestone {
             BLOCK_LIMESTONE
         } else {
             // The top of the deep rock is still the grey stone the game has
@@ -5697,7 +5828,7 @@ impl WorldGen {
                 // The beds of the basement, each at its own depth. See
                 // `bedded_rock` -- and `Scale` for why an older world's new
                 // chunks are still the grey stone they always were.
-                Self::bedded_rock(y, column.granite_from)
+                Self::bedded_rock(y, column.beds)
             } else {
                 BLOCK_STONE
             };
@@ -9230,6 +9361,9 @@ struct Column {
     rock_depth: i32,
     /// Every rock cell at or above this is granite, whatever `rock` is.
     granite_from: i32,
+    /// Where each bed of the deep rock ends under this column, or
+    /// `Beds::NONE` in a world of an older scale. See `bedded_rock`.
+    beds: Beds,
     /// The band of cells, floor to roof inclusive, that the cave carver
     /// may not touch. Empty (floor above roof) for most of the world.
     ///
@@ -9846,6 +9980,8 @@ fn build_column_tile(gen: &WorldGen, tx: i32, tz: i32) -> ColumnTile {
                 }
             }
 
+            let beds = gen.beds_at(gx, gz, granite_from);
+
             columns.push(Column {
                 height,
                 biome,
@@ -9855,6 +9991,7 @@ fn build_column_tile(gen: &WorldGen, tx: i32, tz: i32) -> ColumnTile {
                 rock,
                 rock_depth,
                 granite_from,
+                beds,
                 seal,
             });
         }
@@ -9892,6 +10029,7 @@ impl ColumnCache {
             rock: BLOCK_STONE,
             rock_depth: 0,
             granite_from: i32::MAX,
+            beds: Beds::NONE,
             seal: (i32::MAX, i32::MIN),
         };
         let mut columns = vec![blank; (CACHE_SPAN * CACHE_SPAN) as usize];
@@ -20074,23 +20212,64 @@ mod strata_tests {
         }
     }
 
+    /// The beds under a column of the test world, by the one road the
+    /// generator itself takes.
+    fn beds_of(gen: &WorldGen, gx: i32, gz: i32) -> Beds {
+        gen.beds_at(gx, gz, gen.stratum(gx, gz, Biome::Plains, Biome::Plains.surface()).2)
+    }
+
     /// **A bed dips, it does not lie flat**: the boundary between two beds
     /// is at a different height in different columns, or a cave wall is a
-    /// painted stripe. It dips with the granite line, which is the same
-    /// field -- see `bedded_rock` for why it costs no sample.
+    /// painted stripe. It dips with the granite line and swells on its own
+    /// -- see `bedded_rock`.
     #[test]
     fn a_bed_boundary_dips_rather_than_lying_flat() {
         let gen = WorldGen::new(1337);
         let mut heights = std::collections::BTreeSet::new();
         for step in 0..48 {
             let gx = step * 96;
-            let granite_from = gen.stratum(gx, 0, Biome::Plains, Biome::Plains.surface()).2;
-            let top = (BED_LIMESTONE - 4..=BED_LIMESTONE + 4)
-                .find(|&y| WorldGen::bedded_rock(y, granite_from) != BLOCK_LIMESTONE)
+            let beds = beds_of(&gen, gx, 0);
+            let top = (BED_LIMESTONE - 8..=BED_LIMESTONE + 8)
+                .find(|&y| WorldGen::bedded_rock(y, beds) != BLOCK_LIMESTONE)
                 .expect("the top of the limestone bed");
             heights.insert(top);
         }
         assert!(heights.len() > 2, "the limestone bed lies at {heights:?} everywhere: a sheet, not a bed");
+    }
+
+    /// **The beds are not all one thickness**, and two neighbouring beds do
+    /// not swell together. Every boundary used to carry the same `dip`, so
+    /// the sandstone and the limestone came out fourteen layers thick in
+    /// every column of every world -- measured, a standard deviation of
+    /// nought (`probe_beds`) -- and a cave wall showed three parallel bands
+    /// of one width. See `bedded_rock`.
+    ///
+    /// What is asserted is what a player can see: a bed that is half again
+    /// as thick somewhere as it is somewhere else, and thicknesses that do
+    /// not move in step -- where the sandstone swells the limestone thins.
+    #[test]
+    fn the_beds_of_the_deep_rock_are_not_all_one_thickness() {
+        let gen = WorldGen::new(1337);
+        let thickness = |gx: i32, gz: i32| {
+            let beds = beds_of(&gen, gx, gz);
+            let of = |rock| (BEDROCK_TOP..SEA_LEVEL).filter(|&y| WorldGen::bedded_rock(y, beds) == rock).count() as i32;
+            (of(BLOCK_SANDSTONE), of(BLOCK_LIMESTONE))
+        };
+        let sample: Vec<(i32, i32)> = (0..400).map(|k| thickness((k % 20) * 53 - 500, (k / 20) * 61 - 500)).collect();
+        for (which, name) in ["sandstone", "limestone"].iter().enumerate() {
+            let pick = |t: &(i32, i32)| if which == 0 { t.0 } else { t.1 };
+            let (low, high) = (sample.iter().map(pick).min().unwrap(), sample.iter().map(pick).max().unwrap());
+            assert!(high * 2 >= low * 3, "the {name} bed runs {low}..{high} layers: one thickness everywhere");
+            assert!(low >= 5, "the {name} bed runs out to {low} layers: a bed nobody can drive a gallery along");
+        }
+        // ...and out of step: a column where one bed is at its thinnest and
+        // the other is not, which a shared dip cannot produce.
+        let thinnest = sample.iter().map(|t| t.0).min().unwrap();
+        let thickest = sample.iter().map(|t| t.1).max().unwrap();
+        assert!(
+            sample.iter().any(|&(s, l)| s == thinnest && l == thickest),
+            "the sandstone and the limestone never pinch and swell against each other: {sample:?}"
+        );
     }
 
     /// The first rock cell under the surface of every dry column of a
