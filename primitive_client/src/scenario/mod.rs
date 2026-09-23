@@ -355,11 +355,22 @@ impl Scenario {
     /// as a correction**: the scenario asked for it.
     pub fn stand_at(&mut self, feet: (f64, f64, f64)) {
         let at = DVec3::new(feet.0, feet.1, feet.2);
+        // **Whatever the set-down itself costs is the harness's, not the
+        // player's.** A body put down where the chunk under it has not
+        // arrived yet falls until it does, and the anticheat reads that as
+        // a hundred blocks a second -- a scenario turned red by a busy
+        // machine rather than by anything a player did. So: wait for the
+        // body to be standing (or swimming, which several scenarios set
+        // down into), and forget the corrections that waiting produced.
+        // Corrections from here on are the scenario's own.
+        let before = self.corrections.len();
         self.expected_move = Some(at);
         self.server().teleport_named(&self.name, feet.0 as f32, feet.1 as f32, feet.2 as f32);
         let arrived = self.until(10.0, |s| s.expected_move.is_none() && s.world_ready);
         assert!(arrived, "the teleport to {feet:?} never came back");
         self.seconds(0.3);
+        self.until(2.0, |s| s.player.grounded || s.player.in_water);
+        self.corrections.truncate(before);
     }
 
     /// Gives the player something, and waits until the pack says so.
