@@ -1704,8 +1704,9 @@ pub(crate) enum SlotEdge {
     /// **A state the pack had no way to draw**, and the one the body
     /// page needed most: a boot square with a hat in hand looked exactly
     /// like an empty boot square, so the only way to find out a garment
-    /// would not go somewhere was to try it. See
-    /// `mannequin::worn_square`.
+    /// would not go somewhere was to try it and watch the stack come
+    /// back. Decided from `equipment::slot_of` where the four squares
+    /// are drawn, so the hatching and the refusal are the one rule.
     Barred,
 }
 
