@@ -1836,20 +1836,6 @@ pub mod anchor {
     pub const TOP: fn(f32) -> (f32, f32) = |_aspect| (0.0, 1.0);
 }
 
-/// How big a settings row's furniture is.
-///
-/// **Passed rather than worked out from the row's own height**, which is
-/// what it was. A row used to letter itself in proportion to how tall it
-/// was, on the reasoning that a screen with enough settings on it to
-/// squeeze the rows should not have labels standing taller than the bars
-/// they sit in. That reasoning is sound downward and wrong upward: on a
-/// phone a row is as tall as the *finger* that has to hit it, which is
-/// nearly twice the height the writing wants, and deriving one from the
-/// other made a touch-sized row shout.
-///
-/// So the two are separate now. The row is as tall as the finger; the
-/// writing on it is as big as the player asked for.
-#[derive(Debug, Clone, Copy)]
 /// Whether a pressable thing is being pointed at or pressed.
 ///
 /// Three states and not two, because a phone has no pointer: a thumb
@@ -1864,6 +1850,20 @@ pub enum Press {
     Held,
 }
 
+/// How big a settings row's furniture is.
+///
+/// **Passed rather than worked out from the row's own height**, which is
+/// what it was. A row used to letter itself in proportion to how tall it
+/// was, on the reasoning that a screen with enough settings on it to
+/// squeeze the rows should not have labels standing taller than the bars
+/// they sit in. That reasoning is sound downward and wrong upward: on a
+/// phone a row is as tall as the *finger* that has to hit it, which is
+/// nearly twice the height the writing wants, and deriving one from the
+/// other made a touch-sized row shout.
+///
+/// So the two are separate now. The row is as tall as the finger; the
+/// writing on it is as big as the player asked for.
+#[derive(Debug, Clone, Copy)]
 pub struct RowStyle {
     /// How big the label is written.
     pub text: f32,
