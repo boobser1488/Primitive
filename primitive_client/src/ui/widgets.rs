@@ -645,24 +645,38 @@ const NO_SKIN: u32 = UNTEXTURED;
 /// one screen.
 ///
 /// The price is a global, and it is paid down the way `PRETEND_TOUCH`
-/// pays it: the tests get a thread-local override, so a test that wants
-/// the skin on has it on for itself and nothing else.
+/// pays it: in a test binary this number is never read at all, and a
+/// test that wants the skin on turns it on for its own thread. See
+/// `skin`, which is two functions for that reason.
 pub fn publish_skin(base: u32) {
     SKIN_BASE.store(base, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// What the painters are drawing with.
+#[cfg(not(test))]
 pub fn skin() -> Skin {
-    #[cfg(test)]
-    {
-        let overridden = TEST_SKIN.with(|cell| cell.get());
-        if overridden != NO_SKIN {
-            return Skin { base: Some(overridden) };
-        }
-    }
     match SKIN_BASE.load(std::sync::atomic::Ordering::Relaxed) {
-        NO_SKIN => Skin { base: None },
-        base => Skin { base: Some(base) },
+        NO_SKIN => Skin::NONE,
+        base => Skin::at(base),
+    }
+}
+
+/// **In a test binary the skin is whatever the test asked for, and
+/// nothing else** -- the published number is not read here at all.
+///
+/// It is not tidiness. This crate has tests that build a real atlas on
+/// a real device (`atlas_split_repro`, `model_light_repro`), and the
+/// loader publishes the skin as part of doing that. Read the global
+/// here and one of those tests would turn the skin on for every other
+/// test sharing the process, so whether a menu's golden fingerprint
+/// matched would depend on the order the tests happened to run in --
+/// which is exactly the failure `while_recording_text` refuses a global
+/// for, arriving by the back door.
+#[cfg(test)]
+pub fn skin() -> Skin {
+    match TEST_SKIN.with(|cell| cell.get()) {
+        NO_SKIN => Skin::NONE,
+        base => Skin::at(base),
     }
 }
 
