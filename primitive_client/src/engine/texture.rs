@@ -454,6 +454,33 @@ pub const EXTRA_TEXTURES: &[&str] = &[
     // index above is arithmetic on its neighbours (`extra_in_wood`) and a
     // picture put among them would move a wood's run by one.
     "hide/stretched_leather.png",
+    // **The interface's own pictures**, in `ui::widgets::Piece` order,
+    // and that order is the whole of the lookup: the skin is one base
+    // layer plus a piece number, so a picture inserted in the middle of
+    // this run would silently draw a button where a slot belongs. There
+    // is a test on the order for exactly that reason.
+    //
+    // Here rather than in `blocks.toml` for the reason the rest of this
+    // list is here: a row in `blocks.toml` is a *block*, and a panel is
+    // not a block anybody can place. Here rather than in a second array
+    // of its own because the interface samples the same texture array
+    // the world does -- see `hotbar.wgsl`, which is the one pipeline the
+    // menus, the pack and the hotbar all go through.
+    "ui/panel.png",
+    "ui/tray.png",
+    "ui/well.png",
+    "ui/slot.png",
+    "ui/slot_hover.png",
+    "ui/slot_selected.png",
+    "ui/slot_blocked.png",
+    "ui/button.png",
+    "ui/button_hover.png",
+    "ui/button_down.png",
+    "ui/tab_on.png",
+    "ui/tab_off.png",
+    "ui/track.png",
+    "ui/grip.png",
+    "ui/rule.png",
 ];
 
 /// How many sheets the fire is drawn from: one per crossing quad.
@@ -539,8 +566,27 @@ pub const EXTRA_FLAME: usize = 2;
 /// fourteen.
 pub const EXTRA_STRETCHED_HIDE: usize = 8;
 /// A skin laced in a frame and cured: what a hide frame's slab wears once it has
-/// dried. The last entry of `EXTRA_TEXTURES`.
-pub const EXTRA_STRETCHED_LEATHER: usize = EXTRA_TEXTURES.len() - 1;
+/// dried. The last entry before the interface's own run.
+///
+/// **Derived from where that run starts, not from the end of the list.**
+/// It was `EXTRA_TEXTURES.len() - 1` while the cured skin happened to be
+/// last, and the first picture appended after it would have dressed every
+/// hide frame in a panel -- a build that compiles, a test suite that
+/// passes, and a drying rack wearing a button.
+pub const EXTRA_STRETCHED_LEATHER: usize = EXTRA_UI_SKIN - 1;
+
+/// The first of the interface's own pictures, in `ui::widgets::Piece`
+/// order. See [`UI_SKIN_PIECES`] and `ui::widgets::Skin`.
+pub const EXTRA_UI_SKIN: usize = EXTRA_TEXTURES.len() - UI_SKIN_PIECES;
+
+/// How many pictures the interface's skin is.
+///
+/// Written here rather than read off `Piece::ALL` because this file must
+/// not depend on the interface to know how long its own list is; the test
+/// `widgets::every_piece_of_the_skin_is_the_picture_the_atlas_loads_for_it`
+/// is what keeps the two agreeing.
+pub const UI_SKIN_PIECES: usize = 15;
+
 /// The first of `FLAME_FRAMES` pictures of the fire on a torch. The
 /// rest follow it, and they are a run in the array the same way the
 /// hearth's are -- but no second sheet is derived from them, so unlike
@@ -1825,6 +1871,14 @@ impl TextureManager {
                 images.extend(derived);
             }
         }
+
+        // **Where the interface's own pictures ended up**, said once,
+        // here, because this is the only place that knows: a layer
+        // number is whatever the atlas happened to hand out. Everything
+        // that draws a panel reads it back through `widgets::skin`. See
+        // `widgets::publish_skin` for why that is a published number
+        // rather than an argument on fifty-six constructors.
+        crate::ui::widgets::publish_skin(extra_layers[EXTRA_UI_SKIN]);
 
         // **The mossy faces**, one picture per block that can wear moss
         // (`ground::may_grow_moss`): the block's own side with the overlay

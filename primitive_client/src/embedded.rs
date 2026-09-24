@@ -685,6 +685,25 @@ pub const TEXTURES: &[(&str, &[u8])] = &[
     ("furniture/chair_item.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/furniture/chair_item.png"))),
     ("furniture/table_item.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/furniture/table_item.png"))),
     ("furniture/bed_item.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/furniture/bed_item.png"))),
+    // The interface's own skin, in `ui::widgets::Piece` order. It is
+    // drawn out of the same array the world is (`hotbar.wgsl`), so it is
+    // a texture like any other -- what makes it its own run is that no
+    // block names it and the order is the lookup. See `EXTRA_UI_SKIN`.
+    ("ui/panel.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/panel.png"))),
+    ("ui/tray.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/tray.png"))),
+    ("ui/well.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/well.png"))),
+    ("ui/slot.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/slot.png"))),
+    ("ui/slot_hover.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/slot_hover.png"))),
+    ("ui/slot_selected.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/slot_selected.png"))),
+    ("ui/slot_blocked.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/slot_blocked.png"))),
+    ("ui/button.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/button.png"))),
+    ("ui/button_hover.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/button_hover.png"))),
+    ("ui/button_down.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/button_down.png"))),
+    ("ui/tab_on.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/tab_on.png"))),
+    ("ui/tab_off.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/tab_off.png"))),
+    ("ui/track.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/track.png"))),
+    ("ui/grip.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/grip.png"))),
+    ("ui/rule.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/rule.png"))),
 ];
 
 /// The built-in copy of one texture, if there is one.

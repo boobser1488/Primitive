@@ -3783,6 +3783,15 @@ impl Menu {
                 p.border(button, 0.003, widgets::TEXT_BAD);
                 p.label_in(button, "--", layout.at(0.95), widgets::TEXT_BAD);
                 self.hot.push((button, Action::RebindKey(action)));
+            } else if listening {
+                self.add_pressed_button(
+                    p,
+                    button,
+                    &label,
+                    Action::RebindKey(action),
+                    widgets::Press::Held,
+                    true,
+                );
             } else {
                 self.add_button(p, cursor, button, &label, Action::RebindKey(action), true);
             }
@@ -4246,7 +4255,31 @@ impl Menu {
         enabled: bool,
     ) {
         let hovered = enabled && self.is_hovered(rect, cursor);
-        p.button(rect, label, hovered, enabled);
+        let press = if hovered { widgets::Press::Hovered } else { widgets::Press::Idle };
+        self.add_pressed_button(p, rect, label, action, press, enabled);
+    }
+
+    /// The same, for a button the screen knows is *engaged* rather than
+    /// merely pointed at.
+    ///
+    /// One screen has such a button: the key being rebound, which has
+    /// been clicked and is now waiting for a key (`self.rebinding`).
+    /// It used to be an ordinary raised button whose label had changed
+    /// to PRESS A KEY -- so the only thing saying the interface was
+    /// waiting for you was a line of text three words long, on a
+    /// control that still looked exactly as pressable as the eleven
+    /// under it. Held, its bevel turns over and it reads as a key held
+    /// down, which is the thing that is actually happening.
+    fn add_pressed_button(
+        &mut self,
+        p: &mut Painter,
+        rect: Rect,
+        label: &str,
+        action: Action,
+        press: widgets::Press,
+        enabled: bool,
+    ) {
+        p.pressable(rect, label, press, enabled);
         if enabled {
             self.hot.push((rect, action));
         }

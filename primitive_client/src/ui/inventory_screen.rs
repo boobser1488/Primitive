@@ -1026,9 +1026,19 @@ impl InventoryScreen {
             let scale = widgets::fitted_scale(text, widgets::size::CAPTION, room, 0.7);
             p.text(text, top.x0, widgets::caption_top_over(top.y1, scale), scale, widgets::INK_DIM);
         }
+        // **What is in hand decides what the four squares can say.** A
+        // boot square with a hat in hand looked exactly like a boot
+        // square with nothing in hand, so the only way to learn that a
+        // hat does not go on a foot was to try it and watch the stack
+        // come back. With something held, every square that will not
+        // take it is hatched. See `SlotEdge::Barred`.
+        let in_hand = self.held.and_then(|slot| inventory.block_in(slot));
         for part in 0..primitive_shared::equipment::SLOTS {
             let cell = equipment_rect(part);
             let worn = equipment.slots().get(part).copied().flatten();
+            let takes_it = in_hand.map(|block| {
+                primitive_shared::equipment::slot_of(block).map(|slot| slot.index()) == Some(part)
+            });
             draw_slot_worn(
                 &mut p,
                 cell,
@@ -1040,6 +1050,8 @@ impl InventoryScreen {
                 0,
                 if over_body == Some(part) {
                     SlotEdge::Hovered
+                } else if takes_it == Some(false) {
+                    SlotEdge::Barred
                 } else {
                     SlotEdge::Plain
                 },
@@ -1687,6 +1699,14 @@ pub(crate) enum SlotEdge {
     Source,
     /// Holds something the hovered recipe would spend.
     Ingredient,
+    /// Nothing in hand may go in it.
+    ///
+    /// **A state the pack had no way to draw**, and the one the body
+    /// page needed most: a boot square with a hat in hand looked exactly
+    /// like an empty boot square, so the only way to find out a garment
+    /// would not go somewhere was to try it. See
+    /// `mannequin::worn_square`.
+    Barred,
 }
 
 /// Draws one slot: the recess, its border, its icon and its count.
@@ -1700,6 +1720,21 @@ pub(crate) enum SlotEdge {
 const HIGHLIGHT_HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.35];
 const HIGHLIGHT_SOURCE: [f32; 4] = [1.0, 0.85, 0.35, 0.45];
 const HIGHLIGHT_INGREDIENT: [f32; 4] = [0.55, 0.85, 1.0, 0.30];
+/// ...and a square nothing in hand may go into: hatched rather than
+/// dimmed. A dimmed cell in a wall of cells reads as an empty one, which
+/// is the opposite of what it has to say.
+const HIGHLIGHT_BARRED: [f32; 4] = [0.30, 0.26, 0.24, 0.55];
+
+/// The same three, as the skin's overlays carry them.
+///
+/// **Full alpha, because the picture has the alpha in it.** An overlay
+/// drawn out of `ui/slot_hover.png` is transparent everywhere it has
+/// nothing to say; multiplying that by a wash's own alpha as well would
+/// make the mark half of the half it already is. The colours are the
+/// washes' own, at their own strength.
+const HIGHLIGHT_HOVER_GLOW: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+const HIGHLIGHT_SOURCE_RING: [f32; 4] = [1.0, 0.85, 0.35, 1.0];
+const HIGHLIGHT_INGREDIENT_RING: [f32; 4] = [0.55, 0.85, 1.0, 1.0];
 
 /// One bevel in from a cell: where a wash goes, so it does not paint
 /// over the well's own edge.
@@ -1980,19 +2015,41 @@ fn draw_slot_full(
     contents: Option<(primitive_shared::types::BlockId, u32)>,
     quality: Option<primitive_shared::quality::Band>,
 ) {
-    // **A slot is a well cut into the stone**, and the bevel is what
-    // says so: dark along the top and left where the lip shades it,
-    // light along the bottom and right. See `Painter::well`.
-    p.well(cell, widgets::WELL);
+    // **A slot is a cell cut into the panel**, and it is one picture
+    // now: a seam, a lip, a floor with a vignette in it. See
+    // `Painter::cell`, and the skin block at the top of `widgets`.
+    p.cell(cell, widgets::WELL);
 
     // What the pointer is over, and what has been picked up, are drawn
-    // as a wash *inside* the well rather than as an outline around it: a
-    // second frame round a bevelled hole reads as a third edge, and the
-    // eye stops being able to tell which line is the slot.
+    // *inside* the cell rather than as an outline around it: a second
+    // frame round a bevelled hole reads as a third edge, and the eye
+    // stops being able to tell which line is the slot.
+    //
+    // The skin draws each of these as an overlay with its own alpha --
+    // a glow under the pointer, a ring of amber thread on the square
+    // the stack came from -- and where there is no skin they are the
+    // flat washes they have always been. Same rectangle either way.
     match edge {
-        SlotEdge::Source => p.quad(inset(cell), HIGHLIGHT_SOURCE),
-        SlotEdge::Hovered => p.quad(inset(cell), HIGHLIGHT_HOVER),
-        SlotEdge::Ingredient => p.quad(inset(cell), HIGHLIGHT_INGREDIENT),
+        SlotEdge::Source => {
+            if !p.cell_mark(cell, widgets::Piece::SlotSelected, HIGHLIGHT_SOURCE_RING) {
+                p.quad(inset(cell), HIGHLIGHT_SOURCE);
+            }
+        }
+        SlotEdge::Hovered => {
+            if !p.cell_mark(cell, widgets::Piece::SlotHover, HIGHLIGHT_HOVER_GLOW) {
+                p.quad(inset(cell), HIGHLIGHT_HOVER);
+            }
+        }
+        SlotEdge::Ingredient => {
+            if !p.cell_mark(cell, widgets::Piece::SlotSelected, HIGHLIGHT_INGREDIENT_RING) {
+                p.quad(inset(cell), HIGHLIGHT_INGREDIENT);
+            }
+        }
+        SlotEdge::Barred => {
+            if !p.cell_mark(cell, widgets::Piece::SlotBlocked, HIGHLIGHT_BARRED) {
+                p.quad(inset(cell), HIGHLIGHT_BARRED);
+            }
+        }
         SlotEdge::Plain => {}
     }
 

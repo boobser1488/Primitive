@@ -237,7 +237,7 @@ fn readout(painter: &mut Painter, track: Rect, wanted: f32, widest: &str, label:
         READOUT_LEFT + READOUT_RESERVE,
         centre_y + half,
     );
-    painter.quad(well, READOUT_WELL);
+    painter.track(well, READOUT_WELL);
     // The same hairline every track carries, so the well reads as one
     // more piece of the same instrument rather than as a black sticker
     // laid over it. Without this the degrees -- whose well stands proud
@@ -777,7 +777,7 @@ pub fn health_bar(painter: &mut Painter, current: f32, max: f32, recent: f32) {
         BAR_LEFT + BAR_WIDTH,
         BAR_Y + BAR_HEIGHT,
     );
-    painter.quad(track, BAR_TRACK);
+    painter.track(track, BAR_TRACK);
     painter.border(track, BAR_EDGE_WIDTH, BAR_EDGE);
     // **The one mark that keeps the pale ink**, and health is the
     // reason the rule is worth stating: the other six are strips that
@@ -886,7 +886,7 @@ pub fn stamina_bar(painter: &mut Painter, fraction: f32, exhausted: bool) {
     let fill = if exhausted { STAMINA_SPENT } else { STAMINA_FILL };
     let (y0, y1) = band_below(0);
     let track = Rect::new(BAR_LEFT, y0, BAR_LEFT + BAR_WIDTH, y1);
-    painter.quad(track, STAMINA_TRACK);
+    painter.track(track, STAMINA_TRACK);
 
     if fraction > 0.0 {
         painter.quad(
@@ -922,7 +922,7 @@ pub fn breath_bar(painter: &mut Painter, fraction: f32) {
     }
     let (y0, y1) = band_above(1);
     let track = Rect::new(BAR_LEFT, y0, BAR_LEFT + BAR_WIDTH, y1);
-    painter.quad(track, STAMINA_TRACK);
+    painter.track(track, STAMINA_TRACK);
     if fraction > 0.0 {
         painter.quad(
             Rect::new(track.x0, track.y0, track.x0 + BAR_WIDTH * fraction, track.y1),
@@ -960,7 +960,7 @@ pub fn nourishment_bar(painter: &mut Painter, fraction: f32) {
     };
     let (y0, y1) = band_below(1);
     let track = Rect::new(BAR_LEFT, y0, BAR_LEFT + BAR_WIDTH, y1);
-    painter.quad(track, STAMINA_TRACK);
+    painter.track(track, STAMINA_TRACK);
 
     if fraction > 0.0 {
         painter.quad(
@@ -1218,7 +1218,7 @@ pub fn hydration_bar(painter: &mut Painter, fraction: f32) {
     };
     let (y0, y1) = band_above(0);
     let track = Rect::new(BAR_LEFT, y0, BAR_LEFT + BAR_WIDTH, y1);
-    painter.quad(track, STAMINA_TRACK);
+    painter.track(track, STAMINA_TRACK);
     if fraction > 0.0 {
         painter.quad(
             Rect::new(track.x0, track.y0, track.x0 + BAR_WIDTH * fraction, track.y1),
@@ -1260,7 +1260,7 @@ pub fn rest_bar(painter: &mut Painter, fatigue: f32) {
     };
     let (y0, y1) = band_above(2);
     let track = Rect::new(BAR_LEFT, y0, BAR_LEFT + BAR_WIDTH, y1);
-    painter.quad(track, STAMINA_TRACK);
+    painter.track(track, STAMINA_TRACK);
     if left > 0.0 {
         painter.quad(
             Rect::new(track.x0, track.y0, track.x0 + BAR_WIDTH * left, track.y1),

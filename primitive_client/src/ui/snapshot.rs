@@ -95,6 +95,32 @@ fn snapshot_layout() -> crate::ui::widgets::Layout {
     crate::ui::widgets::Layout::for_screen(width() as f32 / height() as f32, ui_scale())
 }
 
+/// Where the interface's own pictures sit in the fixture atlas.
+///
+/// **The pictures are the point of these PNGs now.** The screens are
+/// drawn out of a skin (`widgets::Piece`), and a harness that left the
+/// skin off would take a picture of a screen the game does not draw --
+/// the one thing this tool must not produce. The numbers are
+/// `FaceLayers::empty_for_test`'s own, which start at one and stop well
+/// short of the font's base of a thousand, so nothing here can be
+/// mistaken for a glyph.
+fn snapshot_skin() -> u32 {
+    FaceLayers::empty_for_test().extra(crate::engine::texture::EXTRA_UI_SKIN)
+}
+
+/// The same, with the skin left off: what these screens looked like
+/// before they were drawn out of pictures.
+///
+/// `UI_SNAPSHOT_SKIN=0` is the "before" of a before-and-after taken in
+/// one binary, which is the only kind whose difference is the change --
+/// the same argument `PRIMITIVE_GRAIN=0` carries for the ground.
+fn wear_the_skin() {
+    if std::env::var("UI_SNAPSHOT_SKIN").as_deref() == Ok("0") {
+        return;
+    }
+    crate::ui::widgets::use_skin(snapshot_skin());
+}
+
 /// Writes the three screens as PNGs.
 ///
 /// Ignored by default -- it is a tool rather than a check. Point it
@@ -106,6 +132,7 @@ fn snapshot_layout() -> crate::ui::widgets::Layout {
 #[test]
 #[ignore = "a tool: writes PNGs of the interface for a person to look at"]
 fn ui_snapshot() {
+    wear_the_skin();
     let out = std::env::var("UI_SNAPSHOT_DIR").unwrap_or_else(|_| ".".to_string());
     std::fs::create_dir_all(&out).expect("output directory");
 
@@ -1074,6 +1101,7 @@ fn write_grown(path: &str, vertices: &[HotbarVertex], font: FontAtlas, scale: f3
 fn write(path: &str, vertices: &[HotbarVertex], font: FontAtlas) {
     let mut pixels = ground();
     let glyphs = glyph_lookup(font);
+    let skin = crate::ui::widgets::skin();
 
     for quad in vertices.chunks_exact(6) {
         let xs = quad.iter().map(|v| v.position[0]);
@@ -1105,6 +1133,29 @@ fn write(path: &str, vertices: &[HotbarVertex], font: FontAtlas) {
                     triangle[0].tint,
                 );
             }
+            continue;
+        }
+
+        // The interface's own pictures, drawn as the pictures they are.
+        // See `fill_picture`.
+        if let Some(piece) = skin.piece_of(quad[0].tex_layer) {
+            let us = quad.iter().map(|v| v.uv[0]);
+            let vs = quad.iter().map(|v| v.uv[1]);
+            let (u0, u1) = (
+                us.clone().fold(f32::MAX, f32::min),
+                us.fold(f32::MIN, f32::max),
+            );
+            let (v0, v1) = (
+                vs.clone().fold(f32::MAX, f32::min),
+                vs.fold(f32::MIN, f32::max),
+            );
+            fill_picture(
+                &mut pixels,
+                skin_picture(piece),
+                (x0, y0, x1, y1),
+                (u0, v0, u1, v1),
+                tint,
+            );
             continue;
         }
 
@@ -1222,6 +1273,7 @@ fn fill_flat_triangle(pixels: &mut [[u8; 4]], points: [(f32, f32); 3], tint: [f3
 #[test]
 #[ignore = "a tool: writes PNGs of the way-finding pieces for a person to look at"]
 fn nav_snapshot() {
+    wear_the_skin();
     use crate::logic::map::{Ground, Tile};
     use crate::ui::journal::{Journal, Tab};
     use crate::ui::lang::Msg;
@@ -1313,6 +1365,7 @@ fn nav_snapshot() {
 #[test]
 #[ignore = "a tool: writes PNGs of the journal for a person to look at"]
 fn journal_snapshot() {
+    wear_the_skin();
     use crate::logic::map::{survey, Landmarks};
     use crate::ui::journal::{body_rect, Journal, Tab};
     use crate::ui::map_screen::PlayerMark;
@@ -1493,6 +1546,7 @@ fn journal_snapshot() {
 #[test]
 #[ignore = "a tool: writes PNGs of the thumb controls for a person to look at"]
 fn thumb_controls_snapshot() {
+    wear_the_skin();
     use crate::platform::Size;
     use crate::settings::{Emits, TouchLayout};
 
@@ -1590,6 +1644,98 @@ fn fill(pixels: &mut [[u8; 4]], x0: f32, y0: f32, x1: f32, y1: f32, tint: [f32; 
             let under = pixels[at];
             for channel in 0..3 {
                 let over = tint[channel].clamp(0.0, 1.0) * 255.0;
+                pixels[at][channel] =
+                    (under[channel] as f32 * (1.0 - alpha) + over * alpha).round() as u8;
+            }
+        }
+    }
+}
+
+/// One of the interface's own pictures, decoded once for the process.
+///
+/// Off the copy compiled into the binary (`embedded::TEXTURES`), which
+/// is the same copy the atlas is built from, so a picture redrawn in
+/// `assets/textures/ui/` shows up here the next time the crate is built
+/// and nowhere else has to be told.
+fn skin_picture(piece: crate::ui::widgets::Piece) -> &'static image::RgbaImage {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, &'static image::RgbaImage>>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("the skin cache");
+    *cache.entry(piece.file()).or_insert_with(|| {
+        let bytes = crate::embedded::texture(piece.file()).expect("the skin is compiled in");
+        let image = image::load_from_memory(bytes).expect("a skin picture").to_rgba8();
+        // Leaked rather than kept in the map by value: a picture is a
+        // few kilobytes, there are fifteen of them, and the alternative
+        // is handing out a reference into a lock that has to be held
+        // for as long as the caller draws.
+        let leaked: &'static image::RgbaImage = Box::leak(Box::new(image));
+        leaked
+    })
+}
+
+/// Fills a rectangle with a piece of the skin, sampled the way the card
+/// samples it.
+///
+/// **This is the one place this harness stops being a stand-in.** Block
+/// icons are drawn as plates here because a block's texture lives on the
+/// graphics card; the interface's own pictures do not -- they are in the
+/// binary -- so a picture of a screen can show the screen rather than a
+/// grey rectangle where the panel goes. Without this, the whole of the
+/// skin would be invisible to the one tool built to look at it.
+///
+/// Nearest, because `texture::build_ui_sampler` is nearest. sRGB out of
+/// the byte and back in at the end, because the array is
+/// `Rgba8UnormSrgb` and the multiply happens in between; the tint
+/// arrives already lifted by `widgets::SKIN_GAIN`.
+fn fill_picture(
+    pixels: &mut [[u8; 4]],
+    picture: &image::RgbaImage,
+    (x0, y0, x1, y1): (f32, f32, f32, f32),
+    (u0, v0, u1, v1): (f32, f32, f32, f32),
+    tint: [f32; 4],
+) {
+    let aspect = width() as f32 / height() as f32;
+    let to_x = |x: f32| ((x / aspect + 1.0) * 0.5 * width() as f32).round() as i32;
+    let to_y = |y: f32| ((1.0 - (y + 1.0) * 0.5) * height() as f32).round() as i32;
+    let (left, right) = (to_x(x0), to_x(x1));
+    let (top, bottom) = (to_y(y1), to_y(y0));
+    let (px0, px1) = (left.max(0), right.min(width() as i32));
+    let (py0, py1) = (top.max(0), bottom.min(height() as i32));
+    if px1 <= px0 || py1 <= py0 {
+        return;
+    }
+    let (w, h) = (picture.width().max(1), picture.height().max(1));
+    let (across, down) = (((right - left) as f32).max(1.0), ((bottom - top) as f32).max(1.0));
+    let to_linear = |byte: u8| {
+        let c = byte as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    for y in py0..py1 {
+        // Where in the quad this row falls, and therefore where in the
+        // picture. Measured at the pixel's middle, which is what stops
+        // the last row of one tile coming out of the next tile.
+        let share = (y as f32 + 0.5 - top as f32) / down;
+        let sy = (((v0 + (v1 - v0) * share) * h as f32) as i64).clamp(0, h as i64 - 1) as u32;
+        for x in px0..px1 {
+            let share = (x as f32 + 0.5 - left as f32) / across;
+            let sx = (((u0 + (u1 - u0) * share) * w as f32) as i64).clamp(0, w as i64 - 1) as u32;
+            let texel = picture.get_pixel(sx, sy).0;
+            let alpha = (texel[3] as f32 / 255.0) * tint[3].clamp(0.0, 1.0);
+            if alpha <= 0.0 {
+                continue;
+            }
+            let at = (y as u32 * width() + x as u32) as usize;
+            let under = pixels[at];
+            for channel in 0..3 {
+                let over = (to_linear(texel[channel]) * tint[channel]).clamp(0.0, 1.0) * 255.0;
                 pixels[at][channel] =
                     (under[channel] as f32 * (1.0 - alpha) + over * alpha).round() as u8;
             }
@@ -2156,6 +2302,7 @@ fn edge(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
 #[test]
 #[ignore = "a tool: writes PNGs of the stall for a person to look at"]
 fn stall_snapshot() {
+    wear_the_skin();
     use crate::ui::chest_screen::{stall_control_rect, StallControl, StallView};
     use primitive_shared::stall::{Offer, STOCK, TAKINGS};
     use primitive_shared::types::{BLOCK_HIDE, BLOCK_STALL};
@@ -2210,6 +2357,7 @@ fn stall_snapshot() {
 #[test]
 #[ignore = "a tool: writes PNGs of every screen for a person to look at"]
 fn ui_audit_snapshot() {
+    wear_the_skin();
     use crate::ui::inventory_screen::Vitals;
     use crate::ui::station_screen::{jobs_of, StationScreen};
     use primitive_shared::minigame::{tolerance, Game};

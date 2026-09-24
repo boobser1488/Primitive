@@ -40,7 +40,14 @@ pub const MAX_SLOTS: usize = 10;
 /// frame edges, and then the pack's marks (`inventory_screen::slot_marks`)
 /// -- two for a quality square, four for a chipped edge, two for a wear
 /// bar. It was eight while the bar drew no marks at all.
-pub const MAX_HOTBAR_VERTICES: usize = MAX_SLOTS * 16 * 6 + 64;
+///
+/// **And two hundred and fifty-six over, for the backdrop**, which is no
+/// longer one quad: it is the skin's panel, sliced into a frame and a
+/// field that tiles along the bar (about two dozen quads at the size the
+/// bar is drawn -- see `widgets::FIELD_TILE`). This is only the capacity
+/// the buffer starts at and the renderer grows it when it has to, but a
+/// hint that is wrong every frame is a reallocation every frame.
+pub const MAX_HOTBAR_VERTICES: usize = MAX_SLOTS * 16 * 6 + 256;
 
 /// Slot geometry. Public because the HUD draws stack counts and the
 /// health row relative to the bar, and two modules laying the same bar
@@ -223,19 +230,31 @@ pub fn build_into(
     selected: usize,
     out: &mut Vec<HotbarVertex>,
 ) {
+    use crate::ui::widgets::{Painter, Piece, Rect};
+
     let count = MAX_SLOTS;
 
     let pitch = SLOT + GAP;
     let total = pitch * count as f32 - GAP;
-    push_quad(
-        out,
-        -total / 2.0 - PAD,
-        BOTTOM - PAD,
-        total / 2.0 + PAD,
-        TOP,
-        UNTEXTURED,
-        BACKDROP,
-    );
+    // One painter for the whole bar, so the belt is drawn out of the
+    // same pictures the pack is. **The bar and the pack are the same
+    // ten squares**, and while the bar drew its own gradient recess and
+    // the pack drew a bevelled well they were visibly two different
+    // interfaces stacked on one screen -- which is what the player was
+    // looking at when he asked for this.
+    let mut p = Painter::onto(textures.font, std::mem::take(out));
+    let backdrop = Rect::new(-total / 2.0 - PAD, BOTTOM - PAD, total / 2.0 + PAD, TOP);
+    if !p.nine(backdrop, Piece::Panel, BACKDROP, Some(crate::ui::widgets::FIELD_TILE)) {
+        push_quad(
+            &mut p.vertices,
+            backdrop.x0,
+            backdrop.y0,
+            backdrop.x1,
+            backdrop.y1,
+            UNTEXTURED,
+            BACKDROP,
+        );
+    }
 
     for index in 0..count {
         let centre = slot_centre(index, count);
@@ -245,22 +264,35 @@ pub fn build_into(
         let y1 = BOTTOM + SLOT;
         let is_selected = index == selected;
 
-        // The recess, under everything else in the slot.
+        // The recess, under everything else in the slot: the pack's own
+        // cell picture, or the gradient it was before there was one.
         let (top, bottom) = if is_selected {
             (CELL_SELECTED_TOP, CELL_SELECTED_BOTTOM)
         } else {
             (CELL_TOP, CELL_BOTTOM)
         };
-        push_gradient(out, x0, y0, x1, y1, top, bottom);
+        // The mean of the two ends of the gradient, because the picture
+        // carries its own light now and the tint carries only the
+        // colour. Keeping the brighter end would have made every slot on
+        // the belt a shade paler than the same slot in the pack.
+        let face = [
+            (top[0] + bottom[0]) / 2.0,
+            (top[1] + bottom[1]) / 2.0,
+            (top[2] + bottom[2]) / 2.0,
+            (top[3] + bottom[3]) / 2.0,
+        ];
+        if !p.stretched(Rect::new(x0, y0, x1, y1), Piece::Slot, face) {
+            push_gradient(&mut p.vertices, x0, y0, x1, y1, top, bottom);
+        }
 
         // Frame: four thin quads rather than a filled rect behind the
         // icon, so the selection reads as an outline at any size.
         let frame_colour = if is_selected { FRAME_SELECTED } else { FRAME };
         let t = if is_selected { 0.008 } else { 0.004 };
-        push_quad(out, x0 - t, y0 - t, x1 + t, y0, UNTEXTURED, frame_colour);
-        push_quad(out, x0 - t, y1, x1 + t, y1 + t, UNTEXTURED, frame_colour);
-        push_quad(out, x0 - t, y0, x0, y1, UNTEXTURED, frame_colour);
-        push_quad(out, x1, y0, x1 + t, y1, UNTEXTURED, frame_colour);
+        push_quad(&mut p.vertices, x0 - t, y0 - t, x1 + t, y0, UNTEXTURED, frame_colour);
+        push_quad(&mut p.vertices, x0 - t, y1, x1 + t, y1 + t, UNTEXTURED, frame_colour);
+        push_quad(&mut p.vertices, x0 - t, y0, x0, y1, UNTEXTURED, frame_colour);
+        push_quad(&mut p.vertices, x1, y0, x1 + t, y1, UNTEXTURED, frame_colour);
 
         // An empty slot draws its frame and nothing else. Drawing a
         // greyed-out block instead would suggest the player has one.
@@ -269,7 +301,7 @@ pub fn build_into(
         };
         let layer = icon_layer(textures, block);
         let tint = if is_selected { ICON_TINT } else { ICON_TINT_DIM };
-        push_quad(out, x0, y0, x1, y1, layer, icon_tint(block, tint));
+        push_quad(&mut p.vertices, x0, y0, x1, y1, layer, icon_tint(block, tint));
 
         // The pack's marks, by the pack's function: a chipped corner for
         // the tool that needs the stone, a square for how well a thing was
@@ -277,16 +309,15 @@ pub fn build_into(
         // actually looks for "which axe is going" -- see
         // `inventory_screen::slot_marks` for why it used to show none.
         let stack = inventory.slots().get(index).copied().flatten();
-        let mut painter = crate::ui::widgets::Painter::onto(textures.font, std::mem::take(out));
         crate::ui::inventory_screen::slot_marks(
-            &mut painter,
-            crate::ui::widgets::Rect::new(x0, y0, x1, y1),
+            &mut p,
+            Rect::new(x0, y0, x1, y1),
             block,
             stack.map(|s| s.condition()),
             stack.and_then(|s| s.quality().band()),
         );
-        *out = painter.into_vertices();
     }
+    *out = p.into_vertices();
 }
 
 /// The colour one item's icon is drawn in.

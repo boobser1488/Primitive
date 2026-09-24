@@ -428,6 +428,347 @@ impl Theme {
     };
 }
 
+// ---------------------------------------------------------------- skin
+//
+// **The interface is drawn out of pictures now, and the pictures are
+// multipliers rather than colours.**
+//
+// The player's words were that the screens looked like flat rectangles
+// out of code, and they were: a panel was a fill and four bevel quads,
+// a slot was the same five quads upside down. What they are now is
+// `assets/textures/ui/*.png` -- tanned hide with a stitched channel and
+// four rivets, cells with a lip and a floor, boards with a grain and a
+// pressed face -- sampled off the same texture array the world uses,
+// through the same pipeline the hotbar already used for block icons.
+//
+// ## Why the pictures have no colour of their own
+//
+// The shader does `sampled.rgb * tint.rgb`. The tint is the theme's
+// surface colour and the picture is a multiplier about 1.0, so a texel
+// of 1.0 leaves the surface exactly the colour `Theme` says it is.
+// That is what lets **one** skin serve the stone screens and the menu's
+// dark one -- the promise `Theme` already makes, "one interface in two
+// lights". A picture with its own browns in it would have broken that
+// promise the moment the menu opened, and it would also have made every
+// contrast measurement in this file a lie: those are taken against the
+// theme's numbers, and they stay true only while the skin's mean texel
+// is neutral. See `the_skin_shades_a_surface_without_moving_its_mean`.
+//
+// Rejected: two skins, one drawn in stone and one in the menu's blue.
+// Thirty pictures instead of fifteen, and two of everything that has to
+// keep agreeing -- which in this codebase is the failure that always
+// happens.
+//
+// ## Why nothing moved
+//
+// Every one of these draws **inside the rectangle it is given**, the
+// same rectangle the old fill and bevel covered. No hit test changed,
+// because no rectangle changed; rule 7 at the top of this file is kept
+// by construction rather than by a second piece of arithmetic that has
+// to match. See `the_skin_covers_its_rectangle_and_nothing_outside_it`.
+
+/// One picture of the interface's own skin.
+///
+/// The order is the lookup -- a piece's layer is the skin's base plus
+/// its number -- and it is the order of the `ui/` run at the end of
+/// `texture::EXTRA_TEXTURES`. A piece inserted in the middle of either
+/// list draws a button where a slot belongs, with nothing to say so, so
+/// there is a test holding the two lists together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Piece {
+    Panel,
+    Tray,
+    Well,
+    Slot,
+    SlotHover,
+    SlotSelected,
+    SlotBlocked,
+    Button,
+    ButtonHover,
+    ButtonDown,
+    TabOn,
+    TabOff,
+    Track,
+    Grip,
+    Rule,
+}
+
+impl Piece {
+    /// Every piece, in the order the array holds them.
+    pub const ALL: [Piece; 15] = [
+        Piece::Panel,
+        Piece::Tray,
+        Piece::Well,
+        Piece::Slot,
+        Piece::SlotHover,
+        Piece::SlotSelected,
+        Piece::SlotBlocked,
+        Piece::Button,
+        Piece::ButtonHover,
+        Piece::ButtonDown,
+        Piece::TabOn,
+        Piece::TabOff,
+        Piece::Track,
+        Piece::Grip,
+        Piece::Rule,
+    ];
+
+    /// The file it is drawn in, under `assets/textures/`.
+    pub fn file(self) -> &'static str {
+        crate::engine::texture::EXTRA_TEXTURES[crate::engine::texture::EXTRA_UI_SKIN + self as usize]
+    }
+
+    /// How many of the picture's 32 texels the frame takes on each side.
+    ///
+    /// Eight for the panel, because that is what a row of stitches needs
+    /// to be stitches rather than a dotted line; six for everything else,
+    /// which is a lip and a bead and no more.
+    fn border_texels(self) -> f32 {
+        match self {
+            Piece::Panel => 8.0,
+            // A cell and its overlays are drawn whole rather than sliced
+            // -- see `Painter::cell` -- so their border is never asked
+            // for. Answering the lip's own depth keeps the number honest
+            // for anything that does slice one.
+            Piece::Slot | Piece::SlotHover | Piece::SlotSelected | Piece::SlotBlocked => 4.0,
+            _ => 6.0,
+        }
+    }
+
+    /// How thick the frame is drawn on the screen.
+    ///
+    /// Separate from [`Piece::border_texels`], which is how much of the
+    /// *picture* the frame is, because the two answer different
+    /// questions: a panel's frame is eight texels because stitching
+    /// needs eight, and it is [`PANEL_BORDER`] wide because that is what
+    /// the screens around it already clear. Everything else is drawn at
+    /// one texel to one font pixel, which is what a lip should be.
+    fn screen_border(self) -> f32 {
+        match self {
+            Piece::Panel => PANEL_BORDER,
+            other => other.border_texels() * SKIN_TEXEL,
+        }
+    }
+}
+
+/// How big one texel of the skin is on the screen.
+///
+/// One font pixel: the stitching, the lip and the letters are then all
+/// drawn at the same size, and a screen made bigger by INTERFACE SIZE
+/// grows all three together (the whole vertex list is multiplied about
+/// the middle -- see `scale_about`).
+pub const SKIN_TEXEL: f32 = PIXEL;
+
+/// How much of a panel's edge its frame takes, on the screen.
+///
+/// **Public because it is what a screen has to clear**: a title written
+/// closer than this to a panel's edge is a title printed on the
+/// stitching. The old bevel was [`BEVEL`], four times thinner, which is
+/// why the two pads that were picked against *that* are derived from
+/// this now instead of being numbers somebody typed.
+///
+/// Thirty thousandths, which is `inventory_screen::PANEL_PAD` exactly:
+/// the pack already inset its contents by that much, so the frame ends
+/// on the line the pack's first slot begins at. The picture spends
+/// eight of its thirty-two texels on the frame -- what a row of
+/// stitches needs to be stitches -- and those eight are drawn a shade
+/// under one screen pixel each at 720p, which is the same squeeze a
+/// letter takes at any interface size that is not exactly 1.0.
+pub const PANEL_BORDER: f32 = 0.030;
+
+/// What a skin quad's tint is multiplied by.
+///
+/// Two and a half. A texel byte cannot go above 1.0, so a plain
+/// multiplier can only ever *darken* a surface -- and a bevel is half
+/// highlight. Lifting the tint on the way in and drawing mid-grey at 1.0
+/// buys the other half: a texel of 2.5 is two and a half times the
+/// theme's colour, a texel of 0.4 is a third of it, and 1.0 is the
+/// colour itself.
+///
+/// Two and a half rather than two, because the bevel this skin replaces
+/// was already brighter than two: `Theme::STONE.light` is 2.11 times
+/// `Theme::STONE.panel`, and a skin that could not reach the edge it was
+/// replacing would have made every panel flatter than the one before it.
+/// `tools/draw_ui_skin.py` encodes against this number, so the two have
+/// to move together.
+pub const SKIN_GAIN: f32 = 2.5;
+
+/// The side of one tile of a panel's field, on the screen.
+///
+/// **The middle of a panel is tiled, not stretched.** A sixteen-texel
+/// field pulled across a screen two units wide is not a texture, it is
+/// four soft blobs; this is a pixel game and that is the one thing it
+/// must not look like. Tiling costs quads -- about a hundred and forty
+/// for the biggest panel in the game, against five for the old flat
+/// fill -- and buys hide that is the same grain wherever it is drawn.
+/// Measured rather than guessed: see
+/// `a_whole_screen_of_skin_stays_inside_one_upload`.
+///
+/// Twice the field's own sixteen texels, so the grain is chunky enough
+/// to read as a material at arm's length and half as many quads as it
+/// would be at one to one.
+pub const FIELD_TILE: f32 = 32.0 * SKIN_TEXEL;
+
+/// Where the interface's pictures are in the texture array.
+///
+/// `None` until the atlas has been built, which is not a fallback
+/// nobody meets: every test in this crate lays screens out without a
+/// graphics card, and the geometry they check is the same either way --
+/// the skin only ever changes what a rectangle is *filled with*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Skin {
+    base: Option<u32>,
+}
+
+/// The base layer, or [`NO_SKIN`] for "the atlas has not been built".
+static SKIN_BASE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(NO_SKIN);
+
+/// Not a layer: `UNTEXTURED` is what a flat quad carries, so no real
+/// picture can ever be there.
+const NO_SKIN: u32 = UNTEXTURED;
+
+/// Says where the interface's pictures ended up.
+///
+/// Called once, by the texture loader, because that is the only place
+/// that knows: a layer number is whatever the atlas happened to hand
+/// out. **A global rather than a parameter**, and the argument is worth
+/// writing down because the obvious answer is the other one.
+///
+/// Threading it would mean a `Skin` on all fifty-six `Painter`
+/// constructors and on every `build` beneath them -- including the
+/// menu's, which has no texture table in scope at all and would have
+/// had to grow one. Fifty-six places is fifty-six chances to build a
+/// painter with no skin, and a screen drawn with no skin does not fail:
+/// it comes out in the old flat rectangles, next to screens that did
+/// not, which is exactly the "two programs" that rule 5 of this file
+/// exists to stop. One number, published once, cannot be forgotten on
+/// one screen.
+///
+/// The price is a global, and it is paid down the way `PRETEND_TOUCH`
+/// pays it: the tests get a thread-local override, so a test that wants
+/// the skin on has it on for itself and nothing else.
+pub fn publish_skin(base: u32) {
+    SKIN_BASE.store(base, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What the painters are drawing with.
+pub fn skin() -> Skin {
+    #[cfg(test)]
+    {
+        let overridden = TEST_SKIN.with(|cell| cell.get());
+        if overridden != NO_SKIN {
+            return Skin { base: Some(overridden) };
+        }
+    }
+    match SKIN_BASE.load(std::sync::atomic::Ordering::Relaxed) {
+        NO_SKIN => Skin { base: None },
+        base => Skin { base: Some(base) },
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SKIN: std::cell::Cell<u32> = const { std::cell::Cell::new(NO_SKIN) };
+}
+
+/// Draws the rest of *this thread* with the skin's pictures at `base`.
+///
+/// For the snapshot tools, whose whole body is one screen after another
+/// and which would otherwise be one closure four hundred lines long.
+/// It needs no restoring: `cargo test` gives every test its own thread,
+/// so the setting dies with the test that made it.
+#[cfg(test)]
+pub fn use_skin(base: u32) {
+    TEST_SKIN.with(|cell| cell.set(base));
+}
+
+/// Runs `body` with the skin's pictures at `base`.
+///
+/// A thread-local and not a store into the global, for the reason
+/// `while_recording_text` gives: `cargo test` runs several tests at
+/// once and a global would have one test drawing another test's screen.
+#[cfg(test)]
+pub fn with_skin<T>(base: u32, body: impl FnOnce() -> T) -> T {
+    struct Restore(u32);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_SKIN.with(|cell| cell.set(self.0));
+        }
+    }
+    let restore = Restore(TEST_SKIN.with(|cell| cell.replace(base)));
+    let answer = body();
+    drop(restore);
+    answer
+}
+
+impl Skin {
+    /// Nothing drawn out of pictures: the flat fills and bevels this
+    /// interface was made of before there was a skin.
+    pub const NONE: Skin = Skin { base: None };
+
+    /// The pictures starting at `base`.
+    pub fn at(base: u32) -> Skin {
+        Skin { base: Some(base) }
+    }
+
+    /// The array layer a piece is on.
+    pub fn layer(self, piece: Piece) -> Option<u32> {
+        self.base.map(|base| base + piece as u32)
+    }
+
+    /// Which piece a layer is, if it is one of ours.
+    ///
+    /// For the harnesses that turn a vertex list back into pixels
+    /// without a graphics card -- `ui::snapshot` and `dump_to_png` --
+    /// which would otherwise draw every panel as the grey plate they
+    /// stand a block icon in.
+    #[cfg(test)]
+    pub fn piece_of(self, layer: u32) -> Option<Piece> {
+        let base = self.base?;
+        let index = layer.checked_sub(base)? as usize;
+        Piece::ALL.get(index).copied()
+    }
+}
+
+/// How many texels square one picture of the skin is.
+///
+/// The pack's own resolution (`blocks.toml`), because these live in the
+/// same array as the blocks and every layer in an array is one size.
+const SKIN_RESOLUTION: f32 = 32.0;
+
+/// A surface colour as a skin quad carries it. See [`SKIN_GAIN`].
+fn skin_tint(colour: [f32; 4]) -> [f32; 4] {
+    [
+        colour[0] * SKIN_GAIN,
+        colour[1] * SKIN_GAIN,
+        colour[2] * SKIN_GAIN,
+        colour[3],
+    ]
+}
+
+/// Cuts a run into tiles, or leaves it whole.
+///
+/// The last tile is short and its picture is cut short with it, so the
+/// run ends exactly where it was asked to -- a tiled edge that rounded
+/// up to a whole tile would hang a texel or two past the rectangle,
+/// which is the one thing nothing in this file is allowed to do.
+fn spans(from: f32, to: f32, u_from: f32, u_to: f32, tile: Option<f32>) -> Vec<(f32, f32, f32, f32)> {
+    let span = to - from;
+    match tile {
+        Some(tile) if tile > 0.0 && span > tile => {
+            let count = (span / tile).ceil() as usize;
+            (0..count)
+                .map(|index| {
+                    let start = from + index as f32 * tile;
+                    let end = (start + tile).min(to);
+                    (start, end, u_from, u_from + (end - start) / tile * (u_to - u_from))
+                })
+                .collect()
+        }
+        _ => vec![(from, to, u_from, u_to)],
+    }
+}
+
 /// The stone the panels are cut from.
 pub const PANEL: [f32; 4] = Theme::STONE.panel;
 /// How thick a bevel is. Three pixels at a 720-tall window: the size a
@@ -621,6 +962,7 @@ pub fn dump_to_png(vertices: &[HotbarVertex], width: u32, height: u32, path: &st
         )
     };
 
+    let skin = skin();
     let mut pixels = vec![[26u8, 30, 38]; (width * height) as usize];
     let mut blend = |x: i64, y: i64, colour: [f32; 4]| {
         if x < 0 || y < 0 || x >= width as i64 || y >= height as i64 {
@@ -649,6 +991,26 @@ pub fn dump_to_png(vertices: &[HotbarVertex], width: u32, height: u32, path: &st
             y1 = y1.max(y);
         }
         let colour = quad[0].tint;
+        // A piece of the skin comes out as the surface colour it stands
+        // for, with the gain taken back off. This dump is for reading
+        // layouts in a terminal -- `ui::snapshot` is the harness that
+        // draws the pictures themselves -- and a panel drawn here as a
+        // block icon's grey plate would hide the very thing a layout
+        // dump is taken to check.
+        if skin.piece_of(quad[0].tex_layer).is_some() {
+            let flat = [
+                colour[0] / SKIN_GAIN,
+                colour[1] / SKIN_GAIN,
+                colour[2] / SKIN_GAIN,
+                colour[3],
+            ];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    blend(x, y, flat);
+                }
+            }
+            continue;
+        }
         match glyphs.get(&quad[0].tex_layer) {
             Some(&c) => {
                 let rows = crate::engine::font::glyph(c);
@@ -1474,6 +1836,20 @@ pub mod anchor {
 /// So the two are separate now. The row is as tall as the finger; the
 /// writing on it is as big as the player asked for.
 #[derive(Debug, Clone, Copy)]
+/// Whether a pressable thing is being pointed at or pressed.
+///
+/// Three states and not two, because a phone has no pointer: a thumb
+/// button is never hovered and always either idle or held, and a
+/// desktop button is never held long enough to matter but is hovered
+/// constantly. One enum covers both, so a screen does not have to know
+/// which kind of glass it is on to draw a button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Press {
+    Idle,
+    Hovered,
+    Held,
+}
+
 pub struct RowStyle {
     /// How big the label is written.
     pub text: f32,
@@ -1504,6 +1880,12 @@ pub struct Painter {
     font: crate::engine::texture::FontAtlas,
     /// Which skin the shared widgets draw in. See `Theme`.
     theme: Theme,
+    /// Which pictures the panels, cells and boards are drawn out of.
+    ///
+    /// Taken once, when the painter is made, rather than looked up per
+    /// quad: it is an atomic read, and a screen draws a few thousand
+    /// quads.
+    skin: Skin,
     /// How big the writing on a full-size widget is, against the
     /// desktop's one.
     ///
@@ -1580,6 +1962,7 @@ impl Painter {
             vertices: Vec::new(),
             font,
             theme: Theme::STONE,
+            skin: skin(),
             content: 1.0,
         }
     }
@@ -1600,6 +1983,7 @@ impl Painter {
             vertices,
             font,
             theme: Theme::STONE,
+            skin: skin(),
             content: 1.0,
         }
     }
@@ -1614,6 +1998,7 @@ impl Painter {
             vertices,
             font,
             theme,
+            skin: skin(),
             content: 1.0,
         }
     }
@@ -1686,6 +2071,136 @@ impl Painter {
                 tex_layer: UNTEXTURED,
                 tint: colour,
             });
+        }
+    }
+
+    /// One rectangle of a picture onto one rectangle of the screen.
+    ///
+    /// `v` runs down the picture and `y` runs up the screen, so the top
+    /// edge of the quad takes the *smaller* v. Getting that backwards
+    /// draws the whole interface upside down -- the same trap the block
+    /// face UVs carry, and the reason `hotbar::push_quad` says so too.
+    fn picture(&mut self, rect: Rect, layer: u32, (u0, v0, u1, v1): (f32, f32, f32, f32), tint: [f32; 4]) {
+        for (position, uv) in [
+            ([rect.x0, rect.y0], [u0, v1]),
+            ([rect.x1, rect.y0], [u1, v1]),
+            ([rect.x1, rect.y1], [u1, v0]),
+            ([rect.x0, rect.y0], [u0, v1]),
+            ([rect.x1, rect.y1], [u1, v0]),
+            ([rect.x0, rect.y1], [u0, v0]),
+        ] {
+            self.vertices.push(HotbarVertex {
+                position,
+                uv,
+                tex_layer: layer,
+                tint,
+            });
+        }
+    }
+
+    /// A whole picture stretched over a rectangle.
+    ///
+    /// What a cell is drawn with: a slot is always about square and
+    /// always about one size, so slicing it would be five times the
+    /// quads for a difference nobody can see at eighty thousandths of a
+    /// screen.
+    ///
+    /// Answers whether it drew anything, so a caller can fall back to
+    /// the flat fill this interface had before it had pictures.
+    #[must_use]
+    pub fn stretched(&mut self, rect: Rect, piece: Piece, colour: [f32; 4]) -> bool {
+        let Some(layer) = self.skin.layer(piece) else {
+            return false;
+        };
+        self.picture(rect, layer, (0.0, 0.0, 1.0, 1.0), skin_tint(colour));
+        true
+    }
+
+    /// A picture in nine pieces: four corners at a fixed size, four
+    /// edges run along their sides, and a field in the middle.
+    ///
+    /// **The frame never eats more than a quarter of the rectangle.** A
+    /// settings row is a third the height of the border it would like,
+    /// and a widget whose frame meets in the middle is not a framed
+    /// thing, it is a lip drawn twice with a scar down it. A quarter
+    /// also leaves half the widget as field, which is what makes a
+    /// short row still read as a row rather than as a bead.
+    ///
+    /// `tile` is the side of one repeat of the middle and of the edges.
+    /// `None` stretches them, which is right for a board or a cell-sized
+    /// hollow and wrong for a panel -- see [`FIELD_TILE`].
+    #[must_use]
+    pub fn nine(&mut self, rect: Rect, piece: Piece, colour: [f32; 4], tile: Option<f32>) -> bool {
+        let Some(layer) = self.skin.layer(piece) else {
+            return false;
+        };
+        let inset = piece.border_texels() / SKIN_RESOLUTION;
+        let border = piece
+            .screen_border()
+            .min(rect.width() * 0.25)
+            .min(rect.height() * 0.25)
+            .max(0.0);
+        let tint = skin_tint(colour);
+        let xs = [rect.x0, rect.x0 + border, rect.x1 - border, rect.x1];
+        let ys = [rect.y0, rect.y0 + border, rect.y1 - border, rect.y1];
+        let us = [0.0, inset, 1.0 - inset, 1.0];
+        // v is measured down the picture while y is measured up the
+        // screen, so the bottom of the rectangle takes the bottom of the
+        // picture, which is v = 1.
+        let vs = [1.0, 1.0 - inset, inset, 0.0];
+        for column in 0..3 {
+            let across = spans(
+                xs[column],
+                xs[column + 1],
+                us[column],
+                us[column + 1],
+                if column == 1 { tile } else { None },
+            );
+            for row in 0..3 {
+                let down = spans(
+                    ys[row],
+                    ys[row + 1],
+                    vs[row],
+                    vs[row + 1],
+                    if row == 1 { tile } else { None },
+                );
+                for &(x0, x1, u0, u1) in &across {
+                    for &(y0, y1, v1, v0) in &down {
+                        if x1 <= x0 || y1 <= y0 {
+                            continue;
+                        }
+                        self.picture(Rect::new(x0, y0, x1, y1), layer, (u0, v0, u1, v1), tint);
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// A hairline divider across a panel: a groove with a lit line under
+    /// it, which is what an edge with a thickness looks like.
+    ///
+    /// **Only four rows of the picture are drawn.** Every layer in the
+    /// array is thirty-two texels square, and a divider is four of them
+    /// tall; sampling the whole layer would squeeze thirty-two rows into
+    /// four and leave half a texel of line. The other rows are empty, so
+    /// they are simply not asked for.
+    ///
+    /// Nothing in the picture varies along x, so stretching it sideways
+    /// across a panel cannot smear anything -- which is why this is one
+    /// quad rather than a nine-slice.
+    pub fn rule(&mut self, x0: f32, x1: f32, y: f32, colour: [f32; 4]) {
+        let half = 2.0 * SKIN_TEXEL;
+        let rect = Rect::new(x0, y - half, x1, y + half);
+        match self.skin.layer(Piece::Rule) {
+            Some(layer) => {
+                let (top, bottom) = (14.0 / SKIN_RESOLUTION, 18.0 / SKIN_RESOLUTION);
+                self.picture(rect, layer, (0.0, top, 1.0, bottom), skin_tint(colour));
+            }
+            None => self.quad(
+                Rect::new(x0, y - SKIN_TEXEL * 0.5, x1, y + SKIN_TEXEL * 0.5),
+                colour,
+            ),
         }
     }
 
@@ -1820,13 +2335,41 @@ impl Painter {
     /// a gradient or a shadow or a blur. The corners are mitred the lazy
     /// way (the light edges own them), because at three pixels nobody
     /// has ever noticed and the alternative is eight quads.
+    ///
+    /// **It is a picture now**, and the four quads below are what is
+    /// drawn where there is none: the hide, its stitched channel and its
+    /// four rivets say "a made thing" in a way two colours cannot, and
+    /// they say it at every size because the frame is sliced rather than
+    /// stretched. See the skin block at the top of this file.
     pub fn slab(&mut self, rect: Rect, face: [f32; 4]) {
-        let (t, light, dark) = (BEVEL, self.theme.light, self.theme.dark);
+        if self.nine(rect, Piece::Panel, face, Some(FIELD_TILE)) {
+            return;
+        }
+        self.bevelled(rect, face, true);
+    }
+
+    /// The fill and the bevel a surface is drawn as where there is no
+    /// skin: light along the top and the left of a raised thing, the
+    /// other way round for a hollow.
+    ///
+    /// Kept whole rather than deleted, and it is not sentiment. Every
+    /// test in this crate lays these screens out without a graphics
+    /// card, so this is what all of them draw -- and it is the picture
+    /// the skin has to agree with, because the geometry is the same
+    /// either way.
+    fn bevelled(&mut self, rect: Rect, face: [f32; 4], raised: bool) {
+        let (light, dark) = if raised {
+            (self.theme.light, self.theme.dark)
+        } else {
+            (self.theme.well_light, self.theme.well_dark)
+        };
+        let (top, bottom) = if raised { (light, dark) } else { (dark, light) };
+        let t = BEVEL;
         self.quad(rect, face);
-        self.quad(Rect::new(rect.x0, rect.y1 - t, rect.x1, rect.y1), light);
-        self.quad(Rect::new(rect.x0, rect.y0, rect.x0 + t, rect.y1), light);
-        self.quad(Rect::new(rect.x0 + t, rect.y0, rect.x1, rect.y0 + t), dark);
-        self.quad(Rect::new(rect.x1 - t, rect.y0 + t, rect.x1, rect.y1 - t), dark);
+        self.quad(Rect::new(rect.x0, rect.y1 - t, rect.x1, rect.y1), top);
+        self.quad(Rect::new(rect.x0, rect.y0, rect.x0 + t, rect.y1), top);
+        self.quad(Rect::new(rect.x0 + t, rect.y0, rect.x1, rect.y0 + t), bottom);
+        self.quad(Rect::new(rect.x1 - t, rect.y0 + t, rect.x1, rect.y1 - t), bottom);
     }
 
     /// A well cut *into* the stone: the same bevel, upside down.
@@ -1835,13 +2378,70 @@ impl Painter {
     /// right. It is the only difference between a thing standing up and
     /// a hole going in, and it is what makes a grid of these read as
     /// somewhere to put things.
+    ///
+    /// **A picture too**, and which one depends on how deep the hollow
+    /// is meant to be: the tray a group of slots stands in is the same
+    /// shape with a gentler lip, and it is one row in this match rather
+    /// than a second widget, because the difference between a tray and a
+    /// well has to stay one difference. Anything else falls back to the
+    /// bevel below.
     pub fn well(&mut self, rect: Rect, face: [f32; 4]) {
-        let (t, light, dark) = (BEVEL, self.theme.well_light, self.theme.well_dark);
-        self.quad(rect, face);
-        self.quad(Rect::new(rect.x0, rect.y1 - t, rect.x1, rect.y1), dark);
-        self.quad(Rect::new(rect.x0, rect.y0, rect.x0 + t, rect.y1), dark);
-        self.quad(Rect::new(rect.x0 + t, rect.y0, rect.x1, rect.y0 + t), light);
-        self.quad(Rect::new(rect.x1 - t, rect.y0 + t, rect.x1, rect.y1 - t), light);
+        let piece = if face == self.theme.tray { Piece::Tray } else { Piece::Well };
+        if self.nine(rect, piece, face, None) {
+            return;
+        }
+        self.bevelled(rect, face, false);
+    }
+
+    /// One cell of a grid: the picture of a slot, whole.
+    ///
+    /// **This is the thing the player asked for by name** -- "make the
+    /// whole inventory a texture, with slots and the rest" -- and it is
+    /// one quad, not five: `ui/slot.png` carries the seam, the lip, the
+    /// floor and its vignette, so a wall of forty of them costs *less*
+    /// than the forty bevelled wells it replaces.
+    ///
+    /// Drawn stretched rather than sliced because a cell is always about
+    /// square and always about one size. `well` is what a hollow that
+    /// can be any shape goes through.
+    pub fn cell(&mut self, rect: Rect, face: [f32; 4]) {
+        if !self.stretched(rect, Piece::Slot, face) {
+            self.bevelled(rect, face, false);
+        }
+    }
+
+    /// The groove a meter runs in.
+    ///
+    /// The HUD's seven strips each drew their own flat rectangle, so the
+    /// gauges over the belt were the one part of the interface with no
+    /// depth in it at all -- a row of coloured bars on a row of black
+    /// ones, over a belt that now has a frame round it. This is the
+    /// skin's scrollbar groove at whatever height the strip is; `nine`
+    /// squeezes the lip into half the strip when the strip is thinner
+    /// than the lip, which is what a groove a few pixels tall should do.
+    ///
+    /// The rectangle is the caller's, unchanged, and the fill, the
+    /// hairline and the mark are still drawn over it by the caller --
+    /// this replaces the floor and nothing else.
+    pub fn track(&mut self, rect: Rect, colour: [f32; 4]) {
+        if !self.nine(rect, Piece::Track, colour, None) {
+            self.quad(rect, colour);
+        }
+    }
+
+    /// What is laid over a cell to say something about it: the pointer
+    /// is on it, it is the one picked up from, nothing may go in it.
+    ///
+    /// **An overlay with its own alpha, not a second cell.** A second
+    /// opaque picture would have to agree with the first about where
+    /// the lip is, and two pictures that have to agree are two pictures
+    /// that stop agreeing the first time one of them is redrawn.
+    ///
+    /// Answers whether it drew, so a caller keeps its flat wash where
+    /// there is no skin.
+    #[must_use]
+    pub fn cell_mark(&mut self, rect: Rect, piece: Piece, colour: [f32; 4]) -> bool {
+        self.stretched(rect, piece, colour)
     }
 
     /// A panel with something under it and light on it.
@@ -1904,16 +2504,28 @@ impl Painter {
         // a window chrome, and this is a slab of stone with a word
         // printed on it -- which is what every interface of this kind
         // does, and the reason they never look dated.
+        // **Inside the frame, not inside the old bevel.** The band used
+        // to start one bevel in -- eight thousandths -- and the title
+        // eight and a half more, which cleared a three-pixel edge and
+        // nothing else. The panel has a stitched frame now, and a title
+        // measured against the bevel would be a title printed across it.
+        // Derived from [`PANEL_BORDER`] rather than typed, so it moves
+        // if the frame ever does.
+        // `max` so that a caller asking for a band shallower than the
+        // frame gets a band of nothing rather than one turned inside
+        // out: `Rect` keeps whatever corners it is given, and an
+        // upside-down rectangle draws its text at the wrong end of the
+        // panel instead of failing.
         let band = Rect::new(
-            panel.x0 + BEVEL,
+            panel.x0 + PANEL_BORDER,
             panel.y1 - height,
-            panel.x1 - BEVEL,
-            panel.y1 - BEVEL,
+            panel.x1 - PANEL_BORDER,
+            (panel.y1 - PANEL_BORDER).max(panel.y1 - height),
         );
         let cap = PIXEL * 1.05 * CAP_HEIGHT as f32;
         self.text(
             title,
-            band.x0 + 0.016 + indent,
+            band.x0 + 0.008 + indent,
             band.centre_y() + cap / 2.0,
             1.05,
             // **The accent, not the ink**, which is what the accent is
@@ -1928,6 +2540,13 @@ impl Painter {
             // menu's amber, a heading can look like one.
             self.theme.accent,
         );
+        // A scored line under the title, sitting wholly inside the band.
+        //
+        // **Above the line the caller is given, never on it.** What this
+        // answers is where the content starts, and a rule centred on
+        // that line would take its lower half out of the content's first
+        // row -- which on the hearth is the word over the fuel slot.
+        self.rule(band.x0, band.x1, band.y0 + 2.0 * SKIN_TEXEL, self.theme.dark);
         band.y0
     }
 
@@ -2047,14 +2666,34 @@ impl Painter {
         // when it can be pressed, and washed out when it cannot. The
         // hover state lightens the face rather than adding an outline,
         // because an outline on a bevelled thing is a third edge.
+        self.pressable(rect, text, if hovered { Press::Hovered } else { Press::Idle }, enabled);
+    }
+
+    /// The same, for a caller that knows the button is being held down.
+    ///
+    /// **A pressed state at all is new**, and the picture is the whole
+    /// of it: `ui/button_down.png` is the same board with the light on
+    /// the other two sides. A player pressing a thumb button on a phone
+    /// had nothing at all to tell them the tap had landed -- the finger
+    /// is over the label -- and a bevel that turns over is visible at
+    /// the edge of the fingertip, which a change of fill is not.
+    pub fn pressable(&mut self, rect: Rect, text: &str, press: Press, enabled: bool) {
         let face = if !enabled {
             self.theme.disabled
-        } else if hovered {
+        } else if press == Press::Hovered {
             self.theme.button_hover
         } else {
             self.theme.button
         };
-        self.slab(rect, face);
+        let piece = match (enabled, press) {
+            (false, _) => Piece::Button,
+            (true, Press::Held) => Piece::ButtonDown,
+            (true, Press::Hovered) => Piece::ButtonHover,
+            (true, Press::Idle) => Piece::Button,
+        };
+        if !self.nine(rect, piece, face, None) {
+            self.bevelled(rect, face, press != Press::Held);
+        }
         let colour = if enabled { self.theme.ink } else { self.theme.ink_dim };
         // Fitted rather than fixed. A label wider than its button used to
         // run out of both ends of it -- see `fitted_scale`, and see the
@@ -2069,8 +2708,8 @@ impl Painter {
         self.label_in(rect, text, scale, colour);
     }
 
-    /// One tab of a strip: the page showing is a *well* lettered in the
-    /// accent, the others are buttons.
+    /// One tab of a strip: the page showing stands forward and is
+    /// lettered in the accent, the others sit back.
     ///
     /// **One function for every strip, and the lettering is the button's.**
     /// The pack screen and a body's two pages each drew their own showing
@@ -2084,11 +2723,44 @@ impl Painter {
     /// Only the face and the colour may differ between the two states.
     pub fn tab(&mut self, rect: Rect, text: &str, showing: bool, hovered: bool, enabled: bool) {
         if showing {
-            self.well(rect, self.theme.tray);
+            // **The page you are on is a tab standing forward**, which
+            // is what `ui/tab_on.png` draws: lit all round and open at
+            // the bottom, so it reads as joined to the panel under it
+            // rather than as a hole in the strip. It was a *well* --
+            // the chosen tab was drawn as the one cut into the stone --
+            // which is the opposite of what a tab strip means and was
+            // only ever legible because of the accent on it.
+            //
+            // **The panel's own colour, not the tray's.** A chosen tab
+            // is a piece of the panel pulled forward, so it wears what
+            // the panel wears. The flat fallback keeps the tray it has
+            // always been: it has no picture to say "forward" with, so
+            // its colour is the only thing it can say it with, and
+            // every test in this crate is drawn against that colour.
+            if !self.nine(rect, Piece::TabOn, self.theme.panel, None) {
+                self.bevelled(rect, self.theme.tray, false);
+            }
             let scale = button_label_scale(rect, text, self.content);
             self.label_in(rect, text, scale, self.theme.accent);
         } else {
-            self.button(rect, text, hovered && enabled, enabled);
+            // **The same shape whether or not the pointer is on it.**
+            // The hover lightens the face, exactly as a button's does;
+            // a tab that changed *shape* under the pointer would be a
+            // strip whose pieces stop being the same kind of thing the
+            // moment the mouse moves across it.
+            let face = if !enabled {
+                self.theme.disabled
+            } else if hovered {
+                self.theme.button_hover
+            } else {
+                self.theme.button
+            };
+            if !self.nine(rect, Piece::TabOff, face, None) {
+                self.bevelled(rect, face, true);
+            }
+            let colour = if enabled { self.theme.ink } else { self.theme.ink_dim };
+            let scale = button_label_scale(rect, text, self.content);
+            self.label_in(rect, text, scale, colour);
         }
     }
 
@@ -2161,14 +2833,23 @@ impl Painter {
         if count == 0 || count <= visible {
             return;
         }
-        self.well(track, self.theme.well);
+        if !self.nine(track, Piece::Track, self.theme.well, None) {
+            self.bevelled(track, self.theme.well, false);
+        }
         let span = visible as f32 / count as f32;
         let offset = first.min(count - visible) as f32 / count as f32;
         // From the top down, because a list runs down the screen and y
         // runs up it.
         let top = track.y1 - track.height() * offset;
         let thumb = self.theme.ink_dim;
-        self.quad(Rect::new(track.x0, top - track.height() * span, track.x1, top), thumb);
+        let grip = Rect::new(track.x0, top - track.height() * span, track.x1, top);
+        // A strap with notches across it rather than a bar of ink: a
+        // thumb that looks like something to take hold of is the whole
+        // difference between a scrollbar a player drags and one they
+        // click either side of.
+        if !self.nine(grip, Piece::Grip, thumb, None) {
+            self.quad(grip, thumb);
+        }
     }
 
     /// A single-line text field. `caret` shows the insertion point; it is
@@ -3322,4 +4003,211 @@ mod tests {
         assert!(wrapped.len() >= 3);
         assert!(wrapped.iter().all(|line| line.chars().count() <= 25));
     }
+
+    // ---- the skin ----
+
+    /// Where the skin's pictures are put in these tests.
+    ///
+    /// Well past the font's stand-in, which is one layer a glyph from
+    /// one (`FontAtlas::for_test`): a skin laid on top of those would
+    /// have `dump_to_png` drawing panels as letters.
+    const A_SKIN: u32 = 900;
+
+    /// The box a painter's whole output occupies.
+    fn drawn_bounds(vertices: &[HotbarVertex]) -> (f32, f32, f32, f32) {
+        vertices.iter().fold(
+            (f32::MAX, f32::MAX, f32::MIN, f32::MIN),
+            |(x0, y0, x1, y1), v| {
+                (
+                    x0.min(v.position[0]),
+                    y0.min(v.position[1]),
+                    x1.max(v.position[0]),
+                    y1.max(v.position[1]),
+                )
+            },
+        )
+    }
+
+    #[test]
+    fn the_skin_covers_its_rectangle_and_nothing_outside_it() {
+        // Rule 7 of this file, for the pictures: a widget that drew a
+        // texel past its own rectangle would be a widget whose hit test
+        // is a rectangle smaller than the thing a player can see, and
+        // the panel beside it would be overlapped by a frame nobody
+        // asked for. Every shape, at a size that makes the frame small
+        // against the field and at one that makes it larger than half
+        // the widget -- which is where the corners have to be squeezed.
+        for rect in [
+            Rect::new(-0.62, -0.38, 0.71, 0.44),
+            Rect::new(-0.04, -0.011, 0.04, 0.011),
+        ] {
+            for piece in Piece::ALL {
+                let mut p = with_skin(A_SKIN, Painter::default);
+                assert!(p.nine(rect, piece, PANEL, Some(FIELD_TILE)));
+                let vertices = p.into_vertices();
+                assert!(!vertices.is_empty(), "{piece:?} drew nothing");
+                let (x0, y0, x1, y1) = drawn_bounds(&vertices);
+                for (drawn, asked, side) in [
+                    (x0, rect.x0, "left"),
+                    (y0, rect.y0, "bottom"),
+                    (x1, rect.x1, "right"),
+                    (y1, rect.y1, "top"),
+                ] {
+                    assert!(
+                        (drawn - asked).abs() < 1e-5,
+                        "{piece:?} drew its {side} edge at {drawn}, not at {asked}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_button_is_drawn_on_the_same_rectangle_with_the_skin_and_without_it() {
+        // The one property the whole change rests on. Every hit test in
+        // this interface is a `Rect::contains` against the rectangle the
+        // widget was drawn on, so as long as the pictures fill exactly
+        // what the fills and bevels filled, not one of them had to
+        // move -- and this is the test that says so rather than the
+        // comment claiming it.
+        let rect = Rect::new(-0.31, -0.062, 0.29, 0.058);
+        let draw = || {
+            let mut p = Painter::default();
+            p.button(rect, "GO", true, true);
+            drawn_bounds(&p.into_vertices())
+        };
+        let plain = draw();
+        let skinned = with_skin(A_SKIN, draw);
+        for (a, b) in [
+            (plain.0, skinned.0),
+            (plain.1, skinned.1),
+            (plain.2, skinned.2),
+            (plain.3, skinned.3),
+        ] {
+            assert!((a - b).abs() < 1e-5, "the skin moved a button's edge: {a} against {b}");
+        }
+        assert!((plain.0 - rect.x0).abs() < 1e-5, "a button is not drawn on its own rectangle");
+        assert!((plain.2 - rect.x1).abs() < 1e-5, "a button is not drawn on its own rectangle");
+    }
+
+    #[test]
+    fn a_cell_is_one_quad_and_it_is_the_cell() {
+        // The pack draws forty of these a frame and the belt ten more,
+        // so "one quad" is a cost as well as a look: it was five before
+        // (a fill and four bevel edges) and the picture carries all
+        // five. If this ever goes back up, the pack's vertex count goes
+        // up with it.
+        let cell = Rect::new(-0.05, -0.05, 0.05, 0.05);
+        let mut p = with_skin(A_SKIN, Painter::default);
+        p.cell(cell, WELL);
+        let vertices = p.into_vertices();
+        assert_eq!(vertices.len(), 6, "a cell is one quad");
+        let (x0, y0, x1, y1) = drawn_bounds(&vertices);
+        assert!((x0 - cell.x0).abs() < 1e-5 && (y0 - cell.y0).abs() < 1e-5);
+        assert!((x1 - cell.x1).abs() < 1e-5 && (y1 - cell.y1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_tiled_field_ends_exactly_where_it_was_asked_to() {
+        // A tile that rounded up to a whole one would hang a texel or
+        // two past the panel -- see `spans`. Run over a span that is
+        // not a whole number of tiles, which is every real panel.
+        let runs = spans(-0.5, 0.42, 0.25, 0.75, Some(0.1));
+        assert!(runs.len() > 1, "a span nine tiles long came back whole");
+        assert!((runs[0].0 + 0.5).abs() < 1e-6, "the first tile does not start at the edge");
+        let last = *runs.last().expect("a tile");
+        assert!((last.1 - 0.42).abs() < 1e-6, "the last tile runs past the edge");
+        let share = (last.1 - last.0) / 0.1;
+        assert!(
+            (last.3 - (0.25 + share * 0.5)).abs() < 1e-6,
+            "the last tile is short and its picture is not",
+        );
+        for pair in runs.windows(2) {
+            assert!((pair[0].1 - pair[1].0).abs() < 1e-6, "a seam between two tiles");
+        }
+    }
+
+    #[test]
+    fn every_piece_of_the_skin_is_the_picture_the_atlas_loads_for_it() {
+        // The lookup is arithmetic -- base plus piece number -- so the
+        // two lists are one list written twice. A picture moved in
+        // either draws a button where a slot belongs, at run time, on a
+        // graphics card, with nothing anywhere to say so.
+        use crate::engine::texture::{EXTRA_TEXTURES, EXTRA_STRETCHED_LEATHER, EXTRA_UI_SKIN, UI_SKIN_PIECES};
+        assert_eq!(UI_SKIN_PIECES, Piece::ALL.len(), "the run is not as long as the skin");
+        for (index, piece) in Piece::ALL.into_iter().enumerate() {
+            assert_eq!(piece.file(), EXTRA_TEXTURES[EXTRA_UI_SKIN + index], "{piece:?}");
+            assert!(
+                crate::embedded::texture(piece.file()).is_some(),
+                "{piece:?} names {} and nothing is compiled in under it",
+                piece.file(),
+            );
+            assert_eq!(Skin::at(100).layer(piece), Some(100 + index as u32));
+            assert_eq!(Skin::NONE.layer(piece), None);
+        }
+        // ...and the run really is at the end of the list, which is what
+        // `EXTRA_STRETCHED_LEATHER` is now derived from.
+        assert_eq!(EXTRA_TEXTURES[EXTRA_STRETCHED_LEATHER], "hide/stretched_leather.png");
+        assert_eq!(EXTRA_UI_SKIN + UI_SKIN_PIECES, EXTRA_TEXTURES.len());
+    }
+
+    #[test]
+    fn the_skin_shades_a_surface_without_moving_the_colour_under_it() {
+        // Every contrast in this file is measured against `Theme`'s own
+        // numbers -- `small_text_is_readable_against_everything_it_is_drawn_on`
+        // and its neighbours. Those measurements are truthful only while
+        // the middle of a surface's picture leaves the theme's colour
+        // where it is: a field drawn a third dark would make a panel a
+        // third darker than every number in this file says it is, and
+        // every one of those tests would be passing about a screen that
+        // no longer exists.
+        //
+        // The states are deliberately not in this list. A hovered board
+        // is *meant* to be lighter than its theme colour and a pressed
+        // one darker -- that difference is the whole of what they say.
+        let linear = |byte: u8| {
+            let c = byte as f32 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        for piece in [Piece::Panel, Piece::Tray, Piece::Well, Piece::Track, Piece::Slot, Piece::Button] {
+            let bytes = crate::embedded::texture(piece.file()).expect("a skin picture");
+            let picture = image::load_from_memory(bytes).expect("a png").to_rgba8();
+            let middle = picture.get_pixel(picture.width() / 2, picture.height() / 2).0;
+            let multiplier = linear(middle[0]) * SKIN_GAIN;
+            assert!(
+                (multiplier - 1.0).abs() < 0.15,
+                "the middle of {} multiplies its surface by {multiplier:.2}",
+                piece.file(),
+            );
+            assert_eq!(middle[3], 255, "{} is a surface and has to be opaque", piece.file());
+        }
+    }
+
+    #[test]
+    fn a_whole_screen_of_skin_stays_inside_one_upload() {
+        // Tiling a panel's field costs quads, and a number written down
+        // in a doc comment is a number that stops being true. The pack
+        // is the biggest panel the game draws; this is what it comes to
+        // with a full grid of cells on it, and it is here so that a
+        // change which makes it ten times that is a red test rather
+        // than a stutter somebody notices six months later.
+        let mut p = with_skin(A_SKIN, Painter::default);
+        p.deep_panel(Rect::new(-1.0, -0.72, 1.0, 0.72));
+        for row in 0..4 {
+            for column in 0..10 {
+                let (x, y) = (-0.9 + column as f32 * 0.09, -0.6 + row as f32 * 0.09);
+                p.cell(Rect::new(x, y, x + 0.08, y + 0.08), WELL);
+            }
+        }
+        let quads = p.into_vertices().len() / 6;
+        assert!(
+            quads < 400,
+            "a panel and forty cells came to {quads} quads; the field is tiling too finely",
+        );
+    }
+
 }
