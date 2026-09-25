@@ -5398,6 +5398,63 @@ impl WorldGen {
     /// you, and hunting a thousand blocks out for the first tree is not
     /// a first five minutes anyone wants.
     ///
+    /// **Nearest, and then flattest -- and for a long time it was only
+    /// nearest.** The ring walk used to return the best column of the
+    /// first ring that had one at all, and the first ring is the origin
+    /// alone: one column, so "the best of them" was "it". Every seed whose
+    /// origin was merely habitable -- dry, above the tide, not a cave roof,
+    /// in the zone's own climate -- woke its player there whatever the
+    /// ground did, and `spawn_quality`'s flatness, the number this whole
+    /// function is written around, decided nothing.
+    ///
+    /// Which did not show until the landforms, because the old country was
+    /// flat wherever it was not a hill. Measured over two hundred seeds a
+    /// zone (`probe_spawn_surroundings`), on the landforms: in the tropics,
+    /// the dry belt and the north five or six seeds in two hundred woke a
+    /// player on ground steeper than a block a column. **In the temperate
+    /// zone -- the default, and the one the report came from -- it was a
+    /// hundred and two of two hundred**, with drops up to 13, which is
+    /// three blocks of rise a column: a hillside you look into rather than
+    /// across, with a wall of turf a step away uphill. The player's words
+    /// for it were a narrow slit between blocks with nothing to see.
+    ///
+    /// And the ground it should have picked was *right there*: in eleven of
+    /// twelve temperate seeds a column of drop 2 or less lay 8 to 24 blocks
+    /// from the origin, inside the first three rings.
+    ///
+    /// So the walk does not stop at the first thing it can stand on. It
+    /// keeps the best column it has seen across the rings and goes on until
+    /// one of them is `GENTLE`, or until it has walked `PATIENCE` past the
+    /// ring where the ground began. The two alternatives, both tried on
+    /// paper:
+    ///
+    /// * **A floor on flatness -- refuse anything steeper.** It has no
+    ///   answer in a world that is all hillside, and the answer it falls
+    ///   back to is the origin, which is the column this exists to stop
+    ///   using. A search that can fail is a search that fails into the bug.
+    /// * **Walk the whole `LIMIT` and take the flattest.** The flattest
+    ///   column within three kilometres is three kilometres away, which
+    ///   throws away the one property the ring walk is for, and costs the
+    ///   full search on every world instead of a few rings.
+    ///
+    /// Only a world of the landforms is walked that way. A spawn is worked
+    /// out afresh on every server start rather than saved, so changing this
+    /// rule moves the respawn of every world already drawn under the rule
+    /// it changes -- and the landforms are the scale of every *new* world,
+    /// which is the one the measurement is of. The two older scales keep
+    /// the search they had, for the reason `spawn_quality` exempts a
+    /// regional world from the marsh and climate rules.
+    ///
+    /// `PATIENCE` is 64 blocks: past every seed the measurement looked at
+    /// -- the furthest gentle ground stood 56 rings past the first standable
+    /// column, and most of them 8 to 24 -- and still a walk a player would
+    /// not notice, because the spawn is promised to be *near* the origin
+    /// and never to be it. It is also what the walk costs. The rings grow
+    /// with their radius, so the columns judged between the first candidate
+    /// and the settling ring go as its square: 64 is about three hundred
+    /// columns and 128 about twelve hundred, for ground the measurement
+    /// says is not there.
+    ///
     /// **And that is why the spawn search is still near the origin**, at
     /// real scale, when the obvious way to start a player in the tropics is
     /// to walk them to the tropics: the tropics are four thousand
@@ -5455,19 +5512,50 @@ impl WorldGen {
         const STEP: i32 = 8;
         /// How far out to look before giving up and taking the origin.
         const LIMIT: i32 = 3_000;
+        /// Flat enough to wake up on. `spawn_quality` answers the total
+        /// rise to the four neighbours two blocks out, so two is a ground
+        /// that climbs a quarter of a block a column: a meadow with a
+        /// shape to it, and somewhere a first hut stands on its own floor.
+        const GENTLE: i32 = 2;
+        /// How much further than the first column it could stand on the
+        /// search will walk to find a gentle one. See below.
+        const PATIENCE: i32 = 64;
+        // **And no patience at all in a world drawn at either older
+        // scale**, for the reason `spawn_quality` exempts a regional world
+        // from the marsh rule and the climate rule: a spawn is where a
+        // player without a bed comes back to, it is computed afresh every
+        // time the server starts, and a world whose owner's respawn moved
+        // under them is a worse thing than a world with a steep one. The
+        // measurement above is of the landforms, which is the scale of
+        // every new world, so this changes where a player wakes up without
+        // changing where anybody wakes up *again*.
+        let patience = if self.scale == Scale::Landforms { PATIENCE } else { 0 };
+
+        // The best column found so far and how flat it is, kept *across*
+        // the rings rather than within one -- which is the whole of the
+        // change. See this function's note.
+        let mut best: Option<((i32, i32), i32)> = None;
+        // The radius this search settles at: set the first time any column
+        // at all will do, so the patience is counted from where the ground
+        // starts rather than from the origin. A world whose first dry land
+        // is a kilometre out gets the same look around it as one whose
+        // first dry land is the origin.
+        let mut settle_at: Option<i32> = None;
 
         for ring in 0..=(LIMIT / STEP) {
             let r = ring * STEP;
             // The perimeter of the square at this radius. A square
             // rather than a circle because it is exact and cheap: what
             // matters is that nothing inside it is missed.
-            let mut best: Option<((i32, i32), i32)> = None;
             let mut consider = |gx: i32, gz: i32| {
                 // The rings are walked in the world's own coordinates --
                 // what comes back is where a player is put down -- and the
                 // judgement is asked of the planet. See `on_planet`.
                 let (px, pz) = self.on_planet(gx, gz);
                 if let Some(flatness) = self.spawn_quality(px, pz) {
+                    // Strictly flatter, so a tie goes to the ring that was
+                    // walked first -- which is the nearer one, and nearness
+                    // is the whole reason this walks in rings at all.
                     if best.is_none_or(|(_, current)| flatness < current) {
                         best = Some(((gx, gz), flatness));
                     }
@@ -5485,11 +5573,15 @@ impl WorldGen {
                     at += STEP;
                 }
             }
-            if let Some((column, _)) = best {
+            let Some((column, flatness)) = best else {
+                continue;
+            };
+            let settle_by = *settle_at.get_or_insert(r + patience);
+            if flatness <= GENTLE || r >= settle_by {
                 return column;
             }
         }
-        (0, 0)
+        best.map_or((0, 0), |(column, _)| column)
     }
 
     /// How flat a column is, if it is fit to stand on at all.
@@ -13764,6 +13856,139 @@ mod tests {
                 search < std::time::Duration::from_millis(400),
                 "seed {seed}: the spawn search took {search:?}"
             );
+        }
+    }
+
+    /// What the ground a new player wakes up on is actually like: over two
+    /// hundred seeds of each zone, how flat the chosen column is, how far
+    /// out it was found, and -- for the first twelve seeds -- how near the
+    /// nearest gentle column was, whether or not the search took it.
+    ///
+    /// ```text
+    /// cargo test -p primitive_shared --release --lib -- --ignored --nocapture probe_spawn_surroundings
+    /// ```
+    ///
+    /// This is the measurement quoted in `spawn_column`: run it with the
+    /// patience there set to 0 for the "before".
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn probe_spawn_surroundings() {
+        for &zone in Zone::ALL {
+            let mut drops: std::collections::BTreeMap<i32, u32> = std::collections::BTreeMap::new();
+            let mut radii: std::collections::BTreeMap<i32, u32> = std::collections::BTreeMap::new();
+            let mut steep = 0;
+            let mut slowest = std::time::Duration::ZERO;
+            for seed in 0..200u32 {
+                let gen = WorldGen::with_zone(seed, Preset::Normal, zone);
+                let started = std::time::Instant::now();
+                let (gx, gz) = gen.spawn_column();
+                slowest = slowest.max(started.elapsed());
+                let here = gen.height_at(gx, gz);
+                let drop: i32 = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .into_iter()
+                    .map(|(dx, dz)| (gen.height_at(gx + dx * 2, gz + dz * 2) - here).abs())
+                    .sum();
+                *drops.entry(drop).or_default() += 1;
+                *radii.entry(gx.abs().max(gz.abs())).or_default() += 1;
+                if drop >= 6 {
+                    steep += 1;
+                }
+            }
+            println!("--- {} (slowest search {slowest:?}) ---", zone.name());
+            println!("  drop at the spawn: {drops:?} ({steep} of 200 steeper than a block a column)");
+            println!("  how far out:       {radii:?}");
+            // And where the gentle ground was, ring by ring, so a bad
+            // choice can be told from a country with no good one in it.
+            for seed in 0..12u32 {
+                let gen = WorldGen::with_zone(seed, Preset::Normal, zone);
+                let mut nearest = None;
+                for ring in 0..=40 {
+                    let r = ring * 8;
+                    let mut columns = Vec::new();
+                    if r == 0 {
+                        columns.push((0, 0));
+                    } else {
+                        let mut at = -r;
+                        while at <= r {
+                            columns.extend([(at, -r), (at, r), (-r, at), (r, at)]);
+                            at += 8;
+                        }
+                    }
+                    for (gx, gz) in columns {
+                        let (px, pz) = gen.on_planet(gx, gz);
+                        if gen.spawn_quality(px, pz).is_some_and(|drop| drop <= 2) {
+                            nearest.get_or_insert(r);
+                        }
+                    }
+                    if nearest.is_some() {
+                        break;
+                    }
+                }
+                println!("  seed {seed}: nearest gentle column {nearest:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_player_wakes_up_with_somewhere_to_step_and_somewhere_to_look() {
+        // A player on a phone made a new world and woke in what they
+        // described as a narrow slit between blocks: walls to the sides,
+        // nothing to see. The cause was the ring search taking the first
+        // column it could stand on rather than the first *gentle* one --
+        // see `spawn_column`, and `probe_spawn_surroundings` for the
+        // measurement. Half of all temperate seeds woke their player on a
+        // hillside of a block a column or steeper.
+        //
+        // Three things asked of the ground, because a single number hides
+        // which of them went wrong:
+        //
+        // * **Somewhere to step.** Not every way out of the spawn cell is a
+        //   climb -- a column whose four neighbours are all a step or more
+        //   above it is a hole a player has to dig out of.
+        // * **Somewhere to look.** At least one bearing where the ground
+        //   does not rise into the camera: eight columns of it, none of
+        //   them more than four blocks above the feet. Four and not one,
+        //   because gentle ground is still ground -- a rise of a quarter
+        //   of a block a column, which is what `GENTLE` allows, is two
+        //   blocks by the eighth column and is a meadow, not a wall.
+        // * **And not a hillside.** `spawn_quality`'s own number, which is
+        //   the one the search is supposed to be choosing on.
+        //
+        // Every zone, because the temperate one was the only one this was
+        // ever visible in and the bug was in all four.
+        // Eight seeds a zone and not a hundred, because a spawn search is
+        // a walk over thousands of columns and this is a test that runs on
+        // every build -- eight was enough to go red on the second temperate
+        // seed before the patience was put in. `probe_spawn_surroundings`
+        // is where two hundred a zone are looked at.
+        // The landforms by name and not by `with_zone`, because
+        // `PRIMITIVE_TEST_SCALE` can point the whole generator suite at an
+        // older scale, and the two older scales keep the search they had on
+        // purpose -- an old world's respawn may not move. This is a test
+        // about the country every new world is drawn in.
+        for &zone in Zone::ALL {
+            for seed in 0..8u32 {
+                let gen = WorldGen::with_scale(seed, Preset::Normal, zone, Scale::Landforms);
+                let (gx, gz) = gen.spawn_column();
+                let here = gen.height_at(gx, gz);
+                let at = |dx: i32, dz: i32| gen.height_at(gx + dx, gz + dz);
+                let where_it_is = format!("{} seed {seed} at {gx},{gz}, height {here}", zone.name());
+
+                let ways_out = [(1, 0), (-1, 0), (0, 1), (0, -1)].into_iter().filter(|&(dx, dz)| at(dx, dz) <= here).count();
+                assert!(ways_out > 0, "{where_it_is}: every way out of the spawn is a climb");
+
+                let views = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .into_iter()
+                    .filter(|&(dx, dz)| (1..=8).all(|k| at(dx * k, dz * k) - here <= 4))
+                    .count();
+                assert!(views > 0, "{where_it_is}: the ground rises into the camera on all four bearings");
+
+                let drop: i32 = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .into_iter()
+                    .map(|(dx, dz)| (at(dx * 2, dz * 2) - here).abs())
+                    .sum();
+                assert!(drop <= 4, "{where_it_is}: the spawn is a hillside, total drop {drop}");
+            }
         }
     }
 
