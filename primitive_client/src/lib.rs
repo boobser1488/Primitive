@@ -1838,6 +1838,32 @@ fn run(
                         }
                     }
 
+                    // The controls on the glass, kept in step with the
+                    // editor while it is open and with the settings while
+                    // it is shut.
+                    //
+                    // **Outside the `net.is_none()` block below, and that
+                    // is the whole of a bug a player reported as
+                    // "настройки управления ни на что не влияют".** The
+                    // pause menu is a menu over a world -- `net` is very
+                    // much `Some` -- so in there the editor was never told
+                    // the size of the glass, never had what it held copied
+                    // into the settings, and never had the game's own
+                    // controls rebuilt from it. Everything a player did on
+                    // that screen was thrown away when they left it, and
+                    // the route through the pause menu is the only one
+                    // they have while they are in a world.
+                    frame::menu_frame::arrangement(
+                        frame::menu_frame::menu_is_up(net.is_some(), paused),
+                        graphics.size,
+                        graphics.ui_scale(),
+                        &mut settings,
+                        &mut menu,
+                        &mut touch,
+                        &mut touch_layout,
+                        &mut arrangement_unsaved,
+                    );
+
                     // --- menus ---
                     if net.is_none() {
                         let now = Instant::now();
@@ -2107,18 +2133,6 @@ fn run(
                         // an idle menu is the stillest screen in the
                         // game, and it used to be relaid and re-uploaded
                         // every frame. See `UiKey`.
-                        // The controls on the glass, kept in step with
-                        // the editor while it is open and with the
-                        // settings while it is shut. See
-                        // `frame::menu_frame::arrangement`.
-                        frame::menu_frame::arrangement(
-                            &mut settings,
-                            &mut menu,
-                            &graphics,
-                            &mut touch,
-                            &mut touch_layout,
-                            &mut arrangement_unsaved,
-                        );
                         let ui_rebuilt = {
                             let ctx = menu_context(&settings, &worlds, &graphics, scene_behind);
                             let key =
