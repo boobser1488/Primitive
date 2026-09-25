@@ -275,6 +275,54 @@ fn ui_snapshot() {
         }
     }
 
+    // A stall, seen by the person who owns it -- which is the crowded
+    // state: three rows of prices with a pair of steppers on each side of
+    // every one of them, a name across the top, and a hint line under the
+    // grid. **The one container screen this folder never had a picture
+    // of**, and the one with the most controls per square inch of any
+    // screen in the game; its guard
+    // (`chest_screen::layout_guards`) says nothing collides, and a
+    // picture is what says whether it can be read.
+    {
+        use crate::ui::chest_screen::StallView;
+        use primitive_shared::stall::{Offer, STOCK, TAKINGS};
+        for (name, language) in [("stall", Language::English), ("stall_ru", Language::Russian)] {
+            let mut stall = ChestScreen::new();
+            stall.show_stall(StallView {
+                at: (0, 0, 0),
+                owner: "ada".to_string(),
+                yours: true,
+                offers: vec![
+                    Some(Offer {
+                        give: BLOCK_FLINT,
+                        give_count: 4,
+                        take: primitive_shared::types::BLOCK_HIDE,
+                        take_count: 1,
+                    }),
+                    None,
+                    None,
+                ],
+            });
+            let mut counter = Inventory::chest();
+            counter.add_within(STOCK, BLOCK_FLINT, 12);
+            counter.add_within(TAKINGS, primitive_shared::types::BLOCK_HIDE, 2);
+            stall.show(
+                (0, 0, 0),
+                counter,
+                Some(primitive_shared::types::BLOCK_STALL),
+                ContainerKind::Stall,
+                None,
+                None,
+            );
+            write_grown(
+                &format!("{out}/{name}.png"),
+                &stall.build(font, &layers, &pack, language),
+                font,
+                stall.grow_by(snapshot_layout()),
+            );
+        }
+    }
+
     // A jug, looked into in the hand, part full -- and in Russian, whose
     // "what may go in" line is the longest either language has for it.
     // Opened the way the game opens one: from a pack slot, with nothing
@@ -500,7 +548,18 @@ fn ui_snapshot() {
             (Tab::Backpack, "pack_rucksack"),
             (Tab::Learn, "pack_path"),
         ] {
-            for (language, tag) in [(Language::English, ""), (Language::Russian, "_ru")] {
+            // **All four languages, not two.** The pack's furniture is
+            // fixed and its words are not: a tab strip that holds
+            // `ЗДОРОВЬЕ` holds `ZDROWIE` with room to spare and
+            // `EKWIPUNEK` not at all, and the only way to know which is
+            // to look. Two of four was how `SPRZĄTNIJ` came to be
+            // lettered a size nobody chose.
+            for (language, tag) in [
+                (Language::English, ""),
+                (Language::Russian, "_ru"),
+                (Language::SimpleEnglish, "_simple"),
+                (Language::Polish, "_pl"),
+            ] {
                 let mut screen = InventoryScreen::new();
                 screen.open = true;
                 screen.sync(&stuffed);

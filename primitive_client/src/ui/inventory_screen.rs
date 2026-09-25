@@ -103,23 +103,37 @@ pub(crate) const HOTBAR_SPLIT: f32 = 0.030;
 pub(crate) const PANEL_PAD: f32 = 0.030;
 /// Room above the first row of slots for the word "PACK".
 const GRID_LABEL: f32 = 0.046;
-/// Room at the top of the panel for the title, and at the bottom for the
-/// readout and the three lines of controls. Named, because "why is there
-/// a gap" is exactly the question a bare number in a `Rect::new` never
-/// answers.
+/// Room at the top of the panel for the title. Named, because "why is
+/// there a gap" is exactly the question a bare number in a `Rect::new`
+/// never answers.
 ///
-/// **A function, because the band has to hold the tidy button**, which is
-/// `widgets::tappable` -- a finger's height where a finger presses it.
+/// **A number again, and the smallest one that holds a line of text.**
+/// It was sized by the way out -- an `X` at the band's left end, floored
+/// to a finger -- and then by the tidy button that replaced the `X`, so
+/// on a phone the band was 0.198: a finger-tall plate in the top corner,
+/// the title floating in the middle of the emptiness under it, and the
+/// rule under *that*. Both of those controls are gone (see
+/// `Intent::Close` and the note under `tab_band` for the tidy button),
+/// and what a header band holds now is a title, which is
+/// `widgets::TITLE_BAND` and nothing else.
 ///
-/// It used to be sized by the way out: an `X` at the band's left end, 72
-/// device pixels against a floor of 91 on the phone it was measured on,
-/// and floored to a finger for that reason. The `X` is gone (see
-/// `Intent::Close`), so the band is what the button beside the title needs
-/// plus the air it always had. On a desktop that comes back to 0.100
-/// exactly, which is what it was: nothing a mouse points at has moved.
-fn header_height() -> f32 {
-    widgets::tappable(SORT_HEIGHT) + 0.048
-}
+/// The same on a phone as on a desktop, which is the point: nothing in
+/// it is pressed, so nothing in it has to be a finger tall, and a band
+/// that grew for a phone was a band that took a row of slots off the
+/// screen the phone had least room on.
+const HEADER_HEIGHT: f32 = widgets::TITLE_BAND;
+
+/// A relation between two constants, so it is checked where constants
+/// are: at compile time. A band shallower than [`widgets::TITLE_BAND`]
+/// leaves no room over its own rule, and `panel_header` then hangs the
+/// title as high as it can and lets the line come up through the word --
+/// which is what the player reported and what the band was doing at
+/// 0.100 against the 0.110 a title needs. As a runtime `assert!` clippy
+/// rightly calls it an assertion with a constant value.
+const _: () = assert!(
+    HEADER_HEIGHT >= widgets::TITLE_BAND,
+    "the pack's header band is shallower than the title in it",
+);
 /// Room under the grid for the one line of readout, and nothing else.
 ///
 /// It used to be three times this: four lines of control hints -- every
@@ -251,7 +265,6 @@ pub enum Intent {
     /// `times` is how many the player asked for, not how many are
     /// possible; the server makes as many of them as it can.
     Craft { index: usize, times: u8 },
-    Sort,
     /// Put on whatever is in this slot of the pack.
     ///
     /// A slot rather than a block, and no destination: the body part a
@@ -626,11 +639,6 @@ impl InventoryScreen {
             return None;
         }
 
-        if sort_button_rect().contains(cursor.0, cursor.1) {
-            self.release();
-            return Some(Intent::Sort);
-        }
-
         // **Nothing below this point is on the health or path pages.**
         // Both are pages of reading with no slot, no recipe and no drop
         // target, so a click on either that is not a tab is a click on
@@ -937,12 +945,14 @@ impl InventoryScreen {
         // Not indented: nothing stands in front of the title in the band
         // any more (see `Intent::Close`), so it starts where the body
         // column under it does.
-        p.panel_header(
-            panel,
-            language.text(Msg::Inventory),
-            header_height() - 0.012,
-            0.0,
-        );
+        //
+        // **The whole band, not twelve thousandths short of it.** The
+        // drawn band used to stop above the room `panel_rect` had
+        // reserved, which is how the rule under the title ended up
+        // floating in the air between the title and the tabs -- and,
+        // with the band that much shallower, through the title itself.
+        // One number for the room and for what is drawn in it.
+        p.panel_header(panel, language.text(Msg::Inventory), HEADER_HEIGHT, 0.0);
         tab_strip(&mut p, self.tab, self.cursor, inventory.backpack_open(), language);
 
         // ---- the health page, which shares nothing below this ----
@@ -984,8 +994,6 @@ impl InventoryScreen {
             language,
             self.heat,
         );
-        sort_button(&mut p, self.cursor, language);
-
         // A strip behind the hotbar row, so the ten slots that are on
         // screen during play are visibly the same ten.
         //
@@ -2236,11 +2244,11 @@ use crate::ui::widgets::{
 /// top of it.
 ///
 /// **Not `panel_rect`**, which is what every note on this screen used to
-/// be held to. That rectangle includes the title, the tidy button and
-/// the tab strip, so a note taken from the top of the recipe grid rode
-/// up over the tabs and hid one of the three controls a player uses on
-/// every visit. The content band is the room a note is allowed, and it
-/// is the room it needs: everything a note can be about is in it.
+/// be held to. That rectangle includes the title and the tab strip, so a
+/// note taken from the top of the recipe grid rode up over the tabs and
+/// hid one of the four controls a player uses on every visit. The
+/// content band is the room a note is allowed, and it is the room it
+/// needs: everything a note can be about is in it.
 fn note_bounds() -> Rect {
     let panel = panel_rect();
     Rect::new(panel.x0 + PANEL_PAD, panel.y0, panel.x1 - PANEL_PAD, content_top())
@@ -2448,58 +2456,31 @@ fn recipe_lines(
     lines
 }
 
-// ---- sort button ----
-
-const SORT_WIDTH: f32 = 0.215;
-/// How tall it is where a mouse points at it. See `sort_button_rect` for
-/// what a finger does to that.
-const SORT_HEIGHT: f32 = 0.052;
-
-/// Where the tidy button sits: the right end of the header band, clear of
-/// both titles and of everything below them.
-///
-/// A finger's height where a finger is what presses it. It was 0.052 at
-/// every scale, which on a 1220-tall phone is 52 device pixels of a
-/// 91-pixel floor -- and unlike the way out, this one has no second,
-/// larger gesture standing behind it.
-pub fn sort_button_rect() -> Rect {
-    // Measured down from the panel's own top edge rather than from
-    // `content_top() + header_height()`, which is where it used to be:
-    // the tab strip was added between the two and the button would
-    // otherwise have stayed where the content now starts, sitting on the
-    // tabs. `panel_rect().y1` is the header band's ceiling by
-    // construction, so this cannot drift again.
-    // **A whole `PANEL_BORDER` down, not fourteen thousandths.** The
-    // panel is a picture with a stitched frame eight texels deep, and the
-    // button was placed against the flat edge the panel had before that:
-    // its top sixteen thousandths were printed *on the stitching*, which
-    // on a phone -- where the button is a finger tall and the frame is
-    // the same size it always is -- read as a control glued half over the
-    // edge of the screen. The frame's inner line is what everything else
-    // on this panel clears (`PANEL_PAD` is the same number), and it is
-    // what the right edge below already clears.
-    let top = panel_rect().y1 - widgets::PANEL_BORDER;
-    let right = recipe_left() + recipe_grid_width();
-    Rect::new(right - SORT_WIDTH, top - widgets::tappable(SORT_HEIGHT), right, top)
-}
-
-fn sort_button(p: &mut Painter, cursor: Option<(f32, f32)>, language: Language) {
-    let rect = sort_button_rect();
-    let hovered = cursor.is_some_and(|(x, y)| rect.contains(x, y));
-    p.slab(
-        rect,
-        if hovered { widgets::BUTTON_HOVER } else { widgets::BUTTON },
-    );
-    let scale = 0.72;
-    let label = language.text(Msg::TidyPile);
-    p.text(
-        label,
-        rect.centre_x() - widgets::ink_width(label, scale) / 2.0,
-        rect.centre_y() + widgets::cell_height(scale) / 2.0 - 0.004,
-        scale,
-        widgets::INK,
-    );
-}
+// ---- there is no tidy button on this screen ----
+//
+// **Removed at the player's request, and the request was about where it
+// sat rather than about what it did**: "кнопка tidy pile и текст
+// inventory не правильно лежат и выглядит плохо". Both complaints were
+// one mistake. The button was a finger tall on a phone and it lived in
+// the title band, so the band was a finger tall too -- an empty stripe
+// across the top of the screen with a plate glued into one corner of it
+// and the title floating in the middle of the rest. Worse, its foot came
+// down on the rule under the title, which is why the line stopped
+// halfway across the panel.
+//
+// Making the band taller still would have made the stripe emptier;
+// putting the button somewhere else meant taking the room from the
+// slots, which on a phone is the thing the screen is short of. What it
+// did is the smallest of the three -- fold the pile together, which the
+// player can do by hand in the time it takes to find the button -- so it
+// is the one that went.
+//
+// **A chest still has one** (`chest_screen::sort_button_rect`), where it
+// is one of three buttons in an action bar built to hold them and where
+// forty slots make it worth the room. Tidying a *chest* is still a
+// press; tidying the pack is not, and `ClientMessage::SortInventory`
+// keeps working for anything that still sends it -- see the note on that
+// variant.
 
 /// Which texture to show for a block in the pack.
 ///
@@ -2901,11 +2882,12 @@ fn panel_rect() -> Rect {
         recipe_left() + recipe_grid_width() + PANEL_PAD,
         // The tab strip is a band of its own between the title and the
         // content, so the panel is that much taller. Growing the *header*
-        // instead was tried and rejected: the tidy button is positioned
-        // inside the header band (`sort_button_rect`) and is centred in
-        // it, so a header twice as tall is a button floating in the
-        // middle of nothing.
-        content_top() + header_height() + tab_band(),
+        // instead was tried and rejected twice: a header band is where a
+        // title goes, and a title centred in a band twice its own height
+        // is a word floating in an empty stripe -- which is precisely
+        // what the phone's header looked like while the tidy button was
+        // holding it open.
+        content_top() + HEADER_HEIGHT + tab_band(),
     )
 }
 
@@ -2919,9 +2901,11 @@ fn panel_rect() -> Rect {
 
 /// Height of one tab.
 ///
-/// `tappable`, like the tidy button: this is the one control on the pack
-/// screen a phone player uses on every visit, and it is at the top of
-/// the panel where a thumb is least accurate.
+/// `tappable`: with the tidy button gone these four are the *only*
+/// controls on the pack screen, they are what a phone player uses on
+/// every visit, and they are at the top of the panel where a thumb is
+/// least accurate. The header band above them is not `tappable` and must
+/// not become so again -- nothing in it is pressed.
 fn tab_height() -> f32 {
     widgets::tappable(0.058)
 }
@@ -2957,7 +2941,7 @@ pub fn tab_rect(index: usize) -> Rect {
     let count = ALL_TABS.len() as f32;
     let width = (inner - TAB_GAP * (count - 1.0)) / count;
     let left = panel.x0 + PANEL_PAD + index as f32 * (width + TAB_GAP);
-    let top = panel.y1 - header_height() - TAB_MARGIN;
+    let top = panel.y1 - HEADER_HEIGHT - TAB_MARGIN;
     Rect::new(left, top - tab_height(), left + width, top)
 }
 
@@ -3053,18 +3037,40 @@ fn crafting_panel(
             language.text(Msg::Of),
             offered.len())
     });
-    // The caption at the size every stone screen writes one, fitted to the
-    // column less whatever the count beside it takes -- `MAKING THINGS` and
-    // `1-16 of 23` share one line.
+    // The caption at the size every stone screen writes one -- `MAKING
+    // THINGS` and `1-16 of 23` share one line.
     let heading = language.text(Msg::Crafting);
     // **A whole space between them, not two hundredths.** The gap was
     // 0.02 -- about three device pixels at 1280 -- so the heading and
     // the count touched in Russian and read as one run-on word. A gap
     // measured in the text's own `m` cannot be too small for the text.
     let counted_gap = widgets::measure("mm", label_scale);
-    let room = recipe_grid_width()
-        - counted.as_ref().map_or(0.0, |c| widgets::ink_width(c, label_scale) + counted_gap);
-    let heading_scale = widgets::fitted_scale(heading, widgets::size::CAPTION, room, 0.7);
+    // **The row squeezes, not one half of it.** The caption used to be
+    // fitted into whatever the count left over, with a floor of seven
+    // tenths under it -- and a floor on a fitted label means the label
+    // *overflows* rather than shrinking once it is reached. In Simple
+    // English with a full pack that is exactly what happened: `MAKING
+    // THINGS` and `1-20 OF 24` are twenty-three characters on a column
+    // four slots wide, the caption hit its floor at 0.56 and was drawn
+    // straight through the count. Both were legible and they were on
+    // top of each other, which is the worst of the three outcomes.
+    //
+    // So the two are treated as one row: whatever they need together,
+    // measured, and if that is more than the column has, both are
+    // multiplied by the same shortfall. They stay in proportion to each
+    // other -- a caption and the note under its wing -- and they cannot
+    // collide for any word in any language, which a floor could not
+    // promise. If the pair ever comes out too small to read, the answer
+    // is a shorter word in `lang.rs`, not a bigger number here.
+    let wanted = counted.as_ref().map_or(0.0, |c| widgets::measure(c, label_scale) + counted_gap)
+        + widgets::measure(heading, widgets::size::CAPTION);
+    let squeeze = if wanted > recipe_grid_width() {
+        recipe_grid_width() / wanted
+    } else {
+        1.0
+    };
+    let label_scale = label_scale * squeeze;
+    let heading_scale = widgets::size::CAPTION * squeeze;
     // Its own height above the row: `top` is the top of the text and the
     // glyphs hang down from it, so anything less writes the word across the
     // slots it names.
@@ -3943,40 +3949,24 @@ mod tests {
         }
     }
 
-    /// The pack's own button can be hit with a thumb.
+    /// The pack's own controls can be hit with a thumb.
     ///
-    /// The same measurement the chest screen carries, on the same phone:
-    /// TIDY PILE was 52 device pixels of a 91-pixel finger. There were two
-    /// buttons here while the `X` stood beside it; the way out is a tap off
-    /// the panel now, measured by `a_phone_always_has_somewhere_off_the_pack_to_tap`.
+    /// **There is one kind of them left, and that is the measurement.**
+    /// It used to be TIDY PILE as well -- 52 device pixels of a 91-pixel
+    /// finger on the phone the complaint came from, which is why it was
+    /// floored to a finger and why the header band grew to a finger to
+    /// hold it. Both are gone: the button is gone (see the note where it
+    /// stood) and the band is a line of text tall again. The way out is a
+    /// tap off the panel, measured by
+    /// `a_phone_always_has_somewhere_off_the_pack_to_tap`.
     #[test]
     fn the_pack_screens_buttons_are_at_least_a_finger_under_a_thumb() {
         widgets::as_a_phone(|| {
             let phone = widgets::Layout::for_screen(2712.0 / 1220.0, 1.65);
             let drawn = grow_by(phone);
             const SLACK: f32 = 1e-4;
-            let rect = sort_button_rect();
-            for (way, side) in [("across", rect.width()), ("down", rect.height())] {
-                assert!(
-                    side >= widgets::FINGER_SIDE - SLACK,
-                    "tidy pile is {side:.3} {way} as authored, under a finger of {:.3}",
-                    widgets::FINGER_SIDE,
-                );
-                assert!(
-                    side * drawn >= widgets::FINGER_SIDE - SLACK,
-                    "tidy pile is {:.0} device pixels {way} on the phone this was \
-                     measured on, against a finger of 91",
-                    side * drawn * 610.0,
-                );
-            }
-            // ...and the band it is drawn in still holds it.
             let panel = panel_rect();
-            assert!(
-                rect.y1 <= panel.y1 && rect.y0 >= content_top() + tab_band(),
-                "the tidy button has grown out of its band",
-            );
-
-            // **And the three tabs**, which are the control a phone
+            // **The four tabs**, which are the control a phone
             // player uses on every visit and sit at the very top of the
             // panel, where a thumb is least accurate. Across is not
             // checked: a third of the panel is far wider than a finger
@@ -4271,32 +4261,51 @@ mod tests {
         );
     }
 
+    /// **The header band holds a title and nothing that can be pressed.**
+    ///
+    /// What is left of `the_tidy_button_is_reachable_and_only_tidies`,
+    /// and it is the opposite assertion: that test said the button did
+    /// not cover a slot, and the property now is that no click in the
+    /// band asks the server for anything at all. A band with a control
+    /// in it is a band that has to be a finger tall on a phone, which is
+    /// how the title came to be floating in an empty stripe with the
+    /// scored line through it -- see [`HEADER_HEIGHT`].
     #[test]
-    fn the_tidy_button_is_reachable_and_only_tidies() {
-        let mut screen = InventoryScreen::new();
+    fn nothing_in_the_header_band_is_pressed() {
         let inventory = stocked();
-        screen.open = true;
-        let button = sort_button_rect();
-        screen.set_cursor(Some((button.centre_x(), button.centre_y())));
-        assert_eq!(screen.click(&inventory, Button::Left, false), Some(Intent::Sort));
-
-        // It is hit-tested before the grid and the recipes, so it must
-        // not be sitting on either of them.
-        for slot in 0..SLOTS {
-            assert_eq!(slot_place_at((button.centre_x(), button.centre_y())), None);
-            let r = slot_rect(slot);
-            let overlaps =
-                r.x0 < button.x1 && r.x1 > button.x0 && r.y0 < button.y1 && r.y1 > button.y0;
-            assert!(!overlaps, "the tidy button covers slot {slot}");
+        for touch in [false, true] {
+            widgets::with_touch(touch, || {
+                let panel = panel_rect();
+                // Inside the frame, because a point exactly on the
+                // panel's edge is outside it and closes the screen --
+                // which is the tap-off-the-panel gesture doing its job
+                // rather than anything in the band answering.
+                let band = Rect::new(
+                    panel.x0 + widgets::PANEL_BORDER,
+                    panel.y1 - HEADER_HEIGHT,
+                    panel.x1 - widgets::PANEL_BORDER,
+                    panel.y1 - widgets::PANEL_BORDER,
+                );
+                // Across the whole width of it, because the button stood
+                // at the right end and the title at the left, and a
+                // control that comes back will come back in one of them.
+                for step in 0..=20 {
+                    let x = band.x0 + band.width() * step as f32 / 20.0;
+                    let at = (x, band.centre_y());
+                    assert_eq!(tab_at(at), None, "a tab has climbed into the title band");
+                    assert_eq!(slot_place_at(at), None, "a slot is under the title");
+                    assert_eq!(recipe_at(at, 0, &inventory), None, "a recipe is under the title");
+                    let mut screen = InventoryScreen::new();
+                    screen.open = true;
+                    screen.set_cursor(Some(at));
+                    assert_eq!(
+                        screen.click(&inventory, Button::Left, false),
+                        None,
+                        "a click at {at:?} in the title band asked the server for something",
+                    );
+                }
+            });
         }
-        for index in 0..visible_recipes().min(RECIPES_LEN) {
-            let r = recipe_rect(index, 0);
-            let overlaps =
-                r.x0 < button.x1 && r.x1 > button.x0 && r.y0 < button.y1 && r.y1 > button.y0;
-            assert!(!overlaps, "the tidy button covers recipe {index}");
-        }
-        let panel = panel_rect();
-        assert!(button.x1 <= panel.x1 && button.y1 <= panel.y1, "the button escapes the panel");
     }
 
     #[test]
@@ -4448,6 +4457,53 @@ mod tests {
         (pack, worn)
     }
 
+    /// The pack the layout guards are run against: **the content that
+    /// breaks layouts, not the content a tidy player has.**
+    ///
+    /// Every square full, counts in three digits, the longest item names
+    /// either alphabet owns, a rucksack worn and its ten squares full
+    /// too. `stocked()` is five stones and three dirt, and every guard
+    /// below used to be checked against it -- so the readout under the
+    /// belt said `12 kg` where a real pack says `8420 кг при себе
+    /// скорость 15%`, and a line that runs off the panel only when the
+    /// pack is full is a line that runs off the panel.
+    ///
+    /// Deliberately the same shape as `snapshot::a_stuffed_pack`, which
+    /// is what the PNGs are taken of: a guard and a picture that
+    /// disagree about the fixture are a guard and a picture that cannot
+    /// be read against each other.
+    fn a_stuffed_pack() -> (Inventory, primitive_shared::inventory::Equipment) {
+        use primitive_shared::inventory::Stack;
+        use primitive_shared::types::*;
+        let (mut pack, mut worn) = with_a_rucksack();
+        pack.put_in_slot(5, Stack::new(BLOCK_BRICK_COURSES, 999));
+        pack.put_in_slot(7, Stack::new(BLOCK_PEGGED_BIRCH_PLANKS, 640));
+        pack.put_in_slot(8, Stack::worn(BLOCK_COPPER_PICKAXE, 1, 3));
+        let filler = [
+            BLOCK_COBBLESTONE, BLOCK_LOG, BLOCK_PLANKS, BLOCK_COAL, BLOCK_CLAY,
+            BLOCK_FLINT, BLOCK_STICK, BLOCK_COPPER_ORE, BLOCK_SAND, BLOCK_VESSEL,
+        ];
+        for slot in 0..SLOTS {
+            if pack.slots()[slot].is_none() {
+                pack.put_in_slot(
+                    slot,
+                    Stack::new(filler[slot % filler.len()], 100 + (slot as u32 * 37) % 800),
+                );
+            }
+        }
+        for square in 0..BACKPACK_SLOTS {
+            pack.put_in_slot(
+                SLOTS + square,
+                Stack::new(filler[square % filler.len()], 7 + square as u32 * 61),
+            );
+        }
+        // Something on every body square as well: an empty one draws a
+        // ghost and no wear bar, and a square that draws nothing is a
+        // square a layout mistake hides in.
+        worn.wear(Stack::new(BLOCK_WOOL_TUNIC, 1));
+        worn.wear(Stack::new(BLOCK_LEATHER_CAP, 1));
+        (pack, worn)
+    }
 
     // ---- the type scale, and text that stays out of the way ----
     //
@@ -4458,11 +4514,73 @@ mod tests {
     // everywhere. Both were true only as far as somebody had last
     // looked at a PNG. These are the three tests that hold them.
 
-    /// Every page of the pack, in every language, with a pack that is
-    /// full and named at its longest.
-    fn every_page_as_drawn(
-    ) -> Vec<(Tab, Language, Vec<crate::ui::widgets::Written>)> {
-        let (pack, worn) = with_a_rucksack();
+    /// One page of the pack as it was actually drawn: what was written
+    /// on it and what furniture was put down under it.
+    ///
+    /// **A struct rather than the four-tuple this used to be**, which
+    /// had grown a `#[allow(clippy::type_complexity)]` over it and was
+    /// about to grow a fifth member. The fifth member is the one that
+    /// matters: the same page is a different layout under a finger, and
+    /// every guard below used to be checked on a desktop only.
+    struct Page {
+        tab: Tab,
+        language: Language,
+        /// Whether this page was laid out for a finger.
+        touch: bool,
+        /// **The panel as it was while this page was drawn**, and the
+        /// controls with it. Not `panel_rect()` asked again at assertion
+        /// time: the panel is a different height under a finger, so a
+        /// guard that measured a phone's page against a desktop's panel
+        /// would report the title hanging off the top of a screen it is
+        /// comfortably inside -- which is exactly what the first run of
+        /// `nothing_on_the_pack_is_drawn_outside_the_panel` did.
+        panel: Rect,
+        controls: Vec<Rect>,
+        lines: Vec<crate::ui::widgets::Written>,
+        furniture: Vec<crate::ui::widgets::Placed>,
+    }
+
+    impl Page {
+        /// What a failure says it was looking at.
+        fn where_(&self) -> String {
+            format!(
+                "{:?}/{:?}/{}",
+                self.tab,
+                self.language,
+                if self.touch { "phone" } else { "desktop" }
+            )
+        }
+
+        /// Every rule scored on this page.
+        fn rules(&self) -> impl Iterator<Item = Rect> + '_ {
+            self.furniture
+                .iter()
+                .filter(|p| p.what == crate::ui::widgets::Furniture::Rule)
+                .map(|p| p.rect)
+        }
+
+        /// Every cell of every grid on it.
+        fn cells(&self) -> impl Iterator<Item = Rect> + '_ {
+            self.furniture
+                .iter()
+                .filter(|p| p.what == crate::ui::widgets::Furniture::Cell)
+                .map(|p| p.rect)
+        }
+    }
+
+    /// Every page of the pack, in every language, on both kinds of
+    /// pointer, with a pack that is full and named at its longest.
+    ///
+    /// **Both kinds of pointer is the widening this pass is about.** The
+    /// pack is authored in one space and scaled, so INTERFACE SIZE
+    /// cannot move one thing past another -- but `widgets::tappable`
+    /// can, and did: the tab strip and the header band are two of the
+    /// three things on this screen whose height depends on what is
+    /// pointing at them, and on a phone the header was twice the desktop
+    /// one. Every guard under here now runs over `[false, true]`, which
+    /// is the whole of the difference between the two layouts.
+    fn every_page_drawn() -> Vec<Page> {
+        let (pack, worn) = a_stuffed_pack();
         let mut hurt = Injuries::default();
         hurt.inflict(Part::LeftArm, primitive_shared::injury::Kind::Cut, 0.8);
         hurt.inflict(Part::RightLeg, primitive_shared::injury::Kind::Fracture, 0.9);
@@ -4481,37 +4599,68 @@ mod tests {
             },
         };
         let mut pages = Vec::new();
-        for &language in Language::ALL {
-            for tab in ALL_TABS {
-                let mut screen = InventoryScreen::new();
-                screen.open = true;
-                screen.sync(&pack);
-                screen.set_tab(tab);
-                // **No cursor.** The tooltip and the stack in hand are
-                // drawn *at* the pointer and are meant to cover what is
-                // under them; a test that counted those as overlaps
-                // would be a test nobody could make pass.
-                let (_, lines) = crate::ui::widgets::while_recording_text(|| {
-                    let mut out = Vec::new();
-                    screen.build_into(
-                        FontAtlas::for_test(),
-                        &FaceLayers::empty_for_test(),
-                        &pack,
-                        &worn,
-                        &hurt,
-                        &vitals,
-                        crate::ui::ladder_screen::Learning::nothing_yet(),
-                        language,
-                        &mut out,
-                    );
-                });
-                // A recorder that answered nothing would make both
-                // tests below pass by drawing nothing, which is the one
-                // way a layout test can lie.
-                assert!(!lines.is_empty(), "{tab:?}/{language:?} wrote nothing at all");
-                pages.push((tab, language, lines));
-            }
+        for touch in [false, true] {
+            crate::ui::widgets::with_touch(touch, || {
+                for &language in Language::ALL {
+                    for tab in ALL_TABS {
+                        let mut screen = InventoryScreen::new();
+                        screen.open = true;
+                        screen.sync(&pack);
+                        screen.set_tab(tab);
+                        // **No cursor.** The tooltip and the stack in
+                        // hand are drawn *at* the pointer and are meant
+                        // to cover what is under them; a test that
+                        // counted those as overlaps would be a test
+                        // nobody could make pass.
+                        //
+                        // **With the skin on**, because the lip is the
+                        // picture's and a screen drawn without one has
+                        // no lip to climb.
+                        let ((_, lines), furniture) =
+                            crate::ui::widgets::while_recording_furniture(|| {
+                                crate::ui::widgets::while_recording_text(|| {
+                                    crate::ui::widgets::with_skin(1, || {
+                                        let mut out = Vec::new();
+                                        screen.build_into(
+                                            FontAtlas::for_test(),
+                                            &FaceLayers::empty_for_test(),
+                                            &pack,
+                                            &worn,
+                                            &hurt,
+                                            &vitals,
+                                            crate::ui::ladder_screen::Learning::nothing_yet(),
+                                            language,
+                                            &mut out,
+                                        );
+                                    })
+                                })
+                            });
+                        // A recorder that answered nothing would make
+                        // every check below pass by drawing nothing,
+                        // which is the one way a layout test can lie.
+                        assert!(
+                            !lines.is_empty(),
+                            "{tab:?}/{language:?} wrote nothing at all"
+                        );
+                        pages.push(Page {
+                            tab,
+                            language,
+                            touch,
+                            panel: panel_rect(),
+                            controls: pack_controls(),
+                            lines,
+                            furniture,
+                        });
+                    }
+                }
+            });
         }
+        // The same, for the furniture: only the grids have cells, so it
+        // is asked across the pages rather than on each.
+        assert!(
+            pages.iter().any(|page| !page.furniture.is_empty()),
+            "the recorder saw no cells on any page of the pack",
+        );
         pages
     }
 
@@ -4526,8 +4675,8 @@ mod tests {
     /// number that goes stale silently; this is what stops it.
     #[test]
     fn no_reading_on_the_body_page_is_written_through_the_bar_beside_it() {
-        for (tab, language, lines) in every_page_as_drawn() {
-            if tab != Tab::Health {
+        for page in every_page_drawn() {
+            if page.tab != Tab::Health {
                 continue;
             }
             // The bars and the readings are drawn from the same
@@ -4536,25 +4685,27 @@ mod tests {
             // `no_two_lines_the_pack_writes_are_drawn_over_each_other`
             // already says. What this adds is the bar, which is not
             // text: every label has to end before the first bar starts.
-            let bar_left = lines
+            let bar_left = page
+                .lines
                 .iter()
                 .filter(|line| line.text.ends_with('%'))
                 .map(|line| line.rect.x0)
                 .fold(f32::INFINITY, f32::min);
-            assert!(bar_left.is_finite(), "{language:?}: the body page printed no readings");
+            assert!(bar_left.is_finite(), "{}: the body page printed no readings", page.where_());
             let bar_left = bar_left - VITAL_BAR - 0.020;
             // Only the rows' own labels, which are the lines that begin
             // exactly at the column the marks leave -- the title and the
             // tabs are over this page too and neither is a row of it.
             let words_left =
                 grid_left() - body_column_width() + VITAL_MARK + VITAL_MARK_GAP;
-            for line in &lines {
+            for line in &page.lines {
                 if (line.rect.x0 - words_left).abs() > 1e-4 {
                     continue;
                 }
                 assert!(
                     line.rect.x1 <= bar_left + 1e-4,
-                    "{language:?}: {:?} reaches {} and the bars start at {bar_left}",
+                    "{}: {:?} reaches {} and the bars start at {bar_left}",
+                    page.where_(),
                     line.text,
                     line.rect.x1,
                 );
@@ -4584,24 +4735,18 @@ mod tests {
             .chain((0..primitive_shared::equipment::SLOTS).map(equipment_rect))
             .chain((0..visible_recipes()).map(|place| recipe_rect(place, 0)))
             .collect();
-        for (tab, language, lines) in every_page_as_drawn() {
-            if matches!(tab, Tab::Health | Tab::Learn) {
+        for page in every_page_drawn() {
+            if matches!(page.tab, Tab::Health | Tab::Learn) {
                 continue;
             }
-            for line in &lines {
+            for line in &page.lines {
                 for square in &squares {
-                    let overlaps = line.rect.x0 < square.x1
-                        && line.rect.x1 > square.x0
-                        && line.rect.y0 < square.y1
-                        && line.rect.y1 > square.y0;
-                    let inside = line.rect.x0 >= square.x0 - 1e-4
-                        && line.rect.x1 <= square.x1 + 1e-4
-                        && line.rect.y0 >= square.y0 - 1e-4
-                        && line.rect.y1 <= square.y1 + 1e-4;
                     assert!(
-                        !overlaps || inside,
-                        "{tab:?}/{language:?}: {:?} is written across the edge of a slot \
+                        !widgets::crossing(line.rect, *square, 0.0)
+                            || widgets::holds(*square, line.rect, 1e-4),
+                        "{}: {:?} is written across the edge of a slot \
                          ({:?} against {square:?})",
+                        page.where_(),
                         line.text,
                         line.rect,
                     );
@@ -4621,9 +4766,9 @@ mod tests {
     /// row two hundredths and two sizes apart.
     #[test]
     fn no_two_lines_the_pack_writes_are_drawn_over_each_other() {
-        for (tab, language, lines) in every_page_as_drawn() {
-            for (i, a) in lines.iter().enumerate() {
-                for b in &lines[i + 1..] {
+        for page in every_page_drawn() {
+            for (i, a) in page.lines.iter().enumerate() {
+                for b in &page.lines[i + 1..] {
                     if a.text == b.text {
                         continue;
                     }
@@ -4632,17 +4777,210 @@ mod tests {
                     // two stacked lines touch by a pixel without either
                     // of them being readable as over the other.
                     let slack = crate::ui::widgets::PIXEL * 1.5;
-                    let over = a.rect.x0 < b.rect.x1 - slack
-                        && a.rect.x1 > b.rect.x0 + slack
-                        && a.rect.y0 < b.rect.y1 - slack
-                        && a.rect.y1 > b.rect.y0 + slack;
                     assert!(
-                        !over,
-                        "{tab:?}/{language:?}: {:?} is drawn over {:?}",
-                        a.text, b.text,
+                        !widgets::crossing(a.rect, b.rect, slack),
+                        "{}: {:?} is drawn over {:?}",
+                        page.where_(),
+                        a.text,
+                        b.text,
                     );
                 }
             }
+        }
+    }
+
+    /// **Nothing the pack writes is drawn over the rule under its own
+    /// title.**
+    ///
+    /// **The watchdog for the complaint this pass answers**, in the
+    /// player's words: "текст inventory не правильно лежит". It did. The
+    /// title band was 0.088 deep on a desktop, `panel_header` centred
+    /// the title in the whole of it, and the scored line along its floor
+    /// is four texels thick -- so the rule came up through the bottom
+    /// fifth of `ИНВЕНТАРЬ`, of `CHEST`, of `KILN`, of every title in
+    /// the game. Neither of the two guards above could see it: one
+    /// compares lines of text to each other and a rule is not text, and
+    /// the other compares text to *cells* and a rule is not a cell.
+    ///
+    /// So `Painter::rule` records itself now (see
+    /// `widgets::Furniture::Rule`), the title is centred in the room
+    /// above its rule rather than in the band that contains it, and
+    /// `widgets::TITLE_BAND` is the depth that leaves such a room.
+    ///
+    /// The ink, not the cell: a heading in capitals puts nothing in the
+    /// bottom two rows of its own box, and a rule two thirds of a pixel
+    /// into that emptiness is a rule nobody can see -- see
+    /// `widgets::descender_slack`.
+    #[test]
+    fn nothing_the_pack_writes_is_drawn_over_a_scored_rule() {
+        let mut seen = 0;
+        for page in every_page_drawn() {
+            for rule in page.rules() {
+                seen += 1;
+                for line in &page.lines {
+                    let ink = Rect::new(
+                        line.rect.x0,
+                        line.rect.y0 + widgets::descender_slack(line.scale),
+                        line.rect.x1,
+                        line.rect.y1,
+                    );
+                    assert!(
+                        !widgets::crossing(ink, rule, widgets::PIXEL * 0.25),
+                        "{}: the rule at {rule:?} is drawn through {:?} at {:?}",
+                        page.where_(),
+                        line.text,
+                        line.rect,
+                    );
+                }
+            }
+        }
+        // The pack scores exactly one rule -- the one under its title --
+        // on every page, in every language, under either pointer. A
+        // recorder that saw none would make the whole of the above pass
+        // by looking at nothing.
+        assert_eq!(
+            seen,
+            ALL_TABS.len() * Language::ALL.len() * 2,
+            "the recorder did not see the rule under the title on every page",
+        );
+    }
+
+    /// **Nothing on the pack is drawn outside the panel it belongs to.**
+    ///
+    /// Every line of text and every control, against the panel less its
+    /// own stitched frame. "Не заезжало" is two failures and this is the
+    /// second one: a thing can be clear of everything else on the screen
+    /// and still be half printed on the border, which is where the tidy
+    /// button's top sixteen thousandths used to be and where a long word
+    /// in Polish is the next one to go.
+    ///
+    /// The frame is [`widgets::PANEL_BORDER`] and not a margin somebody
+    /// picked, because the frame is what a thing is printed *on* when it
+    /// goes wrong.
+    #[test]
+    fn nothing_on_the_pack_is_drawn_outside_the_panel() {
+        for page in every_page_drawn() {
+            let panel = page.panel;
+            let inside = Rect::new(
+                panel.x0 + widgets::PANEL_BORDER,
+                panel.y0 + widgets::PANEL_BORDER,
+                panel.x1 - widgets::PANEL_BORDER,
+                panel.y1 - widgets::PANEL_BORDER,
+            );
+            for line in &page.lines {
+                // Down the page only the ink is measured, for
+                // `descender_slack`'s reason; across, the box is the ink.
+                let ink = Rect::new(
+                    line.rect.x0,
+                    line.rect.y0 + widgets::descender_slack(line.scale),
+                    line.rect.x1,
+                    line.rect.y1,
+                );
+                assert!(
+                    widgets::holds(inside, ink, widgets::PIXEL * 0.5),
+                    "{}: {:?} at {:?} is drawn outside the panel {inside:?}",
+                    page.where_(),
+                    line.text,
+                    line.rect,
+                );
+            }
+            for (index, control) in page.controls.iter().enumerate() {
+                assert!(
+                    widgets::holds(inside, *control, 1e-4),
+                    "{}: control {index} at {control:?} is drawn outside the panel {inside:?}",
+                    page.where_(),
+                );
+            }
+            // ...and every cell of every grid, which is the furniture
+            // the pages are mostly made of.
+            for cell in page.cells() {
+                assert!(
+                    widgets::holds(inside, cell, 1e-4),
+                    "{}: a cell at {cell:?} is drawn outside the panel {inside:?}",
+                    page.where_(),
+                );
+            }
+            // **And no control stands on a scored line.** The other
+            // half of the tidy button's mistake: it was a finger tall
+            // in a band that held a title and a rule, so its foot came
+            // down across the rule and the line stopped halfway over
+            // the panel. A control that is over a boundary is a control
+            // the eye reads as belonging to the wrong side of it.
+            for rule in page.rules() {
+                for (index, control) in page.controls.iter().enumerate() {
+                    assert!(
+                        !widgets::crossing(*control, rule, 1e-4),
+                        "{}: control {index} at {control:?} stands on the rule at {rule:?}",
+                        page.where_(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every control the pack screen has, in one list.
+    ///
+    /// Four tabs, and that is now the whole of it. The list is written
+    /// out rather than recorded, because a control is a thing that is
+    /// *hit-tested* and the rectangle that matters is the one the hit
+    /// test uses -- which is exactly the pair this interface's rule is
+    /// about (see the note over `tab_rect`).
+    fn pack_controls() -> Vec<Rect> {
+        (0..ALL_TABS.len()).map(tab_rect).collect()
+    }
+
+    /// **No control on the pack stands on another, on a slot, on a
+    /// recipe, or in the title band.**
+    ///
+    /// The generalisation of `the_tidy_button_is_reachable_and_only_tidies`,
+    /// which asked this of one button. Controls are hit-tested in an
+    /// order, so one drawn over another is one the player cannot press
+    /// however carefully they aim -- and the interface looks completely
+    /// right while it happens.
+    #[test]
+    fn no_control_on_the_pack_is_drawn_over_anything_else() {
+        let pack = stocked();
+        for touch in [false, true] {
+            widgets::with_touch(touch, || {
+                let where_ = if touch { "phone" } else { "desktop" };
+                let controls = pack_controls();
+                for (i, a) in controls.iter().enumerate() {
+                    for b in &controls[i + 1..] {
+                        assert!(
+                            !widgets::crossing(*a, *b, 1e-4),
+                            "{where_}: two controls are drawn over each other, \
+                             {a:?} and {b:?}",
+                        );
+                    }
+                    for slot in 0..SLOTS {
+                        assert!(
+                            !widgets::crossing(*a, slot_rect(slot), 1e-4),
+                            "{where_}: a control covers slot {slot}",
+                        );
+                    }
+                    for part in 0..primitive_shared::equipment::SLOTS {
+                        assert!(
+                            !widgets::crossing(*a, equipment_rect(part), 1e-4),
+                            "{where_}: a control covers body square {part}",
+                        );
+                    }
+                    for place in 0..visible_recipes().min(RECIPES_LEN) {
+                        assert!(
+                            !widgets::crossing(*a, recipe_rect(place, 0), 1e-4),
+                            "{where_}: a control covers recipe cell {place}",
+                        );
+                    }
+                    // ...and it answers where it is drawn, which is the
+                    // other half of a control being in the right place.
+                    let centre = (a.centre_x(), a.centre_y());
+                    assert_eq!(slot_place_at(centre), None, "{where_}: a slot is under a control");
+                    assert_eq!(
+                        recipe_at(centre, 0, &pack),
+                        None,
+                        "{where_}: a recipe is under a control",
+                    );
+                }
+            });
         }
     }
 
@@ -4661,22 +4999,15 @@ mod tests {
     /// is supposed to be, and a line entirely outside the cell is a
     /// caption minding its own business. Anything else is the bug.
     ///
-    /// Checked in every language and on every tab, because the words
-    /// that overflow are never the English ones.
+    /// Checked in every language, on every tab and under either pointer,
+    /// because the words that overflow are never the English ones.
     #[test]
     fn nothing_written_on_the_pack_sits_on_the_edge_of_a_slot() {
-        for (tab, language, lines, furniture) in every_page_with_its_furniture() {
-            let cells = furniture
-                .iter()
-                .filter(|p| p.what == crate::ui::widgets::Furniture::Cell);
-            for cell in cells {
-                let inner = widgets::cell_inner(cell.rect);
-                for line in &lines {
-                    let touches = line.rect.x0 < cell.rect.x1
-                        && line.rect.x1 > cell.rect.x0
-                        && line.rect.y0 < cell.rect.y1
-                        && line.rect.y1 > cell.rect.y0;
-                    if !touches {
+        for page in every_page_drawn() {
+            for cell in page.cells() {
+                let inner = widgets::cell_inner(cell);
+                for line in &page.lines {
+                    if !widgets::crossing(line.rect, cell, 0.0) {
                         continue;
                     }
                     // A tenth of a font pixel of slack, which is the
@@ -4689,10 +5020,7 @@ mod tests {
                     // descender space a count never puts ink in. Across
                     // is where the overflows were, and across it stays
                     // tight. The same pair the HUD's watchdog uses.
-                    let down = widgets::PIXEL
-                        * line.scale
-                        * (crate::engine::font::GLYPH_HEIGHT - crate::engine::font::CAP_HEIGHT)
-                            as f32;
+                    let down = widgets::descender_slack(line.scale);
                     let across = widgets::PIXEL * 0.1;
                     let inside = line.rect.x0 >= inner.x0 - across
                         && line.rect.x1 <= inner.x1 + across
@@ -4700,76 +5028,15 @@ mod tests {
                         && line.rect.y1 <= inner.y1 + across;
                     assert!(
                         inside,
-                        "{tab:?}/{language:?}: {:?} at {:?} is on the edge of the slot {:?} \
+                        "{}: {:?} at {:?} is on the edge of the slot {cell:?} \
                          (its floor is {inner:?})",
-                        line.text, line.rect, cell.rect,
+                        page.where_(),
+                        line.text,
+                        line.rect,
                     );
                 }
             }
         }
-    }
-
-    /// The pages again, with the furniture the painter put down beside
-    /// the lines it wrote.
-    ///
-    /// Its own function rather than a second argument on
-    /// `every_page_as_drawn`, because that one is read by three tests
-    /// that have no interest in the cells and would all have grown a
-    /// `_` for it.
-    #[allow(clippy::type_complexity)]
-    fn every_page_with_its_furniture() -> Vec<(
-        Tab,
-        Language,
-        Vec<crate::ui::widgets::Written>,
-        Vec<crate::ui::widgets::Placed>,
-    )> {
-        let (pack, worn) = with_a_rucksack();
-        let vitals = Vitals {
-            health: 0.34,
-            nourishment: 0.22,
-            stamina: 0.61,
-            body: crate::ui::hud::BodyGauges::default(),
-        };
-        let mut pages = Vec::new();
-        for &language in Language::ALL {
-            for tab in ALL_TABS {
-                let mut screen = InventoryScreen::new();
-                screen.open = true;
-                screen.sync(&pack);
-                screen.set_tab(tab);
-                // **With the skin on**, because the lip is the picture's
-                // and a screen drawn without one has no lip to climb.
-                let ((_, lines), furniture) =
-                    crate::ui::widgets::while_recording_furniture(|| {
-                        crate::ui::widgets::while_recording_text(|| {
-                            crate::ui::widgets::with_skin(1, || {
-                                let mut out = Vec::new();
-                                screen.build_into(
-                                    FontAtlas::for_test(),
-                                    &FaceLayers::empty_for_test(),
-                                    &pack,
-                                    &worn,
-                                    &Injuries::default(),
-                                    &vitals,
-                                    crate::ui::ladder_screen::Learning::nothing_yet(),
-                                    language,
-                                    &mut out,
-                                );
-                            })
-                        })
-                    });
-                pages.push((tab, language, lines, furniture));
-            }
-        }
-        // A recorder that answered nothing would make every check over
-        // this silently vacuous -- the failure mode a watchdog must not
-        // have. Across the pages, not on each: only the grids have
-        // cells.
-        assert!(
-            pages.iter().any(|(_, _, _, furniture)| !furniture.is_empty()),
-            "the recorder saw no cells on any page of the pack",
-        );
-        pages
     }
 
     /// **Three digits fit a slot at `size::COUNT`, with room for the
@@ -4852,14 +5119,17 @@ mod tests {
         let gap = (tab_rect(0).x1 + TAB_GAP / 2.0, tab_rect(0).centre_y());
         assert_eq!(tab_at(gap), None, "the gap between two tabs is a tab");
         assert_eq!(tab_at((0.0, -0.9)), None, "the bottom of the screen is a tab");
-        // ...and no tab is drawn over a slot, a recipe or the tidy
-        // button, which are the three things under it.
+        // ...and no tab is drawn over a slot or a recipe, which are the
+        // two things under it, nor over the title band above it.
         for index in 0..ALL_TABS.len() {
             let rect = tab_rect(index);
             let centre = (rect.centre_x(), rect.centre_y());
             assert_eq!(slot_place_at(centre), None, "a tab sits on a slot");
             assert_eq!(recipe_at(centre, 0, &pack), None, "a tab sits on a recipe");
-            assert!(!sort_button_rect().contains(centre.0, centre.1), "a tab sits on the tidy button");
+            assert!(
+                rect.y1 <= panel_rect().y1 - HEADER_HEIGHT + 1e-4,
+                "a tab has climbed into the title band",
+            );
         }
     }
 

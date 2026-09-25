@@ -3222,9 +3222,14 @@ mod tests {
             // A cell's floor is the room its picture leaves; a groove is
             // its own rectangle, because its lip is a texel and a
             // reading is meant to sit against it.
+            // A rule is a boundary rather than a place to put a reading
+            // in, and the HUD scores none: skipped rather than matched,
+            // so that if one ever appears here it appears in the list
+            // above instead of being silently treated as a well.
             let inner = match piece.what {
                 Furniture::Cell => crate::ui::widgets::cell_inner(piece.rect),
                 Furniture::Track => piece.rect,
+                Furniture::Rule => continue,
             };
             for line in &lines {
                 let touches = line.rect.x0 < piece.rect.x1

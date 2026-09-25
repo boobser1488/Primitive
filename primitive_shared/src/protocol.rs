@@ -1494,6 +1494,16 @@ pub enum ClientMessage {
     },
     /// "Tidy the storage rows." The hotbar is left alone: where things
     /// sit on the bar is an arrangement the player made.
+    ///
+    /// **Nothing in this client sends it any more, and it is still
+    /// honoured.** The pack screen's TIDY PILE button is gone -- see the
+    /// note where it used to be in `inventory_screen` -- but a message
+    /// the server understands is not the same thing as a button, and
+    /// three parties still depend on this one: an older client on a
+    /// newer server, a mod, and the server's own integration tests,
+    /// which use it as the cheapest gesture that always answers with an
+    /// inventory. Deleting the variant would be a protocol break bought
+    /// for nothing.
     SortInventory,
     /// "Tidy the container I have open."
     ///
