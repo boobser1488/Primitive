@@ -19033,6 +19033,21 @@ mod shadow_tools {
                         set(y, BLOCK_STONE);
                     }
                 }
+                // **And a lone pillar, because the wall is the easy
+                // case.** The wall runs along z, so the far edge of its
+                // shadow runs along z too -- and the map is laid out in
+                // the world's own x and z (`LightView::around`), so that
+                // edge is a straight line of whole texels and reads well
+                // however it is sampled. A pillar's shadow is a band
+                // pointing wherever the sun is, and its *sides* cross the
+                // map's grid at whatever angle the hour gives. That is
+                // the edge a quarry is full of and the one the report is
+                // about.
+                if (sx - middle - 36).abs() < 1 && (sz - middle - 10).abs() < 1 {
+                    for y in QUARRY_TOP..(QUARRY_TOP + 7) {
+                        set(y, BLOCK_STONE);
+                    }
+                }
             }),
             16,
         )
@@ -19220,6 +19235,22 @@ mod shadow_tools {
         /// The same, at the Hard step: one texel read and compared, with
         /// nothing blended (`shadow_bias.w`). See `sunlit_share`.
         Sharp,
+    }
+
+    /// What `Rig::shadow_reach` measured: the wall's own two ends in
+    /// blocks along the beam, how far each step put them from there, and
+    /// how many pixels each step's far edge takes to cross.
+    #[derive(Debug)]
+    struct ShadowReach {
+        near: f32,
+        far: f32,
+        hard_near: f32,
+        hard_far: f32,
+        soft_near: f32,
+        soft_far: f32,
+        hard_px: f32,
+        soft_px: f32,
+        px_per_block: f32,
     }
 
     /// Everything one camera frame needs, built once and drawn many times.
@@ -19461,6 +19492,236 @@ mod shadow_tools {
             }
         }
 
+        /// The camera one frame is drawn through, in scene coordinates.
+        ///
+        /// Its own function because a tool that asks "where on the screen
+        /// did this block land" has to ask the matrix the picture was
+        /// taken with, not one written out a second time beside it.
+        fn view_proj(&self, eye: Vec3, at: Vec3) -> glam::Mat4 {
+            let aspect = self.width as f32 / self.height as f32;
+            let view = glam::Mat4::look_at_rh(eye, at, Vec3::Y);
+            let projection = glam::Mat4::perspective_rh(70f32.to_radians(), aspect, 0.1, 1000.0);
+            projection * view
+        }
+
+        /// Where a scene point lands in the frame, in pixels, or `None`
+        /// behind the camera or off the picture.
+        fn pixel_of(&self, view_proj: glam::Mat4, point: Vec3) -> Option<(u32, u32)> {
+            let clip = view_proj * point.extend(1.0);
+            if clip.w <= 1e-4 {
+                return None;
+            }
+            let ndc = clip.truncate() / clip.w;
+            let x = (ndc.x * 0.5 + 0.5) * self.width as f32;
+            let y = (0.5 - ndc.y * 0.5) * self.height as f32;
+            (x >= 0.0 && y >= 0.0 && x < self.width as f32 && y < self.height as f32)
+                .then_some((x as u32, y as u32))
+        }
+
+        /// Where the wall of `build_quarry` puts its shadow on the plain,
+        /// against where its own geometry says it must.
+        ///
+        /// Both ends, because they answer different questions: the near
+        /// one whether the shadow still touches its caster's foot
+        /// ("peter-panning", which a depth bias buys), the far one whether
+        /// it reaches as far as the caster is tall (which a normal offset
+        /// spends). `None` when the sun is too low or too high to throw a
+        /// shadow across open ground. See `where_a_walls_shadow_lands`.
+        fn shadow_reach(&self, world: &World, t: f32) -> Option<ShadowReach> {
+            let sun = crate::engine::sky::Sky::new(t, 900.0).sun_direction();
+            // `sun` travels with the light, so a sun in the sky points
+            // downward. Anything shallower than this throws a shadow
+            // longer than the plain is wide; anything steeper hides it
+            // under the wall.
+            let flat = Vec3::new(sun.x, 0.0, sun.z);
+            if sun.y > -0.2 || flat.length() < 0.25 {
+                return None;
+            }
+            let middle = world.size as f32 / 2.0;
+            let top = QUARRY_TOP as f32;
+            // The wall: one column at scene x = middle + 24, five blocks
+            // standing on the plain. See `build_quarry`.
+            let west = (world.size / 2 + 24) as f32;
+            let foot = Vec3::new(west + 0.5, top, middle + 0.5);
+            let along = flat.normalize();
+            // Each corner of the wall at height `lift`, slid down the beam
+            // until it meets the plain, measured along the beam from the
+            // middle of the wall's footprint. The furthest is an end of
+            // the shadow: at `lift` nought the near end, at five the far.
+            let reach = |lift: f32| {
+                [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+                    .iter()
+                    .map(|(dx, dz)| {
+                        let corner = Vec3::new(west + dx, top + lift, middle + dz)
+                            + sun * (lift / -sun.y);
+                        (corner - foot).dot(along)
+                    })
+                    .fold(f32::MIN, f32::max)
+            };
+            let (near, far) = (reach(0.0), reach(5.0));
+            // **Beside the shadow, not along it.** A seat up the beam has
+            // the wall itself standing in front of the near half of what is
+            // being measured; a seat across the beam sees both ends.
+            let aside = Vec3::new(along.z, 0.0, -along.x);
+            let mid = foot + along * ((near + far) * 0.5);
+            let eye = mid + aside * 11.0 + Vec3::new(0.0, 13.0, 0.0);
+            let view_proj = self.view_proj(eye, mid);
+            self.frame(Mode::Off, eye, mid, t);
+            let off = self.read();
+            self.frame(Mode::Sharp, eye, mid, t);
+            let hard = self.read();
+            self.frame(Mode::On, eye, mid, t);
+            let soft = self.read();
+            // ...and the three frames themselves, for a person to look at:
+            // this seat is a shadow's edge crossing a wide stone face at
+            // an angle, which is the report's own picture.
+            if let Ok(dir) = std::env::var("GPU_REPRO_DIR") {
+                let _ = std::fs::create_dir_all(&dir);
+                let stamp = (t * 100.0) as i32;
+                let _ = off.save(format!("{dir}/wall_{stamp}_off.png"));
+                let _ = hard.save(format!("{dir}/wall_{stamp}_hard.png"));
+                let _ = soft.save(format!("{dir}/wall_{stamp}_soft.png"));
+            }
+            let luma = |p: &image::Rgba<u8>| {
+                (f32::from(p[0]) * 0.3 + f32::from(p[1]) * 0.6 + f32::from(p[2]) * 0.1) / 255.0
+            };
+            // The light the shadow took, sampled every hundredth of a
+            // block along the beam, from a block short of the wall's own
+            // footprint to half again as far as the shadow should go. The
+            // strip is taken a little to the side of the wall's middle so
+            // that a sample is never on the wall itself.
+            let profile = |lit: &image::RgbaImage| {
+                let mut taken = Vec::new();
+                let mut at = near - 1.5;
+                while at < far + 1.5 {
+                    let point = foot + along * at;
+                    if let Some((x, y)) = self.pixel_of(view_proj, point) {
+                        taken.push((at, luma(off.get_pixel(x, y)) - luma(lit.get_pixel(x, y))));
+                    }
+                    at += 0.01;
+                }
+                taken
+            };
+            // Where the shadow begins and ends, each as the middle of the
+            // crossing from a tenth dark to nine tenths, and how much of
+            // the march that crossing takes.
+            let ends = |taken: &[(f32, f32)]| -> Option<(f32, f32, f32)> {
+                let deepest = taken.iter().map(|(_, d)| *d).fold(0.0f32, f32::max);
+                if deepest < 0.02 {
+                    return None;
+                }
+                let first = taken.iter().position(|(_, d)| *d > deepest * 0.9)?;
+                let last = taken.iter().rposition(|(_, d)| *d > deepest * 0.9)?;
+                let lit_before = taken[..first].iter().rposition(|(_, d)| *d < deepest * 0.1)?;
+                let lit_after = taken[last..].iter().position(|(_, d)| *d < deepest * 0.1)? + last;
+                Some((
+                    (taken[lit_before].0 + taken[first].0) * 0.5,
+                    (taken[last].0 + taken[lit_after].0) * 0.5,
+                    taken[lit_after].0 - taken[last].0,
+                ))
+            };
+            let (hard_near, hard_far, hard_wide) = ends(&profile(&hard))?;
+            let (soft_near, soft_far, soft_wide) = ends(&profile(&soft))?;
+            // ...and the widths in pixels, which is what a player sees: the
+            // march is in blocks, so a step of it is worth however many
+            // pixels the camera makes of it here.
+            let px_per_block = {
+                let a = self.pixel_of(view_proj, foot + along * far)?;
+                let b = self.pixel_of(view_proj, foot + along * (far + 1.0))?;
+                (b.0 as f32 - a.0 as f32).hypot(b.1 as f32 - a.1 as f32).max(1e-3)
+            };
+            Some(ShadowReach {
+                near,
+                far,
+                hard_near: hard_near - near,
+                hard_far: hard_far - far,
+                soft_near: soft_near - near,
+                soft_far: soft_far - far,
+                hard_px: hard_wide * px_per_block,
+                soft_px: soft_wide * px_per_block,
+                px_per_block,
+            })
+        }
+
+        /// How wide the *sides* of the pillar's shadow are, in pixels, at
+        /// the Hard step and at Soft: `(hard, soft, px a block)`.
+        ///
+        /// **Across the beam, not along it.** The far end of a shadow is
+        /// cast by a caster's top edge, and in a world of blocks that edge
+        /// lies along x or z -- which is exactly how the shadow map is
+        /// laid out, so that end is a line of whole texels and comes out
+        /// well however it is read. The *sides* of a shadow point wherever
+        /// the sun does, cross the map's grid at an angle, and are where
+        /// an unfiltered compare draws a staircase. The report's wedges
+        /// are these.
+        fn shadow_across(&self, world: &World, t: f32, out: Option<&str>) -> Option<(f32, f32, f32)> {
+            let sun = crate::engine::sky::Sky::new(t, 900.0).sun_direction();
+            let flat = Vec3::new(sun.x, 0.0, sun.z);
+            if sun.y > -0.2 || flat.length() < 0.25 {
+                return None;
+            }
+            let middle = world.size as f32 / 2.0;
+            let top = QUARRY_TOP as f32;
+            // The pillar of `build_quarry`: one cell, seven blocks tall.
+            let base = Vec3::new((world.size / 2 + 36) as f32 + 0.5, top, middle + 10.5);
+            let along = flat.normalize();
+            let aside = Vec3::new(along.z, 0.0, -along.x);
+            // Half way down the shadow, where its sides are parallel and
+            // the pillar itself is not in the way.
+            let mid = base + along * (3.5 / -sun.y * 0.55);
+            let eye = mid - aside * 7.0 + Vec3::new(0.0, 7.0, 0.0);
+            let view_proj = self.view_proj(eye, mid);
+            self.frame(Mode::Off, eye, mid, t);
+            let off = self.read();
+            self.frame(Mode::Sharp, eye, mid, t);
+            let hard = self.read();
+            self.frame(Mode::On, eye, mid, t);
+            let soft = self.read();
+            if let Some(dir) = out {
+                let _ = std::fs::create_dir_all(dir);
+                let stamp = (t * 100.0) as i32;
+                let _ = off.save(format!("{dir}/pillar_{stamp}_off.png"));
+                let _ = hard.save(format!("{dir}/pillar_{stamp}_hard.png"));
+                let _ = soft.save(format!("{dir}/pillar_{stamp}_soft.png"));
+            }
+            let luma = |p: &image::Rgba<u8>| {
+                (f32::from(p[0]) * 0.3 + f32::from(p[1]) * 0.6 + f32::from(p[2]) * 0.1) / 255.0
+            };
+            // Across the band, a hundredth of a block at a time.
+            let profile = |lit: &image::RgbaImage| {
+                let mut taken = Vec::new();
+                let mut at = -2.5f32;
+                while at < 2.5 {
+                    if let Some((x, y)) = self.pixel_of(view_proj, mid + aside * at) {
+                        taken.push((at, luma(off.get_pixel(x, y)) - luma(lit.get_pixel(x, y))));
+                    }
+                    at += 0.01;
+                }
+                taken
+            };
+            // The near side of the band: from its darkest run out to the
+            // lit ground on the camera's side.
+            let side = |taken: &[(f32, f32)]| -> Option<f32> {
+                let deepest = taken.iter().map(|(_, d)| *d).fold(0.0f32, f32::max);
+                if deepest < 0.02 {
+                    return None;
+                }
+                let dark = taken.iter().position(|(_, d)| *d > deepest * 0.9)?;
+                let lit = taken[..dark].iter().rposition(|(_, d)| *d < deepest * 0.1)?;
+                Some(taken[dark].0 - taken[lit].0)
+            };
+            let px_per_block = {
+                let a = self.pixel_of(view_proj, mid)?;
+                let b = self.pixel_of(view_proj, mid + aside)?;
+                (b.0 as f32 - a.0 as f32).hypot(b.1 as f32 - a.1 as f32).max(1e-3)
+            };
+            Some((
+                side(&profile(&hard))? * px_per_block,
+                side(&profile(&soft))? * px_per_block,
+                px_per_block,
+            ))
+        }
+
         /// Draws and submits one frame. `eye` and `at` are in scene
         /// coordinates. Returns the draw calls the shadow pass made, or
         /// `None` when it did not run.
@@ -19471,9 +19732,7 @@ mod shadow_tools {
             let sky = crate::engine::sky::Sky::new(time_of_day, 900.0);
             let sun = sky.sun_direction();
             let aspect = self.width as f32 / self.height as f32;
-            let view = glam::Mat4::look_at_rh(eye, at, Vec3::Y);
-            let projection = glam::Mat4::perspective_rh(70f32.to_radians(), aspect, 0.1, 1000.0);
-            let view_proj = projection * view;
+            let view_proj = self.view_proj(eye, at);
             let sky_colour = sky.sky_color();
 
             let mut globals: Globals = bytemuck::Zeroable::zeroed();
@@ -19866,6 +20125,211 @@ mod shadow_tools {
                     hard_steps(&off),
                     hard_steps(&on),
                     hard_steps(&sharp)
+                );
+            }
+        }
+    }
+
+    /// **What the three shadow steps cost**, in the quarry the report came
+    /// from, at the reporter's own settings.
+    ///
+    /// ```text
+    /// cargo test -p primitive_client --release --lib \
+    ///     what_the_shadow_steps_cost -- --ignored --nocapture
+    /// ```
+    ///
+    /// Off, Soft and Hard, interleaved in rounds so that whatever the
+    /// card's temperature or the driver's mood does over the run, it does
+    /// to all three. Each frame is timed from the first command recorded
+    /// to the GPU reporting everything submitted done, which is CPU
+    /// recording plus GPU work plus the driver between them -- an upper
+    /// bound on the GPU's share and the same bound for all three.
+    ///
+    /// **Offscreen and not through a window**, which is the whole reason
+    /// this exists beside `PRIMITIVE_BENCH`: on a machine with anything
+    /// else running, a windowed run of the same world came out at 4.6 ms
+    /// of solid pass one time and 26 ms the next, because the compositor
+    /// decides how often a window that is not in front gets to draw. Here
+    /// nothing is presented and nothing is composited.
+    ///
+    /// The number this is for: **Hard is one lookup into the map and Soft
+    /// is eight** (`sunlit_share`), and Hard is the step a weak machine
+    /// and a phone are given. If the two ever measure the same, the row
+    /// has one value too many.
+    #[test]
+    #[ignore = "a tool: needs a GPU; times the quarry at the three shadow steps"]
+    fn what_the_shadow_steps_cost() {
+        let Some((device, queue)) = crate::engine::test_gpu() else {
+            println!("no GPU adapter on this machine; skipping");
+            return;
+        };
+        let world = build_quarry(device, queue);
+        let rig =
+            Rig::new(device, queue, &world, 1920, 1080, 4, 192.0, crate::engine::lighting::Quality::High);
+        let middle = world.size / 2;
+        let top = QUARRY_TOP as f32;
+        let m = middle as f32;
+        // A seat in the working, looking along a bench into the cut: wide
+        // stone faces, drops at their edges and the pillar's shadow across
+        // them -- as many shadowed fragments as the scene has.
+        let eye = Vec3::new(m + 19.5, top - 2.0 + 1.62, m + 1.5);
+        let look = Vec3::new(m - 6.0, top - 6.0, m + 4.0);
+        let t = 0.64f32;
+        let modes = [Mode::Off, Mode::On, Mode::Sharp];
+        for mode in modes {
+            for _ in 0..20 {
+                rig.frame(mode, eye, look, t);
+                device.poll(wgpu::Maintain::Wait);
+            }
+        }
+        let (rounds, frames) = (8, 30);
+        let mut samples: Vec<Vec<f64>> = vec![Vec::new(); modes.len()];
+        for _ in 0..rounds {
+            for (i, mode) in modes.iter().enumerate() {
+                for _ in 0..frames {
+                    let started = std::time::Instant::now();
+                    rig.frame(*mode, eye, look, t);
+                    device.poll(wgpu::Maintain::Wait);
+                    samples[i].push(started.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+        }
+        let mut medians = Vec::new();
+        for (mode, times) in modes.iter().zip(samples.iter_mut()) {
+            times.sort_by(f64::total_cmp);
+            let median = times[times.len() / 2];
+            medians.push(median);
+            println!(
+                "{mode:?}: {median:.3} ms (p10 {:.3}, p90 {:.3})",
+                times[times.len() / 10],
+                times[times.len() * 9 / 10]
+            );
+        }
+        println!(
+            "the shadows cost {:.3} ms at Soft and {:.3} at Hard over no shadows at all",
+            medians[1] - medians[0],
+            medians[2] - medians[0]
+        );
+    }
+
+    /// **A shadow has an edge; it does not have a step.**
+    ///
+    /// The report was "что с тенями": a quarry's own benches throwing
+    /// shadows across wide stone faces, and at the Hard step those came
+    /// out as a razor with a staircase along it -- measured on the pillar
+    /// of `build_quarry`, the side of its shadow crossed from full light
+    /// to full shade in **0.3 of a pixel**, a third of the light gone with
+    /// no pixel in between. A face cut corner to corner by a line like
+    /// that does not read as a shadow. It reads as the face being broken,
+    /// which is what the player said.
+    ///
+    /// **Across the beam, because along it is the easy case.** The far end
+    /// of a shadow is cast by a caster's top edge, which in a world of
+    /// blocks lies along x or z -- and the map is laid out in the world's
+    /// own x and z (`shadow::LightView::around`), so that end is a line of
+    /// whole texels and comes out well however it is read. The *sides* of
+    /// a shadow point wherever the sun does and cross the map's grid at an
+    /// angle. Measuring the wrong one of the two was what made this look
+    /// fine for a fortnight.
+    ///
+    /// **And it may not become a second Soft.** Hard is the step a weak
+    /// machine and a phone are given; it is one lookup against Soft's
+    /// eight, and if its edge were as wide as Soft's there would be no
+    /// reason for the row to have three values instead of two. So both
+    /// ends are asserted: wider than a pixel, and a good deal narrower
+    /// than Soft over the same seat.
+    #[test]
+    fn a_hard_shadow_has_an_edge_and_not_a_step() {
+        let Some((device, queue)) = crate::engine::test_gpu() else {
+            println!("no GPU adapter on this machine; skipping");
+            return;
+        };
+        let world = build_quarry(device, queue);
+        let rig =
+            Rig::new(device, queue, &world, 1280, 720, 4, 192.0, crate::engine::lighting::Quality::High);
+        // An hour where the sun is high enough to cast across open ground
+        // and low enough that the shadow is not under its own caster.
+        let (hard, soft, scale) =
+            rig.shadow_across(&world, 0.64, None).expect("the pillar throws a shadow at this hour");
+        println!("the pillar's shadow crosses in {hard:.1} px hard, {soft:.1} px soft ({scale:.0} px a block)");
+        assert!(
+            hard > 1.0,
+            "the Hard step's shadow edge crosses in {hard:.2} pixels -- that is a step, \
+             not an edge, and it is the wedge of \"что с тенями\""
+        );
+        assert!(
+            hard < soft * 0.5,
+            "the Hard step's edge ({hard:.1} px) is no longer sharper than Soft's \
+             ({soft:.1} px); Hard is one lookup against eight and has to look like it"
+        );
+    }
+
+    /// **Where the sun's shadow actually lands, in blocks**, against
+    /// where the geometry says it must.
+    ///
+    /// ```text
+    /// GPU_REPRO_DIR=C:/Users/Admin/Downloads/flatcraft/shots/quarry \
+    ///     cargo test -p primitive_client --lib \
+    ///     where_a_walls_shadow_lands -- --ignored --nocapture
+    /// ```
+    ///
+    /// **Smoothing an edge that is in the wrong place is decoration.** A
+    /// shadow map has two ways of putting one somewhere it does not
+    /// belong: a depth bias large enough to lift the shadow off its own
+    /// caster ("peter-panning"), and a normal offset that walks the lookup
+    /// point sideways. Both show as a shadow that is shorter or longer
+    /// than the caster's own reach, and neither is visible by eye on a
+    /// picture of a quarry -- it has to be measured against a number.
+    ///
+    /// The number is easy here because `build_quarry` stands one straight
+    /// wall on an unbroken plain: five blocks tall, one thick. The far
+    /// edge of its shadow is the shadow of its top face, and that is a
+    /// line anyone can work out -- every corner of the top face slid along
+    /// the beam until it meets the plain.
+    ///
+    /// Marched along the beam's own horizontal direction, sampling the
+    /// frame at the pixel each world point projects to, so what comes out
+    /// is in blocks and not in pixels and does not depend on where the
+    /// camera stood.
+    #[test]
+    #[ignore = "a tool: needs a GPU; says in blocks where a wall's shadow lands"]
+    fn where_a_walls_shadow_lands() {
+        let Some((device, queue)) = crate::engine::test_gpu() else {
+            println!("no GPU adapter on this machine; skipping");
+            return;
+        };
+        let shots = std::env::var("GPU_REPRO_DIR").ok();
+        let world = build_quarry(device, queue);
+        let rig =
+            Rig::new(device, queue, &world, 1280, 720, 4, 192.0, crate::engine::lighting::Quality::High);
+        for (when, t) in [
+            ("morning", 0.36f32),
+            ("midmorning", 0.41),
+            ("late_morning", 0.45),
+            ("early_afternoon", 0.56),
+            ("afternoon", 0.60),
+            ("evening", 0.64),
+        ] {
+            let Some(got) = rig.shadow_reach(&world, t) else {
+                println!("{when}: the sun throws nothing measurable here");
+                continue;
+            };
+            println!(
+                "{when}: the wall's shadow runs {:.2}..{:.2} blocks ({:.0} px a block)",
+                got.near, got.far, got.px_per_block
+            );
+            println!(
+                "  hard: begins {:+.3}, ends {:+.3} blocks off, far edge crosses in {:.1} px",
+                got.hard_near, got.hard_far, got.hard_px
+            );
+            println!(
+                "  soft: begins {:+.3}, ends {:+.3} blocks off, far edge crosses in {:.1} px",
+                got.soft_near, got.soft_far, got.soft_px
+            );
+            if let Some((hard, soft, scale)) = rig.shadow_across(&world, t, shots.as_deref()) {
+                println!(
+                    "  the pillar's shadow, across the beam ({scale:.0} px a block): \
+                     hard crosses in {hard:.1} px, soft in {soft:.1} px"
                 );
             }
         }
