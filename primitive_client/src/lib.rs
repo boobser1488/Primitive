@@ -589,6 +589,7 @@ fn run(
     graphics.set_shadows(settings.shadows);
     graphics.set_shadow_distance(settings.shadow_distance);
     graphics.set_plant_shadows(settings.plant_shadows);
+    graphics.set_fire_shadows(settings.fire_shadows);
     // **Android is waiting for an answer while this runs.**
     //
     // Starting up takes a second or two -- a GPU device, a texture
@@ -7817,6 +7818,11 @@ fn apply_settings(
     graphics.set_shadows(settings.shadows);
     graphics.set_shadow_distance(settings.shadow_distance);
     graphics.set_plant_shadows(settings.plant_shadows);
+    // Last of the shadow rows and the cheapest of them: it is a number in a
+    // uniform the next frame writes anyway, so it neither rebuilds a
+    // pipeline nor forgets a cache and its order among these does not
+    // matter. See `GraphicsState::set_fire_shadows`.
+    graphics.set_fire_shadows(settings.fire_shadows);
     *fog_enabled = settings.fog_enabled;
 
     // Still capped by whatever the server said it would stream in

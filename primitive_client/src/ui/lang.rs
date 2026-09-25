@@ -1028,6 +1028,21 @@ pub enum Msg {
     /// player is choosing is whether the far edge of a roof is a clean
     /// line or a dotted one, and the Simple line says exactly that.
     AntiAliasing,
+    /// How many hearths cast a shadow, and its three steps past OFF. See
+    /// `lamp_shadow::FireShadows`.
+    FireShadows,
+    FireShadowsOne,
+    FireShadowsFew,
+    FireShadowsAll,
+    /// The row that sets every graphics row at once, and its six readings.
+    /// See `settings::Preset`.
+    GraphicsPreset,
+    PresetCustom,
+    PresetPotato,
+    PresetLow,
+    PresetMedium,
+    PresetHigh,
+    PresetUltra,
 }
 
 /// One line of interface text, in every language at once.
@@ -1875,6 +1890,43 @@ pub const STRINGS: &[Line] = &[
     // "KRAWĘDZI" that would push the row to the smallest type on the
     // screen.
     Line { msg: Msg::AntiAliasing, en: "ANTI-ALIASING", simple: "SMOOTHER EDGES", ru: "СГЛАЖИВАНИЕ", pl: "WYGŁADZANIE" },
+    // ---- the fires' shadows (`lamp_shadow::FireShadows`) ----
+    //
+    // Named for the campfire rather than for "light sources", which is
+    // what the mechanism really answers to (anything with a light of its
+    // own: a hearth, a kiln, a torch, a seam of glowstone). A player does
+    // not have a word for that and does have one for the thing they are
+    // sitting at after dark, and the row is under the three rows about
+    // the sun's shadows, which is what says which shadows these are.
+    //
+    // The three readings are counts, not qualities, because that is what
+    // the setting is: how many hearths round you throw one.
+    Line { msg: Msg::FireShadows,    en: "FIRE SHADOWS", simple: "SHADOWS FROM FIRES", ru: "ТЕНИ КОСТРОВ", pl: "CIENIE OGNISK" },
+    Line { msg: Msg::FireShadowsOne, en: "ONE",   simple: "JUST ONE",    ru: "ОДИН",      pl: "JEDEN" },
+    Line { msg: Msg::FireShadowsFew, en: "A FEW", simple: "A FEW",       ru: "НЕСКОЛЬКО", pl: "KILKA" },
+    Line { msg: Msg::FireShadowsAll, en: "ALL",   simple: "ALL OF THEM", ru: "ВСЕ",       pl: "WSZYSTKIE" },
+    // ---- the graphics preset (`settings::Preset`) ----
+    //
+    // **The joke is in one language and the row is in four.** POTATO is
+    // what an English-speaking player calls the machine this step is for
+    // and it reads as friendly rather than rude; there is no such word in
+    // Russian or Polish that is not simply an insult aimed at the person
+    // reading it, and a settings row is a bad place to be told your
+    // computer is a vegetable in a language you did not choose. So the
+    // other three say what the step is -- the lowest -- and so does the
+    // plain-English line, where the point is to take the jokes out.
+    //
+    // CUSTOM is a reading and not a step: it is what the row says when the
+    // settings match none of the five, and "СВОЙ" -- your own -- is the
+    // word for that in a menu rather than "ДРУГОЙ", which would read as a
+    // sixth set the player has not been offered.
+    Line { msg: Msg::GraphicsPreset, en: "GRAPHICS PRESET", simple: "ALL PICTURE SETTINGS", ru: "НАБОР", pl: "ZESTAW GRAFIKI" },
+    Line { msg: Msg::PresetCustom,   en: "CUSTOM", simple: "YOUR OWN", ru: "СВОЙ",       pl: "WŁASNY" },
+    Line { msg: Msg::PresetPotato,   en: "POTATO", simple: "LOWEST",   ru: "МИНИМУМ",    pl: "MINIMUM" },
+    Line { msg: Msg::PresetLow,      en: "LOW",    simple: "LOW",      ru: "НИЗКИЙ",     pl: "NISKI" },
+    Line { msg: Msg::PresetMedium,   en: "MEDIUM", simple: "MIDDLE",   ru: "СРЕДНИЙ",    pl: "ŚREDNI" },
+    Line { msg: Msg::PresetHigh,     en: "HIGH",   simple: "HIGH",     ru: "ВЫСОКИЙ",    pl: "WYSOKI" },
+    Line { msg: Msg::PresetUltra,    en: "ULTRA",  simple: "HIGHEST",  ru: "УЛЬТРА",     pl: "ULTRA" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as

@@ -579,6 +579,19 @@ pub enum Field {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     Username,
+    /// A whole graphics screen in one row. See `settings::Preset`.
+    ///
+    /// **First of the graphics rows, and the render distance moved down
+    /// under it** -- which is the one row that was above it and which this
+    /// one sets. A preset with a row it owns sitting *over* it is a screen
+    /// that reads top to bottom as "here is a set; here is a thing outside
+    /// the set", and it is not outside the set.
+    ///
+    /// Everything from here to the cloud cover is what it writes; the name,
+    /// the language, the look, the two volumes, vsync and the interface size
+    /// stay above it untouched, and the menu backdrop stays below it for the
+    /// same reason (`settings::Graphics`).
+    Preset,
     RenderDistance,
     Fov,
     Sensitivity,
@@ -651,6 +664,16 @@ pub enum Setting {
     /// the sun's shadows, and saying nothing while they are off, for
     /// `ShadowDistance`'s reason.
     PlantShadows,
+    /// How many hearths cast a shadow of their own
+    /// (`lamp_shadow::FireShadows`).
+    ///
+    /// Last of the four shadow rows, because it is the only one about a
+    /// light that is not the sun -- and still one of the four, because it
+    /// rides on the same map: with the shadows switch off there is no
+    /// shadowed pipeline for a fire to be drawn through, and the row says
+    /// OFF rather than offering a choice that changes nothing
+    /// (`ShadowDistance`'s reason again).
+    FireShadows,
     DetailDistance,
     /// How far out stones and sticks on the ground keep their thickness.
     /// Under the grass-and-stone distance, which says how far they are
@@ -677,16 +700,26 @@ pub enum Setting {
 
 impl Setting {
     /// Every setting on the screen, top to bottom.
-    pub const ALL: [Setting; 27] = [
+    ///
+    /// **Two halves now, and the line between them is the preset.** Above
+    /// `Setting::Preset` is everything a graphics set has no business
+    /// touching -- who you are, what language, how the mouse turns, how big
+    /// the interface is, how loud it is, and vsync; below it, down to the
+    /// cloud cover, is exactly what the set writes. The render distance
+    /// moved from third place to just under the preset when the row arrived:
+    /// it is the biggest thing the set changes, and it used to sit six rows
+    /// above the set that changes it.
+    pub const ALL: [Setting; 29] = [
         Setting::Language,
         Setting::Username,
-        Setting::RenderDistance,
         Setting::Fov,
         Setting::Sensitivity,
         Setting::UiScale,
         Setting::MasterVolume,
         Setting::MusicVolume,
         Setting::Vsync,
+        Setting::Preset,
+        Setting::RenderDistance,
         Setting::Resolution,
         Setting::Fog,
         Setting::AmbientOcclusion,
@@ -698,6 +731,7 @@ impl Setting {
         Setting::Shadows,
         Setting::ShadowDistance,
         Setting::PlantShadows,
+        Setting::FireShadows,
         Setting::DetailDistance,
         Setting::ReliefDistance,
         Setting::LodDistance,
@@ -711,6 +745,7 @@ impl Setting {
     pub fn msg(&self) -> Msg {
         match self {
             Setting::Username => Msg::Name,
+            Setting::Preset => Msg::GraphicsPreset,
             Setting::RenderDistance => Msg::RenderDistance,
             Setting::Fov => Msg::FieldOfView,
             // The same row, named for whatever actually turns the
@@ -736,6 +771,7 @@ impl Setting {
             Setting::Shadows => Msg::Shadows,
             Setting::ShadowDistance => Msg::ShadowDistance,
             Setting::PlantShadows => Msg::PlantShadows,
+            Setting::FireShadows => Msg::FireShadows,
             Setting::DetailDistance => Msg::DetailDistance,
             Setting::ReliefDistance => Msg::ReliefDistance,
             Setting::LodDistance => Msg::LodDistance,
@@ -759,6 +795,20 @@ impl Setting {
             // In the language itself: see `Language::name`.
             Setting::Language => settings.language.name().to_string(),
             Setting::Username => settings.username.clone(),
+            // **Read off the settings, never remembered.** This is the
+            // whole of the promise that the row cannot lie: step any row
+            // below it and the next time this one is drawn it works out
+            // again which set the screen is on, and finds none.
+            Setting::Preset => language
+                .text(match crate::settings::Preset::of(settings) {
+                    crate::settings::Preset::Custom => Msg::PresetCustom,
+                    crate::settings::Preset::Potato => Msg::PresetPotato,
+                    crate::settings::Preset::Low => Msg::PresetLow,
+                    crate::settings::Preset::Medium => Msg::PresetMedium,
+                    crate::settings::Preset::High => Msg::PresetHigh,
+                    crate::settings::Preset::Ultra => Msg::PresetUltra,
+                })
+                .to_string(),
             Setting::RenderDistance => format!(
                 "{} {}",
                 settings.render_distance_chunks,
@@ -885,6 +935,22 @@ impl Setting {
                     })
                     .to_string()
             }
+            // OFF while the shadows switch is, for `ShadowDistance`'s
+            // reason: a fire casts through the sun's own shadowed
+            // pipelines, and with no shadow map there is nothing for this
+            // row to choose between.
+            Setting::FireShadows => {
+                use crate::engine::lamp_shadow::FireShadows;
+                language
+                    .text(match settings.fire_shadows {
+                        _ if !settings.shadows.is_on() => Msg::Off,
+                        FireShadows::Off => Msg::Off,
+                        FireShadows::One => Msg::FireShadowsOne,
+                        FireShadows::Few => Msg::FireShadowsFew,
+                        FireShadows::All => Msg::FireShadowsAll,
+                    })
+                    .to_string()
+            }
             Setting::DetailDistance => format!("{:.0}%", settings.detail_distance * 100.0),
             Setting::ReliefDistance => {
                 if settings.relief_chunks <= 0 {
@@ -982,6 +1048,16 @@ impl Setting {
             // Handled above, before the numeric ones.
             Setting::Language => {}
             Setting::Username => {}
+            // The one row that writes other rows. `sanitize` at the end of
+            // this function is what holds a table to the same clamps a
+            // hand-edited file gets -- and a table that needed clamping
+            // would read back as СВОЙ the moment it was applied, which is
+            // a test rather than a hope
+            // (`every_step_survives_being_written_down_and_read_back`).
+            Setting::Preset => {
+                let next = crate::settings::Preset::of(settings).step(delta);
+                settings.set_graphics(next.graphics());
+            }
             Setting::RenderDistance => settings.render_distance_chunks += delta,
             Setting::Fov => settings.fov_degrees += 5.0 * d,
             Setting::Sensitivity => settings.mouse_sensitivity += 0.0002 * d,
@@ -1090,6 +1166,8 @@ impl Setting {
             }
             // Walked, not wrapped: see `PlantShadows::step`.
             Setting::PlantShadows => settings.plant_shadows = settings.plant_shadows.step(delta),
+            // Walked, not wrapped: see `FireShadows::step`.
+            Setting::FireShadows => settings.fire_shadows = settings.fire_shadows.step(delta),
             Setting::DetailDistance => settings.detail_distance += 0.1 * d,
             Setting::ReliefDistance => {
                 settings.relief_chunks = walk_stops(&crate::settings::RELIEF_STOPS, settings.relief_chunks, delta)
@@ -7279,7 +7357,18 @@ mod tests {
         // of a list that is one row longer: eleven rows of twenty-seven
         // rather than of twenty-six. The colour hash is byte for byte
         // what it was, which is the check that nothing else did.
-        ("settings", 2430, 15883518718561162226, 1115244357459885731),
+        // ...and the graphics preset (`Setting::Preset`) with the fires'
+        // shadows (`Setting::FireShadows`) under the plants', twenty-nine
+        // rows -- and this time the screen really did change, which is why
+        // all three numbers moved. The preset row is ninth, inside the
+        // eleven the panel holds, and the render distance moved down from
+        // third place to under it: so the rows between them each shifted
+        // one place and one new row arrived on screen. Ninety-six more
+        // vertices is the preset's own row (a name, a reading and two
+        // arrows) less the letters the reshuffle saved. The fires' row is
+        // twenty-second of twenty-nine, below the fold, and draws nothing
+        // here.
+        ("settings", 2526, 5626143496880255084, 3645066025292734355),
         // More actions to bind than when this was taken, so more rows.
         // The last of them is GIVE (`keybinds::Action::Give`), which is
         // ninety more vertices -- a row's well, its word and its key --
@@ -8804,6 +8893,208 @@ mod tests {
         assert_eq!(settings.shadows, crate::engine::shadow::Mode::Soft);
         Setting::Shadows.step(&mut settings, delta);
         assert!(!settings.shadows.is_on(), "the third press did not turn shadows off again");
+    }
+
+    /// The row `setting`'s `+` button, scrolled to, and the rect it was
+    /// recorded at. Panics if no scroll position shows the row, which is
+    /// the other half of what these tests are checking.
+    fn plus_of(menu: &mut Menu, fixture: &Fixture, setting: Setting) -> Rect {
+        loop {
+            menu.build(&fixture.ctx());
+            let found = menu
+                .hot
+                .iter()
+                .filter(|(_, action)| matches!(action, Action::Tweak(row, 1) if *row == setting))
+                .map(|(rect, _)| *rect)
+                .next_back();
+            if let Some(rect) = found {
+                return rect;
+            }
+            let before = menu.settings_scroll;
+            menu.scroll_settings(1);
+            assert_ne!(menu.settings_scroll, before, "no scroll position shows the {setting:?} row");
+        }
+    }
+
+    #[test]
+    fn the_fire_row_is_pressed_where_it_is_drawn_and_walks_its_hearths() {
+        use crate::engine::lamp_shadow::FireShadows;
+        let mut menu = Menu::new(ServerList::default());
+        menu.screen = Screen::Settings;
+        let fixture = Fixture::new();
+        let mut settings = fixture.settings.clone();
+        // The row only has anything to say with the shadows on: see
+        // `Setting::FireShadows`.
+        settings.shadows = crate::engine::shadow::Mode::Hard;
+        let rect = plus_of(&mut menu, &fixture, Setting::FireShadows);
+        menu.cursor = Some((rect.centre_x(), rect.centre_y()));
+        let Some(Action::Tweak(Setting::FireShadows, delta)) = menu.click() else {
+            panic!("pressing the middle of the fire row's `+` did not press it");
+        };
+        assert_eq!(delta, 1, "the right-hand button asks for fewer fires");
+        // It starts at ALL -- the game before the row -- so the way to
+        // watch it move is down.
+        assert_eq!(settings.fire_shadows, FireShadows::All);
+        for wanted in [FireShadows::Few, FireShadows::One, FireShadows::Off, FireShadows::Off] {
+            Setting::FireShadows.step(&mut settings, -delta);
+            assert_eq!(settings.fire_shadows, wanted, "the row did not walk down to {wanted:?}");
+        }
+        Setting::FireShadows.step(&mut settings, delta);
+        assert_eq!(settings.fire_shadows, FireShadows::One, "the row would not come back up");
+        assert_eq!(Setting::FireShadows.value(&settings), settings.language.text(Msg::FireShadowsOne));
+        // ...and with the shadows off it says OFF whatever it holds,
+        // because there is no shadowed pipeline for a fire to draw through.
+        settings.fire_shadows = FireShadows::All;
+        settings.shadows = crate::engine::shadow::Mode::Off;
+        assert_eq!(Setting::FireShadows.value(&settings), settings.language.text(Msg::Off), "the row promised shadows with the shadows off");
+    }
+
+    #[test]
+    fn the_preset_row_is_pressed_where_it_is_drawn_and_sets_the_whole_screen() {
+        use crate::settings::Preset;
+        let mut menu = Menu::new(ServerList::default());
+        menu.screen = Screen::Settings;
+        let fixture = Fixture::new();
+        let mut settings = fixture.settings.clone();
+        let rect = plus_of(&mut menu, &fixture, Setting::Preset);
+        menu.cursor = Some((rect.centre_x(), rect.centre_y()));
+        let Some(Action::Tweak(Setting::Preset, delta)) = menu.click() else {
+            panic!("pressing the middle of the preset row's `+` did not press it");
+        };
+        assert_eq!(delta, 1);
+        // Walked to the top and back to the bottom, and at every step the
+        // whole screen is the step's table -- not a field of it.
+        let mut seen = vec![Preset::of(&settings)];
+        for _ in 0..8 {
+            Setting::Preset.step(&mut settings, delta);
+            let now = Preset::of(&settings);
+            assert_eq!(settings.graphics(), now.graphics(), "the row moved and the screen did not follow it");
+            seen.push(now);
+        }
+        assert_eq!(*seen.last().expect("a step"), Preset::Ultra, "the row does not reach the top");
+        for _ in 0..8 {
+            Setting::Preset.step(&mut settings, -delta);
+        }
+        assert_eq!(Preset::of(&settings), Preset::Potato, "the row does not reach the bottom");
+        assert_eq!(settings.graphics(), Preset::Potato.graphics());
+    }
+
+    #[test]
+    fn stepping_a_row_the_set_owns_turns_the_set_to_your_own_and_nothing_else_does() {
+        // **The row must not be able to lie**, which is the whole reason
+        // the set is worked out from the settings rather than remembered:
+        // a screen reading ВЫСОКИЙ while the settings are something else
+        // is the failure this was asked to prevent.
+        //
+        // Written without a list of "the rows the set owns" on purpose.
+        // The question is asked of the settings themselves -- did this
+        // step change anything `settings::Graphics` holds? -- so a row
+        // added to the screen later is covered the day it is added, and a
+        // field added to `Graphics` and forgotten in `set_graphics` fails
+        // here rather than in a player's menu.
+        use crate::settings::Preset;
+        for preset in Preset::CHOOSABLE {
+            for setting in Setting::ALL {
+                if setting == Setting::Preset {
+                    continue;
+                }
+                for delta in [-1, 1] {
+                    let mut settings = ClientSettings::default();
+                    settings.set_graphics(preset.graphics());
+                    settings.sanitize();
+                    let before = settings.graphics();
+                    setting.step(&mut settings, delta);
+                    let now = Preset::of(&settings);
+                    if settings.graphics() == before {
+                        assert_eq!(now, preset, "{preset:?}: {setting:?} {delta:+} changed nothing the set owns and moved the set to {now:?}");
+                    } else {
+                        assert_eq!(now, Preset::Custom, "{preset:?}: {setting:?} {delta:+} changed the picture and the set still reads {now:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_preset_row_steps_out_of_your_own_onto_the_set_this_machine_ships() {
+        // СВОЙ is not on the ring -- there is no table to apply -- so the
+        // first press has to land somewhere, and the one place that is not
+        // a surprise is where this machine started. A naive "step from the
+        // position before the first" would land on POTATO and take a
+        // player who nudged one row down to four chunks.
+        use crate::settings::Preset;
+        let mut settings = ClientSettings::default();
+        Setting::RenderDistance.step(&mut settings, 1);
+        assert_eq!(Preset::of(&settings), Preset::Custom, "one row stepped and the set did not notice");
+        for delta in [-1, 1] {
+            let mut trial = settings.clone();
+            Setting::Preset.step(&mut trial, delta);
+            assert_eq!(Preset::of(&trial), Preset::shipped(), "pressing {delta:+} from СВОЙ landed somewhere else");
+            assert_eq!(trial.graphics(), ClientSettings::default().graphics(), "...and did not put the screen back where it shipped");
+        }
+    }
+
+    #[test]
+    fn the_two_new_rows_ask_for_no_more_room_than_the_screen_already_gives() {
+        // **A row's label and its reading are fitted, not clipped** -- see
+        // `widgets::setting_row` -- and `fitted_scale` only shrinks to
+        // seven tenths before it draws the text at that size whatever the
+        // room is. So "does it fit" is a question about the *widest* text
+        // on the screen rather than about one row, and the answer for
+        // every panel width at once is that nothing new is the widest.
+        // The same argument as
+        // `the_anti_aliasing_label_asks_for_no_more_room_than_the_row_above_it_in_any_language`,
+        // asked of the readings as well, because both new rows read words.
+        let new_rows = [Setting::Preset, Setting::FireShadows];
+        for language in Language::ALL.iter().copied() {
+            let (widest_name, name_room) = Setting::ALL
+                .iter()
+                .filter(|setting| !new_rows.contains(setting))
+                .map(|setting| {
+                    let label = language.text(setting.msg());
+                    (label, widgets::measure(label, 1.0))
+                })
+                .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                .expect("the settings screen has rows on it");
+            // Every reading every old row can show, walked rather than
+            // guessed at: a row's widest word is not always its default.
+            let settings = ClientSettings { language, ..ClientSettings::default() };
+            let mut reading_room: f32 = 0.0;
+            let mut widest_reading = String::new();
+            for setting in Setting::ALL.iter().copied().filter(|setting| !new_rows.contains(setting)) {
+                for delta in [-1, 1] {
+                    let mut walked = settings.clone();
+                    for _ in 0..16 {
+                        let reading = setting.value(&walked);
+                        let width = widgets::measure(&reading, 1.0);
+                        if width > reading_room {
+                            reading_room = width;
+                            widest_reading = reading;
+                        }
+                        setting.step(&mut walked, delta);
+                    }
+                }
+            }
+            for setting in new_rows {
+                let label = language.text(setting.msg());
+                assert!(
+                    widgets::measure(label, 1.0) <= name_room,
+                    "in {language:?} the {setting:?} row is called {label:?}, which is wider than {widest_name:?} -- the longest name the screen already carries",
+                );
+                let mut walked = settings.clone();
+                // With the shadows on, so the fire row shows its words
+                // rather than the OFF it says while they are off.
+                walked.shadows = crate::engine::shadow::Mode::Soft;
+                for _ in 0..8 {
+                    let reading = setting.value(&walked);
+                    assert!(
+                        widgets::measure(&reading, 1.0) <= reading_room,
+                        "in {language:?} the {setting:?} row reads {reading:?}, which is wider than {widest_reading:?} -- the longest reading the screen already carries",
+                    );
+                    setting.step(&mut walked, 1);
+                }
+            }
+        }
     }
 
     /// The anti-aliasing row, scrolled to on whichever kind of pointer

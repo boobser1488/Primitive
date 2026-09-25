@@ -1413,6 +1413,10 @@ pub struct GraphicsState {
     /// into `ShadowMap::lamp_cells`: the corner and the fires, the cells
     /// themselves being on the GPU. See `engine::lamp_shadow`.
     lamp_volume: Option<crate::engine::lamp_shadow::Volume>,
+    /// How many of the fires in `lamp_volume` are handed to the shader. The
+    /// settings row (`lamp_shadow::FireShadows`), and the only part of the
+    /// fires' shadows that moves at run time.
+    fire_shadows: crate::engine::lamp_shadow::FireShadows,
     /// A chunk under `lamp_volume` has had a new mesh -- or lost one -- since
     /// it was taken: a block broken or placed, a hearth lit or put out.
     lamp_volume_stale: bool,
@@ -2628,6 +2632,7 @@ impl GraphicsState {
             plant_shadows: Default::default(),
             shadow_radius: crate::engine::shadow::RADIUS,
             lamp_volume: None,
+            fire_shadows: crate::engine::lamp_shadow::FireShadows::default(),
             lamp_volume_stale: false,
             texture_bind_group,
             ui_texture_bind_group,
@@ -2801,6 +2806,20 @@ impl GraphicsState {
     /// it reads the world, and the walk has to leave out what the map does.
     pub fn plant_shadows(&self) -> crate::engine::shadow::PlantShadows {
         self.plant_shadows
+    }
+
+    /// How many hearths throw a shadow (`lamp_shadow::FireShadows`).
+    ///
+    /// **The cheapest setter on this type**, and deliberately: the count
+    /// reaches the shader as one float in a uniform written every frame
+    /// anyway, so there is no pipeline to rebuild, no texture to rewrite and
+    /// no cache to forget. The step the player presses is drawn by the very
+    /// next frame. Compare `set_shadows` above, which builds a whole map, and
+    /// `set_msaa`, which rebuilds every pipeline in the pass -- both of those
+    /// are what a live settings row costs when the thing it moves is baked
+    /// into a pipeline, and this one is what it costs when it is not.
+    pub fn set_fire_shadows(&mut self, fires: crate::engine::lamp_shadow::FireShadows) {
+        self.fire_shadows = fires;
     }
 
     pub fn set_shadows(&mut self, mode: crate::engine::shadow::Mode) {
@@ -3795,7 +3814,7 @@ impl GraphicsState {
         let lamps_lit = match &self.shadows {
             Some(map) if !params.speck_hunt => {
                 let uniform: crate::engine::lamp_shadow::LampUniform = match &self.lamp_volume {
-                    Some(volume) => volume.uniform(camera.position.as_vec3(), origin),
+                    Some(volume) => volume.uniform(camera.position.as_vec3(), origin, self.fire_shadows),
                     None => bytemuck::Zeroable::zeroed(),
                 };
                 self.queue.write_buffer(&map.lamp_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -20255,6 +20274,10 @@ mod lighting_tools {
         /// shadow the map decided is identical to it. See
         /// `what_a_canopy_casts`.
         no_voxel_sun: std::cell::Cell<bool>,
+        /// How many of the volume's fires are handed to the shader -- the
+        /// settings row (`lamp_shadow::FireShadows`). All, as the game shipped
+        /// it and as every measurement in this file was taken.
+        fires: std::cell::Cell<crate::engine::lamp_shadow::FireShadows>,
     }
 
     impl<'a> Rig<'a> {
@@ -20600,7 +20623,13 @@ mod lighting_tools {
                             step.map.write_lamp_cells(self.queue, &volume.cells, &volume.heights, &volume.lows);
                             self.lamp_uploaded.set(Some((step.quality, volume.min)));
                         }
-                        volume.uniform(eye + origin, origin)
+                        // All unless a tool says otherwise (`Knobs::fires`),
+                        // which is what every measurement and every
+                        // photograph in this file was taken with: the
+                        // settings row (`lamp_shadow::FireShadows`) is the
+                        // game's, and a tool that quietly took a cheaper
+                        // step would be a picture of a different game.
+                        volume.uniform(eye + origin, origin, self.knobs.fires.get())
                     }
                     None => bytemuck::Zeroable::zeroed(),
                 };
@@ -21556,6 +21585,153 @@ mod lighting_tools {
                 println!("  {name}: {cells} cells out, behind the pillar {}, the open side {}", text(behind), text(open));
             }
         }
+    }
+
+    /// **What each step of the fires' shadows row costs**, on a camp with
+    /// more hearths in it than the shader will look at.
+    ///
+    /// ```text
+    /// cargo test -p primitive_client --release --lib \
+    ///     what_the_fires_shadows_cost -- --ignored --nocapture
+    /// ```
+    ///
+    /// The row is a *count* -- how many of the nearest fires are handed to
+    /// the shader (`lamp_shadow::FireShadows`) -- and the shader pays for it
+    /// on every lit fragment, so the scene has to be one where a lot of the
+    /// screen is lit by fire: a stone floor at midnight with forty-nine
+    /// hearths on it in a grid and pillars between them to cast. The eye is
+    /// low and among them, which is where a player sits.
+    ///
+    /// What it answered on a GTX 1050 Ti at 1920x1080 with four samples --
+    /// a deliberately worst case, and read as one:
+    ///
+    /// ```text
+    ///              fires    hard      over OFF     soft      over OFF
+    /// OFF          0        2.131                  2.033
+    /// ONE          1        4.201     +2.07        8.563     +6.53
+    /// A FEW        4        5.567     +3.44       13.442    +11.41
+    /// ALL          16       7.984     +5.85       18.039    +16.01
+    /// ```
+    ///
+    /// Sixteen fires are under three times the cost of one, not sixteen,
+    /// because a fire that cannot beat one already seen is never walked to
+    /// (`lamp_visibility`); and the Soft edge is four rays, which is where
+    /// its fourfold slope comes from.
+    ///
+    /// Four rows at the Hard edge and four at the Soft, because a Soft ray
+    /// is four rays (`lamp_visibility`) and the row's cost is therefore
+    /// about four times as steep there. `off` is the floor: with no fire
+    /// handed over, a night frame has no reason to be in the shadowed
+    /// pipelines at all (`render`, `lamps_lit`), which is the step's real
+    /// saving and the reason it is not merely "one fewer loop".
+    ///
+    /// Wall clock rather than the GPU timer, as `where_the_shadows_spend_the_frame`
+    /// does it and for its reason: the median of several hundred frames on a
+    /// still scene is steadier than a timestamp pair, and every row here is
+    /// the same scene from the same camera with one number changed.
+    #[test]
+    #[ignore = "a tool: needs a GPU; prices each step of the fires' shadows row"]
+    fn what_the_fires_shadows_cost() {
+        use crate::engine::lamp_shadow::{self, FireShadows};
+        use primitive_shared::types::{Chunk, BLOCK_CAMPFIRE_LIT, BLOCK_STONE, CHUNK_VOLUME};
+        let Some((device, queue)) = crate::engine::test_gpu() else {
+            println!("no GPU adapter on this machine; skipping");
+            return;
+        };
+        let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
+        let textures = TextureManager::load(device, queue, assets, 4).expect("textures load");
+        let (width, height) = (1920u32, 1080u32);
+        let rig = Rig::new(device, queue, &textures, width, height, 4);
+        let generator = WorldGen::new(1337);
+
+        // A hearth every five blocks over a stone floor, with a pillar
+        // between each pair: twenty-four fires, half again what the shader
+        // will ever look at, so that the steps really are choosing.
+        // Seven by seven of them, which is what a step of five over
+        // thirty-one blocks comes to.
+        let block_at = |x: i32, y: i32, z: i32| {
+            let camp = (10..=40).contains(&x) && (10..=40).contains(&z);
+            match (x, y, z) {
+                _ if y < 64 => BLOCK_STONE,
+                _ if camp && y == 64 && x % 5 == 0 && z % 5 == 0 => BLOCK_CAMPFIRE_LIT,
+                _ if camp && (64..=66).contains(&y) && x % 5 == 2 && z % 5 == 2 => BLOCK_STONE,
+                _ => BLOCK_AIR,
+            }
+        };
+        let mut chunks = ChunkManager::new(64);
+        let mut positions = Vec::new();
+        for cz in 0..4 {
+            for cx in 0..4 {
+                let pos = ChunkPos::new(cx, cz);
+                let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+                for z in 0..CHUNK_SIZE_Z {
+                    for x in 0..CHUNK_SIZE_X {
+                        for y in 0..72 {
+                            let (wx, wz) = (cx * CHUNK_SIZE_X as i32 + x as i32, cz * CHUNK_SIZE_Z as i32 + z as i32);
+                            blocks[Chunk::index(x, y, z)] = block_at(wx, y as i32, wz);
+                        }
+                    }
+                }
+                chunks.insert(Chunk { pos, blocks });
+                positions.push(pos);
+            }
+        }
+        let (arena, meshes) = upload_scene(device, queue, &textures, &generator, &chunks, &positions);
+        let scene = Scene { name: "camp", arena, meshes, origin: Vec3::ZERO, west: (Vec3::ZERO, Vec3::X), east: (Vec3::ZERO, Vec3::X), underground: 0.0, chunks: None };
+        let (eye, at) = (Vec3::new(25.5, 66.0, 34.0), Vec3::new(25.5, 64.5, 18.0));
+        let volume = lamp_shadow::Volume::gather(lamp_shadow::corner_for(eye.as_dvec3()), |gx, gz, y0, column| match chunks.column(gx, gz) {
+            Some(cells) => {
+                for (dy, slot) in column.iter_mut().enumerate() {
+                    *slot = cells.block(y0 + dy as i32);
+                }
+            }
+            None => column.fill(BLOCK_AIR),
+        });
+        println!("the volume holds {} fire(s); {width}x{height}, four samples, midnight", volume.lamps.len());
+        *rig.knobs.lamps.borrow_mut() = Some(volume);
+
+        let (rounds, frames) = (6, 40);
+        for hard in [true, false] {
+            rig.knobs.hard_shadows.set(hard);
+            let mut floor = 0.0f64;
+            for step in FireShadows::ALL {
+                rig.knobs.fires.set(step);
+                rig.knobs.cached.set(true);
+                rig.forget_shadows();
+                // The warm-up fills the kept shadow picture, so none of the
+                // timed frames is the one that takes it -- the game's own
+                // frames do not take it either (`ShadowCache`).
+                for _ in 0..10 {
+                    rig.knobs.clock.set(0.0);
+                    rig.frame(Mode::Step(Quality::High, true), &scene, (eye, at), 0.0);
+                    device.poll(wgpu::Maintain::Wait);
+                }
+                let mut times = Vec::new();
+                for round in 0..rounds {
+                    for frame in 0..frames {
+                        rig.knobs.clock.set(f64::from(round * frames + frame) / 60.0);
+                        let started = std::time::Instant::now();
+                        rig.frame(Mode::Step(Quality::High, true), &scene, (eye, at), 0.0);
+                        device.poll(wgpu::Maintain::Wait);
+                        times.push(started.elapsed().as_secs_f64() * 1000.0);
+                    }
+                }
+                times.sort_by(f64::total_cmp);
+                let median = times[times.len() / 2];
+                if step == FireShadows::Off {
+                    floor = median;
+                }
+                println!(
+                    "{} {step:?} ({} fires): {median:.3} ms (p90 {:.3}), over OFF {:+.3} ms",
+                    if hard { "hard" } else { "soft" },
+                    step.lamps(),
+                    times[times.len() * 9 / 10],
+                    median - floor,
+                );
+            }
+        }
+        rig.knobs.fires.set(FireShadows::All);
+        rig.knobs.cached.set(false);
     }
 
     /// **The night under each phase of the moon, and the moon itself.**
