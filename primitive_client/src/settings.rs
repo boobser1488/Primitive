@@ -1506,9 +1506,10 @@ impl ClientSettings {
         self.keybinds.sanitize();
     }
 
-    /// `PRIMITIVE_RESOLUTION=<auto|60..100>` and `PRIMITIVE_VSYNC=<0|1>`
-    /// for this run only, read through `var` so a test can hand it a
-    /// map instead of the process environment.
+    /// `PRIMITIVE_RESOLUTION=<auto|60..100>`, `PRIMITIVE_VSYNC=<0|1>`
+    /// and `PRIMITIVE_MSAA=<1|2|4|8>` for this run only, read through
+    /// `var` so a test can hand it a map instead of the process
+    /// environment.
     ///
     /// **Exists because a phone's settings cannot be changed by
     /// anything but a thumb.** The file is readable through `run-as`
@@ -1539,6 +1540,25 @@ impl ClientSettings {
                 "0" => self.vsync = false,
                 "1" => self.vsync = true,
                 other => eprintln!("PRIMITIVE_VSYNC={other} is neither 0 nor 1; ignored"),
+            }
+        }
+        // **The third question a frame time raises**, and the one the
+        // anti-aliasing row was added for: what the samples cost here.
+        // Four runs that differ in one number is the only honest answer
+        // to "should four be the default", and stepping the row between
+        // them would mean four runs that also differ in a menu having
+        // been opened. On a phone it is worse than inconvenient -- the
+        // settings screen is taps nobody can send (see the note above).
+        //
+        // The clamp below rounds anything else down to a power of two,
+        // and the adapter has the last word after that
+        // (`renderer::choose_sample_count`), so what a run was really
+        // drawn at is the `msaa:` line the renderer prints rather than
+        // this.
+        if let Some(raw) = var("PRIMITIVE_MSAA") {
+            match raw.trim().parse::<u32>() {
+                Ok(count) => self.msaa = count,
+                Err(_) => eprintln!("PRIMITIVE_MSAA={raw} is not a number of samples; ignored"),
             }
         }
         self.clamp();
@@ -2537,6 +2557,26 @@ mod file_tests {
         settings.apply_measurement_overrides(env(&[("PRIMITIVE_RESOLUTION", "big"), ("PRIMITIVE_VSYNC", "yes")]));
         assert_eq!(settings.resolution_scale, Some(0.6));
         assert!(!settings.vsync);
+    }
+
+    #[test]
+    fn a_sample_count_can_be_asked_for_without_a_menu_and_is_clamped_like_the_file() {
+        // The four runs that answer "what does anti-aliasing cost here"
+        // have to differ in one number and nothing else -- not in a
+        // settings screen having been opened between them -- and on a
+        // phone the settings screen is taps nobody can send.
+        let env = |value: &'static str| {
+            move |key: &str| (key == "PRIMITIVE_MSAA").then(|| value.to_string())
+        };
+        let mut settings = ClientSettings::default();
+        for (asked, got) in [("1", 1), ("2", 2), ("4", 4), ("8", 8), ("16", 8), ("3", 2)] {
+            settings.apply_measurement_overrides(env(asked));
+            assert_eq!(settings.msaa, got, "PRIMITIVE_MSAA={asked}");
+        }
+        // Nonsense is ignored rather than read as some number, the way
+        // an unparseable resolution is.
+        settings.apply_measurement_overrides(env("lots"));
+        assert_eq!(settings.msaa, 2);
     }
 
     #[test]

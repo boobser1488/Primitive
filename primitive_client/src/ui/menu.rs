@@ -610,6 +610,16 @@ pub enum Setting {
     Fog,
     AmbientOcclusion,
     Anisotropy,
+    /// How many samples a pixel of the world is drawn from.
+    ///
+    /// Directly under the anisotropy row because the two are one
+    /// question asked about two different things, and
+    /// `ClientSettings::msaa` says which is which: that one is how the
+    /// *texture* is read inside a face, this one is how a face's *edge*
+    /// lands on the pixel grid. A player who has just decided the
+    /// ground is sharp enough is the player who should be asked about
+    /// the edges next.
+    Msaa,
     /// How finely the sky is drawn.
     ///
     /// Next to the other two picture-quality rows rather than
@@ -667,7 +677,7 @@ pub enum Setting {
 
 impl Setting {
     /// Every setting on the screen, top to bottom.
-    pub const ALL: [Setting; 26] = [
+    pub const ALL: [Setting; 27] = [
         Setting::Language,
         Setting::Username,
         Setting::RenderDistance,
@@ -681,6 +691,7 @@ impl Setting {
         Setting::Fog,
         Setting::AmbientOcclusion,
         Setting::Anisotropy,
+        Setting::Msaa,
         Setting::SkyQuality,
         Setting::TransparentLeaves,
         Setting::Lighting,
@@ -718,6 +729,7 @@ impl Setting {
             Setting::Fog => Msg::Fog,
             Setting::AmbientOcclusion => Msg::AmbientOcclusion,
             Setting::Anisotropy => Msg::Anisotropy,
+            Setting::Msaa => Msg::AntiAliasing,
             Setting::SkyQuality => Msg::SkyQuality,
             Setting::TransparentLeaves => Msg::TransparentLeaves,
             Setting::Lighting => Msg::LightingQuality,
@@ -789,6 +801,29 @@ impl Setting {
                     format!("{}x", settings.anisotropy)
                 }
             }
+            // **What the frame is drawn at, not what the file asked
+            // for.** Every other row on this screen can show the
+            // setting, because every other setting is granted; this one
+            // is a request an adapter is free to refuse -- a card with
+            // no eight-sample depth format silently gives four (see
+            // `renderer::choose_sample_count`, and the GTX 1050 Ti that
+            // took the game down at `msaa = 2`). A row reading `8x` on
+            // such a card is the one lie a graphics menu must not tell:
+            // the player turns the number up, sees no change, and
+            // concludes the row does nothing.
+            //
+            // What it costs is that on that card the step from 4x to 8x
+            // leaves the reading at 4x, which looks like a row that
+            // will not move. That is the truth, and the alternative is
+            // a number that moves and a picture that does not.
+            //
+            // Before a window exists -- every test, `ui::snapshot`, the
+            // headless tools -- there is nothing in force and the row
+            // falls back to the setting. See `renderer::samples_in_force`.
+            Setting::Msaa => samples_reading(
+                crate::engine::renderer::samples_in_force().unwrap_or(settings.msaa),
+                language,
+            ),
             // Named levels rather than the divisor itself. The number
             // is a property of the renderer -- how many screen pixels
             // one sky pixel covers -- and "1/3" answers a question a
@@ -999,6 +1034,18 @@ impl Setting {
                 let next = (current + delta).clamp(0, steps.len() as i32 - 1);
                 settings.anisotropy = steps[next as usize];
             }
+            // The powers of two, for `Anisotropy`'s reason: those are
+            // the only counts a pipeline can be built for. One is not a
+            // count but the feature off, and reads `OFF` above.
+            Setting::Msaa => {
+                let steps: [u32; 4] = [1, 2, 4, 8];
+                let current = steps
+                    .iter()
+                    .position(|v| *v == settings.msaa)
+                    .unwrap_or(0) as i32;
+                let next = (current + delta).clamp(0, steps.len() as i32 - 1);
+                settings.msaa = steps[next as usize];
+            }
             Setting::SkyQuality => {
                 // Ordered worst to best, so that pressing *right* --
                 // which every other row on this screen answers by
@@ -1110,6 +1157,25 @@ fn percent_or_off(value: f32, language: Language) -> String {
         language.text(Msg::Off).to_string()
     } else {
         format!("{:.0}%", value * 100.0)
+    }
+}
+
+/// How a number of samples a pixel reads on the anti-aliasing row.
+///
+/// Out of line so a test can ask it what a count *in force* looks like
+/// without writing into the renderer's own `SAMPLES_IN_FORCE`: that is a
+/// process-wide atomic, the suite runs its tests in one process, and a
+/// test that stored into it would be answering a question for every
+/// other test in the process at the same time.
+///
+/// One sample is `OFF` rather than `1x`, for the reason the volume rows
+/// give: a feature turned down to nothing and a feature switched off are
+/// the same state, and only one of them says so.
+fn samples_reading(samples: u32, language: Language) -> String {
+    if samples <= 1 {
+        language.text(Msg::Off).to_string()
+    } else {
+        format!("{samples}x")
     }
 }
 
@@ -6627,7 +6693,15 @@ mod tests {
         // and a letter is a quad, which is the whole of the thirty
         // vertices that went. Every row under vsync moved down one, so
         // the shape and the colour hashes moved with them.
-        ("settings", 2430, 4497453934474193077, 1115244357459885731),
+        // ...and ANTI-ALIASING (`Setting::Msaa`), twenty-seven. It sits
+        // under the anisotropy row, fourteenth of twenty-seven, which is
+        // below the eleven the panel holds -- so nothing on the screen
+        // moved and not a vertex was added or removed. The *shape* hash
+        // alone moved, and only because the scrollbar's thumb is a share
+        // of a list that is one row longer: eleven rows of twenty-seven
+        // rather than of twenty-six. The colour hash is byte for byte
+        // what it was, which is the check that nothing else did.
+        ("settings", 2430, 15883518718561162226, 1115244357459885731),
         // More actions to bind than when this was taken, so more rows.
         // The last of them is GIVE (`keybinds::Action::Give`), which is
         // ninety more vertices -- a row's well, its word and its key --
@@ -8152,6 +8226,173 @@ mod tests {
         assert_eq!(settings.shadows, crate::engine::shadow::Mode::Soft);
         Setting::Shadows.step(&mut settings, delta);
         assert!(!settings.shadows.is_on(), "the third press did not turn shadows off again");
+    }
+
+    /// The anti-aliasing row, scrolled to on whichever kind of pointer
+    /// is asked for, and the rect its `+` was recorded at.
+    fn anti_aliasing_plus(menu: &mut Menu, fixture: &Fixture) -> Rect {
+        loop {
+            menu.build(&fixture.ctx());
+            // The `+` is the right-hand of the pair, which is the one a
+            // player reaches for to ask for more samples.
+            let found = menu
+                .hot
+                .iter()
+                .filter(|(_, action)| matches!(action, Action::Tweak(Setting::Msaa, 1)))
+                .map(|(rect, _)| *rect)
+                .next_back();
+            if let Some(rect) = found {
+                return rect;
+            }
+            let before = menu.settings_scroll;
+            menu.scroll_settings(1);
+            assert_ne!(
+                menu.settings_scroll, before,
+                "no scroll position shows the anti-aliasing row"
+            );
+        }
+    }
+
+    #[test]
+    fn the_anti_aliasing_row_walks_the_counts_a_pipeline_can_be_built_for_and_stops() {
+        // One, two, four and eight are the only sample counts wgpu has
+        // a state for; anything else is a validation error before the
+        // first frame (see `ClientSettings::sanitize`). The row must
+        // therefore *walk* them rather than add to the number, and must
+        // stop at both ends rather than wrap -- a player who overshot
+        // the top should step back down, not round through OFF.
+        let mut settings = ClientSettings { msaa: 4, ..ClientSettings::default() };
+        let off = settings.language.text(Msg::Off).to_string();
+
+        Setting::Msaa.step(&mut settings, -1);
+        assert_eq!(settings.msaa, 2);
+        assert_eq!(Setting::Msaa.value(&settings), "2x");
+        Setting::Msaa.step(&mut settings, -1);
+        assert_eq!(settings.msaa, 1);
+        // One sample is not a count the player chose, it is the feature
+        // switched off, and the row says so in words.
+        assert_eq!(Setting::Msaa.value(&settings), off);
+        Setting::Msaa.step(&mut settings, -1);
+        assert_eq!(settings.msaa, 1, "stepping below OFF went somewhere");
+
+        for expected in [2, 4, 8] {
+            Setting::Msaa.step(&mut settings, 1);
+            assert_eq!(settings.msaa, expected);
+        }
+        Setting::Msaa.step(&mut settings, 1);
+        assert_eq!(settings.msaa, 8, "stepping past the top wrapped round");
+        assert_eq!(Setting::Msaa.value(&settings), "8x");
+    }
+
+    #[test]
+    fn what_the_anti_aliasing_row_is_set_to_is_what_the_file_comes_back_with() {
+        // The row writes `ClientSettings::msaa`, which is the field the
+        // file stores -- so a value stepped on the screen has to survive
+        // being written out and read back, or the setting resets itself
+        // every time the player restarts.
+        let mut settings = ClientSettings { msaa: 8, ..ClientSettings::default() };
+        Setting::Msaa.step(&mut settings, -1);
+        assert_eq!(settings.msaa, 4);
+
+        let text = toml::to_string_pretty(&settings).expect("settings should serialise");
+        let mut parsed: ClientSettings =
+            toml::from_str(&text).expect("settings should parse back");
+        // The same pass a hand-edited file goes through on load, so a
+        // value the row can reach is one the clamp agrees with.
+        parsed.sanitize();
+        assert_eq!(parsed.msaa, 4, "the sample count did not survive the file");
+        assert_eq!(Setting::Msaa.value(&parsed), Setting::Msaa.value(&settings));
+    }
+
+    #[test]
+    fn the_anti_aliasing_row_is_pressed_where_it_is_drawn_by_a_mouse_and_by_a_finger() {
+        // A control recorded somewhere other than where its row is
+        // drawn is the fault a click at its own centre would miss, so
+        // the press goes through `click`, the same hit test a player's
+        // finger does -- on both kinds of pointer, because a phone lays
+        // this screen out for a finger and a desktop does not (see
+        // `widgets::Layout`).
+        for touch in [false, true] {
+            widgets::with_touch(touch, || {
+                let mut menu = Menu::new(ServerList::default());
+                menu.screen = Screen::Settings;
+                let fixture = Fixture::new();
+                let mut settings = fixture.settings.clone();
+                settings.msaa = 2;
+                let rect = anti_aliasing_plus(&mut menu, &fixture);
+                menu.cursor = Some((rect.centre_x(), rect.centre_y()));
+                let Some(Action::Tweak(Setting::Msaa, delta)) = menu.click() else {
+                    panic!("pressing the middle of the anti-aliasing + did not press it (touch {touch})");
+                };
+                assert_eq!(delta, 1, "the right-hand button asked for fewer samples");
+                Setting::Msaa.step(&mut settings, delta);
+                assert_eq!(settings.msaa, 4, "touch {touch}");
+            });
+        }
+    }
+
+    #[test]
+    fn the_anti_aliasing_row_reads_what_the_card_gave_and_not_what_was_asked_for() {
+        // **The one row on this screen whose setting is a request.** A
+        // sample count a card has no flag for is cut down by
+        // `renderer::choose_sample_count` -- a GTX 1050 Ti took the game
+        // down at `msaa = 2` before that existed -- and the row is
+        // drawn from what came out, so a player who asks for eight on a
+        // card that gives four sees four. The alternative is a number
+        // that climbs while the picture stands still, which teaches the
+        // player that the row does nothing.
+        let language = Language::English;
+        assert_eq!(samples_reading(4, language), "4x");
+        assert_eq!(samples_reading(8, language), "8x");
+        // Asked for eight and given four, the row is drawn from the
+        // four -- which is a different reading from the one the setting
+        // on its own would have produced.
+        let (asked, in_force) = (8, 4);
+        assert_eq!(samples_reading(in_force, language), "4x");
+        assert_ne!(
+            samples_reading(in_force, language),
+            samples_reading(asked, language),
+            "the row would read the same either way, and would prove nothing",
+        );
+        // And off is a word, in every language, rather than "1x".
+        for language in Language::ALL.iter().copied() {
+            assert_eq!(samples_reading(1, language), language.text(Msg::Off));
+            assert_eq!(samples_reading(0, language), language.text(Msg::Off));
+        }
+    }
+
+    #[test]
+    fn the_anti_aliasing_label_asks_for_no_more_room_than_the_row_above_it_in_any_language() {
+        // **A row's label is fitted, not clipped** -- see
+        // `widgets::setting_row` -- and `fitted_scale` only shrinks to
+        // seven tenths before it gives up and draws the name at that
+        // size whatever the room is. So "does it fit" is not a question
+        // about this row alone: it is a question about the *longest*
+        // name on the screen, and the answer for every width of panel
+        // at once is that the new name is not it.
+        //
+        // ANISOTROPIC FILTERING is the incumbent, in English and in
+        // Polish both, and this row is drawn directly under it. If a
+        // translation of the anti-aliasing row ever grows past that, it
+        // is the row that has to be renamed, because the one above it
+        // has been shipping at that width since the setting existed.
+        for language in Language::ALL.iter().copied() {
+            let mine = language.text(Msg::AntiAliasing);
+            let (widest, width) = Setting::ALL
+                .iter()
+                .filter(|setting| **setting != Setting::Msaa)
+                .map(|setting| {
+                    let label = language.text(setting.msg());
+                    (label, widgets::measure(label, 1.0))
+                })
+                .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                .expect("the settings screen has rows on it");
+            assert!(
+                widgets::measure(mine, 1.0) <= width,
+                "in {language:?} the anti-aliasing row is called {mine:?}, \
+                 which is wider than {widest:?} -- the longest name the screen already carries",
+            );
+        }
     }
 
     #[test]

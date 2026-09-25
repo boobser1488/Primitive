@@ -857,6 +857,248 @@ impl LookPipelines {
     }
 }
 
+/// The rest of what the main pass draws: the small sky stretched over
+/// the frame, the crosshair, the interface and the particles.
+///
+/// **Built in one place for exactly `LookPipelines`' reason, one setting
+/// later.** These four have nothing to do with each other and nothing to
+/// do with the lighting step; what they share is the one number that is
+/// baked into every pipeline in the pass -- the sample count. While
+/// multisampling could only be chosen before the window opened, they
+/// were four blocks in the middle of `GraphicsState::new` and that was
+/// right. The moment the anti-aliasing row could be stepped mid-game
+/// they became four blocks that had to exist twice, which is four places
+/// for a blend mode or a depth state to drift from its twin.
+///
+/// The shaders are compiled here rather than kept, except the two the
+/// caller already holds: the overlay's and the sky blit's, because
+/// `GraphicsState::new` builds the scene blit from the second of them
+/// and the startup path should compile each file once.
+struct PassPipelines {
+    sky_blit_pipeline: wgpu::RenderPipeline,
+    overlay_pipeline: wgpu::RenderPipeline,
+    hotbar_pipeline: wgpu::RenderPipeline,
+    particle_pipeline: wgpu::RenderPipeline,
+}
+
+impl PassPipelines {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+        globals_layout: &wgpu::BindGroupLayout,
+        texture_layout: &wgpu::BindGroupLayout,
+        sky_blit_layout: &wgpu::BindGroupLayout,
+        sky_blit_shader: &wgpu::ShaderModule,
+        overlay_shader: &wgpu::ShaderModule,
+        multisample: wgpu::MultisampleState,
+        atlas: crate::engine::texture::AtlasSplit,
+    ) -> Self {
+        let sky_blit_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("sky blit pipeline layout"),
+                bind_group_layouts: &[sky_blit_layout],
+                push_constant_ranges: &[],
+            });
+        let sky_blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky blit pipeline"),
+            layout: Some(&sky_blit_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: sky_blit_shader,
+                entry_point: "vs_blit",
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: sky_blit_shader,
+                entry_point: "fs_blit",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            // Exactly the sky's own depth state: survives only where the
+            // depth buffer is still at the far plane, and writes nothing.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth_format(),
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample,
+            multiview: None,
+        });
+
+        let overlay_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("overlay pipeline layout"),
+                bind_group_layouts: &[globals_layout],
+                push_constant_ranges: &[],
+            });
+        let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("overlay pipeline"),
+            layout: Some(&overlay_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: overlay_shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<OverlayVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &OVERLAY_ATTRS,
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: overlay_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                // No culling: a 2D quad's winding depends on the aspect
+                // divide, and getting culled on a wide window would be a
+                // baffling bug to chase.
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            // The pass has a depth attachment, so the pipeline needs a
+            // depth state -- but with the test always passing and no
+            // writes, so the crosshair sits on top of everything.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth_format(),
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample,
+            multiview: None,
+        });
+
+        let hotbar_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("hotbar shader"),
+            source: wgpu::ShaderSource::Wgsl(atlas.specialise(include_str!("hotbar.wgsl").into())),
+        });
+        let hotbar_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("hotbar pipeline layout"),
+                // Same texture bind group as the terrain: hotbar icons
+                // are the block textures themselves, not a second atlas.
+                bind_group_layouts: &[globals_layout, texture_layout],
+                push_constant_ranges: &[],
+            });
+        let hotbar_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("hotbar pipeline"),
+            layout: Some(&hotbar_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &hotbar_shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<HotbarVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &HOTBAR_ATTRS,
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &hotbar_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth_format(),
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample,
+            multiview: None,
+        });
+
+        // **Particles get a pipeline of their own**, and the reason is
+        // one number: a terrain vertex packs its texture coordinate into
+        // two bits, and a chip of a broken block has to wear *one texel*
+        // of that block rather than the whole picture of it. See
+        // `particles.wgsl`.
+        //
+        // Blended and depth-tested but not depth-*writing*, like the
+        // water: a few hundred small transparent things must not punch
+        // holes in each other.
+        let particle_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("particle shader"),
+            source: wgpu::ShaderSource::Wgsl(atlas.specialise(include_str!("particles.wgsl").into())),
+        });
+        let particle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("particle pipeline"),
+            layout: Some(&hotbar_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &particle_shader,
+                entry_point: "vs_main",
+                buffers: &[crate::engine::particles::ParticleVertex::layout()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &particle_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth_format(),
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample,
+            multiview: None,
+        });
+
+        Self { sky_blit_pipeline, overlay_pipeline, hotbar_pipeline, particle_pipeline }
+    }
+}
+
 /// One of the pipelines that draw a model into the main pass: opaque,
 /// replacing what is under it, depth tested and written.
 ///
@@ -1137,8 +1379,11 @@ pub struct GraphicsState {
     /// what the adapter offers. Every pipeline that draws into that
     /// pass was built with this number and a pass with any other is a
     /// validation error, which is why it cannot change without
-    /// rebuilding them all.
+    /// rebuilding them all. See `set_msaa`, which does exactly that.
     sample_count: u32,
+    /// The counts this machine will take at all, so the row can be
+    /// stepped without the adapter. See `SampleSupport`.
+    sample_support: SampleSupport,
 
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
@@ -1968,12 +2213,16 @@ impl GraphicsState {
         // Asked of the adapter, not assumed: the counts a card offers
         // differ by format, and a pipeline built for a count the depth
         // format lacks is a validation error before the first frame.
-        let sample_count = choose_sample_count(
-            msaa,
-            adapter.get_texture_format_features(surface_format).flags,
-            adapter.get_texture_format_features(depth_format()).flags,
-            !format_feature_features(&adapter).is_empty(),
-        );
+        // Kept, not just used: the anti-aliasing row can be stepped
+        // while the game is running, and the adapter is gone by then --
+        // `set_msaa` has to be able to ask the same question again.
+        let sample_support = SampleSupport {
+            colour: adapter.get_texture_format_features(surface_format).flags,
+            depth: adapter.get_texture_format_features(depth_format()).flags,
+            adapter_specific: !format_feature_features(&adapter).is_empty(),
+        };
+        let sample_count = sample_support.count_for(msaa);
+        set_samples_in_force(sample_count);
         // **Whether this device can do half-precision arithmetic**, said
         // out loud at startup and nowhere used yet.
         //
@@ -2228,45 +2477,6 @@ impl GraphicsState {
                 bind_group_layouts: &[&sky_blit_layout],
                 push_constant_ranges: &[],
             });
-        let sky_blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("sky blit pipeline"),
-            layout: Some(&sky_blit_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &sky_blit_shader,
-                entry_point: "vs_blit",
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &sky_blit_shader,
-                entry_point: "fs_blit",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            // Exactly the sky's own depth state: survives only where the
-            // depth buffer is still at the far plane, and writes nothing.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth_format(),
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample,
-            multiview: None,
-        });
-
         // The frame itself, stretched over the window -- the same three
         // vertices and the same shader as the sky's, and everything a
         // finished frame does not need taken off: no depth attachment
@@ -2326,164 +2536,25 @@ impl GraphicsState {
             textures.split,
         );
 
-        let overlay_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("overlay pipeline layout"),
-                bind_group_layouts: &[&globals_bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("overlay pipeline"),
-            layout: Some(&overlay_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &overlay_shader,
-                entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<OverlayVertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &OVERLAY_ATTRS,
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &overlay_shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                // No culling: a 2D quad's winding depends on the aspect
-                // divide, and getting culled on a wide window would be a
-                // baffling bug to chase.
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            // The pass has a depth attachment, so the pipeline needs a
-            // depth state -- but with the test always passing and no
-            // writes, so the crosshair sits on top of everything.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth_format(),
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+        // The sky's blit, the crosshair, the interface and the
+        // particles: everything left in the pass that the sample count
+        // is baked into. See `PassPipelines`.
+        let PassPipelines {
+            sky_blit_pipeline,
+            overlay_pipeline,
+            hotbar_pipeline,
+            particle_pipeline,
+        } = PassPipelines::new(
+            &device,
+            &config,
+            &globals_bind_group_layout,
+            &texture_bind_group_layout,
+            &sky_blit_layout,
+            &sky_blit_shader,
+            &overlay_shader,
             multisample,
-            multiview: None,
-        });
-
-        let hotbar_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("hotbar shader"),
-            source: wgpu::ShaderSource::Wgsl(textures.split.specialise(include_str!("hotbar.wgsl").into())),
-        });
-
-        let hotbar_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("hotbar pipeline layout"),
-                // Same texture bind group as the terrain: hotbar icons
-                // are the block textures themselves, not a second atlas.
-                bind_group_layouts: &[&globals_bind_group_layout, &texture_bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let hotbar_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("hotbar pipeline"),
-            layout: Some(&hotbar_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &hotbar_shader,
-                entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<HotbarVertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &HOTBAR_ATTRS,
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &hotbar_shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth_format(),
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample,
-            multiview: None,
-        });
-
-        // **Particles get a pipeline of their own**, and the reason is
-        // one number: a terrain vertex packs its texture coordinate into
-        // two bits, and a chip of a broken block has to wear *one texel*
-        // of that block rather than the whole picture of it. See
-        // `particles.wgsl`.
-        //
-        // Blended and depth-tested but not depth-*writing*, like the
-        // water: a few hundred small transparent things must not punch
-        // holes in each other.
-        let particle_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("particle shader"),
-            source: wgpu::ShaderSource::Wgsl(textures.split.specialise(include_str!("particles.wgsl").into())),
-        });
-        let particle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("particle pipeline"),
-            layout: Some(&hotbar_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &particle_shader,
-                entry_point: "vs_main",
-                buffers: &[crate::engine::particles::ParticleVertex::layout()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &particle_shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth_format(),
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample,
-            multiview: None,
-        });
+            textures.split,
+        );
 
         let hotbar_capacity = MAX_HOTBAR_VERTICES;
         let hotbar_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -2544,6 +2615,7 @@ impl GraphicsState {
             depth_view,
             msaa_view,
             sample_count,
+            sample_support,
             globals_buffer,
             globals_bind_group,
             globals_bind_group_layout,
@@ -2612,6 +2684,85 @@ impl GraphicsState {
             layout: &self.texture_bind_group_layout,
             entries: &self.textures.bind_entries(&self.textures.sampler),
         });
+    }
+
+    /// How many samples a pixel of the main pass is drawn from.
+    ///
+    /// **Live, from the settings row**, for the reason `set_shadows` and
+    /// `set_lighting` both give: a picture setting whose effect waits
+    /// for a restart is a setting nobody evaluates, and anti-aliasing is
+    /// the worst of them to defer -- what it does is visible only in
+    /// motion, on the far edges of things, and a player who has to quit
+    /// the game to see whether it helped will simply leave it wherever
+    /// it was.
+    ///
+    /// What it costs is the whole pass built again: the colour target
+    /// and the depth buffer at the new count, the nine `LookPipelines`,
+    /// the four `PassPipelines`, and -- if the sun's shadows are on --
+    /// the map and the models' receivers with them. That is two shader
+    /// compiles plus a handful of small ones and some twenty pipelines,
+    /// once, on the frame the row is pressed; a few tens of
+    /// milliseconds, one hitch, and nothing at all per frame afterwards.
+    /// The alternative was a row saying "next time you start the game",
+    /// which is the same work done later and a worse row.
+    ///
+    /// **What the adapter will not do is not attempted.** `msaa` here is
+    /// the *request*; `SampleSupport::count_for` cuts it to a count this
+    /// machine can really render and resolve, and everything below --
+    /// the rebuild, the early return, the number the settings row
+    /// shows -- works on what came out rather than what was asked. So a
+    /// player stepping 4x to 8x on a card with no eight-sample depth
+    /// format rebuilds nothing, because nothing would be different.
+    pub fn set_msaa(&mut self, msaa: u32) {
+        let count = self.sample_support.count_for(msaa);
+        if count == self.sample_count {
+            return;
+        }
+        self.sample_count = count;
+        set_samples_in_force(count);
+        // The two attachments first: they are what the pipelines are
+        // about to be validated against, and a pipeline built for four
+        // samples against a one-sample target is the error this rebuild
+        // exists to avoid rather than to produce.
+        self.depth_view = create_depth_view(&self.device, &self.config, count);
+        self.msaa_view = create_msaa_view(&self.device, &self.config, count);
+        // The terrain, the sky, the models -- and the shadow map with
+        // them, which `rebuild_look` takes care of.
+        self.rebuild_look();
+        let PassPipelines {
+            sky_blit_pipeline,
+            overlay_pipeline,
+            hotbar_pipeline,
+            particle_pipeline,
+        } = PassPipelines::new(
+            &self.device,
+            &self.config,
+            &self.globals_bind_group_layout,
+            &self.texture_bind_group_layout,
+            &self.sky_blit_layout,
+            &self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("sky blit shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("sky_blit.wgsl").into()),
+            }),
+            &self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("overlay shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("overlay.wgsl").into()),
+            }),
+            wgpu::MultisampleState { count, mask: !0, alpha_to_coverage_enabled: false },
+            self.textures.split,
+        );
+        self.sky_blit_pipeline = sky_blit_pipeline;
+        self.overlay_pipeline = overlay_pipeline;
+        self.hotbar_pipeline = hotbar_pipeline;
+        self.particle_pipeline = particle_pipeline;
+        // The same line startup prints, because the same question is
+        // being answered and a log that only says it once cannot
+        // explain a frame time that changed halfway through a session.
+        if count == msaa {
+            println!("msaa: {count}x");
+        } else {
+            println!("msaa: {count}x (asked for {msaa}x; the adapter has no such count)");
+        }
     }
 
     /// Builds the sun's shadow map and its four pipelines, or throws
@@ -2741,9 +2892,11 @@ impl GraphicsState {
     /// which is the reason `LookPipelines` exists at all.
     fn rebuild_look(&mut self) {
         let lighting = self.lighting;
-        // The multisample state `new` built them with: the sample count
-        // never changes after startup, and a pipeline built for any other
-        // is a validation error in the main pass.
+        // The count the pass is drawing at *now* -- `set_msaa` writes
+        // `sample_count` before it calls here, and a pipeline built for
+        // any other count is a validation error in the main pass. This
+        // used to say the count never changed after startup, which was
+        // true for exactly as long as there was no row for it.
         let multisample = wgpu::MultisampleState {
             count: self.sample_count,
             mask: !0,
@@ -5076,6 +5229,56 @@ fn create_scene_target(
         ],
     });
     Some((view, bind_group))
+}
+
+/// What sample counts this machine will really render at.
+///
+/// **The adapter's answers, kept rather than the answer.** The sample
+/// count used to be decided once, in `GraphicsState::new`, with the
+/// adapter still in hand; now the settings row can ask for another one
+/// at any point in the session and the adapter is long gone. Three
+/// small copied values are what stands in for it -- see
+/// `choose_sample_count`, which is still where the decision is made.
+#[derive(Clone, Copy)]
+struct SampleSupport {
+    colour: wgpu::TextureFormatFeatureFlags,
+    depth: wgpu::TextureFormatFeatureFlags,
+    adapter_specific: bool,
+}
+
+impl SampleSupport {
+    fn count_for(&self, requested: u32) -> u32 {
+        choose_sample_count(requested, self.colour, self.depth, self.adapter_specific)
+    }
+}
+
+/// Samples a pixel in the main pass, as the renderer actually settled
+/// it -- 0 while no renderer has said, which is every test and every
+/// headless tool.
+///
+/// **An atomic, for `opt::BLOCK_SHADE`'s reason and one more.** The
+/// anti-aliasing row has to show what the frame is *drawn* at rather
+/// than what the file asked for: a card with no eight-sample depth
+/// format silently gives four, and a row reading `8x` on it is the one
+/// kind of lie a graphics menu must not tell -- the player turns a knob
+/// up, sees the number rise, sees no change in the picture, and
+/// concludes the setting does nothing. The menu has no renderer to ask
+/// (a `MenuContext` is settings, worlds and a layout), and threading
+/// one through every screen for one row would be a far larger change
+/// than the row.
+static SAMPLES_IN_FORCE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// What the main pass is drawing at, or `None` where no window has been
+/// opened. See `SAMPLES_IN_FORCE`.
+pub fn samples_in_force() -> Option<u32> {
+    match SAMPLES_IN_FORCE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        count => Some(count),
+    }
+}
+
+fn set_samples_in_force(count: u32) {
+    SAMPLES_IN_FORCE.store(count, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The sample count the main pass will actually use.

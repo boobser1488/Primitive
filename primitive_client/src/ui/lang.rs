@@ -1019,6 +1019,15 @@ pub enum Msg {
     // ---- the ages as journeys ----
     /// Where the bronze rung's tin is: `ladder::Found::FarCountry`.
     FoundFarCountry,
+    /// The anti-aliasing row. See `ClientSettings::msaa`.
+    ///
+    /// Named for the *edge* rather than for the technique: "MSAA" is
+    /// four letters about how it is done, and the row above it in the
+    /// list is already named for a technique nobody can define
+    /// (`Anisotropy`) -- one of those on a screen is enough. What the
+    /// player is choosing is whether the far edge of a roof is a clean
+    /// line or a dotted one, and the Simple line says exactly that.
+    AntiAliasing,
 }
 
 /// One line of interface text, in every language at once.
@@ -1856,6 +1865,16 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::MapNoWalk,    en: "blank hide -- it fills in where you walk carrying it", simple: "the map is empty -- carry it and walk, and it fills in", ru: "кожа пуста -- карта заполняется там, где вы прошли с ней", pl: "pusta skóra -- mapa zapełnia się tam, gdzie przejdziesz, niosąc ją" },
     // ---- the night ----
     Line { msg: Msg::Notice(Notice::WokenByWolves), en: "wolves! you wake to them circling your bed in the dark", simple: "wolves! they woke you - they are all around", ru: "волки! вы просыпаетесь: они кружат у постели в темноте", pl: "wilki! budzisz się, a one krążą w ciemności wokół posłania" },
+    // ---- the anti-aliasing row ----
+    //
+    // Short in all four, because it stands next to ANISOTROPIC FILTERING
+    // on the same screen and that one already fills its half of the row
+    // at the size a Russian or Polish spelling of it needs. Russian's
+    // "СГЛАЖИВАНИЕ" is the word every graphics menu in that language
+    // uses; Polish's "WYGŁADZANIE" is its exact counterpart without the
+    // "KRAWĘDZI" that would push the row to the smallest type on the
+    // screen.
+    Line { msg: Msg::AntiAliasing, en: "ANTI-ALIASING", simple: "SMOOTHER EDGES", ru: "СГЛАЖИВАНИЕ", pl: "WYGŁADZANIE" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as

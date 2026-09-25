@@ -314,6 +314,13 @@ const RAIN_WIND_SPEED: f32 = 12.0;
 /// Shown on the main menu and in the window title.
 const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
+/// The counts `PRIMITIVE_MSAA_SWEEP` walks. Every step the settings row
+/// offers, in the row's own order, so a sweep exercises exactly the
+/// changes a player can ask for -- including the two that turn the
+/// multisampled colour target on and off, which are the two most likely
+/// to be wrong.
+const MSAA_SWEEP_STOPS: [u32; 4] = [1, 2, 4, 8];
+
 /// A connection plus, for singleplayer, the server it is connected to.
 struct Session {
     connection: network::Connection,
@@ -496,7 +503,7 @@ fn start(assets_override: Option<std::path::PathBuf>) -> anyhow::Result<()> {
         settings.assets_dir = dir.to_string_lossy().into_owned();
     }
     // See `apply_measurement_overrides`: the only way to change a
-    // phone's resolution or vsync without a thumb on it.
+    // phone's resolution, vsync or sample count without a thumb on it.
     settings.apply_measurement_overrides(|key| std::env::var(key).ok());
     let settings = settings;
     let servers = menu::ServerList::load_or_default(&settings.server_addr);
@@ -1137,6 +1144,14 @@ fn run(
         .and_then(|value| value.parse().ok())
         .filter(|seconds| *seconds > 0.0);
     let mut bench_started: Option<Instant> = None;
+    // See the use site: `PRIMITIVE_MSAA_SWEEP=<seconds>` is how the
+    // anti-aliasing row's rebuild is checked on a real device without
+    // anybody tapping the row. Only alongside `PRIMITIVE_BENCH`,
+    // because it is measured from the same clock.
+    let msaa_sweep: Option<f32> = std::env::var("PRIMITIVE_MSAA_SWEEP")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|seconds: &f32| *seconds > 0.0);
 
     // **`PRIMITIVE_DEBUG_PANEL=0` keeps the numbers off the screen.**
     // `PRIMITIVE_AUTOSTART` turns the per-second stats on, because a
@@ -3060,6 +3075,36 @@ fn run(
                     if info.is_some() {
                         if let Some(seconds) = bench_seconds {
                             let started = *bench_started.get_or_insert_with(Instant::now);
+                            // **`PRIMITIVE_MSAA_SWEEP=<seconds>` steps
+                            // the sample count while the world is up.**
+                            //
+                            // The anti-aliasing row rebuilds the colour
+                            // target, the depth buffer and every
+                            // pipeline in the main pass on the frame it
+                            // is pressed, and a pipeline built for the
+                            // wrong count is a validation error that
+                            // takes the game down. That is a thing no
+                            // unit test can reach -- it needs a real
+                            // device and a real swapchain -- and a thing
+                            // no script can reach either, because the
+                            // row is a menu tap. So the row's own code
+                            // is reachable from the environment, for the
+                            // reason every other `PRIMITIVE_` variable
+                            // exists: what cannot be asked for without a
+                            // person is not checked.
+                            //
+                            // It walks 1, 2, 4, 8 and round again, one
+                            // step every `<seconds>`, printing the
+                            // `msaa:` line each time. A run that ends
+                            // with `bench: done` rather than a panic is
+                            // the live rebuild working on this machine.
+                            if let Some(step) = msaa_sweep {
+                                let want = MSAA_SWEEP_STOPS[(started.elapsed().as_secs_f32()
+                                    / step)
+                                    as usize
+                                    % MSAA_SWEEP_STOPS.len()];
+                                graphics.set_msaa(want);
+                            }
                             if started.elapsed().as_secs_f32() >= seconds {
                                 println!("bench: done");
                                 elwt.exit();
@@ -7680,6 +7725,12 @@ fn apply_settings(
     // one changes what the frame *is*, and applying it second would
     // build the sky target for the old size and then again for the new.
     graphics.set_resolution_scale(settings.resolution_scale);
+    // After the resolution, because the two rows rebuild the same pair
+    // of attachments -- the colour target and the depth buffer -- and
+    // this is the one that also rebuilds every pipeline in the pass.
+    // Whichever of the two the player actually stepped, the last
+    // rebuild in the pass is the one that knows both numbers.
+    graphics.set_msaa(settings.msaa);
     graphics.set_sky_scale(settings.sky_scale);
     graphics.set_ui_scale(settings.ui_scale);
     // Before the shadows: a step change rebuilds a shadow map that is
