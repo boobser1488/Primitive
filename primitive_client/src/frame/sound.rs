@@ -60,10 +60,10 @@ pub fn update(
         audio,
         &audio::soundscape::Frame {
             dt,
-            player: player,
-            camera: camera,
-            chunks: chunks,
-            sky: sky,
+            player,
+            camera,
+            chunks,
+            sky,
             weather,
             health_fraction: if max_health > 0.0 {
                 health / max_health

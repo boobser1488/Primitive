@@ -338,13 +338,13 @@ pub fn step(
     };
     critters.update(
         &engine::critters::Surroundings {
-            chunks: chunks,
+            chunks,
             player: player.position.as_vec3(),
             world_time: sky.world_days(),
             wet: weather.is_wet(),
             dangers: &dangers,
             country: &country,
-            light: &light,
+            light,
             lantern: inventory
                 .block_in(input.hotbar_slot)
                 .is_some_and(primitive_shared::types::is_lit_torch),
@@ -353,8 +353,8 @@ pub fn step(
     );
     breeze.update(
         &engine::breeze::Air {
-            chunks: chunks,
-            light: &light,
+            chunks,
+            light,
             player: player.position.as_vec3(),
             wind: primitive_shared::raft::wind(sky.world_days(), weather),
             world_time: sky.world_days(),

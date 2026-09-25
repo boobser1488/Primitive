@@ -873,7 +873,7 @@ pub fn on_key(
                             station_screen,
                             net,
                             debug_stats,
-                            &audio,
+                            audio,
                         );
                     }
                 }
@@ -1021,7 +1021,7 @@ pub fn on_key(
                     };
                     eat_from(
                         slot,
-                        &inventory,
+                        inventory,
                         meal,
                         hand,
                     );
@@ -1046,7 +1046,7 @@ pub fn on_key(
                     } else {
                         Some(input.hotbar_slot)
                     };
-                    let slot = something_to_throw(slot, &inventory);
+                    let slot = something_to_throw(slot, inventory);
                     if let (Some(slot), Some(net)) = (slot, net) {
                         net.send(ClientMessage::DropSlot {
                             slot: slot as u8,
@@ -1133,9 +1133,9 @@ pub fn on_key(
                 // an aim for the thing a player does most.
                 // The bar's selection is left alone while a
                 // screen is up, as the wheel's is.
-                (_, _) if hover_swap(code, &inventory_screen, &chest_screen).is_some() => {
+                (_, _) if hover_swap(code, inventory_screen, chest_screen).is_some() => {
                     if let (Some(message), Some(net)) =
-                        (hover_swap(code, &inventory_screen, &chest_screen), net)
+                        (hover_swap(code, inventory_screen, chest_screen), net)
                     {
                         audio.play(audio::Sfx::Click);
                         net.send(message);

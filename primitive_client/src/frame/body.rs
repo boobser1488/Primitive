@@ -430,7 +430,7 @@ pub fn step(
             let step = left.min(PHYSICS_STEP);
             player.update(
                 chunks,
-                &other_positions,
+                other_positions,
                 wish_dir,
                 // Where the camera points, not where the
                 // player faces. Only water reads it, and

@@ -906,7 +906,7 @@ impl Scenario {
         // speed budget is blocks against wall seconds, and smaller steps
         // over the same wall are a slower player, never a faster one.
         crate::maybe_send_transform(
-            &mut self.net,
+            &self.net,
             &self.player,
             &self.camera,
             self.last_frame,
