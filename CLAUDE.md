@@ -146,6 +146,18 @@ slowed nobody. A new mechanic gets a scenario; a bug a player finds gets one
 first. `PRIMITIVE_SCENARIO_SHOTS=<absolute dir>` writes PNGs of what a
 scenario looked at through the real renderer.
 
+**A scenario's time is its frame counter, and the server's ticks come
+from it** (`RunOptions::ticks_by_hand`). That is not a detail: the server
+used to tick on its own 20 Hz wall clock while the client counted frames,
+so on a machine with a few builds on it the world aged three times as
+fast as the player did and one to five scenarios out of seventy went red
+per run, never the same ones. The only thing still measured by the wall
+is the *floor* under a frame -- never shorter than a sixtieth of a second
+-- because the anticheat bills a player by `Instant::now()` and a harness
+running faster than the wall would be corrected for speed. Two scenarios
+want the wall on purpose (the phone in a pocket, the computer asleep) and
+say so.
+
 **Measuring, not guessing.** The game benchmarks itself:
 
 ```

@@ -39,14 +39,57 @@
 //! way in that is not a window, and a window is a GPU, which is exactly
 //! what an unattended run on a build machine does not have.
 //!
-//! ## Time is real
+//! ## Time is counted in frames, and the floor under a frame is real
 //!
-//! The server keeps its own clock and so does the anticheat: a scenario
-//! that ran its frames faster than the wall would be a player moving
-//! faster than the validator allows. So a frame is never shorter than a
-//! sixtieth of a second of wall time, and **never catches up** after a
-//! stall -- a burst of catch-up frames is a burst of movement per second
-//! that the real game (which steps by the frame's own length) never sends.
+//! **A scenario's clock is its frame counter.** `seconds(n)` is `n * 60`
+//! frames, `until(n)` gives something `n * 60` frames to happen in, the
+//! body steps by `FRAME`, and -- this is the part that took the longest
+//! to arrive -- **the server runs one tick per frame it is owed and not
+//! one because the wall said so** (`RunOptions::ticks_by_hand`, and
+//! `Scenario::pace_the_world` below). So a run of a scenario simulates
+//! exactly the same world on a free machine and on one with six builds
+//! on it; what a loaded machine changes is how long the run takes, and
+//! nothing else.
+//!
+//! That is not how it was, and the symptom is worth writing down. The
+//! server ticked on its own 20 Hz wall clock while the client counted
+//! frames, so on a busy machine sixty frames of the client took three
+//! seconds of the wall and the world aged three times as fast as the
+//! player did. One to five scenarios out of seventy went red per run,
+//! never the same ones -- a downed player "died before the clock ran
+//! out", a horse threw its rider before the rider had got on, a fire
+//! burned out during a night that the client had not finished walking
+//! through. Every one of them passed on its own. "The tests are green"
+//! had stopped being a fact.
+//!
+//! **What is still measured by the wall, and why.** A frame is never
+//! shorter than a sixtieth of a second of wall time, and never catches
+//! up after a stall. The anticheat measures a player against
+//! `Instant::now()` -- speed budgets, the hover clock -- so a scenario
+//! that ran its frames *faster* than the wall would be a player moving
+//! faster than the validator allows, and would be corrected for it.
+//! Slower is always safe (the budget only refills), and slower is what a
+//! loaded machine now produces. So the floor stays: it is the harness's
+//! guarantee that it never asks the server for a second of movement in
+//! less than a second.
+//!
+//! The floor is also what gives the real parts of this their real time.
+//! The sockets are real, the chunk generation is real and runs on its own
+//! threads, and a wait for a chunk to arrive is a wait for work nobody's
+//! frame counter can hurry. `until(20.0)` is 1200 frames and therefore at
+//! least twenty seconds of wall -- exactly what it was before -- so the
+//! arrivals have not lost a moment of the time they had.
+//!
+//! The transform the client sends the server keeps the wall for the same
+//! family of reasons: it is a keepalive as well as a position, and the
+//! server's patience (`client_timeout_secs`) is counted in the server's
+//! seconds. See the `maybe_send_transform` call in [`Scenario::frame`].
+//!
+//! **The one clock a scenario still reads directly** is the station
+//! minigame's: `StationScreen` times its own bar with `Instant::now()`
+//! and sends the millisecond of each blow up the wire, so a test that
+//! plays a run on the beat has to watch the same wall the screen does.
+//! `a_run_on_the_marker` does, deliberately, and says so.
 //!
 //! ## Pictures
 //!
@@ -146,7 +189,22 @@ pub struct Scenario {
 
     world_ready: bool,
     frames: u64,
+    /// Where this scenario's clock started. Every "now" the frame hands
+    /// to the client's own machinery is this plus a whole number of
+    /// frames -- see [`Scenario::now`].
+    epoch: Instant,
+    /// When the last frame ran **by the wall**, and the only field here
+    /// that is: it holds the floor under a frame's length. See the
+    /// module note.
     last_frame: Instant,
+    /// The one clock every client on this server shares. See
+    /// [`WorldClock`].
+    clock: std::sync::Arc<WorldClock>,
+    /// Ticks a second the server was started with -- how many of them a
+    /// frame owes it.
+    tick_hz: f32,
+    /// **By the wall**, like `last_frame` and unlike the rest: see the
+    /// `maybe_send_transform` call in `frame`.
     last_sent_at: Instant,
     last_sent_transform: Option<(DVec3, f32, f32)>,
     sequence: u32,
@@ -160,19 +218,69 @@ pub struct Scenario {
     /// The horse this client is riding, ahead of the server: the frame's own
     /// `Entities::horseback`, stepped by `step_body` the way `run` steps it.
     pub horseback: Option<crate::logic::horseback::Horseback>,
-    /// How long the last frame really took, in seconds.
-    ///
-    /// **The horse is predicted by it and not by `FRAME`**, and that is the
-    /// one place this harness steps by the wall. The body steps by `FRAME`
-    /// because the anticheat only ever sees it go *slower* than it could; a
-    /// horse predicted at a sixtieth a frame while a debug frame takes a
-    /// twentieth is a horse at a third of the speed of the server's one,
-    /// which the rider's reins are moving in real time -- and the
-    /// prediction snapped back to it every second. `run` steps both by the
-    /// frame's own length, which is what this is.
-    frame_dt: f32,
     /// The latest snapshot of every entity the server has sent, by id.
     pub entities: HashMap<primitive_shared::protocol::EntityId, primitive_shared::protocol::EntityState>,
+}
+
+/// **How far the world has got, in frames, and how many ticks that has
+/// already bought.** One of these per server, shared by every client on
+/// it (`Scenario::join`).
+///
+/// Why it is shared rather than one per client: two clients on one server
+/// are two people in one world, and the world cannot be at two times at
+/// once. A per-client counter gets both of the patterns tests use wrong
+/// -- interleaved (`until_both`, a trade at a stall) the world would age
+/// twice as fast as either player, and taking turns (a guest joins, does
+/// something while the host stands still, and leaves) the client standing
+/// still would find the world frozen the moment it started stepping
+/// again, because the other one had already spent that time. That second
+/// one is not hypothetical: it is what
+/// `a_rider_who_disconnects_in_the_saddle` did -- the guest's frames
+/// bought no ticks at all, so the server never sent an entity snapshot
+/// and the horse "never reached the client".
+///
+/// So: a frame of any client moves the world to one past wherever it
+/// already was *for that client*, and never backwards for anyone. A
+/// client that has been idle picks the world up where the other left it.
+struct WorldClock {
+    inner: std::sync::Mutex<WorldClockState>,
+}
+
+#[derive(Default)]
+struct WorldClockState {
+    /// Frames of scenario time the world has lived through.
+    frames: u64,
+    /// Ticks already asked of the server for them.
+    asked: u64,
+}
+
+/// What one client's frame did to the shared clock: where the world is
+/// now, and how many ticks the server has been asked for in all.
+struct Stepped {
+    frames: u64,
+    ask: u32,
+    ticks: u64,
+}
+
+impl WorldClock {
+    fn new() -> Self {
+        Self { inner: std::sync::Mutex::new(WorldClockState::default()) }
+    }
+
+    /// One frame on, for a client that was at `mine`.
+    fn step(&self, mine: u64, tick_hz: f32) -> Stepped {
+        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let frames = (mine + 1).max(state.frames);
+        state.frames = frames;
+        let ticks = (frames as f64 * f64::from(tick_hz) * f64::from(FRAME)) as u64;
+        let ask = ticks.saturating_sub(state.asked);
+        state.asked = ticks.max(state.asked);
+        Stepped { frames, ask: ask as u32, ticks }
+    }
+
+    fn frames(&self) -> u64 {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).frames
+    }
 }
 
 /// The server a scenario plays on: the test world, the validator on.
@@ -206,13 +314,34 @@ impl Scenario {
     }
 
     pub fn with(settings: primitive_server::settings::ServerSettings) -> Self {
+        Self::started(settings, true)
+    }
+
+    /// The same, but **the server keeps its own 20 Hz wall clock** rather
+    /// than taking its ticks from the frame.
+    ///
+    /// For the two scenarios whose subject *is* that clock: the phone put
+    /// in a pocket and the computer put to sleep, which assert about what
+    /// the world does while nobody is drawing frames at all. A server
+    /// that ticked only when a frame asked would make both of them pass
+    /// by saying nothing -- there would be no frames, so of course the
+    /// world stood still. Everything else wants the frame's clock; see
+    /// the module note.
+    pub fn with_a_server_on_its_own_clock(settings: primitive_server::settings::ServerSettings) -> Self {
+        Self::started(settings, false)
+    }
+
+    fn started(settings: primitive_server::settings::ServerSettings, by_hand: bool) -> Self {
+        let tick_hz = settings.tick_rate_hz;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .expect("runtime");
+        let options = primitive_server::RunOptions::embedded();
+        let options = if by_hand { options.ticks_by_hand() } else { options };
         let (server, connection) = runtime.block_on(async {
-            let server = primitive_server::start(settings, primitive_server::RunOptions::embedded())
+            let server = primitive_server::start(settings, options)
                 .await
                 .expect("the server did not start");
             let connection = network::connect(&server.address().to_string(), "scenario")
@@ -220,7 +349,14 @@ impl Scenario {
                 .expect("the server refused the scenario");
             (server, connection)
         });
-        Self::connected(runtime, std::sync::Arc::new(server), connection, "scenario")
+        Self::connected(
+            runtime,
+            std::sync::Arc::new(server),
+            connection,
+            "scenario",
+            tick_hz,
+            std::sync::Arc::new(WorldClock::new()),
+        )
     }
 
     /// **A second player on the same server**, called `name`: its own
@@ -250,7 +386,11 @@ impl Scenario {
         let connection = runtime
             .block_on(network::connect(&address, name))
             .expect("the server refused the second player");
-        Self::connected(runtime, server, connection, name)
+        // **The guest joins the world's clock, not a new one.** Its
+        // frames are the same frames; a second counter starting at zero
+        // would be a second player living in a world that is already an
+        // hour old. See `WorldClock`.
+        Self::connected(runtime, server, connection, name, self.tick_hz, std::sync::Arc::clone(&self.clock))
     }
 
     fn connected(
@@ -258,6 +398,8 @@ impl Scenario {
         server: std::sync::Arc<primitive_server::Server>,
         connection: network::Connection,
         name: &str,
+        tick_hz: f32,
+        clock: std::sync::Arc<WorldClock>,
     ) -> Self {
         let welcome = connection.welcome;
         let spawn = DVec3::new(welcome.spawn.0, welcome.spawn.1, welcome.spawn.2);
@@ -298,8 +440,18 @@ impl Scenario {
             corrections: Vec::new(),
             heard: Vec::new(),
             world_ready: false,
-            frames: 0,
+            // Where the world already is, so a guest's first frame is the
+            // next one and not the first one ever. See `WorldClock`.
+            frames: clock.frames(),
+            // ...and the epoch put back behind it by as much, so this
+            // client's "now" is still a real-looking instant rather than
+            // one an hour in its own future.
+            epoch: now
+                .checked_sub(Duration::from_secs_f64(clock.frames() as f64 * f64::from(FRAME)))
+                .unwrap_or(now),
+            clock,
             last_frame: now,
+            tick_hz,
             last_sent_at: now,
             last_sent_transform: None,
             sequence: 0,
@@ -307,7 +459,6 @@ impl Scenario {
             grace: None,
             jump_edge: false,
             horseback: None,
-            frame_dt: FRAME,
             entities: HashMap::new(),
         };
         let ready = scenario.until(20.0, |s| s.world_ready && s.player.grounded);
@@ -327,15 +478,17 @@ impl Scenario {
         for &((x, y, z), block) in cells {
             self.server().place_block(x, y, z, block);
         }
-        // **Twenty seconds of wall clock, and it is not a guess about the
-        // world.** What is waited for is the server's own edit coming back
-        // down the wire and through chunk integration -- which is rationed
-        // by the frame (`streaming_budget`) and therefore paced by how busy
-        // this machine is, not by anything the test is asserting. At five
-        // it failed about one run in three on a machine with half a dozen
-        // builds on it, in whichever scenario happened to be unlucky; a run
-        // where the blocks arrive costs the same either way, because
-        // `until` returns the moment they do.
+        // **Twelve hundred frames, and it is not a guess about the world.**
+        // What is waited for is the server's own edit coming back down the
+        // wire and through chunk integration -- real work on real threads,
+        // paced by how busy this machine is and not by anything the test
+        // is asserting. A frame is never shorter than a sixtieth of a
+        // second of wall time, so this is still at least twenty seconds of
+        // real time for the arrivals to use, and more when the machine is
+        // loaded. At five seconds it failed about one run in three on a
+        // machine with half a dozen builds on it, in whichever scenario
+        // happened to be unlucky; a run where the blocks arrive costs the
+        // same either way, because `until` returns the moment they do.
         let all_there = self.until(20.0, |s| {
             cells.iter().all(|&((x, y, z), block)| s.chunks.block_at(x, y, z) == Some(block))
         });
@@ -585,22 +738,73 @@ impl Scenario {
 
     // ---- time ----
 
-    /// One frame of the game, as `run` orders it: the socket, the chunks
-    /// asked for, the body, the hands, what is sent back.
-    pub fn frame(&mut self) {
-        // Never shorter than a frame, and never catching up. See the
-        // module note.
-        let due = self.last_frame + Duration::from_secs_f32(FRAME);
-        let now = Instant::now();
-        if due > now {
-            std::thread::sleep(due - now);
+    /// **The scenario's own clock**: the frame counter, in the shape the
+    /// client's machinery expects a clock in.
+    ///
+    /// Everything the frame hands a "now" to -- the transform's send
+    /// rate, the chunk manager's unload timers, the reins' resend, the
+    /// placement's settle -- takes an `Instant`, so a counter can be one
+    /// without a single signature changing. Monotonic and always behind
+    /// the wall, because a frame is never shorter than `FRAME` of it.
+    fn now(&self) -> Instant {
+        self.epoch + Duration::from_secs_f64(self.frames as f64 * f64::from(FRAME))
+    }
+
+    /// **The world ages by the frame, not by the wall.**
+    ///
+    /// The server was started with its ticks in this client's hands
+    /// (`RunOptions::ticks_by_hand`); this is the hand. After frame *n*
+    /// the server has run exactly `n * tick_hz / 60` ticks -- on an idle
+    /// machine, which is what it did before, and on a machine with half a
+    /// dozen builds on it, which is what it did not.
+    ///
+    /// **Waited for, not merely asked for.** A scenario reads the
+    /// server's own state the line after it stops stepping
+    /// (`s.server().asleep(...)`, `horse_gear`, `player_riding`), and a
+    /// pile of unspent asks would mean reading a world a dozen ticks
+    /// behind the one the frames drove. So the frame does not return
+    /// until the tick it bought has been run.
+    fn pace_the_world(&mut self) {
+        let stepped = self.clock.step(self.frames, self.tick_hz);
+        // Picked up where another client left it, if one has been
+        // stepping while this one stood still. See `WorldClock`.
+        self.frames = stepped.frames;
+        let server = self.server.as_ref().expect("a scenario without a server has no world to age");
+        if stepped.ask > 0 {
+            server.ask_for_ticks(stepped.ask);
         }
-        // The frame's own length, as `run` measures it, for the one thing
-        // here that is stepped by the wall and not by `FRAME`: see
-        // `frame_dt`.
-        self.frame_dt = Instant::now().saturating_duration_since(self.last_frame).as_secs_f32().clamp(FRAME, 0.1);
+        // The cap is wall time and it is not a timing assertion: it is
+        // the difference between a test that fails and a suite that
+        // hangs. Nothing asserts on it, and a tick that took thirty
+        // seconds is a broken server, not a busy machine.
+        const GIVE_UP: Duration = Duration::from_secs(30);
+        assert!(
+            server.wait_for_ticks(stepped.ticks, GIVE_UP),
+            "the server did not run tick {} within {GIVE_UP:?} -- it is not ticking at all",
+            stepped.ticks
+        );
+    }
+
+    /// One frame of the game, as `run` orders it: the world aged by one
+    /// frame's worth, the socket, the chunks asked for, the body, the
+    /// hands, what is sent back.
+    pub fn frame(&mut self) {
+        // **Never shorter than a frame of wall time, and never catching
+        // up.** The only thing here that reads the wall, and the module
+        // note says what it is for: the anticheat bills a player by
+        // `Instant::now()`, so a harness that ran faster than the wall
+        // would be corrected for speed.
+        let due = self.last_frame + Duration::from_secs_f32(FRAME);
+        let wall = Instant::now();
+        if due > wall {
+            std::thread::sleep(due - wall);
+        }
         self.last_frame = Instant::now();
-        let now = self.last_frame;
+        // One frame on, and the world with it: `pace_the_world` is what
+        // moves `frames`, because the world's clock is shared and this
+        // client's is only its own view of it.
+        self.pace_the_world();
+        let now = self.now();
 
         self.drain();
         // The map's own streaming phase, as the frame runs it -- with no
@@ -632,11 +836,23 @@ impl Scenario {
             }
         }
 
+        // **This one keeps the wall, and it is the keepalive that says
+        // why.** Everything else the frame times is the client talking to
+        // itself; this is the client talking to the server, and the
+        // server decides a player is gone after `client_timeout_secs` of
+        // *its* seconds. `run` sends ten a second by the wall, so a
+        // scenario that sent ten a simulated second would, on a loaded
+        // machine where a frame takes a fifth of a second, speak once
+        // every one and a half -- and a world with a short fuse
+        // (`impatient_world`) kicked it for silence. Sending oftener
+        // than the body moves is safe by construction: the validator's
+        // speed budget is blocks against wall seconds, and smaller steps
+        // over the same wall are a slower player, never a faster one.
         crate::maybe_send_transform(
             &mut self.net,
             &self.player,
             &self.camera,
-            now,
+            self.last_frame,
             Duration::from_secs_f32(1.0 / crate::settings::ClientSettings::default().player_update_hz),
             &mut self.last_sent_at,
             &mut self.last_sent_transform,
@@ -658,7 +874,6 @@ impl Scenario {
         self.chunks.advance_lids(FRAME);
         self.input.end_frame();
         self.jump_edge = false;
-        self.frames += 1;
     }
 
     fn step_body(&mut self) {
@@ -678,8 +893,16 @@ impl Scenario {
                 !frozen && self.input.action_down(&self.binds, Action::Rein),
                 !frozen && (self.jump_edge || self.input.action_pressed(&self.binds, Action::Jump)),
             );
-            horseback.predict(reins, &|x, y, z| self.chunks.block_at(x, y, z), self.frame_dt);
-            if let Some(message) = horseback.rein_message(Instant::now()) {
+            // **By `FRAME`, like the body, and it used to be by the wall.**
+            // It had to be: the server's horse moved on the server's own
+            // clock, so a horse predicted at a sixtieth of a second while a
+            // debug frame took a twentieth was a horse at a third of the
+            // speed of the real one, snapped back to it every second. Now
+            // the server's horse moves one tick per three frames, which is
+            // exactly this -- and on a loaded machine too, which the wall
+            // never managed.
+            horseback.predict(reins, &|x, y, z| self.chunks.block_at(x, y, z), FRAME);
+            if let Some(message) = horseback.rein_message(self.now()) {
                 self.net.send(message);
             }
             if !frozen
@@ -900,7 +1123,7 @@ impl Scenario {
     }
 
     fn apply(&mut self, change: primitive_shared::protocol::BlockChange) {
-        self.mining.confirm_placement(&change, Instant::now());
+        self.mining.confirm_placement(&change, self.now());
         self.explored.note_edit(change.global_x, change.global_z);
         crate::sound_for(&self.audio, &mut self.soundscape, &self.chunks, &change);
         crate::apply_change(
@@ -924,13 +1147,17 @@ impl Scenario {
         self.frames((seconds / FRAME).round() as u32);
     }
 
-    /// Runs frames until `done` says so or `seconds` of them have passed,
-    /// and says which.
-    /// `until`, stepping this client and `other` a frame each in turn, so
-    /// neither stops reading its socket while the other waits.
+    /// [`Scenario::until`], stepping this client and `other` a frame each
+    /// in turn, so neither stops reading its socket while the other waits.
+    ///
+    /// **Counted in frames, as `until` is, and it used to be a deadline
+    /// of `Instant::now`.** A wall-clock window is a different number of
+    /// frames on a busy machine than on a quiet one, which is a stall
+    /// scenario turning red because something else was compiling. See
+    /// the module note.
     pub fn until_both(&mut self, other: &mut Scenario, seconds: f32, mut done: impl FnMut(&Self, &Scenario) -> bool) -> bool {
-        let start = Instant::now();
-        while start.elapsed().as_secs_f32() < seconds {
+        let frames = (seconds / FRAME).ceil() as u32;
+        for _ in 0..frames {
             if done(self, other) {
                 return true;
             }
@@ -940,6 +1167,9 @@ impl Scenario {
         done(self, other)
     }
 
+    /// Runs frames until `done` says so or `seconds` of them have passed,
+    /// and says which. `seconds` is the scenario's own seconds: sixty
+    /// frames to one, whatever the wall is doing.
     pub fn until(&mut self, seconds: f32, mut done: impl FnMut(&Self) -> bool) -> bool {
         let frames = (seconds / FRAME).ceil() as u32;
         for _ in 0..frames {
