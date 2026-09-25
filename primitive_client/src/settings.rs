@@ -401,6 +401,22 @@ pub struct ClientSettings {
     /// coarse band. See `engine::lod` for what it costs to look at.
     #[serde(default = "default_lod_distance")]
     pub lod_distance_chunks: i32,
+    /// Whether every block wears a shade of its own -- the hash in
+    /// `mottled_shade`, which is what stops a wall of one material reading
+    /// as one flat rectangle.
+    ///
+    /// **A setting because one machine can afford it and another cannot.**
+    /// The same feature measured 0.07 ms on a GTX 1050 Ti and 1.87 ms on
+    /// an Adreno 710 -- 13% of that phone's solid pass, for a five per
+    /// cent wobble in a block's colour. So it is on where it is nearly
+    /// free and off where it is not, and `default_block_shade` is the only
+    /// place that decides which is which.
+    ///
+    /// It is compiled into the shader rather than branched on
+    /// (`engine::opt::block_shade`), so moving it rebuilds the terrain
+    /// pipelines exactly as the lighting row does.
+    #[serde(default = "default_block_shade")]
+    pub block_shade: bool,
     /// How much a coarse chunk is allowed to give up.
     ///
     /// The other half of the setting above, and the one that decides
@@ -1298,6 +1314,17 @@ fn default_lod_distance() -> i32 {
     10
 }
 
+/// Blocks wear their own shade everywhere but on a phone.
+///
+/// **The one platform test in this file, and it is a measurement rather
+/// than a guess.** See `ClientSettings::block_shade`: 1.87 ms of an Adreno
+/// 710's 14.10 ms solid pass, against 0.07 ms on a desktop card. A player
+/// on a phone who wants it back writes `block_shade = true` in the file;
+/// the row does not exist yet.
+fn default_block_shade() -> bool {
+    !cfg!(target_os = "android")
+}
+
 /// The furthest the RENDER DISTANCE row goes, in chunks.
 ///
 /// **One owner, because two readers have to agree on it.** The row clamps
@@ -1393,6 +1420,7 @@ impl Default for ClientSettings {
             lighting: crate::engine::lighting::default_quality(),
             detail_distance: 0.7,
             lod_distance_chunks: default_lod_distance(),
+            block_shade: default_block_shade(),
             lod_quality: crate::engine::lod::Quality::default(),
             cloudiness: 0.45,
             language: crate::ui::lang::Language::English,

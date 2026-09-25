@@ -2714,6 +2714,33 @@ impl GraphicsState {
             return;
         }
         self.lighting = lighting;
+        self.rebuild_look();
+    }
+
+    /// Turns the blocks' own shade on or off and, if that is a change,
+    /// builds the terrain shaders and their pipelines again.
+    ///
+    /// **The same machinery as the lighting row, for the same reason.**
+    /// The shade is a constant compiled into the shader
+    /// (`engine::opt::block_shade`) rather than a branch on a uniform,
+    /// because a branch would still be paid on every fragment of every
+    /// frame by a player who has the feature off -- which on a phone is
+    /// the default and the whole point. What that costs is two shader
+    /// compiles and nine pipelines on the frame the setting changes, and
+    /// nothing at all afterwards.
+    pub fn set_block_shade(&mut self, on: bool) {
+        if crate::engine::opt::set_block_shade(on) {
+            self.rebuild_look();
+        }
+    }
+
+    /// The shaders and every pipeline made from them, built again.
+    ///
+    /// Out of line because two settings now ask for it and a second copy
+    /// of nine descriptors is a second place for one of them to drift --
+    /// which is the reason `LookPipelines` exists at all.
+    fn rebuild_look(&mut self) {
+        let lighting = self.lighting;
         // The multisample state `new` built them with: the sample count
         // never changes after startup, and a pipeline built for any other
         // is a validation error in the main pass.
