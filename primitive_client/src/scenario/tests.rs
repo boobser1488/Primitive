@@ -4016,9 +4016,9 @@ fn a_player_who_falls_from_a_height_is_downed_crawls_slowly_and_dies_when_the_ti
     let mut s = Scenario::new();
     let (x0, z) = FIELD;
     s.stand_at((x0 as f64 + 0.5, (GROUND + 21) as f64, z as f64 + 0.5));
-    assert!(s.until(10.0, |s| s.downed.is_some() || s.dead.is_some()), "a twenty-block fall did nothing");
+    assert!(s.until(10.0, |s| s.downed().is_some() || s.dead.is_some()), "a twenty-block fall did nothing");
     assert!(s.dead.is_none(), "a twenty-block fall killed outright: {:?}", s.dead);
-    assert_eq!(s.downed.map(|d| d.cause), Some(Cause::Fall));
+    assert_eq!(s.downed().map(|d| d.cause), Some(Cause::Fall));
     s.seconds(0.5);
     let eye = s.camera.position.y - s.feet().y;
     assert!((eye - f64::from(CRAWL_EYE)).abs() < 0.01, "the eye stayed at {eye} over the feet");
@@ -4043,12 +4043,12 @@ fn a_player_who_falls_from_a_height_is_downed_crawls_slowly_and_dies_when_the_ti
         s.server().hurt_player(bite, "was pulled down by a wolf");
         owed -= bite;
     }
-    assert!(s.until(2.0, |s| s.downed.is_some_and(|d| d.left < leave + 1.0)), "the blow never reached the client's clock");
+    assert!(s.until(2.0, |s| s.downed().is_some_and(|d| d.left < leave + 1.0)), "the blow never reached the client's clock");
     s.seconds(leave - 2.0);
     assert!(s.dead.is_none(), "died before the clock ran out");
     assert!(s.until(6.0, |s| s.dead.is_some()), "the clock ran out and nobody died");
     assert!(s.dead.as_deref().is_some_and(|c| c.contains("fell")), "died of {:?}", s.dead);
-    assert!(s.downed.is_none());
+    assert!(s.downed().is_none());
     no_corrections(&s);
 }
 
@@ -4063,13 +4063,13 @@ fn a_player_downed_by_hunger_who_eats_gets_up_and_walks() {
     s.give(t::BLOCK_BREAD, 2);
     s.server().set_player_nourishment(0.0);
     s.server().hurt_player(30.0, "starved");
-    assert!(s.until(3.0, |s| s.downed.is_some()), "a starving body at nought never went down");
-    assert_eq!(s.downed.map(|d| d.cause), Some(Cause::Hunger));
+    assert!(s.until(3.0, |s| s.downed().is_some()), "a starving body at nought never went down");
+    assert_eq!(s.downed().map(|d| d.cause), Some(Cause::Hunger));
     let crawl = crawled(&mut s, 1.5, false) / 1.5;
 
     let slot = slot_of(&s, t::BLOCK_BREAD).expect("the bread");
     s.send(ClientMessage::Eat { slot: slot as u8 });
-    assert!(s.until(3.0, |s| s.downed.is_none()), "the bread went down and the body stayed down");
+    assert!(s.until(3.0, |s| s.downed().is_none()), "the bread went down and the body stayed down");
     assert!(s.dead.is_none());
     assert!(s.until(2.0, |s| s.health * 20.0 >= RAISED_HEALTH - 0.01), "raised on {} of a bar", s.health);
     let walk = crawled(&mut s, 1.5, false) / 1.5;
@@ -4098,7 +4098,7 @@ fn a_player_downed_in_knee_deep_water_runs_out_of_breath_and_one_standing_in_it_
         "standing in water to the knee took the breath"
     );
     s.server().hurt_player(30.0, "starved");
-    assert!(s.until(3.0, |s| s.downed.is_some()), "the blow never put the body down");
+    assert!(s.until(3.0, |s| s.downed().is_some()), "the blow never put the body down");
     assert!(
         s.until(5.0, |s| s.heard_any(|m| matches!(m, ServerMessage::Breath { fraction } if *fraction < 1.0))),
         "a face down in knee-deep water was never short of air"
@@ -4430,7 +4430,7 @@ fn a_night_asleep_in_the_open_without_a_fire_is_woken_by_wolves_that_come_in() {
 
     // Stand there: the pack comes in.
     let health = s.health;
-    let bitten = s.until(30.0, |s| s.health < health || s.downed.is_some());
+    let bitten = s.until(30.0, |s| s.health < health || s.downed().is_some());
     let (_, closest) = wolves_near(&s, s.feet(), 64.0);
     assert!(bitten, "the pack that woke a sleeper in the open never came in: nearest {closest:.1}");
     no_corrections(&s);

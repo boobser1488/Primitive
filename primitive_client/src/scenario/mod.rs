@@ -19,25 +19,37 @@
 //! a look and a click, sixty frames to the second, and asked afterwards
 //! what a player would have seen and felt.
 //!
-//! ## What it does not share with `run`, and why that is said here
+//! ## What it shares with `run`, and what it still does not
 //!
-//! `run` is one function around a window, and the frame's body is written
-//! inline in it. Everything that could be called is called -- the helpers
-//! above are the frame's own -- but the *order* they are called in, and
-//! the handful of message arms this file handles, are a copy. The copy is
-//! kept to the arms a scenario reads (corrections, block updates, the
-//! pack, the containers, the stations, health and death), and each is the
-//! same statement `drain_network` makes. If `run` grows a step that
-//! changes what the player feels, this file needs the same step, or a
-//! scenario will pass on a game that no longer exists.
+//! This note used to say the opposite. `run` was one function of six
+//! thousand lines with the frame's body written inline in it, so there
+//! was nothing to call: the harness kept its own right click, its own
+//! step of the hands, its own arms of the socket, and the note here
+//! recorded that as a thing rejected for being too large -- "that is the
+//! right end state and a refactor of six thousand lines of event handling
+//! whose every borrow is load-bearing".
 //!
-//! Rejected: pulling the whole frame out of `run` into something both
-//! could call. That is the right end state and a refactor of six thousand
-//! lines of event handling whose every borrow is load-bearing; a harness
-//! that waits for it is a harness that does not exist. Also rejected:
-//! driving the real binary with synthetic input. The platform layer has no
-//! way in that is not a window, and a window is a GPU, which is exactly
-//! what an unattended run on a build machine does not have.
+//! The frame lives in `crate::frame` now, and what a scenario plays is
+//! what the game runs:
+//!
+//! * the right click is [`crate::frame::interact::right_click_on_the_world`],
+//! * one frame of the hands is [`crate::frame::hands::step`],
+//! * and the helpers around them were already shared.
+//!
+//! What is still a copy, and said plainly so the next person can finish
+//! it: **the order of the frame** below (which is `run`'s order, kept by
+//! hand), **the body's own step** (`step_body`, which is the collider and
+//! the horse without the raft, the posture or the sail), and **the arms of
+//! the socket** this file reads (corrections, block updates, the pack, the
+//! containers, the stations, health and death) -- each of them the same
+//! statement `drain_network` makes. If `run` grows a step that changes
+//! what the player feels, those need the same step, or a scenario will
+//! pass on a game that no longer exists.
+//!
+//! Still rejected: driving the real binary with synthetic input. The
+//! platform layer has no way in that is not a window, and a window is a
+//! GPU, which is exactly what an unattended run on a build machine does
+//! not have.
 //!
 //! ## Time is counted in frames, and the floor under a frame is real
 //!
@@ -121,9 +133,13 @@ use crate::net::network::{self, NetworkHandle, WelcomeInfo};
 use crate::platform::Key;
 use crate::ui::debug::DebugStats;
 use crate::ui::input::InputState;
-use crate::ui::keybinds::{Action, Keybinds};
-use crate::ui::{chest_screen::ChestScreen, station_screen::StationScreen};
-use crate::{Arrivals, MeshQueueSet, UseGesture};
+use crate::logic::{hand, shake, stamina};
+use crate::net::remote_players::RemotePlayers;
+use crate::settings::ClientSettings;
+use crate::ui::hud::BodyGauges;
+use crate::ui::keybinds::Action;
+use crate::ui::{chest_screen::ChestScreen, death::DeathScreen, station_screen::StationScreen};
+use crate::{Arrivals, Cut, DigSignal, Meal, MeshQueueSet};
 
 mod tests;
 
@@ -158,20 +174,57 @@ pub struct Scenario {
     pub player: Player,
     pub camera: Camera,
     pub input: InputState,
-    binds: Keybinds,
+    /// **The player's settings, whole, and not just their keys.** The
+    /// frame's own functions are handed a `&ClientSettings` -- the
+    /// bindings, the language a refusal is said in, the reach -- and a
+    /// harness that kept only the bindings would have had to invent the
+    /// rest, which is the same thing as guessing what the game does.
+    settings: ClientSettings,
     pub mining: Mining,
     debug: DebugStats,
     pub audio: crate::Audio,
     soundscape: crate::Soundscape,
+    /// **The rest of what one frame of the hands needs**, all of it the
+    /// frame's own state and none of it invented here: the arm, the rhythm
+    /// a blow comes at, the recoil, the "this player is working" flag the
+    /// server is told about, the tank a swing is billed to, the cut and
+    /// the mouthful under way, and the rod being wound back.
+    ///
+    /// They are fields because [`crate::frame::hands::step`] is what runs
+    /// them. A harness playing its own copy of a swing could pass while
+    /// the game struck twice for every blow -- which the game once did.
+    hand: hand::Hand,
+    strikes: hand::Strikes,
+    shake: shake::Shake,
+    dig_signal: DigSignal,
+    stamina: stamina::Stamina,
+    rod_hold: crate::logic::fishing::Hold,
+    cut: Option<Cut>,
+    meal: Option<Meal>,
+    meal_sent: Option<Instant>,
+    /// What the server last refused, in the player's own language --
+    /// or what this side refused before asking. Several gestures never
+    /// reach the wire at all and say so here instead (a throw onto the
+    /// bank, a set-down with nowhere to set it down), so a scenario that
+    /// asserted only on messages could not see them.
+    pub notice: Option<(String, Instant)>,
+    /// Everybody else, and everything that is not a block. Empty in most
+    /// scenarios, and the frame's own types all the same, so the frame's
+    /// own functions take them without a shim.
+    remote: RemotePlayers,
+    sim: crate::logic::entities::Entities,
+    death: DeathScreen,
 
     pub inventory: Inventory,
     pub equipment: primitive_shared::inventory::Equipment,
-    pub injuries: primitive_shared::injury::Injuries,
     pub health: f32,
     pub dead: Option<String>,
-    /// On the ground, as the server last said -- the frame's own
-    /// `BodyGauges::downed`, and read by `step_body` the way `run` reads it.
-    pub downed: Option<primitive_shared::downed::Down>,
+    /// Everything the server says about the body: how tired, how hurt,
+    /// how thirsty, and whether it is on the ground. The frame's own
+    /// type, because the frame's own functions read it -- see
+    /// [`Scenario::downed`], which is the one field of it tests ask about
+    /// often enough to deserve a name.
+    pub body: BodyGauges,
     pub chest_screen: ChestScreen,
     pub station_screen: StationScreen,
     /// The map: the client's survey of the chunks it has been sent, and
@@ -403,7 +456,7 @@ impl Scenario {
     ) -> Self {
         let welcome = connection.welcome;
         let spawn = DVec3::new(welcome.spawn.0, welcome.spawn.1, welcome.spawn.2);
-        let settings = crate::settings::ClientSettings::default();
+        let settings = ClientSettings::default();
         let player = Player::new(spawn, settings.move_speed);
         let mut camera = Camera::new(player.eye_position(), 16.0 / 9.0);
         camera.yaw = 0.0;
@@ -423,17 +476,29 @@ impl Scenario {
             player,
             camera,
             input: InputState::default(),
-            binds: settings.keybinds.clone(),
+            settings,
             mining: Mining::new(),
             debug: DebugStats::default(),
             audio: crate::Audio::silent(),
             soundscape: crate::Soundscape::new(),
+            hand: hand::Hand::new(),
+            strikes: hand::Strikes::default(),
+            shake: shake::Shake::new(0.0),
+            dig_signal: DigSignal::default(),
+            stamina: stamina::Stamina::new(),
+            rod_hold: crate::logic::fishing::Hold::default(),
+            cut: None,
+            meal: None,
+            meal_sent: None,
+            notice: None,
+            remote: RemotePlayers::default(),
+            sim: crate::logic::entities::Entities::default(),
+            death: DeathScreen::new(),
             inventory: Inventory::new(),
             equipment: Default::default(),
-            injuries: Default::default(),
             health: 1.0,
             dead: None,
-            downed: None,
+            body: BodyGauges::default(),
             chest_screen: ChestScreen::new(),
             explored: crate::logic::map::ExploredMap::default(),
             station_screen: StationScreen::new(),
@@ -461,6 +526,11 @@ impl Scenario {
             horseback: None,
             entities: HashMap::new(),
         };
+        // **A player in a world has the cursor.** The frame refuses to
+        // mine without it (`can_mine`), which is right -- the click that
+        // grabs the pointer is not also a swing -- and a harness that
+        // left it false is a harness in which nothing can ever be dug.
+        scenario.input.mouse_grabbed = true;
         let ready = scenario.until(20.0, |s| s.world_ready && s.player.grounded);
         assert!(ready, "the world never arrived round the spawn");
         scenario
@@ -468,6 +538,13 @@ impl Scenario {
 
     pub fn server(&self) -> &primitive_server::Server {
         self.server.as_ref().expect("server")
+    }
+
+    /// On the ground, as the server last said. A reading of [`Scenario::body`]
+    /// rather than a field of its own: the frame keeps one answer to
+    /// "what is this body doing", and two would be two to keep in step.
+    pub fn downed(&self) -> Option<primitive_shared::downed::Down> {
+        self.body.downed
     }
 
     // ---- setting the stage ----
@@ -585,7 +662,7 @@ impl Scenario {
     // ---- hands ----
 
     pub fn hold(&mut self, action: Action) {
-        let key = self.binds.key(action).expect("an unbound action");
+        let key = self.settings.keybinds.key(action).expect("an unbound action");
         self.input.set_key(key, true);
         if action == Action::Jump {
             self.jump_edge = true;
@@ -593,7 +670,7 @@ impl Scenario {
     }
 
     pub fn release(&mut self, action: Action) {
-        let key = self.binds.key(action).expect("an unbound action");
+        let key = self.settings.keybinds.key(action).expect("an unbound action");
         self.input.set_key(key, false);
     }
 
@@ -605,72 +682,52 @@ impl Scenario {
         self.input.set_key(key, down);
     }
 
-    /// The right click, as the frame's `MouseButton::Right` arm makes it.
+    /// **The right click, through the frame's own dispatch.**
     ///
-    /// **A copy of that arm's dispatch** for the gestures a scenario
-    /// makes: `use_gesture` decides (the real function), and each claim
-    /// sends what `run` sends for it. See the module note.
+    /// It was a copy of that arm: the harness decided for itself what a
+    /// blaze, a set-down, a station, a chest and a placement sent, and
+    /// panicked on everything it had not been taught. So a scenario
+    /// could pass while the game did something else with the same
+    /// click, and a gesture the game grew was a gesture the harness
+    /// refused to play.
+    ///
+    /// Now it is [`crate::frame::interact::right_click_on_the_world`],
+    /// which is the function the game calls. What stays outside it is
+    /// what is about an entity rather than a block -- a raft, a horse,
+    /// an animal, somebody lying on the ground -- and no scenario plays
+    /// those through here.
     pub fn use_aimed(&mut self) {
-        let aimed = self.aimed();
         let held = self.inventory.block_in(self.input.hotbar_slot);
-        let claim = crate::use_gesture(aimed.map(|(_, block)| block), held);
-        let sprinting = self.input.action_down(&self.binds, Action::Sprint);
-        // **A blaze first, as `run` asks it first**: the modifier with a
-        // knife at a standing trunk is a mark, and everywhere else it is
-        // still the set-down below. See `types::BLOCK_BLAZE`.
-        if let (true, Some((cell, block)), Some(held)) = (sprinting, aimed, held) {
-            if primitive_shared::types::is_knife(held) && crate::blazeable(block) {
-                self.net.send(ClientMessage::Blaze { global_x: cell.0, global_y: cell.1, global_z: cell.2 });
-                return;
-            }
-        }
-        let setting_down = held.is_some_and(primitive_shared::types::can_be_set_down)
-            && !aimed.is_some_and(|(_, block)| primitive_shared::types::is_set_down(block))
-            && claim != UseGesture::Hearth
-            && sprinting;
-        if setting_down {
-            if let Some(cell) = crate::set_down_cell(&self.chunks, &self.camera) {
-                self.net.send(ClientMessage::SetDown { global_x: cell.0, global_y: cell.1, global_z: cell.2 });
-            }
-            return;
-        }
-        match (claim, aimed) {
-            (UseGesture::Station, Some((cell, _))) => {
-                self.net.send(ClientMessage::OpenStation { global_x: cell.0, global_y: cell.1, global_z: cell.2 });
-                self.station_screen.asked_to_open();
-            }
-            (UseGesture::Open, Some((cell, _))) => {
-                self.net.send(ClientMessage::OpenChest { global_x: cell.0, global_y: cell.1, global_z: cell.2 });
-                self.chest_screen.asked_to_open();
-            }
-            (
-                UseGesture::Hearth
-                | UseGesture::Water
-                | UseGesture::Pick
-                | UseGesture::Tend
-                | UseGesture::Rest
-                | UseGesture::Pit
-                | UseGesture::Swing,
-                Some((cell, _)),
-            ) => {
-                self.net.send(ClientMessage::UseBlock { global_x: cell.0, global_y: cell.1, global_z: cell.2 });
-            }
-            (UseGesture::Place, _) | (UseGesture::OpenVessel, _) => {
-                let others: Vec<DVec3> = Vec::new();
-                crate::try_place_block(
-                    &self.chunks,
-                    &self.camera,
-                    &self.input,
-                    &self.player,
-                    &others,
-                    &mut self.net,
-                    &self.inventory,
-                    &mut self.mining,
-                    &mut self.debug,
-                );
-            }
-            (other, _) => panic!("a scenario made a right click the harness does not play: {other:?}"),
-        }
+        crate::frame::interact::right_click_on_the_world(
+            // No second finger on a test's glass: the modifier a
+            // scenario means is the sprint key it is holding.
+            false,
+            held,
+            &self.settings,
+            Some(&self.net),
+            &self.audio,
+            &self.player,
+            &self.camera,
+            &self.body,
+            &self.sim,
+            &[],
+            &self.input,
+            &self.inventory,
+            &mut self.chunks,
+            &mut self.light,
+            &mut self.arrivals,
+            &mut self.urgent,
+            &mut self.dirty_set,
+            &mut self.versions,
+            &mut self.chest_screen,
+            &mut self.station_screen,
+            &mut self.mining,
+            &mut self.hand,
+            &mut self.cut,
+            &mut self.meal,
+            &mut self.notice,
+            &mut self.debug,
+        );
     }
 
     /// Shuts whatever container screen is open, as Escape does.
@@ -831,7 +888,7 @@ impl Scenario {
         if self.world_ready && self.dead.is_none() {
             self.step_body();
             // No pick on the ground: `run`'s `can_mine`.
-            if self.downed.is_none() {
+            if self.body.downed.is_none() {
                 self.step_hands();
             }
         }
@@ -883,15 +940,15 @@ impl Scenario {
         // horse predicted, the reins sent, the body put on the saddle and not
         // stepped.
         if let Some(mut horseback) = self.horseback.take() {
-            let wish = if frozen { Vec3::ZERO } else { crate::wish_direction(&self.input, &self.camera, &self.binds) };
+            let wish = if frozen { Vec3::ZERO } else { crate::wish_direction(&self.input, &self.camera, &self.settings.keybinds) };
             let forward = wish.dot(self.camera.forward_horizontal()) * self.input.stick_speed();
             let turn = wish.dot(self.camera.right_horizontal()) * self.input.stick_speed();
             let reins = crate::logic::horseback::Horseback::reins_from_keys(
                 forward,
                 turn,
-                !frozen && self.input.action_down(&self.binds, Action::Sprint),
-                !frozen && self.input.action_down(&self.binds, Action::Rein),
-                !frozen && (self.jump_edge || self.input.action_pressed(&self.binds, Action::Jump)),
+                !frozen && self.input.action_down(&self.settings.keybinds, Action::Sprint),
+                !frozen && self.input.action_down(&self.settings.keybinds, Action::Rein),
+                !frozen && (self.jump_edge || self.input.action_pressed(&self.settings.keybinds, Action::Jump)),
             );
             // **By `FRAME`, like the body, and it used to be by the wall.**
             // It had to be: the server's horse moved on the server's own
@@ -908,7 +965,7 @@ impl Scenario {
             if !frozen
                 && forward.abs() < 0.05
                 && horseback.may_get_down()
-                && self.input.action_pressed(&self.binds, Action::Rein)
+                && self.input.action_pressed(&self.settings.keybinds, Action::Rein)
             {
                 self.net.send(ClientMessage::Dismount);
             }
@@ -923,64 +980,73 @@ impl Scenario {
         // The crawl in place of the limp, as `run` has it.
         self.player.speed_scale = primitive_shared::load::speed_scale(carried)
             * self.equipment.worn().mobility()
-            * self.downed.map_or(self.injuries.speed_factor(), |down| down.crawl());
+            * self.body.downed.map_or(self.body.injuries.speed_factor(), |down| down.crawl());
         self.player.snowshoes = self.equipment.snowshoes();
         self.player.buoyancy = primitive_shared::load::buoyancy(carried);
         self.player.treading = frozen;
         let sprinting = !frozen
-            && self.input.action_down(&self.binds, Action::Sprint)
-            && self.injuries.may_sprint()
-            && self.downed.is_none();
+            && self.input.action_down(&self.settings.keybinds, Action::Sprint)
+            && self.body.injuries.may_sprint()
+            && self.body.downed.is_none();
         let wish = if frozen {
             Vec3::ZERO
         } else {
-            crate::wish_direction(&self.input, &self.camera, &self.binds)
+            crate::wish_direction(&self.input, &self.camera, &self.settings.keybinds)
         };
         let jump_pressed = !frozen
             && primitive_shared::load::can_jump(carried)
-            && self.downed.is_none()
-            && (self.jump_edge || self.input.action_pressed(&self.binds, Action::Jump));
-        let jump_held = !frozen && self.input.action_down(&self.binds, Action::Jump);
+            && self.body.downed.is_none()
+            && (self.jump_edge || self.input.action_pressed(&self.settings.keybinds, Action::Jump));
+        let jump_held = !frozen && self.input.action_down(&self.settings.keybinds, Action::Jump);
         self.player.update(&self.chunks, &[], wish, self.camera.forward(), jump_pressed, jump_held, sprinting, FRAME);
         self.camera.position = self.player.eye_position();
-        if let Some(down) = self.downed.as_mut() {
+        if let Some(down) = self.body.downed.as_mut() {
             self.camera.position = self.player.position
                 + DVec3::new(0.0, f64::from(primitive_shared::downed::CRAWL_EYE), 0.0);
             down.tick(FRAME);
         }
     }
 
+    /// **One frame of the hands, through the frame's own.**
+    ///
+    /// It was a copy of the mining half and nothing else: the harness
+    /// dug at a flat `FRAME` a swing, never billed the tank, never
+    /// struck anybody, never finished a cut or a mouthful, and never
+    /// told the server this player was working. Every one of those is a
+    /// thing a player feels and a thing a scenario could not see.
     fn step_hands(&mut self) {
-        let held_tool = self.inventory.block_in(self.input.hotbar_slot);
-        let quality = self
-            .inventory
-            .slots()
-            .get(self.input.hotbar_slot)
-            .copied()
-            .flatten()
-            .map_or(primitive_shared::quality::Quality::PLAIN, |s| s.quality());
-        let aim = crate::aimed_block_to_mine(&self.chunks, &self.camera)
-            .filter(|(_, block)| primitive_shared::types::is_breakable_with(*block, held_tool));
-        let dug = self.mining.update(aim, self.input.breaking, FRAME, held_tool, quality);
-        if let Some(cell) = dug {
-            // The frame's own choice between a slice and a break.
-            let face = crate::aimed_face_to_mine(&self.chunks, &self.camera);
-            let sliced = match (aim, face) {
-                (Some((_, block)), Some(face)) => primitive_shared::dig::Side::from_normal((
-                    i32::from(face.0),
-                    i32::from(face.1),
-                    i32::from(face.2),
-                ))
-                .and_then(|side| primitive_shared::dig::next_bite(block, side))
-                .is_some(),
-                _ => false,
-            };
-            if sliced {
-                crate::request_dig(&self.chunks, cell, face.unwrap_or((0, 1, 0)), &mut self.net, &mut self.debug);
-            } else {
-                crate::request_break(&self.chunks, cell, &mut self.net, &mut self.debug);
-            }
-        }
+        crate::frame::hands::step(
+            FRAME,
+            self.now(),
+            self.world_ready,
+            // A scenario is never paused and never trimming a sail: it
+            // has no pause menu, and no scenario plays the sheets.
+            false,
+            None,
+            &self.death,
+            &self.body,
+            &self.input,
+            &self.inventory,
+            &self.player,
+            &mut self.remote,
+            &self.chunks,
+            &self.camera,
+            &self.sim,
+            &self.rod_hold,
+            &self.net,
+            &self.audio,
+            &mut self.soundscape,
+            &mut self.mining,
+            &mut self.stamina,
+            &mut self.strikes,
+            &mut self.hand,
+            &mut self.shake,
+            &mut self.dig_signal,
+            &mut self.cut,
+            &mut self.meal,
+            &mut self.meal_sent,
+            &mut self.debug,
+        );
     }
 
     /// The arms of `drain_network` a scenario reads. See the module note.
@@ -1032,18 +1098,18 @@ impl Scenario {
                     self.chest_screen.sync_with(&self.inventory);
                 }
                 ServerMessage::EquipmentState { equipment } => self.equipment = equipment.clone(),
-                ServerMessage::Injuries { injuries } => self.injuries = *injuries,
+                ServerMessage::Injuries { injuries } => self.body.injuries = *injuries,
                 ServerMessage::Health { current, max } => {
                     self.health = if *max > 0.0 { current / max } else { 0.0 };
                 }
-                ServerMessage::Downed { down } => self.downed = *down,
+                ServerMessage::Downed { down } => self.body.downed = *down,
                 ServerMessage::Died { cause } => {
-                    self.downed = None;
+                    self.body.downed = None;
                     self.dead = Some(format!("{cause:?}"));
                 }
                 ServerMessage::Respawned { x, y, z } => {
                     self.dead = None;
-                    self.downed = None;
+                    self.body.downed = None;
                     self.player.teleport(DVec3::new(*x, *y, *z));
                     crate::respawn_gate(&self.chunks, *x, *z, &mut self.world_ready);
                 }

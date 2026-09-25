@@ -90,8 +90,13 @@ pub(super) fn write(scenario: &Scenario, dir: &Path, name: &str) {
     for pixel in png.pixels_mut() {
         pixel.0[3] = 255;
     }
-    let _ = std::fs::create_dir_all(dir);
     let path = dir.join(format!("{name}.png"));
+    // The *file's* folder, not the one that was asked for: a name may
+    // carry a path of its own (`caves/wall-before`), and creating only
+    // the top folder left those two scenarios panicking on a write to a
+    // directory that was never made -- but only when shots were turned
+    // on, which is why it went unnoticed.
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or(dir));
     png.save(&path).expect("write png");
     println!("[scenario] {}", path.display());
 }

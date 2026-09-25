@@ -29,18 +29,19 @@
 //!    a whole frame before it appeared. It stays in `run`, because it is
 //!    the one step that needs the window.
 //! 2. **The socket** (`drain_network`), then the hand-offs the messages
-//!    caused: dying, a chest the server opened, a station's seat. Those
-//!    arrive as messages rather than as events, so the cursor changes
-//!    hands here and nowhere else.
-//! 3. **Streaming**, rationed ([`streaming::stream`]): chunk integration,
-//!    the map's survey, the detail levels, mesh dispatch and mesh upload
-//!    each get a slice of the frame. An unbudgeted phase is a phase that
-//!    lands forty chunks in one frame and stutters. Results are handled
-//!    nearest-the-player first, so the chunk someone just edited is never
-//!    starved.
-//! 4. **What the fingers are still doing** ([`events::poll_touch`]) --
-//!    the held half of touch, read beside the mouse delta because that is
-//!    what it is.
+//!    caused ([`screens::hand_off`]): dying, a chest the server opened, a
+//!    station's seat. Those arrive as messages rather than as events, so
+//!    the cursor changes hands there and nowhere else.
+//! 3. **Streaming**, rationed: arrived chunks and the map's survey
+//!    ([`streaming::integrate`]), then the detail levels, mesh dispatch
+//!    and mesh upload ([`streaming::mesh`]), each with a slice of the
+//!    frame. An unbudgeted phase is a phase that lands forty chunks in
+//!    one frame and stutters. Results are handled nearest-the-player
+//!    first, so the chunk someone just edited is never starved. The sky's
+//!    own tick sits between the two, which is why they are two.
+//! 4. **What the fingers are still doing** -- the held half of touch,
+//!    read beside the mouse delta because that is what it is. Still in
+//!    `run`; its events are in [`events`].
 //! 5. **The body** ([`body::step`]): the raft, the horse, the collider in
 //!    fixed slices, stamina. Prediction only; the server decides.
 //! 6. **Everything small that moves** ([`effects::step`]): particles, the
@@ -49,11 +50,19 @@
 //! 7. **The hands** ([`hands::step`]): mining, blows, the cut, the
 //!    mouthful, and the arm that follows from all of it.
 //! 8. **Sound** ([`sound::update`]), which reads the results of
-//!    everything above it.
-//! 9. **The interface** ([`interface::build`]) and the moving geometry
-//!    ([`scene::build`]), both on the rebuild clock.
+//!    everything above it -- and reads them as [`hands::Worked`] rather
+//!    than asking the keys a second time.
+//! 9. **The readout** ([`readout::gather`]), then **the interface**
+//!    ([`interface::build`]) and the moving geometry ([`scene::build`]),
+//!    the last two on the rebuild clock.
 //! 10. **The draw**, back in `run`, because it needs the frame acquired
 //!     in step 1.
+//!
+//! Outside that order: [`events`] is what the player did (a finger, a
+//! key, a wheel, a button), [`interact`] is what a right click asks of
+//! the server, and [`menu_frame`] is the two things the world frame has
+//! no version of -- the patch of world behind the menus, and the editor
+//! for the controls on the glass.
 //!
 //! ## What is still in `lib.rs`, and why
 //!
@@ -66,6 +75,7 @@ pub mod body;
 pub mod effects;
 pub mod events;
 pub mod hands;
+pub mod interact;
 pub mod interface;
 pub mod menu_frame;
 pub mod readout;
