@@ -2754,32 +2754,58 @@ fn sunlit_share(coord: vec3<f32>, view_distance: f32) -> f32 {
     let o = globals.shadow_params.w;
     var seen: f32;
     if (globals.shadow_bias.w > 0.5) {
-        // **Hard shadows read one texel and compare it themselves**
-        // (`shadow::Mode::Hard`): in or out, with nothing blended.
+        // **Hard shadows take one filtered compare** (`shadow::Mode::Hard`):
+        // the hardware's own four texels around the point, bilinearly
+        // weighted, in one lookup.
         //
-        // It was the hardware's filtered compare of the four texels round
-        // the point -- one call, and a *ramp* across two texels rather
-        // than an edge. A texel is a tenth of a block, which sounds like
-        // nothing until you look at ground ten blocks away at a grazing
-        // angle, where a tenth of a block is eighteen screen pixels: the
-        // report was "тени от листвы размытые", and measured across the
-        // edge of a crown's shadow at 13:24 the filtered read crossed from
-        // lit to shaded over 18 pixels where the voxel walk, which decides
-        // the nearest thirty blocks, crossed in 1 (`what_a_canopy_casts`).
-        // One tree therefore threw two different shadows in one frame.
+        // **It read a single texel and compared it here**, `textureLoad`
+        // and a `select`, which is in-or-out with nothing blended. That
+        // was chosen against the filter on a canopy at 13:24 -- the
+        // filtered read crossed from lit to shaded over 18 pixels where
+        // the voxel walk crossed in 1 ("тени от листвы размытые",
+        // `what_a_canopy_casts`) -- and the reason it survived was that
+        // the picture is laid out in the world's own x and z
+        // (`LightView::around`), so every edge a block has along either
+        // axis is already a straight line of whole texels.
         //
-        // A read has a staircase where a filter does not, and the grid it
-        // steps along is the thing that makes this affordable: the picture
-        // is laid out in the world's own x and z (`LightView::around`), so
-        // every edge a block has along either axis is a straight line of
-        // whole texels at any height and any hour. What is left diagonal
-        // is the upright edges of a block, and those end a shadow rather
-        // than run along it.
+        // **And the edges that are not along an axis are everything a
+        // player digs.** The report was "что с тенями": a quarry's own
+        // benches throw shadows across wide stone faces at whatever angle
+        // the hour gives, and an unfiltered compare draws those as a
+        // razor. Measured on the wall of `build_quarry` at
+        // `shadow_distance` 192 (`where_a_walls_shadow_lands`), the far
+        // edge of a five-block wall's shadow crossed from dark to lit in
+        // **0.3 of a pixel** against Soft's 10.5 -- a step of a third of
+        // the light with no pixel in between, which is not an edge the eye
+        // reads as a shadow at all. It reads as the face being broken: two
+        // triangles of different brightness with a seam down the middle.
         //
-        // It is also the cheaper read: no comparison sampler, no blend.
-        let size = vec2<f32>(textureDimensions(shadow_map, 0));
-        let texel = clamp(vec2<i32>(uv * size), vec2<i32>(0), vec2<i32>(size) - vec2<i32>(1));
-        seen = select(0.0, 1.0, depth <= textureLoad(shadow_map, texel, 0));
+        // One filtered compare crosses in about a texel, which is where
+        // this started -- but a texel is no longer what it was when the 18
+        // pixels were measured. The spread that made a crown's shadow a
+        // smudge was `SOFTNESS_TEXELS` at six tenths on *four* taps plus
+        // the High ring at 2.2 times that: a footprint some three and a
+        // half texels wide. The plain compare is one, and Soft still puts
+        // eight taps over about three. So the two steps are a third apart
+        // in edge and eight lookups to one in cost, which is the
+        // distinction the step is for.
+        //
+        // Rejected, with their numbers, in `where_a_walls_shadow_lands`
+        // and `what_the_shadow_steps_cost`:
+        //
+        // * **a bigger map at the same radius** -- 4096 is four times the
+        //   depth-pass fill and four times the memory to halve a texel,
+        //   and halving a texel halves the ramp as well, so it buys the
+        //   sharpness back and not the edge;
+        // * **snapping the map to its texel grid** -- already done
+        //   (`ShadowCache::plan`, `a_still_block_stays_on_its_texel_while_
+        //   the_camera_walks`), and it is about the edge crawling as the
+        //   player walks, not about its width;
+        // * **a bigger depth bias** -- moves the edge instead of softening
+        //   it, and the measurement says the edge is already where it
+        //   belongs: Hard and Soft put this wall's shadow in the same
+        //   place to within seven hundredths of a block.
+        seen = smoothstep(HARD_EDGE.x, HARD_EDGE.y, textureSampleCompareLevel(shadow_map, shadow_sampler, uv, depth));
     } else {
         seen = (textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(-o, -o), depth)
             + textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(o, -o), depth)
@@ -2811,6 +2837,21 @@ fn sunlit_share(coord: vec3<f32>, view_distance: f32) -> f32 {
         * smoothstep(0.0, 0.08, rim);
     return 1.0 - (1.0 - seen) * globals.shadow_params.x * edge;
 }
+
+// **How much of the filtered compare's ramp the Hard step keeps.**
+//
+// One hardware compare answers with the four texels round the point
+// bilinearly weighted, so its edge crosses over a whole texel. That is
+// what Soft is for. Squeezed to the middle half of the ramp, Hard's edge
+// crosses over about a quarter of a texel -- still a ramp, so a pixel on
+// it is never the only pixel between full light and full shade, and still
+// three or four times crisper than Soft over the same seat. Measured on
+// the wall of `build_quarry`: see `what_the_shadow_steps_cost` for the
+// table.
+//
+// Not nought and one: that is the `textureLoad` this replaced, and the
+// razor it drew is the report this const exists for.
+const HARD_EDGE: vec2<f32> = vec2<f32>(0.38, 0.62);
 
 // What the beam's floor comes down to where the shadows reach.
 //

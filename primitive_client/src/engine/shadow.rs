@@ -1938,17 +1938,28 @@ mod tests {
         assert!(leaf_caster_is_cut_out(Mode::Soft), "the Soft step lost the dapple under a tree");
     }
 
-    /// **The Hard step never blends two texels of the picture together.**
+    /// **The Hard step takes one lookup into the picture and Soft takes
+    /// eight.**
     ///
-    /// A filtered compare is a ramp across two texels, and a texel is a
-    /// tenth of a block: on ground ten blocks away at a grazing angle that
-    /// is eighteen screen pixels of gradient, against the one pixel the
-    /// voxel walk gives for the same edge. Since the walk only reaches as
-    /// far as the volume does, one crown threw a cell-sharp shadow near
-    /// the player and a soft one past it -- "тени от листвы мягкие". The
-    /// Hard step reads a texel and compares it itself; only Soft filters.
+    /// That, and not the edge, is what the step is: Hard is what a weak
+    /// machine and a phone are given, and on a device the fragment stage
+    /// is the expensive half of the solid pass. If the two branches ever
+    /// took the same number of lookups the row would have one value too
+    /// many.
+    ///
+    /// **It used to be one *unfiltered* read** -- `textureLoad` and a
+    /// `select`, in or out with nothing blended -- and that was chosen
+    /// against the filter on a canopy at 13:24, where the filtered read
+    /// crossed from lit to shaded over 18 screen pixels against the voxel
+    /// walk's 1 ("тени от листвы размытые"). What it cost is the report
+    /// "что с тенями": every shadow edge that does not run along x or z
+    /// -- which is every edge in a quarry -- came out as a razor with the
+    /// map's own staircase along it, crossing in 0.3 of a pixel. See
+    /// `renderer::shadow_tools::a_hard_shadow_has_an_edge_and_not_a_step`,
+    /// which measures both ends of that trade in pixels, and `HARD_EDGE`
+    /// in the shader for what keeps the filtered compare crisp.
     #[test]
-    fn the_hard_step_reads_one_texel_of_the_picture_and_the_soft_step_filters() {
+    fn the_hard_step_takes_one_lookup_into_the_picture_and_the_soft_step_takes_eight() {
         let source = include_str!("shader.wgsl");
         let start = source.find("fn sunlit_share(").expect("shader.wgsl has no `sunlit_share`");
         let end = source[start..].find("\n}").expect("`sunlit_share` never ends") + start;
@@ -1956,13 +1967,43 @@ mod tests {
         let hard = body.find("if (globals.shadow_bias.w > 0.5) {").expect("`sunlit_share` no longer splits on the step");
         let soft = body.find("} else {").expect("`sunlit_share` no longer has a soft branch");
         assert!(hard < soft, "the two branches swapped places");
-        let (hard_branch, soft_branch) = (&body[hard..soft], &body[soft..]);
-        assert!(
-            hard_branch.contains("textureLoad(shadow_map, texel, 0)"),
-            "the hard step no longer reads a texel: it is filtering again, which is the gradient the report was about"
+        // **The code, not the prose.** Both branches carry a comment
+        // naming what they used to do, and a test that reads those as
+        // code says the shader still does it.
+        let code = |text: &str| {
+            text.lines()
+                .map(|line| line.split("//").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("
+")
+        };
+        let (hard_branch, soft_branch) = (code(&body[hard..soft]), code(&body[soft..]));
+        let (hard_branch, soft_branch) = (hard_branch.as_str(), soft_branch.as_str());
+        let lookups = |text: &str| text.matches("textureSampleCompareLevel(").count();
+        assert_eq!(
+            lookups(hard_branch),
+            1,
+            "the Hard step takes {} lookups into the map; one is the whole of why the row \
+             has a step between Off and Soft",
+            lookups(hard_branch)
         );
-        assert!(!hard_branch.contains("textureSampleCompare"), "the hard step filters the picture");
-        assert!(soft_branch.contains("textureSampleCompareLevel"), "the soft step stopped filtering, and its edge is its point");
+        assert!(
+            !hard_branch.contains("textureLoad"),
+            "the Hard step is reading a texel unfiltered again, which is the razor of \
+             \"что с тенями\" -- see `a_hard_shadow_has_an_edge_and_not_a_step`"
+        );
+        assert!(
+            hard_branch.contains("HARD_EDGE"),
+            "the Hard step stopped squeezing the filter's ramp, and a shadow's edge there \
+             is as wide as Soft's for a third of the lookups"
+        );
+        assert_eq!(
+            lookups(soft_branch),
+            8,
+            "the Soft step takes {} lookups; its penumbra is its point and it is the \
+             expensive step by construction",
+            lookups(soft_branch)
+        );
     }
 
     #[test]
