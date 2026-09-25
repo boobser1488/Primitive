@@ -252,11 +252,23 @@ pub fn grazes(season: crate::season::Season) -> bool {
 /// How far from a haystack a kept animal eats from it, in blocks, across;
 /// [`MANGER_RISE`] up and down.
 ///
-/// **Five: a pen.** Far enough that a stack in the corner of a walled
-/// pen of ten by ten reaches every sheep in it, near enough that a stack by
-/// the house does not feed a flock loose in the meadow beyond -- where the
-/// stack stands is where the flock has to be.
-pub const MANGER_REACH: i32 = 5;
+/// **Nine: the far corner of a pen from the near one.** The sentence this
+/// number is written for is "a stack in the corner of a walled pen of ten
+/// by ten reaches every sheep in it", and for eight months it said that
+/// over a five -- while the opposite corner of a pen ten cells across is
+/// nine cells away on each axis. A player who built the pen the prose
+/// described and put the stack where the prose said found half the flock
+/// thin in the spring, and nothing in the game ever told them which half or
+/// why. Nine makes the sentence true; the reach is a box and not a circle,
+/// so nine on each axis is the diagonal as well.
+///
+/// Still near enough that a stack by the house does not feed a flock loose
+/// in the meadow beyond -- where the stack stands is still where the flock
+/// has to live. What it costs is the look: nineteen by nineteen by five is
+/// 1805 cells, three times what a five cost, which is why the look is rationed
+/// (`MANGER_LOOK_EVERY` on the server) and why `stacks_in_reach` scans the
+/// second box only when there is a second box to scan.
+pub const MANGER_REACH: i32 = 9;
 /// See [`MANGER_REACH`].
 pub const MANGER_RISE: i32 = 2;
 

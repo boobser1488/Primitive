@@ -175,6 +175,104 @@ impl Rest {
     }
 }
 
+/// **Is a sleeper's head under water?**
+///
+/// The question `survival::Vitals::breathe` is billed from and the question
+/// the client tints the screen from, asked once here so the two cannot
+/// disagree -- which they did, in the most confusing way available: the
+/// server asked about a head at [`geometry::EYE_HEIGHT`](crate::geometry::EYE_HEIGHT)
+/// over the feet, a standing head, and a player who woke in a bedroom the
+/// river had got into lay in the water without losing a breath.
+///
+/// **Three cases, and the middle one is the whole reason this is not two
+/// lines.**
+///
+/// 1. The eye lands in a cell of water: the ordinary question
+///    ([`fluid::covers_with_above`](crate::fluid::covers_with_above)), asked
+///    at the height within the cell, exactly as it is for a standing body.
+/// 2. **The eye lands in the bed.** It nearly always does: the feet are on
+///    top of the mattress and the head is a hand's breadth above them, which
+///    is still inside the bed's own cell -- and a cell holding a bed is a
+///    cell no water can ever be written into. Asked there, a sleeper could
+///    not drown in a lake. So the water is looked for in the four cells the
+///    bed's open half opens onto, at the same height. A bed is furniture
+///    standing in a room, not a watertight box: if the room's water is at
+///    the height of the pillow and against the bed, it is over the face.
+/// 3. **The eye lands inside something solid.** A lone bed half with its
+///    pillow shoved against a wall, and the reach along the bed puts the eye
+///    in the stone. Nothing can be asked of a wall, so the reach is dropped
+///    and the question is asked straight over the feet -- the eye is never
+///    left inside a block it could not see out of.
+///
+/// Rejected: **the deepest water within a block of the bed, always.** That
+/// is case 2 without the bed, and it drowns a player asleep on a dry ledge
+/// with a waterfall past it.
+pub fn sleeper_head_under_water(
+    feet: (f32, f32, f32),
+    head_yaw: f32,
+    block: impl Fn(i32, i32, i32) -> Option<crate::types::BlockId>,
+) -> bool {
+    let eye = crate::geometry::lying_eye(feet, head_yaw);
+    // Case 3, decided before anything is asked about water.
+    let eye = if head_in_the_solid(eye, &block) {
+        (feet.0, feet.1 + crate::geometry::LYING_EYE, feet.2)
+    } else {
+        eye
+    };
+    let (cell, height) = eye_cell(eye);
+    let Some(here) = block(cell.0, cell.1, cell.2) else {
+        // Over a chunk the server has not loaded: the old answer, and the
+        // only one that cannot drown somebody in unbuilt air.
+        return false;
+    };
+    if water_covers(cell, height, &block) {
+        return true;
+    }
+    // Case 2.
+    Rest::of(here).is_some()
+        && [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .iter()
+            .any(|&(dx, dz)| water_covers((cell.0 + dx, cell.1, cell.2 + dz), height, &block))
+}
+
+/// The cell a point is in, and how high up that cell it sits.
+#[inline]
+fn eye_cell(eye: (f32, f32, f32)) -> ((i32, i32, i32), f32) {
+    (
+        (eye.0.floor() as i32, eye.1.floor() as i32, eye.2.floor() as i32),
+        eye.1 - eye.1.floor(),
+    )
+}
+
+/// Water over `height` in this cell, with the cell above it in hand -- the
+/// top twelve per cent of a full cell is water and does not look like it
+/// (`fluid::SURFACE_DROP`), and asking without the neighbour above is how a
+/// player on the sea floor was handed their breath back every tick.
+fn water_covers(
+    cell: (i32, i32, i32),
+    height: f32,
+    block: &impl Fn(i32, i32, i32) -> Option<crate::types::BlockId>,
+) -> bool {
+    let Some(here) = block(cell.0, cell.1, cell.2) else {
+        return false;
+    };
+    let above = block(cell.0, cell.1 + 1, cell.2).unwrap_or(crate::types::BLOCK_AIR);
+    crate::fluid::covers_with_above(here, above, height)
+}
+
+/// Is this point inside something a head cannot be inside -- a wall, a
+/// shelf, the underside of a stair? A bed is not: the head lies in the open
+/// half of its cell, which is the whole of case 2 above.
+fn head_in_the_solid(
+    eye: (f32, f32, f32),
+    block: &impl Fn(i32, i32, i32) -> Option<crate::types::BlockId>,
+) -> bool {
+    let (cell, height) = eye_cell(eye);
+    block(cell.0, cell.1, cell.2).is_some_and(|here| {
+        !crate::types::is_liquid(here) && crate::types::collision_height(here) > height
+    })
+}
+
 /// How fast tiredness goes while sitting on something made for it.
 ///
 /// **Sitting is not sleeping**, and this number is the whole of the
@@ -1449,5 +1547,124 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- the sleeper's head ----
+
+    /// A room with a bed in it, and whatever the caller floods it with.
+    ///
+    /// The bed lies along x: its foot at (0, 10, 0) and its head at
+    /// (1, 10, 0), on a stone floor at y 9, which is what `lying_place`
+    /// puts a body across. The sleeper's feet go at the seam between the
+    /// two, which is why the eye is in the head's cell and not the foot's.
+    fn bedroom(water: &[(i32, i32, i32)]) -> impl Fn(i32, i32, i32) -> Option<crate::types::BlockId> {
+        let water: Vec<_> = water.to_vec();
+        move |x, y, z| {
+            if water.contains(&(x, y, z)) {
+                return Some(crate::types::BLOCK_WATER);
+            }
+            Some(match (x, y, z) {
+                (_, 9, _) => crate::types::BLOCK_STONE,
+                (0 | 1, 10, 0) => crate::types::BLOCK_BED,
+                _ => crate::types::BLOCK_AIR,
+            })
+        }
+    }
+
+    /// Where the server lays a body on that bed: the middle of the two
+    /// cells, on top of the mattress.
+    fn on_the_bed() -> (f32, f32, f32) {
+        (1.0, 10.0 + crate::types::collision_height(crate::types::BLOCK_BED), 0.5)
+    }
+
+    /// The yaw that points from the middle of the body toward the head at
+    /// (1, 10, 0): along +x.
+    const HEAD_ALONG_X: f32 = 0.0;
+
+    #[test]
+    fn a_sleeper_in_a_flooded_bedroom_has_their_head_under_the_water_a_standing_one_would_be_dry_in() {
+        // One cell of water, standing on the floor all round the bed. A
+        // standing head at `EYE_HEIGHT` is a block and a third above it and
+        // finds nothing but air -- which is exactly what the server used to
+        // ask, and why this room drowned nobody.
+        let flooded = bedroom(&[(1, 10, 1), (1, 10, -1), (2, 10, 0), (0, 10, 1)]);
+        assert!(
+            sleeper_head_under_water(on_the_bed(), HEAD_ALONG_X, &flooded),
+            "a sleeper lying in a flooded room was breathing",
+        );
+        let eye = crate::geometry::lying_eye(on_the_bed(), HEAD_ALONG_X);
+        assert_eq!(
+            (eye.0.floor() as i32, eye.1.floor() as i32, eye.2.floor() as i32),
+            (1, 10, 0),
+            "the eye left the bed's head cell; the rest of this test is about somewhere else",
+        );
+        let standing = on_the_bed().1 + crate::geometry::EYE_HEIGHT;
+        assert!(
+            flooded(1, standing.floor() as i32, 0) != Some(crate::types::BLOCK_WATER),
+            "the room was flooded past a standing head, so this proves nothing",
+        );
+    }
+
+    #[test]
+    fn a_dry_bedroom_and_a_pool_across_the_floor_leave_a_sleeper_breathing() {
+        // Nothing at all...
+        assert!(
+            !sleeper_head_under_water(on_the_bed(), HEAD_ALONG_X, bedroom(&[])),
+            "a sleeper drowned in a dry room",
+        );
+        // ...and water that is in the room but not against the bed. The
+        // four cells the bed's open half opens onto are the whole of what
+        // is asked, so a pool two strides away is a pool.
+        let across_the_room = bedroom(&[(4, 10, 0), (4, 10, 1), (5, 10, 0)]);
+        assert!(
+            !sleeper_head_under_water(on_the_bed(), HEAD_ALONG_X, &across_the_room),
+            "a puddle across the room drowned a sleeper in a dry bed",
+        );
+    }
+
+    #[test]
+    fn a_pillow_against_a_wall_is_asked_about_the_water_and_not_about_the_wall() {
+        // The bed's head cell is stone: a lone bed half with its pillow
+        // shoved against the wall, where the reach along the bed puts the
+        // eye inside the stone. The reach is dropped and the question is
+        // asked over the feet -- which is a cell of the room, and the room
+        // is under water.
+        let walled = |x: i32, y: i32, z: i32| -> Option<crate::types::BlockId> {
+            Some(match (x, y, z) {
+                (_, 9, _) => crate::types::BLOCK_STONE,
+                (1, 10, 0) => crate::types::BLOCK_STONE,
+                (0, 10, 0) => crate::types::BLOCK_BED,
+                (_, 10, _) => crate::types::BLOCK_WATER,
+                _ => crate::types::BLOCK_AIR,
+            })
+        };
+        // The feet on the lone half, which is where `lying_place` puts them.
+        let feet = (0.5, 10.0 + crate::types::collision_height(crate::types::BLOCK_BED), 0.5);
+        assert!(
+            sleeper_head_under_water(feet, HEAD_ALONG_X, walled),
+            "the wall the pillow is against was asked whether it was wet",
+        );
+        // ...and a dry room with the same wall still leaves them breathing.
+        let dry = |x: i32, y: i32, z: i32| -> Option<crate::types::BlockId> {
+            Some(match (x, y, z) {
+                (_, 9, _) => crate::types::BLOCK_STONE,
+                (1, 10, 0) => crate::types::BLOCK_STONE,
+                (0, 10, 0) => crate::types::BLOCK_BED,
+                _ => crate::types::BLOCK_AIR,
+            })
+        };
+        assert!(!sleeper_head_under_water(feet, HEAD_ALONG_X, dry), "a dry walled bed drowned its sleeper");
+    }
+
+    #[test]
+    fn a_sleepers_eye_is_at_the_pillow_and_a_standing_ones_is_not() {
+        // The two numbers this all turns on, stated once: the eye is a hand
+        // above the mattress and most of a half-body along the bed. A rule
+        // that lowered the eye and forgot the reach would answer about the
+        // sleeper's navel.
+        let eye = crate::geometry::lying_eye((10.0, 4.0, 10.0), std::f32::consts::FRAC_PI_2);
+        assert!((eye.1 - (4.0 + crate::geometry::LYING_EYE)).abs() < 1e-5, "{eye:?}");
+        assert!((eye.2 - (10.0 + crate::geometry::LYING_HEAD_REACH)).abs() < 1e-5, "the head did not reach along the bed: {eye:?}");
+        assert!((eye.0 - 10.0).abs() < 1e-5, "the head reached across the bed: {eye:?}");
     }
 }

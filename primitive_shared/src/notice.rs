@@ -256,6 +256,22 @@ pub enum Notice {
     /// and the pack is at the edge of a lunge. Said at once, because it is
     /// the only warning there is.
     WokenByWolves,
+    // ---- appended: the body, which is not a blow ----
+    //
+    // **The bed used to answer all of these with `HurtCannotSleep`.** Hunger,
+    // thirst, the cold, the heat, bad water and a bad mushroom all went down
+    // the same path a wolf's teeth did (`survival::Harm`), so a player who
+    // crawled in out of a blizzard was told something was still hitting them
+    // and went looking for the animal. Two of the six needed words of their
+    // own; the rest either had them already (`TooHungryToSleep`,
+    // `TooThirstyToSleep`) or are no longer a reason to keep anybody up.
+    /// **Too cold to sleep**: past `body::FREEZING`, where the cold is
+    /// taking health. Said instead of letting the player lie down and be
+    /// billed for the night in one step, which is the rule
+    /// `TooHungryToSleep` was written for.
+    TooColdToSleep,
+    /// The other end: past `body::SCALDING`.
+    TooHotToSleep,
 }
 
 impl Notice {
@@ -414,6 +430,8 @@ impl Notice {
         Notice::SoilDry,
         Notice::PlayerDied,
         Notice::WokenByWolves,
+        Notice::TooColdToSleep,
+        Notice::TooHotToSleep,
     ];
 
     /// Whether this is news rather than a refusal: said the same way, but
@@ -537,7 +555,7 @@ mod tests {
         // append one** -- that is the whole check, and a notice appended
         // to the enum and forgotten in `ALL` is a notice the client is
         // never asked to have words for.
-        assert_eq!(Notice::ALL.len(), Notice::WokenByWolves as usize + 1);
+        assert_eq!(Notice::ALL.len(), Notice::TooHotToSleep as usize + 1);
         for (i, notice) in Notice::ALL.iter().enumerate() {
             assert_eq!(*notice as usize, i, "{notice:?} is out of place in `ALL`");
         }

@@ -6025,7 +6025,25 @@ fn run(
                     // waist-deep in a lake shouldn't tint the screen.
                     // Physics already samples this, so there's one
                     // definition of "under water" rather than two.
-                    let underwater = player.submerged;
+                    //
+                    // **Except lying down**, where the head is not over the
+                    // feet at all and `submersion` -- which is measured to
+                    // a standing crown -- says "dry" for a bedroom the
+                    // water is standing in over the pillow. The same rule
+                    // the server bills the breath from
+                    // (`body::sleeper_head_under_water`), so the tint and
+                    // the drowning arrive together instead of the tint
+                    // arriving alone.
+                    let underwater = match resting {
+                        logic::posture::Resting::Lying { head_yaw } => {
+                            primitive_shared::body::sleeper_head_under_water(
+                                player.position.as_vec3().into(),
+                                head_yaw,
+                                |x, y, z| chunks.block_at(x, y, z),
+                            )
+                        }
+                        _ => player.submerged,
+                    };
 
                     // Asked of the eye and not of the feet, because
                     // this is a fact about what the *view* runs into: a

@@ -442,3 +442,448 @@ impl WorldGen {
         f64::from(super::hash2(0, 0, self.seed.wrapping_add(0xD2A1)) % 6_283) / 1_000.0
     }
 }
+
+// ---------------------------------------------------------------------
+// What the ground tells a newcomer
+// ---------------------------------------------------------------------
+//
+// **The first hour used to be led by a tab and a line of text.** A new
+// player opened the journal, read that flint is found by water, and walked
+// until the prompt went away. Everything below is the same hour led by the
+// country instead: the shingle at a river's edge, the paths something has
+// worn to the pond, the talus round a cave mouth, the stain of copper on a
+// hillside. None of it says anything. It is all things to notice, and every
+// one of them is a reason to walk somewhere.
+//
+// **Landforms only**, every one of them, because an old world's chunks are
+// held to the block by
+// `an_old_worlds_new_chunks_are_the_old_generators_to_the_block`.
+//
+// Rejected: **markers.** A cairn at a cave mouth, a post on a trail, a pile
+// of ore at an outcrop -- all of them read as somebody else's world rather
+// than as the world, and all of them are the text tab again with a mesh
+// instead of a sentence. What a player learns from a bank of gravel is that
+// gravel means water; what they learn from a signpost is to look for
+// signposts.
+
+/// How far from the waterline the shingle reaches, in columns, and how far
+/// above it.
+///
+/// **Three columns wide and two high.** Two was a hem nobody saw from a
+/// hill; four crept up the bank into the grass and stopped reading as a
+/// waterline at all. Three is about what a river leaves when it drops a
+/// foot in the summer, and from a rise it draws the course of the water as
+/// a pale line through the green -- which is the point: a player on high
+/// ground should see where the water is before they can see the water.
+const SHINGLE_REACH: i32 = 3;
+const SHINGLE_RISE: i32 = 2;
+
+/// One loose thing in every this many columns of the strip, and one in this
+/// many of those is flint.
+///
+/// Against `PEBBLE_SPACING`'s twenty-six on ordinary ground: nine times as
+/// thick, which is the difference that makes the band a band. Two thirds of
+/// what lies there is the rock's own gravel and pebble and the other third
+/// is flint, so a hundred blocks of shore is about a dozen nodules -- a
+/// morning's knapping, and no tab had to say so.
+const SHINGLE_SPACING: u32 = 3;
+const SHINGLE_FLINT_SHARE: u32 = 3;
+
+/// How far a game trail runs back from the water, in blocks, and how wide
+/// it is either side of its line.
+///
+/// **Twenty-six and one.** The trail has to be long enough that a player
+/// standing on it is not already at the pond -- otherwise it is a halo, not
+/// a path -- and short enough that it reads as *converging* rather than as
+/// a road going somewhere. A metre either side of the line is two columns
+/// of bare ground: a path a person walks down without thinking about it,
+/// and one something walked because it is easier than the grass.
+const TRAIL_REACH: f64 = 26.0;
+const TRAIL_HALF_WIDTH: f64 = 1.0;
+
+/// How far a trail wanders off its bearing, in radians, and how quickly.
+///
+/// **Straight lines were tried first and they are unmistakably drawn.** A
+/// path that runs dead straight for twenty-six blocks is a path somebody
+/// laid; a quarter of a radian of weave over the same distance is a path
+/// something walked. The weave is a function of the distance from the water
+/// and of nothing else, so every column of one path agrees about where the
+/// path is -- a wander that read the column's own position would be a
+/// dotted line.
+const TRAIL_WANDER: f64 = 0.24;
+const TRAIL_WEAVE: f64 = 0.055;
+
+/// How many paths come in to one watering place: three, and up to three
+/// more.
+///
+/// Fewer than three and it is not a convergence; more than six and the
+/// ground round a pond is more path than meadow, which is a lawn.
+const TRAIL_PATHS: (u32, u32) = (3, 4);
+
+/// How far the talus spreads from a hole in the ground, in columns.
+const SCREE_REACH: i32 = 2;
+
+/// One lump of the rock's own cobble in this many columns of the talus, and
+/// one pebble in this many of what is left.
+const SCREE_LUMP_SPACING: u32 = 3;
+const SCREE_PEBBLE_SPACING: u32 = 2;
+
+// Rejected: **scraping the turf off the ring round the hole.**
+//
+// It was written, it looked exactly right, and it broke four invariants that
+// have nothing to do with caves: the flowers the ground cover had already
+// grown were left standing on cobble, a longhouse's floor stopped being the
+// floor its site had planned, the savanna's dry grass was found on stone,
+// and `lay_lips` -- which reads the surface to decide what to cut -- dropped
+// the ground out from under a feature. What a decoration pass may do is put
+// things *on* the ground; what the ground *is* belongs to
+// `build_column_tile`, and a pass that runs after the plants have been grown
+// cannot change what they are standing on.
+//
+// So the colour comes from the talus itself: gravel and pebble of the
+// country's own rock, thick at the lip and thinning out, which against turf
+// is the pale patch the ask was asking for and costs nothing else.
+
+/// One outcrop candidate in this many columns, before the ground is asked.
+///
+/// **Rare on purpose, and the rarity is the mechanic.** An outcrop is not
+/// where a player gets their copper -- a handful of blocks is not a
+/// smelting -- it is where they learn that *this* hill has copper in it,
+/// and the decision it creates is whether to come back with a pick or keep
+/// walking. Common outcrops would make the hills a shop; one to a few
+/// hundred blocks of high ground makes them a map.
+const OUTCROP_SPACING: u32 = 700;
+
+/// What an outcrop needs: a face rather than a meadow, well above the
+/// water, and high enough that the rock under it is carrying copper
+/// (`WorldGen::copper_country`, which is a ramp on altitude -- so "the
+/// copper is over the hill" is true of the ground and not only of the ore
+/// table).
+const OUTCROP_SLOPE: f32 = 0.85;
+const OUTCROP_ABOVE_WATER: i32 = 12;
+const OUTCROP_COUNTRY: f64 = 0.3;
+
+/// How deep an outcrop goes: a lens, not a pebble. Three cells down and a
+/// ragged four-neighbour spread, so it is a patch a player sees from across
+/// a valley rather than a block they walk past.
+const OUTCROP_DEPTH: i32 = 3;
+
+/// A watering place, and the paths that come in to it.
+///
+/// **A lake and not a river**, and that is a decision rather than an
+/// oversight: a trail is a line something walks to get to water, and a
+/// river is already a line -- animals meet it wherever they happen to be
+/// standing, so there is nothing for paths to converge *on*. A pond is a
+/// point, and a point is what makes a convergence read as one.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Watering {
+    centre_x: i32,
+    centre_z: i32,
+    /// Where the water ends, roughly: the lake's own radius. The trails
+    /// begin outside it, because inside it is the lake.
+    shore: i32,
+    /// This place's own number, off its centre: how many paths and where
+    /// they come in from.
+    salt: u32,
+}
+
+impl Watering {
+    /// Where the water is and how far it reaches. For the tests, which have
+    /// to be able to say "and the paths reach *this*".
+    #[cfg(test)]
+    pub(super) fn centre_x(&self) -> i32 {
+        self.centre_x
+    }
+    #[cfg(test)]
+    pub(super) fn centre_z(&self) -> i32 {
+        self.centre_z
+    }
+    #[cfg(test)]
+    pub(super) fn shore(&self) -> i32 {
+        self.shore
+    }
+
+    /// Is this column worn bare by whatever walks to the water?
+    pub(super) fn on_a_trail(&self, gx: i32, gz: i32) -> bool {
+        let (dx, dz) = (f64::from(gx - self.centre_x), f64::from(gz - self.centre_z));
+        let far = dx.hypot(dz);
+        let shore = f64::from(self.shore);
+        if far <= shore || far > shore + TRAIL_REACH {
+            return false;
+        }
+        let bearing = dz.atan2(dx);
+        let paths = TRAIL_PATHS.0 + self.salt % TRAIL_PATHS.1;
+        (0..paths).any(|path| {
+            let spoke = f64::from(
+                super::hash2(self.centre_x, self.centre_z, self.salt ^ (path.wrapping_mul(0x9E37) | 1)) % 6_283,
+            ) / 1_000.0;
+            let aim = spoke + TRAIL_WANDER * (far * TRAIL_WEAVE + f64::from(path)).sin();
+            let turn = bearing - aim;
+            // On the near side of the water only. Without this the same
+            // line is a path coming in from both directions at once, which
+            // is a road through the pond.
+            turn.cos() > 0.0 && (turn.sin() * far).abs() <= TRAIL_HALF_WIDTH
+        })
+    }
+}
+
+impl WorldGen {
+    /// The watering places whose trails could cross a chunk, worked out
+    /// once for the chunk.
+    ///
+    /// **Once, and not once a column**, because a lake's site is judged off
+    /// forty columns of terrain and asking for it two hundred and fifty-six
+    /// times a chunk would put the cost of the trails on every column in
+    /// the world. The cells are walked the way `wide_lake_within` walks
+    /// them.
+    pub(super) fn waterings_near(&self, origin_x: i32, origin_z: i32) -> Vec<Watering> {
+        if self.scale != Scale::Landforms {
+            return Vec::new();
+        }
+        let reach = TRAIL_REACH.ceil() as i32;
+        let (from_x, to_x) = (origin_x - reach, origin_x + super::CHUNK_SIZE_X as i32 + reach);
+        let (from_z, to_z) = (origin_z - reach, origin_z + super::CHUNK_SIZE_Z as i32 + reach);
+        let cell = self.pond_cell();
+        let mut found = Vec::new();
+        for cell_z in from_z.div_euclid(cell)..=to_z.div_euclid(cell) {
+            for cell_x in from_x.div_euclid(cell)..=to_x.div_euclid(cell) {
+                if let Some(lake) = self.lake_site(cell_x, cell_z) {
+                    found.push(Watering {
+                        centre_x: lake.centre_x,
+                        centre_z: lake.centre_z,
+                        shore: lake.radius,
+                        salt: super::hash2(lake.centre_x, lake.centre_z, self.seed.wrapping_add(0x7BA1)),
+                    });
+                }
+            }
+        }
+        found
+    }
+
+    /// What lies loose on the shingle at this column, if anything.
+    ///
+    /// **Fresh water only.** The sea has a beach of its own and the ask was
+    /// the rivers and the lakes: a shingle bank means "there is water here
+    /// you can drink and there is flint in it", and a salt shore means
+    /// neither. A flooded column whose water stands off the sea's level is
+    /// a lake or a pool; a `Biome::River` column is the channel itself --
+    /// the biome is never the bank, which is the trap `on_a_riverbank` is
+    /// written round.
+    ///
+    /// The die is rolled before the strip is looked for, on the rule the
+    /// rusty stones are written to: the look is forty-nine cache reads and
+    /// the die is one hash, so an ordinary column pays one hash.
+    pub(super) fn shingle_at(
+        &self,
+        columns: &super::ColumnCache,
+        local: (i32, i32),
+        world: (i32, i32),
+        height: i32,
+        rock: crate::types::BlockId,
+    ) -> Option<crate::types::BlockId> {
+        let ((lx, lz), (gx, gz)) = (local, world);
+        if self.scale != Scale::Landforms
+            || !super::hash2(gx, gz, self.seed.wrapping_add(0x5417)).is_multiple_of(SHINGLE_SPACING)
+        {
+            return None;
+        }
+        let fresh = (-SHINGLE_REACH..=SHINGLE_REACH).any(|dz| {
+            (-SHINGLE_REACH..=SHINGLE_REACH).any(|dx| {
+                let near = columns.at(lx + dx, lz + dz);
+                near.height < near.water
+                    && (near.water != super::SEA_LEVEL || near.biome == super::Biome::River)
+                    && height <= near.water + SHINGLE_RISE
+            })
+        });
+        if !fresh {
+            return None;
+        }
+        // A third of it flint, and the rest the country's own stone, so the
+        // band is the colour of the rock it was worn off and the flint is a
+        // find in it rather than a carpet.
+        if super::hash2(gz, gx, self.seed.wrapping_add(0xF117)).is_multiple_of(SHINGLE_FLINT_SHARE) {
+            Some(crate::types::BLOCK_FLINT)
+        } else if super::hash2(gx, gz, self.seed.wrapping_add(0x6BA7)).is_multiple_of(2) {
+            Some(crate::ground::rubble_of(rock, crate::ground::Form::Gravel))
+        } else {
+            Some(crate::ground::rubble_of(rock, crate::ground::Form::Pebble))
+        }
+    }
+
+    /// **The talus round a hole in the ground.**
+    ///
+    /// A cave that opens on a hillside is not a doorway in a lawn: the turf
+    /// goes for a couple of columns round the lip, the rock under it shows,
+    /// and what has fallen out of the roof lies in a fan below. Before
+    /// this, a cave mouth in open country was a black rectangle in
+    /// unbroken grass, and a player walked past a dozen of them for every
+    /// one they noticed.
+    ///
+    /// **Run after `place_ground_cover`**, because the talus beats the
+    /// tuft: ground cover writes one thing into the cell over the ground
+    /// and stops, so a mouth surrounded by grass would stay surrounded by
+    /// grass if this ran first.
+    ///
+    /// The holes are found once, for the chunk and one column of margin,
+    /// and then read as a grid. Asked per column instead it is four
+    /// `is_cave` samples a column -- eight Perlin lookups -- for the whole
+    /// world, to find the handful of columns that are near a hole.
+    pub(super) fn place_cave_mouths(
+        &self,
+        blocks: &mut [crate::types::BlockId],
+        origin_x: i32,
+        origin_z: i32,
+        columns: &super::ColumnCache,
+    ) {
+        if self.scale != Scale::Landforms {
+            return;
+        }
+        let span = super::CHUNK_SIZE_X as i32 + 2 * SCREE_REACH;
+        let mut holed = vec![false; (span * span) as usize];
+        for lz in -SCREE_REACH..(super::CHUNK_SIZE_Z as i32 + SCREE_REACH) {
+            for lx in -SCREE_REACH..(super::CHUNK_SIZE_X as i32 + SCREE_REACH) {
+                let column = columns.at(lx, lz);
+                // The carver ate this column's top: the surface cell is a
+                // hole. The same question `place_boulders` asks so that a
+                // boulder is never left hanging over one.
+                holed[((lz + SCREE_REACH) * span + lx + SCREE_REACH) as usize] =
+                    column.height >= column.water && self.is_cave(origin_x + lx, column.height, origin_z + lz);
+            }
+        }
+        let holed_at = |lx: i32, lz: i32| holed[((lz + SCREE_REACH) * span + lx + SCREE_REACH) as usize];
+        for lz in 0..super::CHUNK_SIZE_Z as i32 {
+            for lx in 0..super::CHUNK_SIZE_X as i32 {
+                if holed_at(lx, lz) {
+                    continue;
+                }
+                let super::Column { height, water, rock, .. } = columns.at(lx, lz);
+                if height < water || height + 1 >= super::CHUNK_SIZE_Y as i32 {
+                    continue;
+                }
+                // How near the nearest hole is, in columns, which is what
+                // decides whether the turf goes or only the stones fall.
+                let near = (-SCREE_REACH..=SCREE_REACH)
+                    .flat_map(|dz| (-SCREE_REACH..=SCREE_REACH).map(move |dx| (dx, dz)))
+                    .filter(|&(dx, dz)| holed_at(lx + dx, lz + dz))
+                    .map(|(dx, dz)| dx.abs().max(dz.abs()))
+                    .min();
+                let Some(near) = near else {
+                    continue;
+                };
+                let (gx, gz) = (origin_x + lx, origin_z + lz);
+                let air = super::Chunk::index(lx as usize, (height + 1) as usize, lz as usize);
+                // **Into air, and into nothing else.** It overwrote
+                // anything that was not solid, which reads as "the talus
+                // beats a tuft of grass" and is in fact "the talus beats
+                // the lower half of a tall plant, the flint flakes of a
+                // knapping floor, and the fallen leaves of a wood" -- one
+                // orphaned plant top and two broken finds, all found by
+                // tests that have nothing to do with caves. A decoration
+                // pass that runs last takes the cells nothing else wanted;
+                // the ground cover leaves most of them, and a talus of two
+                // columns in three of what is bare is still a talus.
+                if blocks[air] != crate::types::BLOCK_AIR {
+                    continue;
+                }
+                // **Gravel and not cobble.** A cobble block standing on the
+                // ground is a *boulder* everywhere else in this generator,
+                // and `a_boulder_lies_on_a_bank_or_under_a_cliff_and_never_in_a_meadow`
+                // reads them by block id -- talus of cobble is a hillside
+                // full of boulders nothing can explain. Gravel of the same
+                // rock is the same colour and is what falls out of a roof
+                // anyway.
+                let stones = super::hash2(gz, gx, self.seed.wrapping_add(0x5C2F));
+                let thick = if near <= 1 { SCREE_LUMP_SPACING } else { SCREE_LUMP_SPACING * 2 };
+                if stones.is_multiple_of(thick) {
+                    blocks[air] = crate::ground::rubble_of(rock, crate::ground::Form::Gravel);
+                } else if near <= 1 || stones.is_multiple_of(SCREE_PEBBLE_SPACING) {
+                    blocks[air] = crate::ground::rubble_of(rock, crate::ground::Form::Pebble);
+                }
+            }
+        }
+    }
+
+    /// **Copper showing through a hillside.**
+    ///
+    /// "Медь за холмом" was true of the ore table and invisible from the
+    /// ground: copper lies above `copper_country`'s line, which is an
+    /// altitude, so the hills were where to dig -- and nothing on a hill
+    /// said so. A player found their first copper by digging somewhere and
+    /// being right, which is not a decision, it is a lottery.
+    ///
+    /// An outcrop is a lens of the ore itself set into a steep face, three
+    /// cells deep and a ragged patch across, in country the ore table
+    /// already agrees has copper in it. It is not a supply -- a handful of
+    /// blocks is not a smelting -- it is a *sighting*, and the decision it
+    /// makes is whether this hill is worth coming back to.
+    ///
+    /// Rejected: **a nugget on the surface.** There is one already
+    /// (`BLOCK_NATIVE_COPPER`, in the same country), and it is a thing you
+    /// find by walking over it. An outcrop has to be a thing you see from
+    /// the other side of a valley, and one loose block is not.
+    ///
+    /// Runs after `place_ground_cover` for the reason `place_cave_mouths`
+    /// does, and the die is rolled before anything is read.
+    pub(super) fn place_outcrops(
+        &self,
+        blocks: &mut [crate::types::BlockId],
+        origin_x: i32,
+        origin_z: i32,
+        columns: &super::ColumnCache,
+    ) {
+        if self.scale != Scale::Landforms {
+            return;
+        }
+        for lz in 0..super::CHUNK_SIZE_Z as i32 {
+            for lx in 0..super::CHUNK_SIZE_X as i32 {
+                let (gx, gz) = (origin_x + lx, origin_z + lz);
+                if !super::hash2(gx, gz, self.seed.wrapping_add(0x0C09)).is_multiple_of(OUTCROP_SPACING) {
+                    continue;
+                }
+                let column = columns.at(lx, lz);
+                if column.height < column.water + OUTCROP_ABOVE_WATER
+                    || column.slope < OUTCROP_SLOPE
+                    || Self::copper_country(column.height) < OUTCROP_COUNTRY
+                {
+                    continue;
+                }
+                // The candidate column and whichever of its four
+                // neighbours the second die takes: a patch of one to five
+                // columns, which is a stain on a slope rather than a square.
+                for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let (nx, nz) = (lx + dx, lz + dz);
+                    if !(0..super::CHUNK_SIZE_X as i32).contains(&nx)
+                        || !(0..super::CHUNK_SIZE_Z as i32).contains(&nz)
+                    {
+                        continue;
+                    }
+                    if (dx, dz) != (0, 0)
+                        && !super::hash2(origin_x + nx, origin_z + nz, self.seed.wrapping_add(0x0C0A)).is_multiple_of(2)
+                    {
+                        continue;
+                    }
+                    let near = columns.at(nx, nz);
+                    if near.height < near.water || self.is_cave(origin_x + nx, near.height, origin_z + nz) {
+                        continue;
+                    }
+                    for step in 0..OUTCROP_DEPTH {
+                        let y = near.height - step;
+                        if y <= 1 {
+                            break;
+                        }
+                        let index = super::Chunk::index(nx as usize, y as usize, nz as usize);
+                        // Only into ground that is there: a lens written
+                        // into a cave the carver opened under the face
+                        // would be ore floating in a black room.
+                        if blocks[index] == crate::types::BLOCK_AIR
+                            || crate::types::is_liquid(blocks[index])
+                        {
+                            break;
+                        }
+                        blocks[index] = crate::types::BLOCK_COPPER_ORE;
+                    }
+                }
+            }
+        }
+    }
+}

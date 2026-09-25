@@ -5536,7 +5536,7 @@ impl Animals {
                 && keep.tame
                 && husbandry::eats_hay(animal.species)
                 && keep.hunger + days >= husbandry::STACK_AFTER_DAYS;
-            let stacks = if wants_hay { stacks_in_reach(world, animal.position, &taken) } else { Vec::new() };
+            let stacks = if wants_hay { stacks_in_reach(world, animal.position, keep.home, &taken) } else { Vec::new() };
             let mut hay = stacks.iter().map(|&(_, left)| left).sum();
             let (dung, eaten) = keep.winter_through(animal.species, days, from_day, grazing, &mut hay);
             take_bites(&stacks, eaten, &mut taken, &mut self.hay_eaten);
@@ -5606,8 +5606,12 @@ impl Animals {
                     // pen's would have (`Keeping::winter_through`): a flock
                     // left for the winter with hay beside it is a flock that
                     // was fed, and the stack is lower by what it ate.
+                    //
+                    // **And from the pen's stack, not only from the one it
+                    // happened to freeze beside**: see `stacks_in_reach`.
+                    // This is the call the two boxes were written for.
                     let stacks = if keep.tame && husbandry::eats_hay(animal.species) {
-                        stacks_in_reach(world, animal.position, &parked_bites)
+                        stacks_in_reach(world, animal.position, keep.home, &parked_bites)
                     } else {
                         Vec::new()
                     };
@@ -8347,36 +8351,76 @@ fn spawn_ground(species: Species, under: primitive_shared::types::BlockId) -> bo
 /// How many of `keep_the_kept`'s calls pass between two looks for a stack by
 /// an animal that wants one: forty ticks, two seconds.
 ///
-/// **Not every tick**, because the look is six hundred cells (`MANGER_REACH`
-/// round and `MANGER_RISE` up and down) and an animal with no stack in reach
+/// **Not every tick**, because the look is eighteen hundred cells
+/// (`MANGER_REACH` round and `MANGER_RISE` up and down, and twice that for an
+/// animal standing away from its home) and an animal with no stack in reach
 /// wants one every tick from the moment it passes `STACK_AFTER_DAYS` until
 /// somebody feeds it. Two seconds late to a stack is nothing to an animal
 /// that has half a day before it is hungry.
 const MANGER_LOOK_EVERY: u32 = 40;
 
-/// The haystacks within reach of an animal's feet, nearest first, with the
+/// The haystacks a kept animal can eat from, nearest its feet first, with the
 /// hay each still holds once `taken` (bites already promised this step) is
 /// counted off.
+///
+/// **Two boxes: where it is standing, and where it lives.** The feet alone
+/// were the whole rule, and that made a week away turn on which cell a sheep
+/// happened to be standing in when the server stopped watching it: `unpark`
+/// feeds the absence from `stacks_in_reach` too, so a flock parked by the
+/// gate of a long pen came back thin while the flock parked by the stack came
+/// back fat, out of the same pen, on the same hay, for no reason a player
+/// could see or plan against. Where an animal froze is not a decision anybody
+/// made; where its home is (`Keeping::home` -- the place it was last fed while
+/// tame) is the one the player made when they built the pen.
+///
+/// Rejected: **home only.** Then a tame sheep walked out to a stack in a field
+/// and standing on top of it would starve beside it, which is the opposite
+/// bug and a worse one, because the player can see that stack.
+///
+/// The home box is skipped when the home is the feet's own cell, and its cells
+/// inside the feet's box are skipped, so the common case -- an animal at home
+/// -- pays for one box and no hay is ever counted twice.
 fn stacks_in_reach(
     world: &dyn BlockWorld,
     feet: (f64, f64, f64),
+    home: Option<(f32, f32, f32)>,
     taken: &std::collections::HashMap<(i32, i32, i32), u32>,
 ) -> Vec<((i32, i32, i32), u32)> {
     use husbandry::{MANGER_REACH, MANGER_RISE};
     let (fx, fy, fz) = (feet.0.floor() as i32, feet.1.floor() as i32, feet.2.floor() as i32);
     let mut found = Vec::new();
-    for dy in -MANGER_RISE..=MANGER_RISE {
-        for dz in -MANGER_REACH..=MANGER_REACH {
-            for dx in -MANGER_REACH..=MANGER_REACH {
-                let cell = (fx + dx, fy + dy, fz + dz);
-                let Some(left) = world.block(cell.0, cell.1, cell.2).and_then(primitive_shared::types::hay_in_stack) else {
-                    continue;
-                };
-                let left = u32::from(left).saturating_sub(taken.get(&cell).copied().unwrap_or(0));
-                if left > 0 {
-                    found.push((cell, left, dx * dx + dy * dy + dz * dz));
+    // Sorted by the distance from the feet even for a stack found round the
+    // home, because "nearest first" is what `take_bites` spends, and the
+    // nearest stack to the animal is the one it is standing at.
+    let mut look = |ox: i32, oy: i32, oz: i32, skip_feet_box: bool| {
+        for dy in -MANGER_RISE..=MANGER_RISE {
+            for dz in -MANGER_REACH..=MANGER_REACH {
+                for dx in -MANGER_REACH..=MANGER_REACH {
+                    let cell = (ox + dx, oy + dy, oz + dz);
+                    if skip_feet_box
+                        && (cell.0 - fx).abs() <= MANGER_REACH
+                        && (cell.1 - fy).abs() <= MANGER_RISE
+                        && (cell.2 - fz).abs() <= MANGER_REACH
+                    {
+                        continue;
+                    }
+                    let Some(left) = world.block(cell.0, cell.1, cell.2).and_then(primitive_shared::types::hay_in_stack) else {
+                        continue;
+                    };
+                    let left = u32::from(left).saturating_sub(taken.get(&cell).copied().unwrap_or(0));
+                    if left > 0 {
+                        let (ax, ay, az) = (cell.0 - fx, cell.1 - fy, cell.2 - fz);
+                        found.push((cell, left, ax * ax + ay * ay + az * az));
+                    }
                 }
             }
+        }
+    };
+    look(fx, fy, fz, false);
+    if let Some((hx, hy, hz)) = home {
+        let (hx, hy, hz) = (hx.floor() as i32, hy.floor() as i32, hz.floor() as i32);
+        if (hx, hy, hz) != (fx, fy, fz) {
+            look(hx, hy, hz, true);
         }
     }
     found.sort_by_key(|&(_, _, far)| far);
@@ -17594,6 +17638,87 @@ mod husbandry_tests {
         assert!(!animals.keeping(unfed).is_some_and(|k| k.tame), "a winter pen with no hay kept its sheep tame");
         let bites = animals.take_hay_eaten();
         assert!((6..=9).contains(&bites.len()), "eight days took {} bites of the stack", bites.len());
+        assert!(bites.iter().all(|&cell| cell == stack), "a bite came out of somewhere that is not the stack");
+    }
+
+    /// The sentence `husbandry::MANGER_REACH` is written for, made into a
+    /// world: a pen ten cells across, the stack in one corner, a sheep in
+    /// each of the other three. Over a five it fed the near corner only.
+    #[test]
+    fn a_stack_in_the_corner_of_a_ten_by_ten_pen_reaches_the_sheep_in_every_other_corner() {
+        use primitive_shared::types::{haystack_holding, HAYSTACK_HOLDS};
+        let world = meadow(40);
+        // The pen's floor runs x,z in 0..=9; the stack stands in the corner
+        // at the origin, so the far corner is nine cells away on each axis.
+        let stack = (0, 21, 0);
+        world.put(stack.0, stack.1, stack.2, haystack_holding(HAYSTACK_HOLDS));
+        let mut animals = Animals::seeded(11);
+        let corners = [(9.5, 0.5), (0.5, 9.5), (9.5, 9.5)];
+        let sheep: Vec<_> = corners
+            .iter()
+            .map(|&(x, z)| {
+                let id = animals.spawn(Species::Sheep, (x, 21.0, z)).expect("sheep");
+                animals.keep_for_test(id, Keeping { home: Some((x, 21.0, z)), ..tame_at_home() });
+                id
+            })
+            .collect();
+        let winter = first_winter_day();
+        animals.calendar(winter);
+        animals.step(&world, &at(4.0, 4.0), 0.05, NOON);
+        // A day and three quarters in one lump, as a night slept through
+        // hands the step: past `STACK_AFTER_DAYS`, and winter turf feeds
+        // nobody, so every one of them wants the stack.
+        animals.calendar(winter + 1.75);
+        animals.step(&world, &at(4.0, 4.0), 0.05, NOON);
+        let bites = animals.take_hay_eaten();
+        assert_eq!(bites.len(), corners.len(), "a corner of the pen did not reach the stack");
+        assert!(bites.iter().all(|&cell| cell == stack), "a bite came out of somewhere that is not the stack");
+        for (id, place) in sheep.iter().zip(corners) {
+            assert!(
+                !animals.keeping(*id).is_some_and(|k| k.is_hungry()),
+                "the sheep at {place:?} went hungry in a pen with hay in it",
+            );
+        }
+    }
+
+    /// The week away, and it must not turn on which cell the flock froze in.
+    /// Both sheep live in the same pen and both are parked; one is parked
+    /// standing on the stack and one is parked well outside its box, out by
+    /// the gate. The second used to come back wild and thin.
+    #[test]
+    fn a_parked_sheep_is_fed_from_the_stack_at_its_home_and_not_only_from_the_cell_it_froze_in() {
+        use primitive_shared::types::{haystack_holding, HAYSTACK_HOLDS};
+        let world = meadow(60);
+        let stack = (0, 21, 0);
+        world.put(stack.0, stack.1, stack.2, haystack_holding(HAYSTACK_HOLDS));
+        let home = (0.5, 21.0, 0.5);
+        let mut animals = Animals::seeded(12);
+        // Sixteen cells out: past `MANGER_REACH` from the stack, so the feet
+        // find nothing and only the home does. One sheep to the stack,
+        // because a stack holds `HAYSTACK_HOLDS` bites and a second mouth on
+        // it would be a test that fails on the arithmetic of the larder
+        // rather than on the reach.
+        let strayed = animals.spawn(Species::Sheep, (16.5, 21.0, 0.5)).expect("sheep");
+        // ...and one that lives out there, which nothing feeds.
+        let away = animals.spawn(Species::Sheep, (40.5, 21.0, 40.5)).expect("sheep");
+        animals.keep_for_test(strayed, Keeping { home: Some(home), ..tame_at_home() });
+        animals.keep_for_test(away, Keeping { home: Some((40.5, 21.0, 40.5)), ..tame_at_home() });
+        let winter = first_winter_day();
+        animals.calendar(winter);
+        animals.step(&world, &at(500.0, 0.5), 0.05, NOON);
+        assert_eq!(animals.parked_count(), 2);
+        animals.calendar(winter + 8.0);
+        animals.step(&world, &at(10.0, 10.0), 0.05, NOON);
+        let kept = animals.keeping(strayed).expect("the sheep by the gate was forgotten");
+        assert!(
+            kept.tame && kept.condition >= husbandry::THRIVING,
+            "a sheep parked away from the stack it lives beside came out of the winter wild or thin: {kept:?}",
+        );
+        assert!(
+            !animals.keeping(away).is_some_and(|k| k.tame),
+            "a sheep whose home has no hay in it was fed from a pen it does not live in",
+        );
+        let bites = animals.take_hay_eaten();
         assert!(bites.iter().all(|&cell| cell == stack), "a bite came out of somewhere that is not the stack");
     }
 

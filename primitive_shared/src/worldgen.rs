@@ -1400,6 +1400,12 @@ mod hive_tests;
 /// `surface_metal_tests`' reason.
 #[cfg(test)]
 mod tree_tests;
+
+/// What the ground tells a newcomer -- the shingle, the trails, the talus at
+/// a cave mouth, the copper in a hillside -- in its own file for
+/// `surface_metal_tests`' reason.
+#[cfg(test)]
+mod tells_tests;
 pub use scale::Scale;
 /// Hill country and plain country, rivers that drain to the sea, relief that
 /// follows the rock: what `Scale::Landforms` adds over `Scale::Earth`. See
@@ -5808,6 +5814,14 @@ impl WorldGen {
         self.place_ruins(&mut blocks, origin_x, origin_z, &columns);
         // Last, so a tuft never lands where a trunk is about to.
         self.place_ground_cover(&mut blocks, origin_x, origin_z, &columns);
+        // **The two tells that beat the turf** (`landforms`): the talus
+        // round a cave mouth and a lens of copper in a steep face. After
+        // the ground cover rather than before it, because both of them are
+        // ground the turf has *gone* from -- run first, the cover would
+        // grow back over them and the mouth would be a black rectangle in
+        // a lawn again. Landforms only; both return at once elsewhere.
+        self.place_cave_mouths(&mut blocks, origin_x, origin_z, &columns);
+        self.place_outcrops(&mut blocks, origin_x, origin_z, &columns);
         // **The lips on the slopes** (`lips`): after everything that stands
         // or lies on the ground, which keeps the whole block it was put on.
         self.lay_lips(&mut blocks, &columns, origin_x, origin_z);
@@ -6027,6 +6041,10 @@ impl WorldGen {
         origin_z: i32,
         columns: &ColumnCache,
     ) {
+        // **Where the paths to the water are**, worked out once for the
+        // chunk: see `landforms::Watering`. Empty in every world but a
+        // landformed one, and empty in most chunks of those.
+        let waterings = self.waterings_near(origin_x, origin_z);
         for lz in 0..CHUNK_SIZE_Z as i32 {
             for lx in 0..CHUNK_SIZE_X as i32 {
                 let (gx, gz) = (origin_x + lx, origin_z + lz);
@@ -6067,6 +6085,53 @@ impl WorldGen {
                     continue;
                 }
                 let ground = blocks[ground_index];
+
+                // **The shingle at the water's edge**, before every plant
+                // and before the ordinary stones: a bank of gravel and
+                // flint is what a shore *is*, and a tuft of grass standing
+                // in it would be the one cell that says the bank is a
+                // meadow. See `landforms::shingle_at`, which rolls its own
+                // die first and costs an ordinary column one hash.
+                if crate::types::can_grow_on(BLOCK_PEBBLE, ground) {
+                    if let Some(stone) = self.shingle_at(columns, (lx, lz), (gx, gz), height, rock) {
+                        blocks[air_index] = stone;
+                        continue;
+                    }
+                }
+
+                // **The paths worn to the water.** A trail is a *gap* -- no
+                // grass, no fern, no flower, no berry -- and not a block
+                // laid down to mean "path": a line of trodden ground reads
+                // as a line of trodden ground from a hill, and a line of
+                // some special block reads as somebody's road. So the whole
+                // of a trail is this `continue`: the column takes the
+                // stones every column takes and none of the plants.
+                //
+                // Here, above every plant, rather than as a condition on
+                // each of them -- there are fourteen of those and a
+                // fifteenth would be written next month without this line
+                // in front of it, and then the path would have gorse in it.
+                //
+                // **Not under a closed canopy.** A trail is a wearing-away,
+                // and a wood's floor is already worn: what lies on it is
+                // fallen leaves, which a path does not sweep up. Run under
+                // the crowns as well, this took the litter with it -- the
+                // floor of an oak wood measurably stopped being brown
+                // (`an_oak_wood_floor_is_brown_with_fallen_leaves...`) --
+                // and gained nothing a player could see, because bare
+                // ground under a canopy looks like the ground under a
+                // canopy. A trail that comes out of a wood into the open
+                // and is visible from there is also what a trail does.
+                if waterings.iter().any(|w| w.on_a_trail(gx, gz))
+                    && !(biome.has_forest_floor() && under_canopy(blocks, lx, height, lz))
+                {
+                    if crate::types::can_grow_on(BLOCK_PEBBLE, ground)
+                        && hash2(gx, gz, self.seed.wrapping_add(0x570E)).is_multiple_of(PEBBLE_SPACING)
+                    {
+                        blocks[air_index] = crate::ground::rubble_of(rock, crate::ground::Form::Pebble);
+                    }
+                    continue;
+                }
 
                 if let Some(spacing) = biome.cactus_spacing() {
                     if crate::types::can_grow_on(BLOCK_CACTUS, ground)
@@ -7464,6 +7529,12 @@ fn broken_course(hash: u32) -> i32 {
         columns: &ColumnCache,
     ) {
         const REACH: i32 = 1;
+        // A bush standing in a game trail is the one thing that would stop
+        // it reading as one: the grass a path is cut through can be waded,
+        // and a thicket across it cannot. The same paths the ground cover
+        // leaves bare (`landforms::Watering`), worked out once here too --
+        // this pass runs long before that one and cannot borrow its answer.
+        let waterings = self.waterings_near(origin_x, origin_z);
         for lz in -REACH..(CHUNK_SIZE_Z as i32 + REACH) {
             for lx in -REACH..(CHUNK_SIZE_X as i32 + REACH) {
                 let (gx, gz) = (origin_x + lx, origin_z + lz);
@@ -7479,6 +7550,20 @@ fn broken_course(hash: u32) -> i32 {
                 };
                 let roll = hash2(gx, gz, self.seed.wrapping_add(0xB05B));
                 if !roll.is_multiple_of(spacing.max(8)) {
+                    continue;
+                }
+                // After the die, on the rule the banks are written to: the
+                // trail test is trigonometry and the die is one hash.
+                //
+                // **The whole footprint, not the root.** A bush is `REACH`
+                // columns across, so refusing only the column it is rooted
+                // in leaves a bush rooted beside the path with its leaves
+                // lying across it -- which is exactly what
+                // `the_paths_to_a_pond_are_bare_ground...` found, and from
+                // the ground it is a path that stops at a hedge.
+                if (-REACH..=REACH).any(|dz| {
+                    (-REACH..=REACH).any(|dx| waterings.iter().any(|w| w.on_a_trail(gx + dx, gz + dz)))
+                }) {
                     continue;
                 }
                 // The tree's rules, because it is the same question: not
