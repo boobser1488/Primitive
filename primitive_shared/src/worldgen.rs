@@ -483,12 +483,24 @@ struct Beds {
     granite: i32,
     sandstone: i32,
     limestone: i32,
+    /// The parting of clay lying on the sandstone, floor and roof, as a
+    /// half-open band: `clay_from..clay_to`. Empty in most columns, and
+    /// empty in every column of an older scale. See [`CLAY_LENS_MAX`].
+    ///
+    /// Held as two numbers beside the three boundaries rather than as an
+    /// `Option<Range>` because it is read in the same loop and by the same
+    /// kind of comparison: `y >= clay_from` is one test that is false the
+    /// moment the column has no lens, where an `Option` would be a branch
+    /// on a tag before the same two comparisons.
+    clay_from: i32,
+    clay_to: i32,
 }
 
 impl Beds {
     /// A column with no beds in it at all: an older scale's, where the deep
     /// rock is the grey stone it always was (`Scale`).
-    const NONE: Self = Self { granite: i32::MIN, sandstone: i32::MIN, limestone: i32::MIN };
+    const NONE: Self =
+        Self { granite: i32::MIN, sandstone: i32::MIN, limestone: i32::MIN, clay_from: i32::MAX, clay_to: i32::MIN };
 
     /// The three boundaries of a column whose granite line is `granite_from`
     /// and whose bed field reads `swell`.
@@ -514,16 +526,36 @@ impl Beds {
     /// bed that is missing is a bed that teaches nothing. Measured
     /// (`probe_beds`): the sandstone runs 8 to 20 layers and the limestone
     /// 7 to 20, where both were 14 in every column of every world.
-    fn at(granite_from: i32, swell: f64) -> Self {
+    fn at(granite_from: i32, swell: f64, lens: f64) -> Self {
         // The line wanders by `swing(6.0)` about `SEA_LEVEL + 55`
         // (`WorldGen::stratum`); halved, so the basin dips by up to three
         // layers.
         let dip = (granite_from - SEA_LEVEL - 55) / 2;
         let swing = |layers: f64| (swell * layers).round().clamp(-layers, layers) as i32;
+        let sandstone = BED_SANDSTONE + dip - swing(3.0);
+        // The clay hangs *under* the boundary, in the top of the sandstone,
+        // so a shaft sunk from above passes limestone, then clay, then the
+        // sandstone the clay was laid on. That order is the readable one: the
+        // player is told what they have found by the rock they were already
+        // in, and the clay is the floor of the bed rather than a stripe
+        // somewhere in the middle of one.
+        //
+        // **It does not eat the whole sandstone.** `CLAY_LENS_MAX` is three
+        // and the thinnest the sandstone gets is eight (`Beds::at`'s note),
+        // so there is always sandstone under the parting -- a bed with
+        // nothing under it reads as the bed *being* clay, and then the
+        // lens has taught the player nothing about where to dig.
+        let thickness = if lens > CLAY_LENS_EDGE {
+            (1 + ((lens - CLAY_LENS_EDGE) * CLAY_LENS_SWELL) as i32).min(CLAY_LENS_MAX)
+        } else {
+            0
+        };
         Self {
             granite: BED_GRANITE + dip + swing(3.0),
-            sandstone: BED_SANDSTONE + dip - swing(3.0),
+            sandstone,
             limestone: BED_LIMESTONE + dip + swing(4.0),
+            clay_from: if thickness > 0 { sandstone - thickness } else { i32::MAX },
+            clay_to: if thickness > 0 { sandstone } else { i32::MIN },
         }
     }
 }
@@ -1420,6 +1452,12 @@ mod lips;
 /// Its tests, apart for `surface_metal_tests`' reason.
 #[cfg(test)]
 mod lips_tests;
+
+/// The clay: the alluvial bed under a floodplain's soil and the parting in
+/// the deep rock. In its own file for `surface_metal_tests`' reason. See
+/// `WorldGen::clay_bed` and `Beds::at`.
+#[cfg(test)]
+mod clay_tests;
 
 pub struct WorldGen {
     seed: u32,
@@ -2740,6 +2778,150 @@ const BANK_SLOPE: f32 = 0.7;
 const CLAY_DEPOSIT: f64 = 0.22;
 const GRAVEL_DEPOSIT: f64 = -0.20;
 
+/// The alluvial clay: the layers of it lying between the soil and the rock
+/// of a floodplain. See `WorldGen::clay_bed`.
+///
+/// **Four at the thickest.** A bed deep enough to stand in would be a
+/// second kind of ground rather than a band in a bank, and the whole point
+/// of the bed is that it is *read* -- a stripe under the turf of a bank the
+/// water has cut, the thing that says "dig here" from across the river.
+/// Four layers under the two of soil that are left over it
+/// ([`CLAY_BED_SOIL`]) is a band twice the depth of the earth above it,
+/// which is what a river terrace looks like where a stream has cut into it.
+const CLAY_BED_MAX: i32 = 4;
+/// How far above its own waterline the ground can stand before the clay
+/// under it has thinned to nothing.
+///
+/// **Twenty-six blocks, measured off the column's water and not off the
+/// sea.** Alluvium is laid by water that stood here, so the floor of a
+/// basin holding a lake at height 110 is as much a clay floor as a river
+/// terrace at 66 -- that is what "the bed of an old lake" means, and using
+/// the sea's level instead would have said there are no old lakes in the
+/// hills. What the number buys is the other half: a hillside twenty-six
+/// blocks above any water it can see has no bed at all, whatever the field
+/// says, so the clay stops at the foot of the hills instead of climbing
+/// them like a paint job.
+const CLAY_BED_RISE: f64 = 26.0;
+/// How far up the alluvium field a low, flat column has to read before a
+/// bed is laid at all -- and how fast the bed swells past that line.
+///
+/// The edge is what makes the bed **wedge out** rather than end: the field
+/// crosses the threshold somewhere, and where it crosses, the bed is one
+/// layer thick and then nothing. A player walking out of a floodplain sees
+/// the stripe in the bank narrow and disappear, which is what a bed pinching
+/// out against a rise looks like.
+const CLAY_BED_EDGE: f64 = 0.06;
+/// See [`CLAY_BED_EDGE`]. Eight, so the field's own top (about 0.55 where
+/// two octaves agree) reaches the fourth layer and most of the bed is one to
+/// three -- a sheet of one thickness would be the paint job again.
+const CLAY_BED_SWELL: f64 = 8.0;
+/// How much of the bed one block of *rise* to a neighbour takes away, and
+/// past how many blocks there is no bed at all.
+///
+/// ## Why the uphill step and not the slope
+///
+/// Every other rule about what the ground is made of reads `slope_from` --
+/// the central-difference gradient, which asks "is this place steep". For
+/// the clay that is the wrong question, and it was asked first and had to
+/// be changed: the gradient at the brink of a cut bank is enormous, because
+/// one neighbour is six blocks down, so the lip of every terrace failed the
+/// test. Which meant the bed existed only where nothing had ever cut it --
+/// and a bed nothing has cut is a bed no player will ever see, since a
+/// buried layer is seen in a *face* or not at all. Measured: with the slope
+/// rule, a ten-thousand-block sweep found **not one** bank anywhere in the
+/// world with the band standing in it.
+///
+/// What a floodplain actually is, is ground that is flat *and that nothing
+/// rises from*: the sheet was laid by water spreading out, so a slope above
+/// it is where the sheet stops, and a hole cut down through it is not. So
+/// the measure is the tallest step **up** to a neighbour. A valley floor
+/// reads nought; the last column before the hillside reads two or three and
+/// the bed wedges out against it, which is what a bed does against a rise;
+/// the brink of a cut bank reads nought and keeps its clay, and the cut is
+/// the window the player reads it through.
+const CLAY_BED_UPHILL: f64 = 0.12;
+/// See [`CLAY_BED_UPHILL`]: four blocks of rise to a neighbour and there is
+/// nothing left to lay, so the sample is not taken at all.
+const CLAY_BED_UPHILL_MAX: i32 = 4;
+/// How wide a patch of alluvium is: 0.009 is a couple of hundred blocks
+/// across, which is a floodplain rather than a puddle and rather than a
+/// province. See `WorldGen::clay_bed`.
+const CLAY_BED_FREQUENCY: f64 = 0.009;
+/// How much soil is left over a clay bed: the turf and one layer of earth.
+///
+/// **A thin skin, and it is the difference between a mechanic and a
+/// statistic.** A floodplain's soil is four or five layers deep
+/// (`surface_for`: flat ground keeps everything the slopes lost), and a bed
+/// laid under all of it sits at a depth of five -- deeper than any bank in
+/// this world is cut, deeper than a player digs to lay a floor. Measured
+/// with the bed under the full soil: in a ten-thousand-block sweep the band
+/// stood in open air at **five** places. It was there and it could not be
+/// found.
+///
+/// A metre of dark earth over metres of clay is also not what a floodplain
+/// is. The clay *is* the subsoil -- that is the whole reason a potter digs a
+/// riverbank rather than a hilltop -- and the living soil over it is thin.
+/// So where the bed is laid, the soil above it is cut back to the turf and
+/// one layer, and the rest of the column's depth is clay. What the player
+/// gets is the thing that was wanted: three spadefuls in a meadow and you
+/// are in clay, and every bank in clay country shows the band.
+///
+/// **Not in a bog.** Peat is measured in layers too (`bog_soil`), the manual
+/// promises two to four of them, and a bog is flat, low ground -- exactly
+/// where the bed goes. A clay pan under peat is why a bog is a bog, so the
+/// two stack: the peat keeps its depth and the clay lies under it.
+const CLAY_BED_SOIL: i32 = 2;
+
+/// The deep clay: a parting of it lying on top of the sandstone, under the
+/// limestone. See `Beds::at`.
+///
+/// **Where it is, is the whole argument.** The three beds of the basement
+/// (`BED_LIMESTONE`) were laid by a sea that came and went, and what a sea
+/// leaves when it goes quiet is mud. So the clay is *at a boundary* -- the
+/// one between the sandstone and the limestone over it -- and not a scatter
+/// through the rock: a player who finds it at one place in a gallery finds
+/// it again by driving along that level, which is a decision about which way
+/// to dig. A scatter would be a thing you trip over.
+const CLAY_LENS_MAX: i32 = 3;
+/// How far up the lens field a column has to read before a parting is there
+/// at all, and how fast it swells past that. Measured (`probe_clay`): a
+/// parting under 22% of the world's columns, of one to three layers -- "the
+/// shaft that happens to land on it" rather than "every shaft", and rarer
+/// than that would be a thing a player hears about and never meets.
+const CLAY_LENS_EDGE: f64 = 0.24;
+/// See [`CLAY_LENS_EDGE`].
+const CLAY_LENS_SWELL: f64 = 7.0;
+/// How wide a lens is: 0.013 is roughly a hundred and fifty blocks, so a
+/// gallery driven along the parting stays in it for a while and then runs
+/// out of it.
+const CLAY_LENS_FREQUENCY: f64 = 0.013;
+
+#[cfg(test)]
+thread_local! {
+    /// Both of the clay's rules off on this thread, for
+    /// `what_the_landforms_cost_a_chunk` to price them in one binary. Same
+    /// pattern as `lips::LIPS_OFF`, and here for a sharper reason: what the
+    /// clay adds to a chunk is a noise sample a column and one integer
+    /// compare a cell, and a machine with anything else running on it moves
+    /// a debug timing by a tenth between runs -- several times what is
+    /// being measured. Two builds cannot answer the question; one binary
+    /// timing both in the same minute can.
+    pub(super) static CLAY_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Is the clay switched off on this thread? Always false outside the tests.
+#[inline]
+fn clay_off() -> bool {
+    #[cfg(test)]
+    {
+        CLAY_OFF.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
 /// How steep a column is, from the heights of its four neighbours.
 ///
 /// The central-difference gradient magnitude: the same measure a
@@ -3480,6 +3662,85 @@ impl WorldGen {
     /// octaves of Perlin are the whole cost of the question.
     fn deposit(&self, gx: i32, gz: i32) -> f64 {
         fbm(&self.deposit_noise, gx as f64, gz as f64, 0.016, 2)
+    }
+
+    /// How many layers of clay lie between the soil and the rock of this
+    /// column: nought in most of the world.
+    ///
+    /// ## Clay as a bed rather than as a patch
+    ///
+    /// What the game had was `clayey`: a patch of clay *on the surface*, at
+    /// the waterline, where slow water dropped it. That is true as far as it
+    /// goes, and it made clay a thing you find by walking a shore -- but it
+    /// made clay a thing that exists only on the shore, in a world whose
+    /// deep rock has three beds in it and whose every bank shows its soil.
+    /// A player who cut into a river terrace saw turf, four of dirt and
+    /// then stone, which is not what a river terrace is.
+    ///
+    /// So the clay is a *bed* now, in the same sense the sandstone is one:
+    /// a sheet lying under the soil, of a thickness that changes across the
+    /// country and wedges out at its edge. Where it is laid is where still
+    /// water stood long enough to drop mud -- the floodplain of a river, the
+    /// floor of a basin that once held a lake, the flat ground under a
+    /// meadow -- so it is decided by three things in the order they cost:
+    ///
+    /// * **Nothing rises from it.** The tallest step *up* to a neighbour,
+    ///   and not the slope every other surface rule reads -- see
+    ///   [`CLAY_BED_UPHILL`], which is the one paragraph of this to read if
+    ///   only one gets read.
+    /// * **Low over its own water.** Not over the *sea*: the column's own
+    ///   waterline, so a basin in the hills is a basin. See
+    ///   [`CLAY_BED_RISE`].
+    /// * **In a district the field says was one.** Two octaves at
+    ///   [`CLAY_BED_FREQUENCY`], so a floodplain is a couple of hundred
+    ///   blocks of it and the next valley may have none.
+    ///
+    /// The last two are a ramp each rather than a line: a bed that ended at
+    /// a threshold would end in a *wall* of clay, and a bed wedges out. See
+    /// `a_clay_bed_thins_out_at_its_edge_instead_of_ending_in_a_wall`.
+    ///
+    /// The cheap tests run first and the noise last, once, which is the same
+    /// order the surface deposits use and for the same reason: most columns
+    /// in the world are a hillside or a sea floor, and they should not pay a
+    /// Perlin sample to find that out.
+    ///
+    /// ## What it does not do
+    ///
+    /// **It does not move the ground.** The bed takes layers from the soil
+    /// over it ([`CLAY_BED_SOIL`]) and from the rock under it, and adds
+    /// none: the surface of the world is the block it always was, every
+    /// height is the number it always was, and nothing that reads a height
+    /// -- the spawn search, the rivers, the trees, a save's own columns --
+    /// reads anything new. A bed that *added* layers would have been a
+    /// floodplain standing four blocks proud of its own river.
+    fn clay_bed(&self, gx: i32, gz: i32, height: i32, water: i32, uphill: i32, biome: Biome) -> i32 {
+        if self.scale != Scale::Landforms || clay_off() {
+            return 0;
+        }
+        // Not the sea floor, at any depth: the shelf is already silt over
+        // sand (`surface_for`), nobody digs it, and the ocean is a third of
+        // the world's columns to pay a noise sample for.
+        //
+        // **And not the mountains**, which the uphill test would mostly have
+        // caught anyway -- but a shelf or a cirque floor high in them is
+        // flat, and the water standing in it is its own, so the rise test
+        // would have said yes. Rock country is rock to the turf.
+        if height < SEA_LEVEL
+            || uphill > CLAY_BED_UPHILL_MAX
+            || matches!(biome, Biome::Ocean | Biome::Mountains | Biome::SnowyPeaks)
+        {
+            return 0;
+        }
+        let rise = (height - water).max(0) as f64 / CLAY_BED_RISE + uphill.max(0) as f64 * CLAY_BED_UPHILL;
+        if rise >= 1.0 {
+            return 0;
+        }
+        let field = fbm(&self.deposit_noise, gx as f64 - 7_331.0, gz as f64 + 4_219.0, CLAY_BED_FREQUENCY, 2);
+        let strength = field - rise;
+        if strength <= CLAY_BED_EDGE {
+            return 0;
+        }
+        (1 + ((strength - CLAY_BED_EDGE) * CLAY_BED_SWELL) as i32).min(CLAY_BED_MAX)
     }
 
     /// Is there gravel here?
@@ -4535,11 +4796,36 @@ impl WorldGen {
         if self.scale != Scale::Landforms {
             return Beds::NONE;
         }
-        Beds::at(granite_from, fbm(&self.strata_noise, gx as f64 + 1_657.0, gz as f64 - 4_871.0, 0.017, 2))
+        Beds::at(
+            granite_from,
+            fbm(&self.strata_noise, gx as f64 + 1_657.0, gz as f64 - 4_871.0, 0.017, 2),
+            // **Where the deep clay is, off the clay field and not off the
+            // beds' own.** Keyed to `swell` it would have been free -- the
+            // sample is already in hand -- and it would have laid the clay
+            // exactly where the sandstone pinches, every time: one thing
+            // read twice, which a player eventually notices as a rule.
+            // These are two ages of the world that have nothing to do with
+            // each other, so they get two fields, and the deposit field is
+            // the one that already answers "where is the clay" at the
+            // surface (`deposit`).
+            if clay_off() {
+                // Below `CLAY_LENS_EDGE` whatever the field says, and the
+                // sample not taken: the switch has to cost what the rule
+                // costs, or it prices something else. See `CLAY_OFF`.
+                -1.0
+            } else {
+                fbm(&self.deposit_noise, gx as f64 - 12_907.0, gz as f64 + 6_143.0, CLAY_LENS_FREQUENCY, 2)
+            },
+        )
     }
 
     fn bedded_rock(y: i32, beds: Beds) -> BlockId {
-        if y < beds.granite {
+        // The parting first, because it is the only test most columns fail
+        // on their first comparison: `clay_from` is `i32::MAX` wherever
+        // there is no lens, and that is four columns in five.
+        if y >= beds.clay_from && y < beds.clay_to {
+            BLOCK_CLAY
+        } else if y < beds.granite {
             BLOCK_GRANITE
         } else if y < beds.sandstone {
             BLOCK_SANDSTONE
@@ -4829,7 +5115,32 @@ impl WorldGen {
         if biome == Biome::Bog && surface.filler == BLOCK_PEAT {
             surface.soil = Self::bog_soil(self.seed, gx, gz);
         }
+        // The skin of soil over a clay bed, which the cache also lays and
+        // which a test that reads a depth out of this has to see: a column
+        // in clay country keeps the turf and one layer, and `rock_top` is
+        // two below its ground rather than five. See `CLAY_BED_SOIL`.
+        if surface.filler != BLOCK_PEAT
+            && self.clay_bed(gx, gz, height, self.water_level_at(gx, gz), self.uphill_at(gx, gz), biome) > 0
+        {
+            surface.soil = surface.soil.min(CLAY_BED_SOIL);
+        }
         surface
+    }
+
+    /// The tallest step *up* to a neighbouring column: what the clay reads
+    /// instead of the slope, asked from outside the column cache. See
+    /// `CLAY_BED_UPHILL`.
+    ///
+    /// Four more height lookups, which is why the cache does not call it --
+    /// it has the neighbours in hand already.
+    #[cfg(test)]
+    fn uphill_at(&self, gx: i32, gz: i32) -> i32 {
+        let height = self.height_at(gx, gz);
+        [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .iter()
+            .map(|&(dx, dz)| self.height_at(gx + dx, gz + dz) - height)
+            .max()
+            .unwrap_or(0)
     }
 
     /// A lake bed's surface, for a column with water standing over it
@@ -5860,6 +6171,13 @@ impl WorldGen {
         // the bedrock is rock of one kind or another, and which kind
         // depends on how far below this line the cell is.
         let rock_top = height - surface.soil;
+        // ...and the floor of the clay bed under the soil, if the column has
+        // one. Worked out here rather than in the loop so the cell test is a
+        // comparison against a number already in a register, like every other
+        // line in this loop: `clay_floor == rock_top` in all but a few
+        // hundredths of the world's columns, and then the branch is one
+        // compare that is immediately false. See `clay_bed`.
+        let clay_floor = rock_top - column.clay_bed;
         // ...and the line under which it is all basalt. Wobbled by the
         // column's own granite line so the floor of the world is a
         // contour rather than a sheet, and by the same field, so a
@@ -5906,6 +6224,13 @@ impl WorldGen {
                 surface.top
             } else if y > rock_top {
                 surface.filler
+            } else if y > clay_floor {
+                // The alluvial clay, between the soil and the rock. It takes
+                // the top cells of the upper rock rather than pushing them
+                // down: the mud was laid *on* this rock, and a bed that
+                // pushed would raise the floodplain over its own river. See
+                // `clay_bed`.
+                BLOCK_CLAY
             } else if y >= column.granite_from || rock_top - y < column.rock_depth {
                 // The upper rock, and the granite line over everything.
                 // See `stratum`. The granite test first, because it is
@@ -9541,6 +9866,10 @@ struct Column {
     /// Where each bed of the deep rock ends under this column, or
     /// `Beds::NONE` in a world of an older scale. See `bedded_rock`.
     beds: Beds,
+    /// How many layers of clay lie between the soil and the rock: nought
+    /// in most of the world, and in every column of an older scale. See
+    /// `clay_bed`.
+    clay_bed: i32,
     /// The band of cells, floor to roof inclusive, that the cave carver
     /// may not touch. Empty (floor above roof) for most of the world.
     ///
@@ -10110,6 +10439,29 @@ fn build_column_tile(gen: &WorldGen, tx: i32, tz: i32) -> ColumnTile {
                 }
             }
 
+            // **The alluvial clay**, after every rule that decides what the
+            // surface is made of and before the rock under it, because it
+            // takes layers from both. See `clay_bed`.
+            //
+            // **The tallest step up to a neighbour**, off the heights
+            // already in hand, as the slope is. Read from the ground as it
+            // stood before a pool was dug into it -- both sides of the
+            // comparison -- because what the number is asking is whether
+            // this is the floor of a basin or the side of a hill, and a
+            // hole a hand's depth across answers neither.
+            let uphill = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                .iter()
+                .map(|&(dx, dz)| height_at(lx + dx, lz + dz) - height_at(lx, lz))
+                .max()
+                .unwrap_or(0);
+            let clay_bed = gen.clay_bed(gx, gz, height, water, uphill, biome);
+            // The soil over it cut back to a skin, so the band is within
+            // reach of a spade and of every bank that is cut. Peat keeps
+            // its depth: see `CLAY_BED_SOIL`.
+            if clay_bed > 0 && surface.filler != BLOCK_PEAT {
+                surface.soil = surface.soil.min(CLAY_BED_SOIL);
+            }
+
             let (rock, rock_depth, granite_from) = gen.stratum(gx, gz, biome, surface);
 
             // **Rubble in the stone it broke off** (`ground::rubble_of`): a
@@ -10169,6 +10521,7 @@ fn build_column_tile(gen: &WorldGen, tx: i32, tz: i32) -> ColumnTile {
                 rock_depth,
                 granite_from,
                 beds,
+                clay_bed,
                 seal,
             });
         }
@@ -10207,6 +10560,7 @@ impl ColumnCache {
             rock_depth: 0,
             granite_from: i32::MAX,
             beds: Beds::NONE,
+            clay_bed: 0,
             seal: (i32::MAX, i32::MIN),
         };
         let mut columns = vec![blank; (CACHE_SPAN * CACHE_SPAN) as usize];
@@ -20560,10 +20914,20 @@ mod strata_tests {
     #[test]
     fn the_beds_of_the_deep_rock_are_not_all_one_thickness() {
         let gen = WorldGen::new(1337);
+        // **The bed's own extent, and not the cells of its rock.** The two
+        // are the same number everywhere except where the clay parting lies
+        // (`Beds::at`), and there they are not: a seam of clay on top of
+        // the sandstone takes up to three cells out of a count of
+        // `bedded_rock(y) == BLOCK_SANDSTONE` while taking nothing out of
+        // the *bed*, which is what is being measured here and what a player
+        // drives a gallery along. Counted the other way, this test went red
+        // on its last assertion -- the thinnest sandstone and the thickest
+        // limestone stopped coinciding, for a reason that has nothing to do
+        // with whether two beds swell in step.
         let thickness = |gx: i32, gz: i32| {
             let beds = beds_of(&gen, gx, gz);
-            let of = |rock| (BEDROCK_TOP..SEA_LEVEL).filter(|&y| WorldGen::bedded_rock(y, beds) == rock).count() as i32;
-            (of(BLOCK_SANDSTONE), of(BLOCK_LIMESTONE))
+            let span = |from: i32, to: i32| (BEDROCK_TOP..SEA_LEVEL).filter(|&y| y >= from && y < to).count() as i32;
+            (span(beds.granite, beds.sandstone), span(beds.sandstone, beds.limestone))
         };
         let sample: Vec<(i32, i32)> = (0..400).map(|k| thickness((k % 20) * 53 - 500, (k / 20) * 61 - 500)).collect();
         for (which, name) in ["sandstone", "limestone"].iter().enumerate() {
