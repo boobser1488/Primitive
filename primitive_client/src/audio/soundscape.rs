@@ -1639,7 +1639,18 @@ fn brushes(block: BlockId) -> f32 {
     if types::is_air(block) || types::is_liquid(block) || types::is_collidable(block) {
         return 0.0;
     }
-    if Material::of(block) == Material::Grass {
+    // **Ankle-high grass makes no noise.** Every plant of grass material
+    // used to rustle, and a meadow is grass in nearly every cell: walking
+    // anywhere in the open was a continuous swish that said nothing about
+    // where the player was. What a body actually pushes through is a plant
+    // it meets with its shins or higher -- the two-cell plants (reeds,
+    // nettle, bracken, fireweed, cattail) and the big grasses that stand
+    // as tall. A tuft brushed by a boot is below the noise floor of the
+    // footstep that is already playing over it.
+    let kind = types::block_kind(block);
+    if types::is_tall_plant(block)
+        || matches!(kind, types::BLOCK_ELEPHANT_GRASS | types::BLOCK_TUSSOCK_GRASS | types::BLOCK_REEDS)
+    {
         0.55
     } else {
         0.0
@@ -3010,6 +3021,18 @@ mod tests {
         assert_eq!(brushes(BLOCK_GRASS), 0.0, "turf is walked on, not through");
         assert_eq!(brushes(BLOCK_STONE), 0.0);
         assert_eq!(brushes(BLOCK_AIR), 0.0);
+        // **A tuft of meadow grass is silent, a stand of reeds is not.**
+        // Every grass-material plant used to rustle, and in a meadow that
+        // is nearly every cell: the walk was one long swish that told the
+        // player nothing. See `brushes`.
+        use primitive_shared::types::{
+            BLOCK_BRACKEN, BLOCK_ELEPHANT_GRASS, BLOCK_FEATHER_GRASS, BLOCK_REEDS, BLOCK_TALL_GRASS,
+        };
+        assert_eq!(brushes(BLOCK_TALL_GRASS), 0.0, "a meadow tuft rustled");
+        assert_eq!(brushes(BLOCK_FEATHER_GRASS), 0.0, "a meadow tuft rustled");
+        assert!(brushes(BLOCK_BRACKEN) > 0.0, "a two-cell plant went quiet");
+        assert!(brushes(BLOCK_REEDS) > 0.0, "reeds went quiet");
+        assert!(brushes(BLOCK_ELEPHANT_GRASS) > 0.0, "a grass as tall as a body went quiet");
         let mut chunks = flat_world(8);
         let mut chunk = chunks.get(ChunkPos::new(0, 0)).unwrap().clone();
         chunk.set(4, 9, 4, BLOCK_LEAVES);
