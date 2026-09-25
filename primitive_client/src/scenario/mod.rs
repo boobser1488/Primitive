@@ -1040,7 +1040,6 @@ impl Scenario {
             &mut self.stamina,
             &mut self.strikes,
             &mut self.hand,
-            &mut self.shake,
             &mut self.dig_signal,
             &mut self.cut,
             &mut self.meal,

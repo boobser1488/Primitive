@@ -17,7 +17,7 @@ use crate::engine::camera::Camera;
 use crate::logic::chunk_manager::ChunkManager;
 use crate::logic::inventory::Inventory;
 use crate::logic::physics::Player;
-use crate::logic::{self, hand, mining as mining_mod, shake, stamina};
+use crate::logic::{self, hand, mining as mining_mod, stamina};
 use crate::net::network;
 use crate::net::remote_players::RemotePlayers;
 use crate::ui::debug::DebugStats;
@@ -76,7 +76,6 @@ pub fn step(
     stamina: &mut stamina::Stamina,
     strikes: &mut hand::Strikes,
     hand: &mut hand::Hand,
-    shake: &mut shake::Shake,
     dig_signal: &mut DigSignal,
     cut: &mut Option<Cut>,
     meal: &mut Option<Meal>,
@@ -332,25 +331,13 @@ pub fn step(
         player.grounded,
         held_now,
     );
-    // **The recoil is played where the blow lands, not
-    // where it is clicked.** A blow is most of a third of
-    // a second long and the head is down a fraction of
-    // the way through it; a kick on the click would be
-    // the view flinching before the tool arrived, and the
-    // heavier the tool the further ahead of itself it
-    // would flinch. `Hand` is the only thing that knows
-    // when the arm is actually down. See `Shake::on_blow`.
-    //
-    // The view for *this* frame was settled further up,
-    // so a push lands on the next one. Sixteen
-    // milliseconds against a recoil that lasts a hundred
-    // and seventy: not worth reordering the frame for,
-    // and the alternative -- advancing the arm before
-    // physics has told it how fast the player is going --
-    // would cost a frame somewhere that shows.
-    if let Some(heft) = hand.take_landed() {
-        shake.on_blow(heft);
-    }
+    // **A landed blow moves nothing on screen.** The recoil that
+    // used to be taken here is gone: a swing is one event but mining
+    // is a rhythm of them, and a view that dipped on every blow made
+    // a quarry tiring to look at. `Hand::take_landed` is still the
+    // one thing that knows when the arm is actually down, and the
+    // sound still reads it; see `logic::shake` for the numbers the
+    // recoil had and why it is not simply smaller.
     // ...and the same swing, for everybody else's picture
     // of this player. See `DigSignal`.
     // The rod drawn back follows the wind-up. See `hand::Rod`.

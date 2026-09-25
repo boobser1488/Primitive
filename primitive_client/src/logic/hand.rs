@@ -685,7 +685,7 @@ pub struct Hand {
     /// [`Hand::wind_rod`].
     rod: Rod,
     /// The heft of a blow whose head arrived this frame, waiting to be
-    /// taken by the frame loop -- see [`Hand::take_landed`].
+    /// taken -- see [`Hand::take_landed`].
     landed: Option<f32>,
 }
 
@@ -865,7 +865,7 @@ impl Hand {
                 // that is noticed.** Nothing else in the client knows
                 // when a swing is *down* -- the click is up to a third
                 // of a second earlier, and for a heavy tool further
-                // still. The recoil reads this; see `Shake::on_blow`.
+                // still. See [`Hand::take_landed`] for who asks.
                 if blow.elapsed < blow.impact * blow.length
                     && elapsed >= blow.impact * blow.length
                 {
@@ -924,11 +924,18 @@ impl Hand {
     /// The heft of a blow whose head arrived since this was last asked,
     /// or `None`.
     ///
-    /// **Taken rather than read**, so one blow is one recoil however
-    /// many times a frame loop asks. A blow that landed during a stall
-    /// is still reported: the frame was long, the arm went through the
-    /// impact inside it, and a view that did not flinch would be the one
-    /// dropped frame a player actually notices.
+    /// **Taken rather than read**, so one blow is reported once
+    /// however many times a frame loop asks. A blow that landed during
+    /// a stall is still reported: the frame was long and the arm went
+    /// through the impact inside it.
+    ///
+    /// **Nothing in the frame reads this at the moment.** It fed the
+    /// camera's recoil until the owner asked for that to go (see
+    /// `logic::shake`), and it is kept because it is the only answer in
+    /// the client to "when is the head actually down" -- which is what
+    /// a blow's sound, a spark or a dent would each need. The tests
+    /// below are what keep it honest in the meantime.
+    #[allow(dead_code)]
     pub fn take_landed(&mut self) -> Option<f32> {
         self.landed.take()
     }

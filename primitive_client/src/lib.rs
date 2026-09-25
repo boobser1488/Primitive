@@ -2949,7 +2949,6 @@ fn run(
                         &mut stamina,
                         &mut strikes,
                         &mut hand,
-                        &mut shake,
                         &mut dig_signal,
                         &mut cut,
                         &mut meal,
