@@ -39,6 +39,11 @@
 //! | `PRIMITIVE_OPT_RESOLUTION=50` | overrides the resolution scale, in per cent |
 //! | `PRIMITIVE_OPT_LOD=4` | overrides where the coarse bands start, in chunks |
 //! | `PRIMITIVE_OPT_VIEW=8` | overrides the render distance, in chunks |
+//! | `PRIMITIVE_OPT_NO_TEXTURE=1` | the terrain fetch, ablated |
+//! | `PRIMITIVE_OPT_NO_MOTTLE=1` | the per-block shade and its derivative, ablated |
+//! | `PRIMITIVE_OPT_NO_LIGHT=1` | the light assembly, ablated |
+//! | `PRIMITIVE_OPT_NO_FOG=1` | the fog and the aerial perspective, ablated |
+//! | `PRIMITIVE_OPT_DEPTH16=1` | a 16-bit depth buffer instead of a 32-bit float one |
 //!
 //! The last three change nothing about how the game draws -- they are the
 //! three settings the frame is most sensitive to, made reachable without a
@@ -76,6 +81,58 @@
 //!   resolution is a quarter of the pixels and took the solid pass down
 //!   22%, at the same 255k triangles. So roughly a fifth to a quarter of
 //!   the pass is fill, and the rest is geometry.
+//!
+//! ## The second round, and where the frame actually goes
+//!
+//! ```text
+//! mode                   fps  gpu      solid   tris        detail
+//! stock                   55  14.682   14.078  255k/340k   247/162/32
+//! OPT_VIEW=8              58  13.739   13.168  151k/194k   155/42/0
+//! OPT_VIEW=8 + OPT_LOD=4  59  13.543   12.955  126k/163k   69/128/0
+//! OPT_LOD=4               56  14.421   13.817  230k/309k   69/180/192
+//! PRIMITIVE_SPECKS=1      65  10.820    5.873  255k/340k   247/162/32
+//! OPT_MIP_BIAS=-0.5       55  14.688   14.116  255k/340k   247/162/32
+//! ```
+//!
+//! **Shading is 58% of the solid pass.** The speck hunt replaces this
+//! fragment shader with one flat colour a face -- no fetch, no light, no
+//! fog -- and the pass falls from 14.08 ms to 5.87 at the same 255
+//! thousand triangles. Meanwhile *halving* the triangles (the render
+//! distance at 8: 255k to 151k) buys 0.9 ms. So geometry is about 5.9 ms
+//! and per-fragment work about 8.2, and every lever this module started
+//! with was pulling on the smaller half.
+//!
+//! The mip bias costs nothing measurable (14.116 against 14.078), so the
+//! sharpening is free and the only question left about it is what it looks
+//! like.
+//!
+//! ## Where the 8.2 ms is: four ablations
+//!
+//! `PRIMITIVE_SPECKS` is the ceiling and says nothing about the parts. So
+//! each part of the fragment shader has a switch that takes it away, and
+//! each is a constant compiled into the shader rather than a uniform, so
+//! an unset build is the shader that was there before:
+//!
+//! | variable | what stops being computed |
+//! |---|---|
+//! | `PRIMITIVE_OPT_NO_TEXTURE=1` | the atlas fetch; a flat albedo instead |
+//! | `PRIMITIVE_OPT_NO_MOTTLE=1` | the per-block hash *and* the screen derivative that fades it |
+//! | `PRIMITIVE_OPT_NO_LIGHT=1` | the beam, the fill, the floor, the occlusion |
+//! | `PRIMITIVE_OPT_NO_FOG=1` | the fog ramp and the aerial perspective |
+//!
+//! Each makes the picture wrong on purpose; they are instruments. The four
+//! should roughly add up to the gap between a stock run and the speck
+//! hunt, and where they do not is itself the answer -- the remainder is
+//! the tint, the greenness and the interpolation of ten varyings, none of
+//! which can be switched off without changing what is drawn.
+//!
+//! **What to expect.** `mottled_shade` already carries a phone measurement
+//! in shader.wgsl: two hashes a fragment cost that device three
+//! milliseconds where a desktop paid 0.07. It is one hash now, and it is
+//! the first place to look. The fetch is the second -- one
+//! `textureSample` from an 804-layer array with trilinear minification,
+//! and a tile-based GPU pays for every miss in bandwidth it shares with
+//! the processor.
 //!
 //! And one did not do its job: `PRIMITIVE_OPT_LOD=4` took 10% of the
 //! triangles away where a coarse chunk sheds 56% of its own
@@ -203,9 +260,25 @@ pub fn mip_bias() -> f32 {
     })
 }
 
-/// The line in `shader.wgsl` the bias replaces. Written there exactly as
-/// it is here, and `specialise` fails loudly if it ever stops matching.
-const MIP_BIAS_SWITCH: &str = "const MIP_BIAS: f32 = 0.0;";
+/// The lines in `shader.wgsl` the switches replace, each written there
+/// exactly as it is here.
+///
+/// **A table rather than a call per constant**, because the failure mode
+/// is one line renamed in the shader and a substitution that then silently
+/// does nothing: one list means one test
+/// (`the_shader_still_carries_every_line_a_switch_replaces`) covers all of
+/// them.
+const SWITCH_LINES: [&str; 6] = [
+    "const MIP_BIAS: f32 = 0.0;",
+    "const SKIP_TEXTURE: bool = false;",
+    "const SKIP_MOTTLE: bool = false;",
+    "const SKIP_LIGHT: bool = false;",
+    "const SKIP_FOG: bool = false;",
+    "const DECAL_SCALE: f32 = 1.0;",
+];
+
+/// The line in `shader.wgsl` the bias replaces.
+const MIP_BIAS_SWITCH: &str = SWITCH_LINES[0];
 
 /// The terrain shader with [`mip_bias`] compiled into it.
 ///
@@ -213,7 +286,37 @@ const MIP_BIAS_SWITCH: &str = "const MIP_BIAS: f32 = 0.0;";
 /// like them it hands the source straight back when there is nothing to
 /// change -- so a run without the switch compiles the file's own text.
 pub fn specialise(source: std::borrow::Cow<'_, str>) -> std::borrow::Cow<'_, str> {
-    specialise_at(mip_bias(), source)
+    let mut out = specialise_at(mip_bias(), source);
+    // **The decal nudge goes with the depth format**, not with a switch of
+    // its own: they are one decision, and a nudge scaled without the buffer
+    // being made smaller would push every decal off its surface for
+    // nothing.
+    if depth16() {
+        out = rewrite(out, SWITCH_LINES[5], "const DECAL_SCALE: f32 = 32.0;");
+    }
+    for (on, line, replacement) in [
+        (no_texture(), SWITCH_LINES[1], "const SKIP_TEXTURE: bool = true;"),
+        (no_mottle(), SWITCH_LINES[2], "const SKIP_MOTTLE: bool = true;"),
+        (no_light(), SWITCH_LINES[3], "const SKIP_LIGHT: bool = true;"),
+        (no_fog(), SWITCH_LINES[4], "const SKIP_FOG: bool = true;"),
+    ] {
+        if on {
+            out = rewrite(out, line, replacement);
+        }
+    }
+    out
+}
+
+/// One line of the shader swapped for another, borrowing until it has to
+/// own. `debug_assert` rather than a silent pass, for the reason
+/// `SWITCH_LINES` exists.
+fn rewrite<'a>(
+    source: std::borrow::Cow<'a, str>,
+    line: &str,
+    replacement: &str,
+) -> std::borrow::Cow<'a, str> {
+    debug_assert!(source.contains(line), "shader.wgsl no longer carries {line:?}");
+    std::borrow::Cow::Owned(source.replacen(line, replacement, 1))
 }
 
 /// `specialise`, told the bias rather than reading it, so that a test can
@@ -320,6 +423,109 @@ pub fn view_distance(setting: i32) -> i32 {
     }
 }
 
+/// **The atlas fetch, taken away.** Every terrain fragment gets
+/// `FLAT_ALBEDO` and the shading runs on it unchanged.
+///
+/// What it prices is one `textureSample` from an array 804 layers deep,
+/// with trilinear minification, over a bus a phone shares with everything
+/// else. If this is most of the 8.2 ms the answer is about texture
+/// residency -- a smaller atlas, fewer mip levels in flight, or blocks
+/// that share pictures -- and not about arithmetic.
+pub fn no_texture() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| flag_or("PRIMITIVE_OPT_NO_TEXTURE", false))
+}
+
+/// **The block-to-block shade, taken away** -- the hash in
+/// `mottled_shade`, and with it the screen-space derivative in
+/// `cell_footprint` that exists only to fade the hash out at range.
+///
+/// **Both halves, or the measurement would be half a measurement.** The
+/// derivative is taken on every terrain fragment in the frame whether the
+/// block wears a shade or not, because a derivative has to be taken in
+/// uniform control flow; leaving it in would price the hash and not what
+/// the feature costs.
+///
+/// shader.wgsl already records what this class of GPU thinks of a
+/// per-pixel hash: two of them took a phone's terrain pass from 4.0 ms to
+/// 7.1 where a desktop paid 0.07. It is one hash now. This says what that
+/// one still costs.
+pub fn no_mottle() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| flag_or("PRIMITIVE_OPT_NO_MOTTLE", false))
+}
+
+/// **The light, taken away**: the sun's beam, the sky fill, the ambient
+/// floor, the ambient occlusion and the clamp over the lot. Every fragment
+/// is lit at one.
+///
+/// Most of this is a handful of multiplies over values the vertex shader
+/// already interpolated, so a large number here would be a surprise and a
+/// useful one -- it would mean the cost is in the vector work rather than
+/// in the fetch, which is exactly the case half precision (`f16`) is made
+/// for.
+pub fn no_light() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| flag_or("PRIMITIVE_OPT_NO_LIGHT", false))
+}
+
+/// **The distance haze, taken away**: the fog ramp and the aerial
+/// perspective that greys the far ground before it.
+///
+/// The cheapest-looking of the four on paper -- a `mix` and a ratio -- and
+/// the one that runs on literally every fragment with no bit to gate it.
+/// If it prices high, the fix is real and easy: the ramp is a function of
+/// `view_distance`, which is already a varying, so it can move to the
+/// vertex shader for a quad small enough that the ramp is linear across
+/// it.
+pub fn no_fog() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| flag_or("PRIMITIVE_OPT_NO_FOG", false))
+}
+
+/// **A 16-bit depth buffer in place of the 32-bit float one.**
+///
+/// Colour and depth are 8 bytes a pixel of tile memory on a tile-based
+/// GPU; at two bytes of depth they are 6, which is a third more pixels in
+/// a bin and a third fewer bins for the geometry to be sorted into and
+/// re-read for. That is a saving on the *geometry* half of the pass, which
+/// the device puts at 5.9 ms, and on the bandwidth the whole frame shares.
+///
+/// **What it costs, said plainly.** Two things, and they are why this is a
+/// switch:
+///
+/// * A decal's depth nudge is 9.5e-7 of clip depth and a 16-bit step is
+///   about 1.5e-5, so the nudge is multiplied by `DECAL_SCALE` (see
+///   shader.wgsl) and a decal then stands further off the surface it is
+///   painted on -- visible at a grazing angle, if at all.
+/// * The sun's shadow map is made from the same format, so it loses
+///   precision too. The device this is for has shadows off (`shadow 0.000`
+///   on its stage line), but a run with them on is not measuring the same
+///   picture and the number would not be comparable.
+///
+/// `Depth24Plus` is not offered as a middle step because it is not one:
+/// every implementation this runs on stores it in four bytes, so it saves
+/// exactly nothing of what this is trying to save.
+pub fn depth16() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| flag_or("PRIMITIVE_OPT_DEPTH16", false))
+}
+
+/// The depth format the frame and every pipeline that draws into it use.
+///
+/// **One function, and every caller goes through it.** A pipeline built
+/// for one format and a pass begun with another is a validation error at
+/// the first frame -- loud, but loud on whichever machine ran it, and this
+/// switch exists to be flipped on a phone. There is no second copy of the
+/// answer to get wrong.
+pub fn depth_format() -> wgpu::TextureFormat {
+    if depth16() {
+        wgpu::TextureFormat::Depth16Unorm
+    } else {
+        wgpu::TextureFormat::Depth32Float
+    }
+}
+
 /// One line for the log, so that a measurement taken from a device says
 /// on its face which build it came from. Printed once at startup and only
 /// when something is actually switched on -- a stock run stays silent.
@@ -350,6 +556,17 @@ pub fn announce() {
     if view_distance(i32::MIN) != i32::MIN {
         on.push(format!("view {} chunks", view_distance(i32::MIN)));
     }
+    for (set, name) in [
+        (no_texture(), "no-texture"),
+        (no_mottle(), "no-mottle"),
+        (no_light(), "no-light"),
+        (no_fog(), "no-fog"),
+        (depth16(), "depth16"),
+    ] {
+        if set {
+            on.push(name.into());
+        }
+    }
     if !on.is_empty() {
         println!("[opt] {}", on.join(", "));
     }
@@ -363,11 +580,46 @@ mod tests {
     /// left this behind would silently draw at the stock mip level while
     /// the log said otherwise.
     #[test]
-    fn the_shader_still_carries_the_line_the_mip_bias_replaces() {
-        assert!(
-            include_str!("shader.wgsl").contains(MIP_BIAS_SWITCH),
-            "shader.wgsl must carry {MIP_BIAS_SWITCH:?} for engine::opt::specialise"
-        );
+    fn the_shader_still_carries_every_line_a_switch_replaces() {
+        let source = include_str!("shader.wgsl");
+        for line in SWITCH_LINES {
+            assert_eq!(
+                source.matches(line).count(),
+                1,
+                "shader.wgsl must carry {line:?} exactly once for engine::opt::specialise"
+            );
+        }
+    }
+
+    /// Every ablation has to produce a shader that compiles, and only a
+    /// build with the switch set would ever find out -- on a phone, which
+    /// is the one place nobody can attach a debugger to. So each one is
+    /// substituted, parsed and validated here, whole and split.
+    #[test]
+    fn every_ablation_still_compiles() {
+        use naga::valid::{Capabilities, ValidationFlags, Validator};
+        let source = include_str!("shader.wgsl");
+        for line in SWITCH_LINES {
+            let flipped = line
+                .replace("bool = false", "bool = true")
+                .replace("f32 = 1.0", "f32 = 32.0")
+                .replace("f32 = 0.0", "f32 = -0.5");
+            assert_ne!(flipped, line, "{line:?} has no other value to take");
+            let text = source.replacen(line, &flipped, 1);
+            for arrays in [1u32, 4] {
+                let split = crate::engine::texture::AtlasSplit {
+                    per_array: crate::engine::texture::MIN_PER_ARRAY,
+                    arrays,
+                };
+                let text = split.specialise(std::borrow::Cow::Borrowed(text.as_str()));
+                let module = naga::front::wgsl::parse_str(&text).unwrap_or_else(|e| {
+                    panic!("{flipped} in {arrays} array(s) failed to parse:\n{}", e.emit_to_string(&text))
+                });
+                Validator::new(ValidationFlags::all(), Capabilities::all())
+                    .validate(&module)
+                    .unwrap_or_else(|e| panic!("{flipped} in {arrays} array(s) failed validation: {e:?}"));
+            }
+        }
     }
 
     /// **The biased shader has to compile, and only a build with the

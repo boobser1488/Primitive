@@ -196,7 +196,24 @@ PRIMITIVE_OPT_RESOLUTION=50       overrides the resolution scale, in per cent
 PRIMITIVE_OPT_LOD=4               overrides where the coarse bands start, in
                                   chunks; 0 is the simplification off
 PRIMITIVE_OPT_VIEW=8              overrides the render distance, in chunks
+PRIMITIVE_OPT_NO_TEXTURE=1        the terrain's atlas fetch, ablated
+PRIMITIVE_OPT_NO_MOTTLE=1         the per-block shade and the screen
+                                  derivative that fades it, ablated
+PRIMITIVE_OPT_NO_LIGHT=1          the beam, the fill, the floor and the
+                                  occlusion, ablated
+PRIMITIVE_OPT_NO_FOG=1            the fog ramp and the aerial perspective,
+                                  ablated
+PRIMITIVE_OPT_DEPTH16=1           a 16-bit depth buffer instead of a 32-bit
+                                  float one — a third less tile memory a
+                                  pixel, at the price of a decal standing
+                                  further off its surface
 ```
+
+The four `NO_` switches make the picture wrong on purpose: they are
+instruments, not settings, and they exist because the device said shading is
+58% of the solid pass while `PRIMITIVE_SPECKS=1` — which takes *all* of it
+away — cannot say which part. Each is a constant compiled into the shader, so
+an unset build is byte-for-byte the shader that was there before.
 
 The last three change nothing about how the game draws. They are there
 because "is this pass paying for pixels or for triangles?" is answered by
@@ -216,6 +233,15 @@ every triangle stay exactly as they were. The gap between its `solid` stage
 and a stock one is what the shading costs, and everything left is geometry.
 (It also leaves the sky out and clears to white, which is what it was written
 for; neither touches the solid stage's time.)
+
+**Where the frame goes, on an Adreno 710.** Shading, not geometry: the speck
+hunt takes the solid pass from 14.08 ms to 5.87 at the same 255 thousand
+triangles, while halving the triangles buys 0.9 ms. So about 5.9 ms is
+geometry and about 8.2 is per-fragment work — and the first three rounds of
+switches were all pulling on the smaller half. What a fragment still computes
+that a vertex could have is close to nothing: the one term that was moved out
+to the vertex had to be moved back, and `shade_lit_sky` carries the test that
+caught it.
 
 **What the Adreno 710 has already answered** (the `bench` world, the player
 standing, 55 s a mode, restarted between them). Two of these switches are

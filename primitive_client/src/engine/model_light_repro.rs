@@ -540,7 +540,7 @@ impl<'a> Rig<'a> {
                     &globals_layout,
                     &texture_layout,
                     FORMAT,
-                    DEPTH_FORMAT,
+                    depth_format(),
                     samples,
                     crate::engine::shadow::RESOLUTION,
                     (MAX_CHUNK_DRAWS * std::mem::size_of::<[f32; 4]>()) as u64,
@@ -582,7 +582,7 @@ impl<'a> Rig<'a> {
         let sample_view = (samples > 1)
             .then(|| texture("model light samples", samples, FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default()));
         let depth_view =
-            texture("model light depth", samples, DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default());
+            texture("model light depth", samples, depth_format(), wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default());
         Self {
             device,
             queue,

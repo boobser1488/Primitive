@@ -938,6 +938,58 @@ fn crisp_uv(uv: vec2<f32>, resolution: f32, ramp: vec2<f32>) -> vec2<f32> {
     return snapped / resolution;
 }
 
+// **The four ablations, and why they are constants.**
+//
+// A phone said that shading, not geometry, is where the solid pass goes:
+// `PRIMITIVE_SPECKS=1` replaces this whole fragment shader with one flat
+// colour a face and took the pass from 14.08 ms to 5.87 at the same 255
+// thousand triangles. That is 8.2 ms of per-fragment work and no way to
+// tell which part of it is which -- so each part gets a switch that takes
+// it away, and the device prices them one at a time. See `engine::opt`.
+//
+// **Constants rather than uniforms**, the way `MIP_BIAS` and the lighting
+// step are: a `false` here is dead code before the driver sees it, so a
+// build with no switch set compiles to exactly the shader that was here
+// before, and a build with one set is not paying for a branch on top of
+// the thing it is measuring.
+//
+// Each of these makes the picture wrong on purpose. They are instruments,
+// not settings, and nothing in the game turns them on.
+//
+// **`SKIP_TEXTURE` reaches the two plain entry points and not the shadowed
+// pair.** `fs_solid_shadowed` and `fs_cutout_shadowed` still fetch, because
+// the device this was written for draws with shadows off -- its stage line
+// reads `shadow 0.000` -- and a second pair of branches would be two more
+// places for the instrument to disagree with itself. The other three
+// ablations live in `shade_lit_sky`, which every entry point goes through,
+// so they apply either way. A run with shadows on is measuring a different
+// frame in any case.
+const SKIP_TEXTURE: bool = false;
+const SKIP_MOTTLE: bool = false;
+const SKIP_LIGHT: bool = false;
+const SKIP_FOG: bool = false;
+
+// What a fragment wears when `SKIP_TEXTURE` takes its picture away.
+//
+// Mid grey and fully opaque: the cut-out's `discard` reads this alpha, so
+// anything under one would throw the leaves away and measure a smaller
+// scene rather than a cheaper one. The colour is the rough mean of the
+// atlas so the frame still reads as a world and a screenshot of the
+// ablation is worth looking at.
+const FLAT_ALBEDO: vec4<f32> = vec4<f32>(0.42, 0.40, 0.36, 1.0);
+
+// **How much the decal nudge is multiplied by**, for a depth buffer with
+// fewer bits than the one these numbers were chosen against.
+//
+// `DECAL_DEPTH` is 9.5e-7 of clip depth, which a 32-bit float buffer
+// resolves with room to spare and a 16-bit one cannot see at all: at 16
+// bits a step is about 1.5e-5, so every decal would sink into the ground
+// it is drawn on and z-fight with it. `engine::opt::depth16` rewrites
+// this line when it takes the buffer down, and the price is a decal
+// standing further off its surface -- visible at a grazing angle, which
+// is why the smaller buffer is an experiment and not the default.
+const DECAL_SCALE: f32 = 1.0;
+
 // **How many mip levels sharper the terrain is fetched.**
 //
 // Nought is the game's own picture and the line below is the one
@@ -1302,7 +1354,7 @@ fn terrain_vertex(in: VertexInput) -> VertexOutput {
         // floor level with the eye -- a line on the screen -- would be pulled
         // through everything in front of it.
         let over = max(abs(globals.camera_pos.y - world.y), 0.05);
-        out.clip_position.z = out.clip_position.z - (DECAL_DEPTH + DECAL_SLOPE / over) * out.clip_position.w;
+        out.clip_position.z = out.clip_position.z - DECAL_SCALE * (DECAL_DEPTH + DECAL_SLOPE / over) * out.clip_position.w;
     }
     if (out.translucent != 0u) {
         // The byte's second reading, and the translucent bit is what
@@ -1823,7 +1875,15 @@ fn fs_solid(in: VertexOutput) -> @location(0) vec4<f32> {
     if (globals.texture_params.w > 0.5) {
         return speck_colour(in.lambert);
     }
-    let sampled = sample_block(in.uv, in.tex_layer);
+    // The fetch, or the flat colour standing in for it. The branch is on
+    // a module constant, so it is uniform and `sample_block`'s derivatives
+    // are legal inside it; one arm is dead before the driver sees it.
+    var sampled: vec4<f32>;
+    if (SKIP_TEXTURE) {
+        sampled = FLAT_ALBEDO;
+    } else {
+        sampled = sample_block(in.uv, in.tex_layer);
+    }
     // **A hole drawn solid is not a hole -- it is what was behind it.**
     //
     // The complaint this fixes, in the player's words: *"при выключении
@@ -1860,7 +1920,16 @@ fn fs_solid(in: VertexOutput) -> @location(0) vec4<f32> {
         sampled.rgb * mix(1.0, HOLE_SHADE, solid_hole),
         sampled.a,
     );
-    return shade(in, filled, cell_footprint(in.uv));
+    // **The footprint is a derivative pair on every terrain fragment**, and
+    // it exists only to fade the block-to-block shade out at range (see
+    // `MOTTLE_FADE_FROM`). Under `SKIP_MOTTLE` nothing reads it, so it is
+    // not taken -- otherwise the ablation would leave half of what it is
+    // meant to be measuring in place.
+    var footprint = NO_FOOTPRINT;
+    if (!SKIP_MOTTLE) {
+        footprint = cell_footprint(in.uv);
+    }
+    return shade(in, filled, footprint);
 }
 
 /// How dark a hole in a cutout picture is drawn when the picture is
@@ -1886,7 +1955,15 @@ fn fs_cutout(in: VertexOutput) -> @location(0) vec4<f32> {
     if (globals.texture_params.w > 0.5) {
         return speck_colour(in.lambert);
     }
-    let sampled = sample_cutout(in.uv, in.tex_layer);
+    // As in `fs_solid`: the fetch or the flat colour. `FLAT_ALBEDO` is
+    // opaque so the `discard` below keeps every fragment, and the ablation
+    // measures a cheaper scene rather than a smaller one.
+    var sampled: vec4<f32>;
+    if (SKIP_TEXTURE) {
+        sampled = FLAT_ALBEDO;
+    } else {
+        sampled = sample_cutout(in.uv, in.tex_layer);
+    }
     // Before the cut-out throws anything away: see `shade`.
     let cell_px = cell_footprint(in.uv);
 
@@ -2158,7 +2235,7 @@ fn shade_lit_sky(in: VertexOutput, sampled: vec4<f32>, lambert: f32, sun_sky: f3
     var variation = vec3<f32>(1.0);
     // Inside the flat branch, so nothing that is not a merged block pays
     // for the fade at all.
-    if ((in.mottled & MOTTLED_BIT) != 0u) {
+    if ((in.mottled & MOTTLED_BIT) != 0u && !SKIP_MOTTLE) {
         let mottle_seen = 1.0 - smoothstep(MOTTLE_FADE_FROM, MOTTLE_FADE_TO, cell_px);
         if (mottle_seen > 0.0) {
             variation = mix(vec3<f32>(1.0), mottled_shade(in.shade_cell), mottle_seen);
@@ -2171,6 +2248,12 @@ fn shade_lit_sky(in: VertexOutput, sampled: vec4<f32>, lambert: f32, sun_sky: f3
         variation = variation * chip_shade(in.uv);
     }
     light = clamp(light * ao_factor * variation, vec3<f32>(0.0), vec3<f32>(1.4));
+    // Everything above -- the beam, the fill, the floor, the occlusion and
+    // the block-to-block shade -- thrown away in one line, so the driver
+    // can drop the lot as dead. See `SKIP_LIGHT`.
+    if (SKIP_LIGHT) {
+        light = vec3<f32>(1.0);
+    }
 
     // Tinted in proportion to how green the texel already is.
     //
@@ -2327,7 +2410,7 @@ fn shade_lit_sky(in: VertexOutput, sampled: vec4<f32>, lambert: f32, sun_sky: f3
     // its own weight, tinted by the sky's hue -- so this moves no exposure
     // and nothing anybody argued over. `fill_color` is the sky at luminance
     // one, already on the uniform for the shadow fill.
-    if (globals.extra.z < 0.5) {
+    if (globals.extra.z < 0.5 && !SKIP_FOG) {
         // **The fragment's own distance, squared, and not the vertex's.**
         //
         // `view_distance` is a `length` taken per vertex and interpolated
@@ -2351,7 +2434,7 @@ fn shade_lit_sky(in: VertexOutput, sampled: vec4<f32>, lambert: f32, sun_sky: f3
         color = mix(color, luma * globals.fill_color.rgb, air);
     }
 
-    if (globals.extra.w > 0.5) {
+    if (globals.extra.w > 0.5 && !SKIP_FOG) {
         let fog_start = globals.fog_params.x;
         let fog_end = max(globals.fog_params.y, fog_start + 1.0);
         // Squared falloff: closer to how real aerial perspective behaves
