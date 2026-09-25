@@ -246,7 +246,18 @@ const FINE_V_SHIFT: u32 = 14u;
 const FINE_MASK: u32 = 16383u;
 const FINE_UNITS: f32 = 256.0;
 struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
+    // **`@invariant`, and the depth prepass is why.** With
+    // `PRIMITIVE_OPT_DEPTH_PREPASS` the terrain is drawn twice -- once
+    // through `vs_depth` writing depth only, once through here testing
+    // `LessEqual` against what that wrote -- and "equal" is exact. A
+    // compiler free to reassociate the projection differently in the two
+    // entry points could land a unit in the last place apart, and a
+    // `LessEqual` that fails draws the clear colour where a face should
+    // be: a hole in the world, on one driver and not another. This
+    // attribute is the language's promise that the position is computed
+    // the same way wherever it appears. Off the prepass it costs the
+    // reassociation of four dot products and nothing else.
+    @invariant @builtin(position) clip_position: vec4<f32>,
     // **Centroid, because the frame is multisampled.** With several
     // samples per pixel a pixel on the edge of a face is covered by
     // some of them and not others, and the fragment shader still runs
@@ -938,6 +949,44 @@ fn crisp_uv(uv: vec2<f32>, resolution: f32, ramp: vec2<f32>) -> vec2<f32> {
     return snapped / resolution;
 }
 
+// **How many mip levels sharper the terrain is fetched.**
+//
+// Nought is the game's own picture and the line below is the one
+// `engine::opt::specialise` rewrites when `PRIMITIVE_OPT_MIP_BIAS` names
+// a number -- the same mechanism the lighting step uses, and for the same
+// reason: it cannot change while the game runs, so a uniform read per
+// fragment would carry a constant across the whole screen for nothing.
+//
+// It exists because of what a phone photographed at anisotropy 1. With no
+// anisotropic taps the hardware picks one level from the *longer* of the
+// two derivatives, so ground running away from the eye is fetched from a
+// level far coarser than its short axis needs -- and with `Nearest`
+// between levels there is nothing to soften where one ends. Half a level
+// is roughly what the missing anisotropy costs a surface at 45 degrees.
+// See `engine::opt::mip_bias` for the range and for why it is a dial.
+//
+// A constant, so the branch below folds away: a build without the switch
+// compiles to the single `textureSample` that was here before.
+const MIP_BIAS: f32 = 0.0;
+
+// The plain fetch, and the mip bias if there is one.
+//
+// A function of its own rather than two lines inside `sample_block`, and
+// the reason is the shape of the statement: `engine::opt` rewrites the
+// constant, but `renderer`'s own ablation tool
+// (`where_the_sampling_seams_come_from`) rewrites the *line* that fetches,
+// and a call it can replace whole is what keeps that tool working. The
+// condition is a module constant, so it is uniform by construction --
+// which is what makes `textureSample`, legal only in uniform control flow,
+// legal inside it -- and one of the two arms is dead before the driver
+// ever sees it.
+fn plain_fetch(uv: vec2<f32>, layer: i32) -> vec4<f32> {
+    if (MIP_BIAS == 0.0) {
+        return textureSample(block_textures, block_sampler, uv, layer);
+    }
+    return textureSampleBias(block_textures, block_sampler, uv, layer, MIP_BIAS);
+}
+
 // Samples a block texture with the snapped coordinate but the *original*
 // gradients.
 //
@@ -979,7 +1028,7 @@ fn sample_block(uv: vec2<f32>, named: u32) -> vec4<f32> {
     // anisotropic taps cost the same as one). The instruction was the
     // cost, not the taps, and it was being paid on every pixel of
     // terrain to serve the handful that are close enough to need it.
-    let plain = textureSample(block_textures, block_sampler, uv, i32(layer));
+    let plain = plain_fetch(uv, i32(layer));
 
     // Filtering off: the sampler is nearest and there are no mips in
     // play, so the coordinate needs no fixing. The branch is on a
@@ -1218,6 +1267,28 @@ fn face_normal(face: u32) -> vec3<f32> {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     return terrain_vertex(in);
+}
+
+// The depth prepass's vertex shader: the same arithmetic as `vs_main` and
+// nothing else carried out of it.
+//
+// **It has to exist, and it has to be `terrain_vertex` and not a second
+// projection.** wgpu will not take a fragment stage that leaves a vertex
+// output unconsumed -- "Location[0] is provided by the previous stage
+// output but is not consumed as input by this stage" -- so a prepass whose
+// fragment shader reads nothing needs a vertex shader that writes nothing
+// but the position. Writing the projection out again here is how the two
+// draws come to disagree by a unit in the last place, which `LessEqual`
+// reads as a rejection and a player reads as a hole; calling the same
+// function is how they cannot. `@invariant` on `VertexOutput` closes what
+// is left, which is the compiler's freedom to fold the two differently.
+//
+// The decal nudge (`DECAL_DEPTH`) rides along for free, which it would not
+// have done in a hand-written copy -- and a decal drawn at its nudged depth
+// in one pass and its true depth in the other is exactly the hole above.
+@vertex
+fn vs_depth(in: VertexInput) -> @invariant @builtin(position) vec4<f32> {
+    return terrain_vertex(in).clip_position;
 }
 
 // The body of `vs_main`, as a function so the shadowed entry point and
@@ -1776,6 +1847,29 @@ fn speck_colour(face: f32) -> vec4<f32> {
     if (f == 3u) { return vec4<f32>(1.0, 1.0, 0.0, 1.0); }
     if (f == 4u) { return vec4<f32>(1.0, 0.0, 1.0, 1.0); }
     return vec4<f32>(0.0, 1.0, 1.0, 1.0);
+}
+
+// **The depth prepass's fragment shader, which exists only because wgpu
+// will not take a pipeline without one.**
+//
+// A pipeline with `fragment: None` is refused against a pass that has a
+// colour attachment -- "render pipeline targets are incompatible with
+// render pass" -- and the prepass runs inside the main pass, beside the
+// shading it is there to save, because a depth-only pass of its own would
+// store the depth buffer out of tile memory and load it back, which on a
+// tile-based GPU is more than the prepass could ever return. So the
+// pipeline keeps a colour target and masks every channel off
+// (`ColorWrites::empty()`), and this is what sits behind the mask.
+//
+// **It declares no inputs, and that is the point.** A fragment entry that
+// took `VertexOutput` would have all ten of the terrain's varyings
+// interpolated for it -- the uv, the light terms, the shade cell, the
+// tint -- on every fragment of the world, twice a frame. Taking nothing
+// leaves the vertex shader's outputs unread, and every compiler this goes
+// through drops the work that fed them. See `renderer::Prepass`.
+@fragment
+fn fs_depth() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
 }
 
 @fragment

@@ -25,6 +25,7 @@
 //! | `sky`      | the time of day, and the colours that follow from it    |
 //! | `shadow`   | the sun's shadow map, when the player has asked for one |
 //! | `lighting` | how much colour the light carries, step by step          |
+//! | `opt`      | the frame-cost experiments, one environment switch each  |
 //! | `font`     | the bitmap glyphs the UI layer draws with               |
 //! | `capture`  | one frame of it, written to a PNG                        |
 //!
@@ -58,6 +59,7 @@ pub mod lighting;
 pub mod lod;
 pub mod mesh;
 pub mod mesher;
+pub mod opt;
 pub mod particles;
 pub mod relief;
 pub mod renderer;

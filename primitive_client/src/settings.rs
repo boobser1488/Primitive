@@ -1731,6 +1731,19 @@ impl ClientSettings {
         // under the player's feet. A settings file is user input, and a
         // threshold of one would mesh the chunk they are standing in out
         // of two-block lumps.
+        //
+        // **The environment is asked first, and this is the one place it
+        // can be.** `lod_distance_chunks` is read by the mesher, by the
+        // arena's ring bookkeeping and by the stones; an override applied
+        // at one of those would leave the other two meshing to a
+        // different line. Applied here, before the clamp, it is the value
+        // every reader sees and it is bounded by the same rule a settings
+        // file is. See `engine::opt::lod_distance` for why a phone needs
+        // it reachable without a menu -- at the default of ten chunks
+        // inside a render distance of twelve, only the outermost ring of
+        // the world is coarse at all, and the phone's own stage line says
+        // the solid pass is paying for triangles.
+        self.lod_distance_chunks = crate::engine::opt::lod_distance(self.lod_distance_chunks);
         self.lod_distance_chunks = if self.lod_distance_chunks <= 0 {
             0
         } else {
