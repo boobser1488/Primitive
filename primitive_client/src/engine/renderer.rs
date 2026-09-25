@@ -17091,7 +17091,7 @@ pub(crate) mod offscreen_repro {
                 // Advanced in one step to the wanted fraction of a blow:
                 // the animation is a pure function of elapsed time, so
                 // this is the same pose the frame would build there.
-                hand.update(phase * 0.28, false, 0.0, true);
+                hand.update(phase * 0.28, false, 0.0, true, Some(block));
                 let mut vertices = Vec::new();
                 let mut indices = Vec::new();
                 hand.build_into(

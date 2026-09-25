@@ -310,11 +310,44 @@ const SHOULDER: Vec3 = Vec3::new(0.50, -0.62, -0.30);
 /// down reads as repeated effort rather than one slow stir, slow enough
 /// that a single click is visible at all.
 pub(crate) const SWING_SECONDS: f32 = 0.28;
-/// Where in that time the blow *lands*. Everything before this is the
-/// windup and the strike, everything after is the recovery -- which is
-/// two and a half times as long, because that is what a swing feels
-/// like and an even one feels like waving.
+/// Where in that time the blow *lands*, **with nothing in the hand**.
+/// Everything before this is the windup and the strike, everything after
+/// is the recovery -- which is two and a half times as long, because
+/// that is what a swing feels like and an even one feels like waving.
+///
+/// What is actually held moves this later: see [`impact_at`].
 pub(crate) const IMPACT: f32 = 0.30;
+
+/// How much longer a blow takes with the heaviest head in the game than
+/// with an empty hand: a third again, so [`SWING_SECONDS`]' 0.28 becomes
+/// 0.36 for an iron pick.
+///
+/// **Why the blow's length carries the weight and not its amplitude
+/// alone.** A tool that swung at exactly the speed of a fist and merely
+/// travelled further did not read as heavy -- it read as a bigger fist.
+/// What an arm actually does with a mass on the end of a haft is take
+/// longer to get it up there and longer to stop it, and *time* is the
+/// only channel the eye reads mass through.
+///
+/// **A third and not double.** This is the rhythm of work: a player at a
+/// rock face hears and sees a blow three or four times a second, and
+/// halving that turns mining from a rhythm into a wait. The difference
+/// has to be felt between two tools held one after the other, not
+/// suffered for the length of a shift.
+const HEFT_SLOWS: f32 = 0.30;
+/// ...and how much later in its own blow the heavy head lands: 0.30 of
+/// the way through for a fist, 0.42 for an iron pick.
+///
+/// The windup and the recovery both grow in seconds -- the blow is
+/// longer *and* the landing is later in it -- which is the shape of a
+/// heavy swing: slow up, and a long time settling afterwards.
+const HEFT_LOADS: f32 = 0.12;
+/// ...and how much further the arm travels at full heft: a sixth again.
+///
+/// Small on purpose. The item is held two thirds of a unit from the
+/// shoulder, so every extra radian is two thirds of a unit of screen
+/// travel; the arc is the seasoning on the timing, not the dish.
+const HEFT_ARC: f32 = 0.16;
 /// How far the arm drops at the moment of impact, in radians (about 31
 /// degrees). See [`SHOULDER`] for why this is not the 50-odd degrees a
 /// swing sounds like it should be.
@@ -411,8 +444,86 @@ pub fn blow_seconds(held: Option<BlockId>) -> f32 {
     if held.is_some_and(primitive_shared::types::is_weapon) {
         primitive_shared::combat::swing_seconds(held)
     } else {
-        SWING_SECONDS
+        dig_seconds(held)
     }
+}
+
+/// How heavy what is in the hand feels, 0 for a fist and 1 for the
+/// heaviest head in the game.
+///
+/// **Not a mass in kilograms, and deliberately not one.** Nothing in
+/// this game weighs anything -- a stack of forty logs is carried up a
+/// mountain -- and inventing a mass table to drive an animation would be
+/// a second set of numbers about every block, arguable in every row, for
+/// a thing the player can only ever feel as *more* or *less*. What
+/// actually decides how a tool swings is the head: what it is made of,
+/// and how big a head that work needs. Both of those are already in
+/// `blocks::definition`, and reading them is what keeps this honest --
+/// a new tool gets a weight from its tier and its work without anybody
+/// adding a row.
+///
+/// **The tiers are not in density order, and that is the point.** A
+/// ground stone axe head is a fist-sized lump of rock at 2.6 g/cm³; a
+/// copper one is a casting a smith paid for in ore and made no bigger
+/// than it had to be, at 8.9. The two come out close, with stone a
+/// little ahead -- which is exactly the thing a player notices when they
+/// finally hang up the stone axe. Flint is the lightest because a flint
+/// tool is a knapped flake lashed to a haft and most of what is in the
+/// hand is the haft. Bronze and iron are the heavy end: a smith who can
+/// cast bronze can afford a head that does the work in one blow.
+///
+/// A held *block* is not a tool and is not swung, but it is not nothing
+/// either: it is carried, and setting it down has a weight to it.
+pub fn heft(held: Option<BlockId>) -> f32 {
+    use primitive_shared::blocks::{Tier, Work};
+    let Some(id) = held else { return 0.0 };
+    let def = primitive_shared::blocks::definition(primitive_shared::types::block_kind(id));
+    let Some(tier) = def.tool else {
+        // Anything else in the hand: a block, an ingot, a handful of
+        // berries. A sixth, which is under the lightest tool there is.
+        return 0.15;
+    };
+    let head: f32 = match tier {
+        // A tool that brings no tier with it is a fist with a handle,
+        // and weighs what a fist does. Named rather than swept into a
+        // catch-all, so a rung added to the ladder fails to compile here
+        // instead of silently arriving with somebody else's weight.
+        Tier::Hand => 0.0,
+        Tier::Flint => 0.34,
+        Tier::Stone => 0.52,
+        Tier::Copper => 0.60,
+        Tier::Bronze => 0.74,
+        Tier::Iron => 0.85,
+    };
+    // ...and how much head the work needs. A pick and a hammer are all
+    // head; an axe nearly so; a spade moves earth and is mostly a blade
+    // of nothing; a knife is an edge and a grip, and a rod is a stick.
+    let shape = match def.work {
+        Work::Stone => 1.15,
+        Work::Wood => 1.0,
+        Work::Ground => 0.7,
+        Work::Plant | Work::Any => 0.55,
+    };
+    (head * shape).clamp(0.0, 1.0)
+}
+
+/// How long one blow at a *block* takes with this in hand, in seconds.
+///
+/// The digging rhythm, and therefore the rhythm the soundscape knocks at
+/// (`audio::soundscape::Soundscape::digging`) and the rate the arm
+/// starts its next blow at. Both read this rather than
+/// [`SWING_SECONDS`], so the knock cannot walk off the blow it belongs
+/// to when a heavier tool slows the arm down.
+pub fn dig_seconds(held: Option<BlockId>) -> f32 {
+    SWING_SECONDS * (1.0 + HEFT_SLOWS * heft(held))
+}
+
+/// How far through its own blow the head lands, 0..1.
+///
+/// See [`IMPACT`] for the shape this is a fraction of, and [`HEFT_LOADS`]
+/// for why a heavy head lands later in a blow that is already longer.
+pub(crate) fn impact_at(held: Option<BlockId>) -> f32 {
+    IMPACT + HEFT_LOADS * heft(held)
 }
 
 /// How long after the click a blow with this in hand *lands*, in seconds:
@@ -525,9 +636,31 @@ impl Strikes {
 struct Blow {
     elapsed: f32,
     length: f32,
+    /// Where in this blow the head lands, and how heavy that head is --
+    /// taken from what was in the hand when the blow started, for the
+    /// same reason `length` is. See [`impact_at`] and [`heft`].
+    impact: f32,
+    heft: f32,
 }
 
 impl Blow {
+    /// The blow that what is in the hand makes, from rest.
+    fn of(held: Option<BlockId>) -> Blow {
+        Blow {
+            elapsed: 0.0,
+            length: blow_seconds(held),
+            impact: impact_at(held),
+            heft: heft(held),
+        }
+    }
+
+    /// The same, at the *digging* rhythm: a spear held against a rock
+    /// face chops at a pick's pace rather than jabbing once a second.
+    /// See `Hand::update`.
+    fn digging(held: Option<BlockId>) -> Blow {
+        Blow { length: dig_seconds(held), ..Blow::of(held) }
+    }
+
     /// 0 at the start of the blow and 1 at its end.
     fn phase(self) -> f32 {
         self.elapsed / self.length
@@ -551,6 +684,9 @@ pub struct Hand {
     /// The rod: how far it is drawn back, and the throw under way. See
     /// [`Hand::wind_rod`].
     rod: Rod,
+    /// The heft of a blow whose head arrived this frame, waiting to be
+    /// taken by the frame loop -- see [`Hand::take_landed`].
+    landed: Option<f32>,
 }
 
 /// **A rod drawn back while the cast is wound up, and whipped forward when
@@ -638,7 +774,7 @@ impl Hand {
     /// the middle of a thrust has nowhere to go and queues nothing.
     pub fn strike(&mut self, held: Option<BlockId>) {
         if self.swing.is_none() {
-            self.swing = Some(Blow { elapsed: 0.0, length: blow_seconds(held) });
+            self.swing = Some(Blow::of(held));
         }
     }
 
@@ -702,8 +838,8 @@ impl Hand {
         // photograph of a thrust is a phase of the spear's second; at
         // rest, the quick blow's. The pose reads only the fraction, so
         // either is the same picture.
-        let length = self.swing.map_or(SWING_SECONDS, |blow| blow.length);
-        self.swing = Some(Blow { elapsed: phase.clamp(0.0, 1.0) * length, length });
+        let held = self.swing.unwrap_or(Blow { elapsed: 0.0, length: SWING_SECONDS, impact: IMPACT, heft: 0.0 });
+        self.swing = Some(Blow { elapsed: phase.clamp(0.0, 1.0) * held.length, ..held });
     }
 
     /// Advances the animation by one frame.
@@ -713,8 +849,11 @@ impl Hand {
     /// back to rest, which is what turns a click into a rhythm. `speed`
     /// is horizontal speed in blocks per second and `grounded` whether
     /// the player is actually on the floor -- the bob is a footfall, and
-    /// there are none in mid-air.
-    pub fn update(&mut self, dt: f32, digging: bool, speed: f32, grounded: bool) {
+    /// there are none in mid-air. `held` is what is in the hand *now*,
+    /// which is what the next blow of a rhythm weighs -- swapping a fist
+    /// for an iron pick mid-dig slows the arm from the next blow on
+    /// rather than from the next click.
+    pub fn update(&mut self, dt: f32, digging: bool, speed: f32, grounded: bool, held: Option<BlockId>) {
         // A stall must not throw the arm through a whole blow in one
         // step; the same clamp physics and the camera shake use.
         let dt = dt.clamp(0.0, 0.1);
@@ -722,6 +861,16 @@ impl Hand {
         match self.swing {
             Some(blow) => {
                 let elapsed = blow.elapsed + dt;
+                // **The head arrives once per blow, and this is where
+                // that is noticed.** Nothing else in the client knows
+                // when a swing is *down* -- the click is up to a third
+                // of a second earlier, and for a heavy tool further
+                // still. The recoil reads this; see `Shake::on_blow`.
+                if blow.elapsed < blow.impact * blow.length
+                    && elapsed >= blow.impact * blow.length
+                {
+                    self.landed = Some(blow.heft);
+                }
                 self.swing = if elapsed < blow.length {
                     Some(Blow { elapsed, ..blow })
                 } else if digging {
@@ -734,13 +883,15 @@ impl Hand {
                     // block comes apart at the pace its cracks spread and
                     // the soundscape knocks: a spear held while digging
                     // jabs at a pick's rate, rather than once a second
-                    // while the cracks run four times as fast.
-                    Some(Blow { elapsed: elapsed - blow.length, length: SWING_SECONDS })
+                    // while the cracks run four times as fast. That pace
+                    // is `dig_seconds` and not a constant, because what
+                    // is in the hand has a weight -- see [`HEFT_SLOWS`].
+                    Some(Blow { elapsed: elapsed - blow.length, ..Blow::digging(held) })
                 } else {
                     None
                 };
             }
-            None if digging => self.swing = Some(Blow { elapsed: 0.0, length: SWING_SECONDS }),
+            None if digging => self.swing = Some(Blow::digging(held)),
             None => {}
         }
 
@@ -765,9 +916,27 @@ impl Hand {
     /// of impact.
     pub fn swing(&self) -> f32 {
         match self.swing {
-            Some(blow) => swing_curve(blow.phase()),
+            Some(blow) => swing_curve(blow.phase(), blow.impact),
             None => 0.0,
         }
+    }
+
+    /// The heft of a blow whose head arrived since this was last asked,
+    /// or `None`.
+    ///
+    /// **Taken rather than read**, so one blow is one recoil however
+    /// many times a frame loop asks. A blow that landed during a stall
+    /// is still reported: the frame was long, the arm went through the
+    /// impact inside it, and a view that did not flinch would be the one
+    /// dropped frame a player actually notices.
+    pub fn take_landed(&mut self) -> Option<f32> {
+        self.landed.take()
+    }
+
+    /// How far the arm travels this frame as a share of a fist's, which
+    /// is 1: a heavier head is swung further. See [`HEFT_ARC`].
+    fn arc(&self) -> f32 {
+        1.0 + HEFT_ARC * self.swing.map_or(0.0, |blow| blow.heft)
     }
 
     /// The same blow read as a *thrust*: 0 at rest, 1 at full
@@ -1132,7 +1301,10 @@ impl Hand {
     /// the pose, and a second copy is a thing that agrees with the
     /// first until somebody changes one of them.
     pub fn group(&self) -> Mat4 {
-        let swing = self.swing();
+        // The weight of what is held reaches the pose here and nowhere
+        // else, so the arm, the tool and the forearm cannot disagree
+        // about how far the blow went.
+        let swing = self.swing() * self.arc();
         Mat4::from_translation(self.carried_offset())
             * Mat4::from_translation(SHOULDER)
             * Mat4::from_rotation_x(-SWING_PITCH * swing)
@@ -1605,14 +1777,21 @@ pub fn held_scale(block: BlockId, model: &crate::engine::item_model::ItemModel) 
 /// The strike is a fractional power, so it leaves rest fast and arrives
 /// slowing; the recovery is a square, so it leaves the impact slowly and
 /// settles rather than stopping.
-fn swing_curve(t: f32) -> f32 {
+/// `impact` is where in the blow the head lands -- [`IMPACT`] for an
+/// empty hand, later for a heavy one ([`impact_at`]). Passed in rather
+/// than read off the constant, because a blow is authored by what was in
+/// the hand when it started and the hand can change mid-swing.
+fn swing_curve(t: f32, impact: f32) -> f32 {
     if t <= 0.0 || t >= 1.0 {
         return 0.0;
     }
-    if t < IMPACT {
-        (t / IMPACT).powf(0.55)
+    // A fraction of a blow, never its ends: a zero would divide by
+    // nothing on the strike and a one on the recovery.
+    let impact = impact.clamp(0.05, 0.95);
+    if t < impact {
+        (t / impact).powf(0.55)
     } else {
-        let back = (1.0 - t) / (1.0 - IMPACT);
+        let back = (1.0 - t) / (1.0 - impact);
         back * back
     }
 }
@@ -1863,7 +2042,7 @@ mod tests {
             let phase = step as f32 / 12.0;
             let mut hand = Hand::new();
             hand.strike(None);
-            hand.update(phase * SWING_SECONDS, false, 0.0, true);
+            hand.update(phase * SWING_SECONDS, false, 0.0, true, None);
 
             let build = |flame: Option<u32>| {
                 let (mut vertices, mut indices) = (Vec::new(), Vec::new());
@@ -2058,7 +2237,7 @@ mod tests {
             let mut hand = Hand::new();
             if swinging {
                 hand.strike(None);
-                hand.update(SWING_SECONDS * IMPACT, false, 0.0, true);
+                hand.update(SWING_SECONDS * IMPACT, false, 0.0, true, None);
             }
             let vertices = build(&hand, true, Some(1));
             assert!(!vertices.is_empty());
@@ -2730,7 +2909,7 @@ mod tests {
             let mut left = seconds;
             while left > 0.0 {
                 let step = left.min(0.05);
-                hand.update(step, false, 0.0, true);
+                hand.update(step, false, 0.0, true, None);
                 left -= step;
             }
             hand.group().transform_point3(ITEM_CENTRE)
@@ -2753,7 +2932,7 @@ mod tests {
         // travels and that it is over when it says it is.
         let mut peak: f32 = 0.0;
         for _ in 0..40 {
-            hand.update(SWING_SECONDS / 20.0, false, 0.0, true);
+            hand.update(SWING_SECONDS / 20.0, false, 0.0, true, None);
             peak = peak.max(hand.swing());
         }
         assert!(peak > 0.9, "the arm barely moved: peak {peak}");
@@ -2761,21 +2940,97 @@ mod tests {
     }
 
     #[test]
+    fn a_heavier_head_takes_longer_to_swing_and_lands_later_in_its_own_blow() {
+        use primitive_shared::types::{
+            BLOCK_FLINT_KNIFE, BLOCK_IRON_PICKAXE, BLOCK_STONE_AXE,
+        };
+        // The ladder as a player climbs it: a knapped flake is mostly
+        // haft, a ground stone head is a lump of rock, and a cast iron
+        // one is what a smith finally spends the ore on. The order is
+        // the whole claim -- see `heft`.
+        let fist = heft(None);
+        let flake = heft(Some(BLOCK_FLINT_KNIFE));
+        let stone = heft(Some(BLOCK_STONE_AXE));
+        let iron = heft(Some(BLOCK_IRON_PICKAXE));
+        assert_eq!(fist, 0.0, "an empty hand weighs {fist}");
+        assert!(
+            fist < flake && flake < stone && stone < iron,
+            "the ladder came out {fist} {flake} {stone} {iron}"
+        );
+        assert!(iron <= 1.0, "the heaviest head is off the scale at {iron}");
+
+        // ...and both clocks follow it.
+        assert!(dig_seconds(Some(BLOCK_IRON_PICKAXE)) > dig_seconds(Some(BLOCK_FLINT_KNIFE)));
+        assert!(impact_at(Some(BLOCK_IRON_PICKAXE)) > impact_at(None));
+        // The windup and the recovery both grow in *seconds*, which is
+        // the shape of a heavy swing: slow up, and a long time settling
+        // afterwards. A blow of a fixed length with a later impact would
+        // give the heavy tool a *shorter* recovery, which reads as the
+        // arm snapping back.
+        let windup = |held| dig_seconds(held) * impact_at(held);
+        let recovery = |held| dig_seconds(held) * (1.0 - impact_at(held));
+        let iron = Some(BLOCK_IRON_PICKAXE);
+        assert!(windup(iron) > windup(None), "the heavy head came up as fast as a fist");
+        assert!(recovery(iron) > recovery(None), "the heavy head came home as fast as a fist");
+    }
+
+    #[test]
+    fn a_blow_lands_exactly_once_and_when_the_arm_is_down() {
+        use primitive_shared::types::BLOCK_IRON_PICKAXE;
+        // What the camera's recoil is played off. Landing twice is a
+        // double kick per swing; landing at the click is the view
+        // flinching before the tool arrives.
+        let iron = Some(BLOCK_IRON_PICKAXE);
+        let mut hand = Hand::new();
+        hand.strike(iron);
+        let step = 1.0 / 240.0;
+        let mut landings = Vec::new();
+        let mut elapsed = 0.0;
+        for _ in 0..400 {
+            hand.update(step, false, 0.0, true, iron);
+            elapsed += step;
+            if let Some(heft) = hand.take_landed() {
+                landings.push((elapsed, heft));
+            }
+        }
+        assert_eq!(landings.len(), 1, "a blow landed {} times", landings.len());
+        let (at, weight) = landings[0];
+        let wanted = dig_seconds(iron) * impact_at(iron);
+        assert!(
+            (at - wanted).abs() <= step * 2.0,
+            "the blow landed at {at}s against an arm that is down at {wanted}s"
+        );
+        assert_eq!(weight, heft(iron), "the blow forgot what struck it");
+        assert!(hand.take_landed().is_none(), "one blow was taken twice");
+    }
+
+    #[test]
+    fn a_blow_that_landed_during_a_stall_is_still_reported() {
+        // A dropped frame is the one time a player actually notices the
+        // view not flinching, so a landing swallowed by a long `dt`
+        // would be the bug this is for.
+        let mut hand = Hand::new();
+        hand.strike(None);
+        hand.update(1.0, false, 0.0, true, None);
+        assert!(hand.take_landed().is_some(), "the stall swallowed the blow");
+    }
+
+    #[test]
     fn the_blow_lands_early_and_recovers_late() {
         // The whole difference between a strike and a wave. Half way
         // through the animation the arm should already be most of the
         // way home from an impact that happened near the start.
-        assert!(swing_curve(IMPACT) > 0.99, "the blow does not land at the impact");
+        assert!(swing_curve(IMPACT, IMPACT) > 0.99, "the blow does not land at the impact");
         assert!(
-            swing_curve(IMPACT * 0.5) > 0.6,
+            swing_curve(IMPACT * 0.5, IMPACT) > 0.6,
             "the strike is too slow to leave rest"
         );
         assert!(
-            swing_curve(0.5) < 0.6,
+            swing_curve(0.5, IMPACT) < 0.6,
             "the recovery is as fast as the strike, which reads as a pendulum"
         );
-        assert_eq!(swing_curve(0.0), 0.0);
-        assert_eq!(swing_curve(1.0), 0.0);
+        assert_eq!(swing_curve(0.0, IMPACT), 0.0);
+        assert_eq!(swing_curve(1.0, IMPACT), 0.0);
     }
 
     #[test]
@@ -2783,7 +3038,7 @@ mod tests {
         let mut hand = Hand::new();
         let mut moved = 0;
         for _ in 0..60 {
-            hand.update(SWING_SECONDS / 20.0, true, 0.0, true);
+            hand.update(SWING_SECONDS / 20.0, true, 0.0, true, None);
             if hand.swing() > 0.05 {
                 moved += 1;
             }
@@ -2801,9 +3056,9 @@ mod tests {
         let mut walking = Hand::new();
         let mut falling = Hand::new();
         for _ in 0..60 {
-            still.update(1.0 / 60.0, false, 0.0, true);
-            walking.update(1.0 / 60.0, false, 4.3, true);
-            falling.update(1.0 / 60.0, false, 4.3, false);
+            still.update(1.0 / 60.0, false, 0.0, true, None);
+            walking.update(1.0 / 60.0, false, 4.3, true, None);
+            falling.update(1.0 / 60.0, false, 4.3, false, None);
         }
         assert_eq!(still.bob_offset(), Vec3::ZERO, "a standing player bobs");
         assert_eq!(falling.bob_offset(), Vec3::ZERO, "a falling player bobs");
@@ -2821,7 +3076,7 @@ mod tests {
     fn a_stall_cannot_throw_the_arm_through_a_whole_blow() {
         let mut hand = Hand::new();
         hand.strike(None);
-        hand.update(10.0, false, 0.0, true);
+        hand.update(10.0, false, 0.0, true, None);
         assert!(hand.swing() > 0.0, "one long frame skipped the entire swing");
     }
 
@@ -2840,7 +3095,7 @@ mod tests {
         let step = 1.0 / 60.0;
         let mut lasted = 0.0;
         while hand.swing.is_some() {
-            hand.update(step, false, 0.0, true);
+            hand.update(step, false, 0.0, true, None);
             lasted += step;
             assert!(lasted < 5.0, "the thrust never ended");
         }
@@ -2849,7 +3104,14 @@ mod tests {
             "the thrust lasted {lasted}s against a {refused_for}s cooldown"
         );
         // ...and a pick's swing is still the quick one.
-        assert_eq!(blow_seconds(Some(BLOCK_STONE_PICKAXE)), SWING_SECONDS);
+        // ...and a pick's swing is still the quick one: within a third
+        // of a fist's, which is all the weight of its head is worth.
+        let pick = blow_seconds(Some(BLOCK_STONE_PICKAXE));
+        assert_eq!(pick, dig_seconds(Some(BLOCK_STONE_PICKAXE)));
+        assert!(
+            pick > SWING_SECONDS && pick < SWING_SECONDS * (1.0 + HEFT_SLOWS) + 1e-6,
+            "a stone pick's blow is {pick}s against a fist's {SWING_SECONDS}s"
+        );
     }
 
     #[test]
@@ -2861,7 +3123,7 @@ mod tests {
         hand.strike(spear);
         // In steps, because one step is clamped to a tenth of a second.
         for _ in 0..50 {
-            hand.update(hit / 50.0, false, 0.0, true);
+            hand.update(hit / 50.0, false, 0.0, true, None);
         }
         assert!(
             (hand.lunge() - 1.0).abs() < 1e-3,
@@ -3008,7 +3270,7 @@ mod tests {
         let mut furthest = f32::MAX;
         let mut t = 0.0;
         while t < ROD_WHIP_SECONDS + 0.1 {
-            hand.update(1.0 / 60.0, false, 0.0, true);
+            hand.update(1.0 / 60.0, false, 0.0, true, None);
             hand.wind_rod(None, 1.0 / 60.0);
             furthest = furthest.min(hand.rod_pitch());
             t += 1.0 / 60.0;

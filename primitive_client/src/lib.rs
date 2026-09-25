@@ -2479,6 +2479,28 @@ fn run(
                                             ),
                                         });
                                         audio.play(audio::Sfx::Drop);
+                                        // ...and what it was. `Sfx::Drop`
+                                        // is the throw -- a hand opening,
+                                        // the same every time -- and
+                                        // what the player is actually
+                                        // listening for is the thing
+                                        // hitting the ground. An ingot
+                                        // and a handful of berries left
+                                        // the hand identically before
+                                        // this, which made throwing
+                                        // something away feel like
+                                        // pressing a key rather than
+                                        // like putting it down.
+                                        if let Some(thrown) = inventory.block_in(slot) {
+                                            audio.play_flat(
+                                                audio::Sfx::Material(
+                                                    audio::bank::Impact::Place,
+                                                    audio::bank::Material::of(thrown),
+                                                ),
+                                                0.5,
+                                                1.0,
+                                            );
+                                        }
                                         debug_stats.network_messages_out_this_second += 1;
                                     }
                                 }
@@ -3505,6 +3527,7 @@ fn run(
                                 in_world: false,
                                 digging: None,
                                 swinging: false,
+                                held: None,
                             },
                         );
 
@@ -5741,7 +5764,27 @@ fn run(
                         digging_now,
                         player.velocity.with_y(0.0).length(),
                         player.grounded,
+                        held_now,
                     );
+                    // **The recoil is played where the blow lands, not
+                    // where it is clicked.** A blow is most of a third of
+                    // a second long and the head is down a fraction of
+                    // the way through it; a kick on the click would be
+                    // the view flinching before the tool arrived, and the
+                    // heavier the tool the further ahead of itself it
+                    // would flinch. `Hand` is the only thing that knows
+                    // when the arm is actually down. See `Shake::on_blow`.
+                    //
+                    // The view for *this* frame was settled further up,
+                    // so a push lands on the next one. Sixteen
+                    // milliseconds against a recoil that lasts a hundred
+                    // and seventy: not worth reordering the frame for,
+                    // and the alternative -- advancing the arm before
+                    // physics has told it how fast the player is going --
+                    // would cost a frame somewhere that shows.
+                    if let Some(heft) = hand.take_landed() {
+                        shake.on_blow(heft);
+                    }
                     // ...and the same swing, for everybody else's picture
                     // of this player. See `DigSignal`.
                     // The rod drawn back follows the wind-up. See `hand::Rod`.
@@ -5807,8 +5850,20 @@ fn run(
                                 && input.breaking
                                 && aim.is_none()
                                 && !struck,
+                            // What the blow is struck *with*: its
+                            // rhythm and half its noise. See
+                            // `Frame::held`.
+                            held: held_now,
                         },
                     );
+                    // The floor arriving, jolted into the view. The
+                    // soundscape owns what counts as a hard landing --
+                    // one threshold, one event, a thump and a jolt
+                    // together rather than two effects that each decided
+                    // for themselves. See `Soundscape::take_landing`.
+                    if let Some(hardness) = soundscape.take_landing() {
+                        shake.on_landing(hardness);
+                    }
                     // ...and what lives near the player: gulls, a bird going
                     // up, the frogs. A call of its own for the reason
                     // `Soundscape::wildlife` gives.

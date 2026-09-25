@@ -19,6 +19,14 @@
 //! of it, which is the standard trick -- the shake fades away smoothly
 //! instead of stopping dead while still visibly moving.
 //!
+//! **A recoil is a third shape, and it is neither of those.** A pick
+//! meeting a rock face and a fall arriving at the floor are one push in
+//! one direction, over in a fraction of a second; the trauma shake with
+//! a smaller number in front of it would rattle the view, which reads as
+//! the player being hit by their own tool. So [`Kick`] has a direction
+//! and no oscillation at all: the view dips, and comes back. See
+//! [`Shake::on_blow`] and [`Shake::on_landing`].
+//!
 //! ## Walking bobs too now, and that is a setting
 //!
 //! It used to bob only while sprinting, on the argument that a bob on
@@ -90,6 +98,83 @@ const TRAUMA_ANGLE: f32 = 0.070;
 /// rather than a sway.
 const TRAUMA_RATE: f32 = 27.0;
 
+/// How far a blow struck with the heaviest head in the game dips the
+/// view, in radians (about a degree and a half), and how long that dip
+/// lasts.
+///
+/// **Why a struck blow needs one at all.** A pick met a rock face and
+/// the only thing that moved on screen was the arm: the player was a
+/// tripod the arm was bolted to. What a body doing this actually does is
+/// give -- the head stops, the shoulders take it, the view dips and
+/// comes back -- and a sixth of a second of that is the whole difference
+/// between swinging a tool and pressing a button.
+///
+/// A degree and a half is deliberately under the four degrees of
+/// [`TRAUMA_ANGLE`]: a blow the player *chose* must not read as loud as
+/// a blow taken. The rhythm is what sells it, not the size -- this lands
+/// three or four times a second while digging, and anything bigger turns
+/// a minute at a rock face into seasickness.
+const BLOW_ANGLE: f32 = 0.026;
+/// A sixth of a second, which is shorter than the shortest blow
+/// ([`crate::logic::hand::SWING_SECONDS`] is 0.28): the view is back
+/// before the arm is, so a rhythm of blows is a rhythm of dips rather
+/// than one long sag.
+const BLOW_SECONDS: f32 = 0.17;
+/// How far the same blow drops the eye, in blocks. Under three
+/// centimetres: at arm's length that is pure parallax, and the tilt
+/// above is what is actually seen. It is here because a dip with no
+/// travel at all reads as the world rotating about the player's nose.
+const BLOW_DROP: f32 = 0.028;
+/// How much of the dip comes out as roll: the body turns with the swing
+/// rather than nodding squarely forward.
+const BLOW_ROLL_SHARE: f32 = 0.35;
+
+/// The jolt of a landing at [`crate::audio::soundscape`]'s loudest fall,
+/// in radians (about three degrees), how far it drops the eye, and how
+/// long it takes.
+///
+/// **Twice as long as a blow, and that is the whole of what makes the
+/// two read differently.** A tool stopping is an impact; a body arriving
+/// is knees giving and straightening, which takes a third of a second
+/// whatever the fall was. Shorter and a ten-block drop feels like
+/// stubbing a toe.
+const LANDING_ANGLE: f32 = 0.052;
+const LANDING_DROP: f32 = 0.080;
+const LANDING_SECONDS: f32 = 0.34;
+
+/// One push of the view: a direction, and how much of it is left.
+///
+/// **No oscillation, unlike the trauma shake**, and no random phase: a
+/// blow landing is one event with one direction, and the eye reads a
+/// sine wave at this size as a wobble rather than as an impact. What it
+/// shares with the trauma is the squared decay -- the push eases out
+/// instead of being switched off while still visibly displaced.
+#[derive(Clone, Copy, Default)]
+struct Kick {
+    /// 1 the moment it lands, 0 when it is over.
+    left: f32,
+    /// How many seconds the whole push lasts. Zero means there is none.
+    span: f32,
+    /// Radians at full: negative dips the view.
+    pitch: f32,
+    roll: f32,
+    /// Blocks at full, along the camera's own up: negative drops the eye.
+    rise: f32,
+}
+
+impl Kick {
+    /// How much of the push is applied this instant, 0..1.
+    fn amount(self) -> f32 {
+        self.left * self.left
+    }
+
+    /// The tilt on screen right now, as a positive size. What two kicks
+    /// are compared by; see [`Shake::push`].
+    fn tilt(self) -> f32 {
+        self.pitch.abs() * self.amount()
+    }
+}
+
 pub struct Shake {
     /// Advances with distance travelled, not with time, so the bob stays
     /// in step with the stride when the player speeds up or stops.
@@ -102,6 +187,13 @@ pub struct Shake {
     trauma: f32,
     /// Advances with time while trauma lasts.
     trauma_phase: f32,
+    /// The one-shot push a struck blow or a landing left -- see [`Kick`].
+    ///
+    /// **One slot and not a list.** Two of these overlapping would need
+    /// their directions summed, and what a player would see of the sum
+    /// is whichever was bigger; `push` keeps the bigger one and drops
+    /// the other, which is the same picture for none of the bookkeeping.
+    kick: Kick,
     /// The player's `view_bob` setting, 0..1.
     ///
     /// **It scales the stride and not the trauma.** Turning the bob off
@@ -126,6 +218,7 @@ impl Shake {
             run_blend: 0.0,
             trauma: 0.0,
             trauma_phase: 0.0,
+            kick: Kick::default(),
             strength: if view_bob.is_finite() {
                 view_bob.clamp(0.0, 1.0)
             } else {
@@ -140,6 +233,66 @@ impl Shake {
             return;
         }
         self.trauma = (self.trauma + damage * TRAUMA_PER_DAMAGE).clamp(0.0, 1.0);
+    }
+
+    /// The recoil of a blow that has just landed, `heft` being how heavy
+    /// what struck it was: 0 for a fist, 1 for the heaviest head in the
+    /// game (`crate::logic::hand::heft`).
+    ///
+    /// **Played when the head arrives, not when the click happens.** A
+    /// blow is most of a third of a second long and the tool is down at
+    /// a fraction of the way through it (`hand::impact_at`); a recoil on
+    /// the click would land while the arm was still going up, which
+    /// reads as the view flinching *before* the blow -- and the heavier
+    /// the tool, the further ahead of itself it would flinch.
+    pub fn on_blow(&mut self, heft: f32) {
+        let heft = if heft.is_finite() { heft.clamp(0.0, 1.0) } else { 0.0 };
+        // A bare fist still nudges the view: an empty hand meeting stone
+        // is a smaller event than a pick doing it, not no event. A third
+        // of the heaviest tool's dip is about what a knuckle is worth.
+        let weight = 0.33 + 0.67 * heft;
+        self.push(Kick {
+            left: 1.0,
+            span: BLOW_SECONDS,
+            pitch: -BLOW_ANGLE * weight,
+            roll: BLOW_ANGLE * weight * BLOW_ROLL_SHARE,
+            rise: -BLOW_DROP * weight,
+        });
+    }
+
+    /// The jolt of arriving at the floor, `hardness` being 0 for a step
+    /// off a kerb and 1 for a fall that is about to cost health.
+    ///
+    /// **The same number the landing sound is played at**
+    /// (`soundscape::LANDING_THRESHOLD` to `LANDING_FULL`), so the thump
+    /// and the jolt are one event rather than two effects that each
+    /// decided for themselves what counted as a hard landing.
+    pub fn on_landing(&mut self, hardness: f32) {
+        let hardness = if hardness.is_finite() { hardness.clamp(0.0, 1.0) } else { 0.0 };
+        if hardness <= 0.0 {
+            return;
+        }
+        self.push(Kick {
+            left: 1.0,
+            span: LANDING_SECONDS,
+            pitch: -LANDING_ANGLE * hardness,
+            roll: 0.0,
+            rise: -LANDING_DROP * hardness,
+        });
+    }
+
+    /// Takes a new push if it is at least as big as what is still on
+    /// screen.
+    ///
+    /// **Both halves of that matter.** A tap on a rock face must not cut
+    /// short the jolt of a ten-block fall, or landing hard and carrying
+    /// on digging would swallow the landing; and a second blow must not
+    /// be swallowed by the tail of the first, or a rhythm of blows would
+    /// be one dip and then nothing.
+    fn push(&mut self, kick: Kick) {
+        if kick.tilt() >= self.kick.tilt() {
+            self.kick = kick;
+        }
     }
 
     /// How much of the stride bob is on screen this frame, 0..1: the
@@ -206,6 +359,18 @@ impl Shake {
         } else {
             self.trauma_phase = 0.0;
         }
+
+        // **Straight to zero, and the slot cleared with it.** The push
+        // has to end *exactly* at nothing rather than at a millionth of
+        // a radian: `push` compares against what is left, and a kick
+        // that never quite finished would go on refusing quiet ones for
+        // the rest of the session.
+        if self.kick.span > 0.0 {
+            self.kick.left -= dt / self.kick.span;
+            if self.kick.left <= 0.0 {
+                self.kick = Kick::default();
+            }
+        }
     }
 
     /// The offset to add to the eye this frame.
@@ -242,6 +407,13 @@ impl Shake {
             let x = self.trauma_phase.sin();
             let y = (self.trauma_phase * 1.7 + 1.3).sin();
             offset += (right * x + up * y) * amount;
+        }
+
+        // The recoil rides the camera's own up for the same reason the
+        // stride rides its right: a dip has to be a dip whichever way
+        // the player is facing.
+        if self.kick.span > 0.0 {
+            offset += up * (self.kick.rise * self.kick.amount());
         }
 
         offset
@@ -283,6 +455,18 @@ impl Shake {
                 (self.trauma_phase * 0.9 + 2.1).sin(),
                 (self.trauma_phase * 1.6 + 0.7).sin(),
             ) * amount;
+        }
+
+        // **Not scaled by the `view_bob` setting**, for the reason the
+        // trauma is not: turning the bob off is a statement about
+        // *walking*, and a player who turned it off and then stopped
+        // being told that their pick had landed or that the floor had
+        // arrived would file that as a second bug. No yaw, unlike the
+        // trauma: a push that turned the view sideways would read as the
+        // mouse having moved.
+        if self.kick.span > 0.0 {
+            let amount = self.kick.amount();
+            angles += Vec3::new(self.kick.pitch * amount, 0.0, self.kick.roll * amount);
         }
 
         angles
@@ -632,5 +816,161 @@ mod tests {
         let north = shake.offset(Vec3::Z, Vec3::Y);
         assert!((east.length() - north.length()).abs() < 1e-6);
         assert_ne!(east, north, "the offset ignored the axes it was given");
+    }
+
+    // ------------------------------------------------------- the recoil
+
+    /// How many frames at sixty a second a recoil is allowed to last.
+    /// [`BLOW_SECONDS`] is 0.17 and [`LANDING_SECONDS`] 0.34, so a fifth
+    /// of a second and two fifths, plus the frame the decay finishes in.
+    const BLOW_FRAMES: usize = 11;
+    const LANDING_FRAMES: usize = 21;
+
+    fn frames(shake: &mut Shake, count: usize) {
+        for _ in 0..count {
+            shake.update(1.0 / 60.0, 0.0, false, false);
+        }
+    }
+
+    #[test]
+    fn a_struck_blow_dips_the_view_and_the_dip_is_gone_in_eleven_frames() {
+        // The property the whole effect stands on: a recoil that does
+        // not come back is aim wander with extra steps. It has to reach
+        // *exactly* zero, not nearly -- `push` compares new kicks
+        // against what is left, so a tail that never finished would go
+        // on refusing quiet ones for the rest of the session.
+        let mut shake = shake();
+        shake.on_blow(1.0);
+        assert!(shake.angles().x < 0.0, "the blow did not dip the view");
+        assert!(shake.offset(RIGHT, UP).y < 0.0, "the blow did not drop the eye");
+
+        frames(&mut shake, BLOW_FRAMES);
+        assert_eq!(shake.angles(), Vec3::ZERO, "the dip never came home");
+        assert_eq!(shake.offset(RIGHT, UP), Vec3::ZERO, "the eye never came home");
+    }
+
+    #[test]
+    fn a_recoil_only_ever_fades_and_never_swings_back_past_level() {
+        // **Not the trauma shake at a smaller amplitude.** Trauma is a
+        // sine, and a sine at this size reads as the player being hit
+        // by their own pick. One push, one direction, decaying: every
+        // frame is nearer level than the frame before it.
+        let mut shake = shake();
+        shake.on_blow(1.0);
+        let mut last = shake.angles().x;
+        assert!(last < 0.0);
+        for _ in 0..BLOW_FRAMES {
+            shake.update(1.0 / 60.0, 0.0, false, false);
+            let now = shake.angles().x;
+            assert!(now <= 0.0, "the recoil swung past level to {now}");
+            assert!(now >= last, "the recoil grew from {last} to {now} on its way out");
+            last = now;
+        }
+    }
+
+    #[test]
+    fn a_heavier_tool_kicks_harder_and_a_bare_fist_still_kicks() {
+        // The whole of what the player is meant to feel: an iron axe is
+        // not a fist, and a fist is not nothing. Both read off
+        // `hand::heft`.
+        let mut fist = shake();
+        fist.on_blow(0.0);
+        let mut iron = shake();
+        iron.on_blow(1.0);
+
+        let (light, heavy) = (fist.angles().x.abs(), iron.angles().x.abs());
+        assert!(light > 0.0, "an empty hand on stone moved nothing");
+        assert!(
+            heavy > light * 2.0,
+            "a heavy head dipped {heavy} against a fist's {light}, which is not a difference"
+        );
+    }
+
+    #[test]
+    fn a_hard_landing_jolts_for_longer_than_a_blow_does() {
+        // A tool stopping is an impact; a body arriving is knees giving
+        // and straightening. If the two were the same length a
+        // ten-block drop would feel like stubbing a toe.
+        let mut landed = shake();
+        landed.on_landing(1.0);
+        frames(&mut landed, BLOW_FRAMES);
+        assert!(
+            landed.angles().x < 0.0,
+            "the landing was over in a blow's time"
+        );
+        frames(&mut landed, LANDING_FRAMES - BLOW_FRAMES);
+        assert_eq!(landed.angles(), Vec3::ZERO, "the landing never came home");
+    }
+
+    #[test]
+    fn stepping_off_a_kerb_does_not_shake_the_screen() {
+        // `soundscape` hands over a hardness of zero for anything under
+        // its landing threshold, and zero has to mean nothing at all --
+        // otherwise every stair in the game is a jolt.
+        let mut shake = shake();
+        shake.on_landing(0.0);
+        assert_eq!(shake.angles(), Vec3::ZERO);
+        assert_eq!(shake.offset(RIGHT, UP), Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_tap_at_a_rock_face_does_not_cut_short_the_jolt_of_a_long_fall() {
+        // Landing hard and carrying straight on digging is the ordinary
+        // way into a mine, and the small push must not replace the big
+        // one -- nor the other way about, or a rhythm of blows would be
+        // one dip and then nothing for as long as the button is held.
+        let mut shake = shake();
+        shake.on_landing(1.0);
+        let jolt = shake.angles().x;
+        shake.on_blow(0.2);
+        assert_eq!(shake.angles().x, jolt, "a tap swallowed the landing");
+
+        // ...and the other way: once the jolt has faded, the next blow
+        // is heard.
+        frames(&mut shake, LANDING_FRAMES);
+        shake.on_blow(0.2);
+        assert!(shake.angles().x < 0.0, "the tail of a jolt ate the next blow");
+    }
+
+    #[test]
+    fn the_recoil_is_not_the_bob_and_the_bob_setting_does_not_silence_it() {
+        // Turning `view_bob` off is a statement about walking. A player
+        // who turned it off and then stopped being told that their pick
+        // had landed, or that the floor had arrived, would file that as
+        // a second bug -- the same argument the trauma shake makes.
+        let mut off = Shake::new(0.0);
+        off.on_blow(1.0);
+        assert!(off.angles().x < 0.0, "the bob setting silenced the recoil");
+        off.on_landing(1.0);
+        assert!(off.offset(RIGHT, UP).y < 0.0, "the bob setting silenced the jolt");
+    }
+
+    #[test]
+    fn a_recoil_never_turns_the_view_sideways() {
+        // Yaw is the one axis a mouse owns. A push that moved it would
+        // be indistinguishable from the mouse having moved, which is
+        // the one thing a first-person camera must never fake.
+        let mut shake = shake();
+        shake.on_blow(1.0);
+        assert_eq!(shake.angles().y, 0.0);
+        shake.on_landing(1.0);
+        assert_eq!(shake.angles().y, 0.0);
+    }
+
+    #[test]
+    fn a_recoil_is_bounded_however_it_is_asked_for() {
+        // `heft` is arithmetic on a block definition and `hardness` on a
+        // fall speed; neither is checked anywhere else.
+        for asked in [-3.0, f32::NAN, f32::INFINITY, 40.0] {
+            let mut shake = shake();
+            shake.on_blow(asked);
+            shake.on_landing(asked);
+            let tilt = shake.angles().length();
+            assert!(tilt.is_finite(), "{asked} gave {tilt}");
+            assert!(
+                tilt <= LANDING_ANGLE + 1e-6,
+                "{asked} threw the view {tilt} radians"
+            );
+        }
     }
 }

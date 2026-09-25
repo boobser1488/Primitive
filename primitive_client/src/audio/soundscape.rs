@@ -63,6 +63,26 @@ const STRIDE: f32 = crate::logic::player_model::STEP_BLOCKS;
 /// collision-resolution jitter.
 const WALK_THRESHOLD: f32 = 0.6;
 
+/// The quietest a footfall gets, as a share of a sprint's.
+///
+/// A quarter. There is no crouch key in this game, so the only way to
+/// move quietly is to move slowly, and this is what that buys: a creep
+/// against a sprint is two full stops of difference, which is about what
+/// it is in a room. Silence was rejected -- a player who cannot hear
+/// their own feet cannot tell walking from being stuck against a wall.
+const CREEP_EFFORT: f32 = 0.25;
+
+/// How often a foot finds a dry stick where the canopy is closed, and
+/// how loud that is against a whole branch coming down.
+///
+/// A fifth of the steps under a full canopy, scaled by how much of the
+/// survey came back leaves -- so a meadow never cracks and a thicket
+/// does most of the time. Loud enough to be startling and quiet enough
+/// not to sound like the player broke something: this is a *fifth* of
+/// the gain the same clip gets when a tree is felled.
+const TWIG_CHANCE: f32 = 0.2;
+const TWIG_GAIN: f32 = 0.22;
+
 /// Seconds between one swimming stroke and the next, least and most.
 ///
 /// **A stroke has to finish before the next one starts.** It was 0.55 to
@@ -74,18 +94,19 @@ const WALK_THRESHOLD: f32 = 0.6;
 /// stroke (`recorded` holds the clips to it).
 pub(super) const SWIM_GAP: (f32, f32) = (1.05, 1.45);
 
-/// Seconds between the blows of a swing that is still going.
-///
-/// Four a second is about the rate an arm actually swings, and it is
-/// deliberately not tied to the mining progress: a block that takes six
-/// seconds and one that takes a quarter of one are the same arm.
-///
-/// **The arm's own blow, `hand::SWING_SECONDS`, and not a number of its
-/// own.** It was 0.26 against an arm at 0.28, so the knock walked a
-/// fiftieth of a second further off the blow with every swing and was
-/// landing on the backswing within seven -- a rhythm that sounds and looks
-/// out of step without anybody being able to say which is wrong.
-const DIG_INTERVAL: f32 = crate::logic::hand::SWING_SECONDS;
+// The rhythm of a swing that is still going is the arm's own -- see
+// `Soundscape::digging`. It is deliberately not tied to the mining
+// progress: a block that takes six seconds and one that takes a quarter
+// of one are the same arm.
+//
+// It was a constant of its own here, 0.26 against an arm at 0.28, so the
+// knock walked a fiftieth of a second further off the blow with every
+// swing and was landing on the backswing within seven -- a rhythm that
+// sounds and looks out of step without anybody being able to say which
+// is wrong. Then it was `hand::SWING_SECONDS`, which was right until a
+// blow's length started depending on what is in the hand. It is
+// `hand::dig_seconds(held)` now, which is the same number the arm is
+// actually drawn at.
 
 /// Landing softer than this makes no sound at all -- it is walking off a
 /// kerb.
@@ -179,6 +200,15 @@ pub struct Frame<'a> {
     /// different sound from a blow, and a player who cannot hear the
     /// difference thinks the game is ignoring them.
     pub swinging: bool,
+    /// What is in the hand.
+    ///
+    /// **Two things read it, and both of them are the blow.** A heavy
+    /// head swings slower (`hand::dig_seconds`), so the knock has to
+    /// keep the arm's time rather than a constant's; and the blow itself
+    /// is two materials meeting, not one -- a copper axe on stone is a
+    /// different noise from a flint one, and before this the tool was
+    /// silent and only the rock was heard.
+    pub held: Option<BlockId>,
 }
 
 /// The timers, and what they were last frame.
@@ -190,6 +220,9 @@ pub struct Soundscape {
     /// Distance walked since the last footfall.
     walked: f32,
     was_grounded: bool,
+    /// How hard the player arrived at the floor this frame, 0..1, if
+    /// they did -- see [`Soundscape::take_landing`].
+    landing: Option<f32>,
     /// The fastest the player was falling while airborne. Reset on
     /// landing, which is what makes a landing's loudness the height of
     /// the fall rather than the speed at the moment of contact -- those
@@ -252,6 +285,21 @@ pub struct Soundscape {
     /// `update` -- for the crickets in `wildlife`.
     sun: f32,
     wet: bool,
+    /// ...and whether it is before noon, and how old the world is, which
+    /// is where the season comes from. See [`Air`].
+    morning: bool,
+    world_days: f32,
+
+    /// The three beds the weather is not: the cicadas in the heat, the
+    /// birds at either end of the day, and the water off the eaves in a
+    /// thaw. Each is a level that is only ever eased ([`Level`]) and a
+    /// timer that lays pieces or calls against it.
+    cicada: Level,
+    cicada_left: f32,
+    birds: Level,
+    bird_left: f32,
+    thaw: Level,
+    thaw_left: f32,
     /// Every horse's feet near the player. See [`Hoofbeats`].
     hooves: Hoofbeats,
 
@@ -312,6 +360,7 @@ impl Soundscape {
             hurt_at: None,
             walked: 0.0,
             was_grounded: true,
+            landing: None,
             fall_speed: 0.0,
             was_submerged: false,
             was_in_water: false,
@@ -339,6 +388,14 @@ impl Soundscape {
             cricket_ear: glam::DVec3::ZERO,
             sun: 1.0,
             wet: false,
+            morning: true,
+            world_days: 0.0,
+            cicada: Level::default(),
+            cicada_left: 0.0,
+            birds: Level::default(),
+            bird_left: 0.0,
+            thaw: Level::default(),
+            thaw_left: 0.0,
             hooves: Hoofbeats::new(),
             outdoors: true,
             shelter: Shelter::Open,
@@ -364,6 +421,12 @@ impl Soundscape {
         self.night = frame.sky.sun_elevation() <= 0.0;
         self.sun = frame.sky.sun_elevation();
         self.wet = frame.weather.is_wet();
+        // 0.5 is noon, so anything under it is on the way up. Read from
+        // the clock rather than from the sun's height changing between
+        // frames, which would answer "morning" for a whole frame after
+        // every `TimeSync` eased the clock backwards.
+        self.morning = frame.sky.time_of_day < 0.5;
+        self.world_days = frame.sky.world_days();
 
         if !frame.in_world {
             self.push_mood(audio, Mood::Menu, frame.dt);
@@ -465,6 +528,12 @@ impl Soundscape {
                 let hardness = ((self.fall_speed - LANDING_THRESHOLD)
                     / (LANDING_FULL - LANDING_THRESHOLD))
                     .clamp(0.0, 1.0);
+                // **The same number the view is jolted by.** The thump
+                // and the jolt are one event, and letting the camera
+                // decide for itself what counted as a hard landing would
+                // be two thresholds to keep in step -- and a fall that
+                // shook the screen without a sound under it.
+                self.landing = Some(hardness);
                 audio.play_flat(Sfx::Land, 0.35 + 0.65 * hardness, 1.0 - hardness * 0.2);
                 // The ground gets a word in as well, so landing on
                 // gravel and landing on snow are not the same event with
@@ -498,8 +567,19 @@ impl Soundscape {
                 let sfx = stride_sound(player.in_water, material);
                 // Quieter when creeping, louder at a run: the same clip,
                 // and the difference is entirely in these two numbers.
-                let effort = (horizontal / 6.0).clamp(0.4, 1.1);
+                //
+                // **There is no crouch key in this game** (see
+                // `physics`), so creeping *is* walking slowly, and the
+                // only way a player can be quiet is to go slowly. That
+                // makes this the whole of the mechanic rather than a
+                // detail of it: the floor was 0.4 of a sprint's loudness
+                // and it is a quarter now, measured against the sprint
+                // (`animals::NOMINAL_SPRINT_SPEED`) rather than against
+                // a 6.0 nobody could say the origin of.
+                let effort = (horizontal / primitive_shared::animals::NOMINAL_SPRINT_SPEED)
+                    .clamp(CREEP_EFFORT, 1.15);
                 audio.play_flat(sfx, 0.55 * effort, self.jitter(0.12));
+                self.underfoot(audio, material, effort);
             }
         } else {
             // Stopping resets the stride, so setting off again starts
@@ -508,24 +588,82 @@ impl Soundscape {
         }
     }
 
+    /// The small thing that goes under the boot with the step.
+    ///
+    /// **Why a step needs a second sound at all.** A footfall is one
+    /// clip per material, and twenty minutes of walking is that clip
+    /// several thousand times; what makes a wood sound like a wood
+    /// rather than like a loop is that now and then something *else*
+    /// happens -- a dry stick gives, a stem is pushed aside. Neither is
+    /// a new recording: a twig is a very small branch breaking
+    /// (`Impact::Break` on wood, at a fifth of the gain a felled tree
+    /// gets), and the litter it lies in is the reason it only happens
+    /// where there are trees.
+    ///
+    /// **Read off `leaf_share`**, which the survey already measures for
+    /// the wind and the music -- a player in a meadow never steps on a
+    /// branch, and one under a canopy does about every fifth step.
+    /// Rejected: a block lookup for deadfall under the foot. There is no
+    /// such block, and adding one to carry a sound would be a change to
+    /// the world for a change to the ear.
+    fn underfoot(&mut self, audio: &Audio, ground: Material, effort: f32) {
+        // Only what a wood's floor is made of. A branch does not lie on
+        // rock, in sand or in a stream, and one snapping on a plank
+        // floor is a board giving way, which is a different report.
+        if !matches!(ground, Material::Grass | Material::Dirt | Material::Snow) {
+            return;
+        }
+        if self.rng.range(0.0, 1.0) > TWIG_CHANCE * self.leaf_share {
+            return;
+        }
+        // A twig under a creeping foot still cracks -- that is the
+        // point of it, and the reason it is not scaled all the way down
+        // by the effort: the one sound a player cannot be quiet about.
+        audio.play_flat(
+            Sfx::Material(Impact::Break, Material::Wood),
+            TWIG_GAIN * (0.7 + 0.3 * effort),
+            self.jitter(0.25),
+        );
+    }
+
+    /// How hard the player arrived at the floor this frame, 0..1, taken
+    /// once.
+    ///
+    /// **Here rather than in the frame loop** because the thresholds a
+    /// landing is measured against are this module's
+    /// ([`LANDING_THRESHOLD`] and [`LANDING_FULL`]), and the thump and
+    /// the jolt have to be one event. The frame loop hands it to
+    /// `Shake::on_landing` and does not otherwise know what a hard
+    /// landing is.
+    pub fn take_landing(&mut self) -> Option<f32> {
+        self.landing.take()
+    }
+
     // ---------------------------------------------------------- digging
 
     /// The rhythm of a swing that has not finished yet, whether or not
     /// it is hitting anything.
     fn digging(&mut self, audio: &Audio, frame: &Frame<'_>) {
+        // **The arm's own clock, and not a constant beside it.** A heavy
+        // head swings slower (`hand::dig_seconds`) and lands later in
+        // its own blow (`hand::impact_at`); a knock at a fixed rate
+        // would walk off the arm within a few swings of picking up an
+        // iron pick, which is the same bug the note above `SWIM_GAP`
+        // describes from the first time it happened.
+        let blow = crate::logic::hand::dig_seconds(frame.held);
         if frame.digging.is_none() && !frame.swinging {
             // Ready to strike when the next swing *lands*, rather than up
             // to a quarter-second later -- and not the instant it starts,
             // which was a knock a twelfth of a second before the blow it
-            // belongs to (`hand::IMPACT` of the way through it).
-            self.dig_left = crate::logic::hand::SWING_SECONDS * crate::logic::hand::IMPACT;
+            // belongs to.
+            self.dig_left = blow * crate::logic::hand::impact_at(frame.held);
             return;
         }
         self.dig_left -= frame.dt;
         if self.dig_left > 0.0 {
             return;
         }
-        self.dig_left = DIG_INTERVAL;
+        self.dig_left = blow;
 
         let Some(cell) = frame.digging else {
             // Air, or something a bare hand will never get through. The
@@ -542,6 +680,16 @@ impl Soundscape {
             0.8,
             self.jitter(0.14),
         );
+        // **...and what struck it.** A blow is two things meeting, and
+        // only one of them was ever heard: a flint axe, a copper one and
+        // a fist all made the same noise against the same log, which is
+        // the whole of what a tool is, gone. The tool's own material is
+        // played under the block's, quiet and a little lower -- see
+        // `tool_voice` for why it is a second sound rather than a
+        // different one.
+        if let Some((tool, gain, pitch)) = tool_voice(frame.held) {
+            audio.play_at_block(Sfx::Material(Impact::Dig, tool), cell, gain, pitch);
+        }
     }
 
     // -------------------------------------------------------- ambience
@@ -875,6 +1023,35 @@ impl Soundscape {
             }
         }
 
+        // ---- the country's own bed ----
+        //
+        // Three of them, and all three read the same `Air`: the heat of
+        // the day, the hour, and which way the year is going. See the
+        // section that defines them for why the season arrives as a
+        // temperature and never as an enum.
+        if let Some((biome, warmth)) = air {
+            let here = Air {
+                sun: self.sun,
+                morning: self.morning,
+                warmth,
+                thaw: thawing(self.world_days),
+                biome,
+                wet: self.wet,
+                shelter: self.shelter,
+                at_sea: self.water_share > AT_SEA,
+            };
+            self.cicadas(audio, dt, &here);
+            self.birdsong(audio, dt, &here);
+            self.thaw_drip(audio, dt, &here);
+        } else {
+            // No chunk under the player yet, so there is no country to
+            // sing. Eased down rather than cut, or walking out of a
+            // world's edge would click.
+            self.cicada.ease(0.0, dt);
+            self.birds.ease(0.0, dt);
+            self.thaw.ease(0.0, dt);
+        }
+
         // ---- hooves ----
         let mut horses: Vec<Hoof> = animals
             .iter()
@@ -898,6 +1075,110 @@ impl Soundscape {
         for beat in self.hooves.hear(dt, &horses) {
             audio.play_at(beat.sfx, beat.at, beat.gain, beat.pitch);
         }
+    }
+
+    // ------------------------------------------- the country's own bed
+
+    /// The cicadas: the crickets' recording, played high and fast, laid
+    /// end over end through the heat of the day.
+    ///
+    /// The interval is divided by [`CICADA_PITCH`] because a piece
+    /// played faster *ends* earlier: laid at the crickets' spacing it
+    /// would be a wall of sound with a hole in every second of it.
+    fn cicadas(&mut self, audio: &Audio, dt: f32, air: &Air) {
+        let loud = self.cicada.ease(cicada_chorus(air), dt);
+        self.cicada_left -= dt;
+        if self.cicada_left > 0.0 {
+            return;
+        }
+        self.cicada_left =
+            ((bank::BED_SECONDS - bank::BED_FADE) / CICADA_PITCH).max(0.2);
+        if loud <= BED_FLOOR {
+            return;
+        }
+        // Out in the grass rather than in the player's ears, and level
+        // with the head: a cicada is in a tree or a stem, not underfoot
+        // the way a cricket is.
+        let angle = self.rng.range(0.0, std::f32::consts::TAU);
+        let distance = self.rng.range(3.0, 9.0);
+        let at = self.ear
+            + glam::DVec3::new(
+                f64::from(angle.cos() * distance),
+                f64::from(self.rng.range(-0.5, 2.5)),
+                f64::from(angle.sin() * distance),
+            );
+        // The pitch jitter rides *on* the shift rather than replacing
+        // it, so two pieces are never quite the same insect and the
+        // spacing above still holds to within a few per cent.
+        audio.play_at(Sfx::Crickets, at, loud * 0.85, CICADA_PITCH * self.jitter(0.03));
+    }
+
+    /// The birds at either end of the day: single calls from all round
+    /// the player, as often as the chorus is loud.
+    ///
+    /// **The fowl's own voice, and nothing was downloaded for this.**
+    /// Same argument as the monkey's (`bank::voice_of`): what that clip
+    /// *is* is a small warm-blooded thing calling in short repeated
+    /// bursts from a hedge, which is what a bird in a hedge is. Played
+    /// high and quiet and from a long way off, which is the difference
+    /// between a hen in the yard and a thrush four gardens away.
+    fn birdsong(&mut self, audio: &Audio, dt: f32, air: &Air) {
+        let loud = self.birds.ease(dawn_chorus(air), dt);
+        self.bird_left -= dt;
+        if self.bird_left > 0.0 {
+            return;
+        }
+        if loud <= BED_FLOOR {
+            // Asked again shortly rather than never: the window opens
+            // over a couple of minutes and a timer set for the gap at
+            // silence would miss the first half of it.
+            self.bird_left = 1.0;
+            return;
+        }
+        let gap = BIRD_GAP.1 + (BIRD_GAP.0 - BIRD_GAP.1) * loud;
+        self.bird_left = self.rng.range(gap * 0.5, gap * 1.6);
+        let Some(sfx) = voice_of(Species::Fowl, Cry::Idle) else {
+            return;
+        };
+        let angle = self.rng.range(0.0, std::f32::consts::TAU);
+        let distance = self.rng.range(6.0, 22.0);
+        let at = self.ear
+            + glam::DVec3::new(
+                f64::from(angle.cos() * distance),
+                f64::from(self.rng.range(1.0, 6.0)),
+                f64::from(angle.sin() * distance),
+            );
+        audio.play_at(sfx, at, 0.16 + 0.24 * loud, self.rng.range(1.25, 1.65));
+    }
+
+    /// The thaw: water off an edge, every second or so, while the year
+    /// is warming and there is still something up there to melt.
+    fn thaw_drip(&mut self, audio: &Audio, dt: f32, air: &Air) {
+        let loud = self.thaw.ease(eaves_drip(air), dt);
+        self.thaw_left -= dt;
+        if self.thaw_left > 0.0 {
+            return;
+        }
+        if loud <= BED_FLOOR {
+            self.thaw_left = 1.0;
+            return;
+        }
+        let gap = DRIP_GAP.1 + (DRIP_GAP.0 - DRIP_GAP.1) * loud;
+        self.thaw_left = self.rng.range(gap * 0.4, gap * 1.8);
+        // **The rain's own tick, from above the head.** A drop off an
+        // eave and a drop out of a cloud are the same event, and the
+        // difference an ear can name is where it comes from: the rain's
+        // drips are placed at shoulder height round the player, and
+        // these come off whatever is over them.
+        let angle = self.rng.range(0.0, std::f32::consts::TAU);
+        let distance = self.rng.range(1.0, 4.5);
+        let at = self.ear
+            + glam::DVec3::new(
+                f64::from(angle.cos() * distance),
+                f64::from(self.rng.range(0.8, 2.2)),
+                f64::from(angle.sin() * distance),
+            );
+        audio.play_at(Sfx::RainTick, at, 0.25 + 0.4 * loud, self.rng.range(0.85, 1.25));
     }
 
     // ------------------------------------------------------------ mood
@@ -1858,15 +2139,10 @@ pub fn cricket_chorus(night: &Night) -> f32 {
         Biome::Mountains => 0.15,
         Biome::Ocean | Biome::Tundra | Biome::SnowyPeaks => 0.0,
     };
-    let heard = match night.shelter {
-        Shelter::Open | Shelter::Canopy => 1.0,
-        Shelter::Roofed => 0.45,
-        Shelter::Enclosed => 0.0,
-    };
     if night.wet || night.at_sea {
         return 0.0;
     }
-    dark * warm * grass * heard
+    dark * warm * grass * heard_through(night.shelter)
 }
 
 /// How far round a moving player the crickets fall silent, in blocks. A
@@ -1892,6 +2168,318 @@ pub fn cricket_hush(hush: f32, moving: bool, dt: f32) -> f32 {
         (hush - CRICKET_TRUST * dt).max(CRICKET_NEAREST)
     }
 }
+
+// ------------------------------------------------ the country's own bed
+//
+// **Three beds the weather is not.** Rain, wind and thunder are what is
+// *falling*; these are what is *living* where the player is standing, at
+// this hour of this year. Before them a meadow at noon in July and the
+// same meadow at noon in February were the same silence with a different
+// colour of grass in it.
+//
+// **The season reaches all three as a temperature and as a direction,
+// never as an enum.** `Season::at` is a step function -- one frame it is
+// autumn and the next it is winter -- and a bed whose loudness was read
+// off it would change by a whole step between two frames, which is the
+// one thing a continuous sound must never do. The crickets already
+// learned this ("what makes winter, a cold spring and the north silent
+// without a word about seasons here"); what the two new beds needed on
+// top of warmth was a way to tell a thaw from a freeze at the same six
+// degrees, and that is [`thawing`], which is a sine and not a step.
+
+/// What the air round the player is doing, as far as anything that sings
+/// in it cares.
+///
+/// A struct of facts for the reason [`Night`] is one: whether the steppe
+/// rings at noon is a question a test should answer with a literal
+/// rather than with a chunk manager and a sky.
+#[derive(Debug, Clone, Copy)]
+pub struct Air {
+    /// `Sky::sun_elevation`: 1 at noon, 0 on the horizon, -1 at midnight.
+    pub sun: f32,
+    /// Before noon. What makes the morning's birds louder than the
+    /// evening's -- see [`dawn_chorus`].
+    pub morning: bool,
+    /// Degrees over freezing here and now, the same number the crickets
+    /// and the frogs wake by (`Critters::air_here`). **This is where the
+    /// season is**: midsummer is [`primitive_shared::season::SUMMER_PEAK_C`]
+    /// warmer than the generator's climate and midwinter ten colder.
+    pub warmth: f32,
+    /// How hard the year is warming, 0..1 -- see [`thawing`].
+    pub thaw: f32,
+    pub biome: Biome,
+    pub wet: bool,
+    pub shelter: Shelter,
+    /// Out on the water: the look around came back mostly water.
+    pub at_sea: bool,
+}
+
+/// How hard the year is warming at `world_time`, 0..1: nothing at either
+/// solstice, one at the steepest part of the climb out of winter.
+///
+/// **A sine of the day of the year, clamped at zero.** The warming half
+/// of the year is midwinter to midsummer, and its steepest point is the
+/// spring equinox -- which is what a thaw is, and what tells spring from
+/// an autumn at the same temperature. The other half comes out negative
+/// and is clamped away: nothing drips in October.
+///
+/// Rejected: `Season::at(t) == Season::Spring`. It is a step, and a bed
+/// whose level stepped would click on the stroke of a season -- the one
+/// artefact that makes a generated ambience sound like a recording being
+/// switched on. See `no_bed_ever_jumps_over_a_whole_year`.
+pub fn thawing(world_time: f32) -> f32 {
+    use primitive_shared::season::{day_of_year, MIDWINTER_DAY_OF_YEAR, YEAR_DAYS};
+    if !world_time.is_finite() {
+        return 0.0;
+    }
+    let phase = (day_of_year(world_time) - MIDWINTER_DAY_OF_YEAR) / YEAR_DAYS;
+    (std::f32::consts::TAU * phase).sin().max(0.0)
+}
+
+/// Degrees over freezing before the cicadas start, and where the whole
+/// field is going.
+///
+/// **Twenty and twenty-eight, against the crickets' eight and sixteen**,
+/// and the gap is the point: a cricket sings on a mild evening anywhere
+/// with grass in it, and a cicada is a *hot* sound. Twenty over freezing
+/// is a summer noon in the temperate middle of the map and is never
+/// reached at all in the taiga; twenty-eight belongs to the steppe and
+/// the savanna in the middle of summer. So the same code gives a meadow
+/// a few cicadas on the hottest days of July and gives the steppe a
+/// solid wall of them, without a word about latitude here.
+const CICADA_COLD: f32 = 20.0;
+const CICADA_WARM: f32 = 28.0;
+
+/// How loud the cicadas are, 0 to 1.
+///
+/// A product, like [`cricket_chorus`], and for the same reason -- any
+/// one of these can silence a field:
+///
+/// * **the sun** -- the mirror of the crickets. A cicada sings in the
+///   heat of the day and stops at dusk, so this fades in as the sun
+///   climbs clear of the horizon rather than as it drops below it. The
+///   two beds therefore hand over at twilight, which is what an evening
+///   in a hot place actually sounds like;
+/// * **the heat** -- see [`CICADA_COLD`]. This is the season, arriving
+///   as a temperature;
+/// * **the country** -- dry open grass and scrub. A steppe or a savanna
+///   is what this sound *is*; a wood has some, a marsh a few, the taiga
+///   nearly none, and the sea, the tundra and the peaks none at all;
+/// * **the weather and the roof** -- rain silences it outright, and a
+///   wall muffles it, exactly as for the crickets.
+pub fn cicada_chorus(air: &Air) -> f32 {
+    // Clear of the horizon, not merely up: the first hour of daylight is
+    // the birds' and not the cicadas'.
+    let day = ((air.sun - 0.12) / 0.25).clamp(0.0, 1.0);
+    let hot = ((air.warmth - CICADA_COLD) / (CICADA_WARM - CICADA_COLD)).clamp(0.0, 1.0);
+    let country = match air.biome {
+        Biome::Steppe | Biome::Savanna => 1.0,
+        Biome::Desert => 0.8,
+        Biome::Plains | Biome::Hills => 0.65,
+        Biome::Forest | Biome::BirchForest => 0.5,
+        Biome::DeadForest | Biome::Beach => 0.3,
+        Biome::Swamp | Biome::Bog | Biome::River => 0.35,
+        Biome::Taiga | Biome::Mountains => 0.1,
+        Biome::Ocean | Biome::Tundra | Biome::SnowyPeaks => 0.0,
+    };
+    if air.wet || air.at_sea {
+        return 0.0;
+    }
+    day * hot * country * heard_through(air.shelter)
+}
+
+/// Degrees over freezing the birds need. Much lower than the cicadas'
+/// and a little over the crickets': a bird is warm-blooded and sings on
+/// a cold April morning, and what actually stops it is a hard frost.
+const BIRD_COLD: f32 = 3.0;
+const BIRD_WARM: f32 = 11.0;
+/// How near the horizon the sun has to be for the birds to be at it, in
+/// the units `Sky::sun_elevation` reports.
+///
+/// A quarter either way, which at this day length is roughly the hour
+/// before and after sunrise and the same at sunset. **Wider than the
+/// crickets' fade** (0.2 from full to nothing), because a dawn chorus is
+/// not an on-off: it starts in the dark, peaks as the light comes, and
+/// thins out as the day gets on.
+const BIRD_TWILIGHT: f32 = 0.25;
+/// How much of the morning's chorus the evening gets.
+///
+/// **Not the same, and this is the one asymmetry in the module.** Birds
+/// sing hardest at dawn -- it is territory, and it is settled at first
+/// light -- and the evening is a handful of calls going to roost. Equal
+/// mornings and evenings would throw away the one thing this bed can
+/// tell a player who has lost track of the clock underground: which end
+/// of the day they have come up into.
+const BIRD_EVENING: f32 = 0.45;
+
+/// How loud the birds are at this hour, 0 to 1.
+///
+/// **The hour either side of sunrise and sunset**, which is where a
+/// chorus is; and warm enough that there is something to sing about,
+/// which is what keeps a midwinter morning silent without naming a
+/// season. Rain thins it rather than stopping it -- birds do sing in
+/// drizzle, and the rain is louder anyway.
+pub fn dawn_chorus(air: &Air) -> f32 {
+    let twilight = (1.0 - air.sun.abs() / BIRD_TWILIGHT).clamp(0.0, 1.0);
+    let mild = ((air.warmth - BIRD_COLD) / (BIRD_WARM - BIRD_COLD)).clamp(0.0, 1.0);
+    // Hedges, wood edges and meadows. A desert, a peak and the open sea
+    // have birds and they are not a chorus.
+    let country = match air.biome {
+        Biome::Forest | Biome::BirchForest => 1.0,
+        Biome::Plains | Biome::Hills | Biome::River => 0.8,
+        Biome::Swamp | Biome::Bog => 0.6,
+        Biome::Taiga | Biome::Steppe | Biome::Savanna => 0.5,
+        Biome::DeadForest => 0.25,
+        Biome::Beach => 0.3,
+        Biome::Desert | Biome::Mountains | Biome::Tundra => 0.15,
+        Biome::Ocean | Biome::SnowyPeaks => 0.0,
+    };
+    if air.at_sea {
+        return 0.0;
+    }
+    let hour = if air.morning { 1.0 } else { BIRD_EVENING };
+    let dry = if air.wet { 0.4 } else { 1.0 };
+    twilight * mild * country * hour * dry * heard_through(air.shelter)
+}
+
+/// The window, in degrees over freezing, where there is both ice left to
+/// melt and enough warmth to melt it.
+///
+/// **Both ends matter.** At or under freezing nothing runs, and eight
+/// degrees into a thaw the snow that was on the roof has been gone for a
+/// day. The drip is the *edge* of winter, which is the point of it: it
+/// is the sound of the season turning, and it is over in a few days.
+const THAW_COLD: f32 = 0.5;
+const THAW_WARM: f32 = 8.0;
+
+/// How much is running off the eaves, 0 to 1.
+///
+/// **The one bed that needs to know which way the year is going**, and
+/// the reason [`thawing`] exists: six degrees over freezing in a warming
+/// year is a thaw and in a cooling one is a wet November, and no
+/// temperature can tell them apart.
+///
+/// Loudest under a roof or a canopy, because that is what a drip *is* --
+/// water leaving an edge above your head. Out in the open there is some
+/// of it off whatever is standing about; underground there is none, and
+/// rain drowns the lot.
+pub fn eaves_drip(air: &Air) -> f32 {
+    if air.wet || air.at_sea {
+        return 0.0;
+    }
+    let melting = if air.warmth <= THAW_COLD {
+        0.0
+    } else {
+        // Up fast and down slowly: the first degree over freezing is
+        // most of the effect, and what takes the rest of it away is the
+        // snow running out.
+        let t = ((air.warmth - THAW_COLD) / (THAW_WARM - THAW_COLD)).clamp(0.0, 1.0);
+        (1.0 - t) * (1.0 - t) * 4.0 * t
+    };
+    // Where there was snow to begin with. A desert does not drip.
+    let country = match air.biome {
+        Biome::Taiga | Biome::SnowyPeaks | Biome::Tundra | Biome::Mountains => 1.0,
+        Biome::Forest | Biome::BirchForest | Biome::DeadForest => 0.8,
+        Biome::Plains | Biome::Hills | Biome::River | Biome::Swamp | Biome::Bog => 0.7,
+        Biome::Steppe => 0.5,
+        Biome::Beach | Biome::Savanna => 0.25,
+        Biome::Desert | Biome::Ocean => 0.0,
+    };
+    let under = match air.shelter {
+        Shelter::Roofed | Shelter::Canopy => 1.0,
+        Shelter::Open => 0.55,
+        // Deep underground. There is no sky for the snow to have been on.
+        Shelter::Enclosed => 0.0,
+    };
+    air.thaw * melting * country * under
+}
+
+/// How much of what is going on outside is heard through whatever is
+/// over the player's head.
+///
+/// The crickets' numbers, pulled out because three beds now want them
+/// and three copies is three chances to disagree about what a roof is.
+fn heard_through(shelter: Shelter) -> f32 {
+    match shelter {
+        Shelter::Open | Shelter::Canopy => 1.0,
+        Shelter::Roofed => 0.45,
+        Shelter::Enclosed => 0.0,
+    }
+}
+
+/// How fast an ambient level is allowed to change, per second.
+///
+/// **The whole of "no bed ever clicks".** Every one of the functions
+/// above is a product of things that can move quickly -- the player
+/// walks under a roof, crosses a biome edge, steps out of the rain --
+/// and a bed whose gain followed them frame for frame would jump. A
+/// third of the way a second means a bed takes about three seconds to
+/// come up or go down: slower than one piece of it is long
+/// (`bank::BED_SECONDS` less its crossfade), so two consecutive pieces
+/// are never more than a fraction apart and the seam between them cannot
+/// be heard.
+///
+/// Rejected: an exponential follow (`level += (wanted - level) * k`). It
+/// never actually arrives, so a bed that should be silent goes on
+/// playing pieces at a millionth of full gain for ever, and every one of
+/// them is a voice the mixer has spent.
+const BED_SLEW: f32 = 0.34;
+
+/// A level that is only ever eased toward what the world asks for.
+///
+/// One field and one method, and it exists so that "the background does
+/// not click" is a property of a *type* rather than a thing three call
+/// sites each remember to do.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Level(f32);
+
+impl Level {
+    /// Moves one frame toward `wanted` and returns where it got to.
+    pub fn ease(&mut self, wanted: f32, dt: f32) -> f32 {
+        let wanted = if wanted.is_finite() { wanted.clamp(0.0, 1.0) } else { 0.0 };
+        let step = BED_SLEW * dt.clamp(0.0, 0.25);
+        self.0 += (wanted - self.0).clamp(-step, step);
+        self.0 = self.0.clamp(0.0, 1.0);
+        self.0
+    }
+}
+
+/// Under this a bed is not laid at all.
+///
+/// A voice at a fiftieth of full gain is inaudible and costs the mixer
+/// exactly as much as a loud one. The slew above guarantees a level
+/// actually reaches zero, so this is a floor and not a fudge.
+const BED_FLOOR: f32 = 0.02;
+
+/// How much faster the cicadas' bed runs than the crickets'.
+///
+/// **The crickets' own recording, played high.** A cicada and a cricket
+/// are the same event -- a file on one wing drawn across a scraper on
+/// the other -- at different sizes, and what separates them to an ear is
+/// rate and pitch. The alternative was a download, and it would have
+/// been a download of very nearly this.
+///
+/// **A pitched bed is a shorter bed**, which is the trap here: the
+/// pieces are laid end over end against `bank::BED_SECONDS`, and a piece
+/// played half again as fast ends half again as early. The interval is
+/// divided by this, or the wall of sound comes out as a wall with gaps
+/// in it -- the exact fault the fire's comment warns about, arrived at
+/// from the other direction.
+const CICADA_PITCH: f32 = 1.5;
+
+/// Seconds between one bird and the next at a full chorus, and at the
+/// thinnest one that is heard at all.
+///
+/// **Calls, not a bed.** A chorus laid end over end would be one
+/// continuous sound, and what a dawn chorus is, is many small sounds
+/// from many directions -- so this is a rate, and the level sets the
+/// rate as well as the gain. At full it is about two a second from all
+/// round the player; at the very edge of the window it is one every five
+/// seconds from somewhere off in the trees.
+const BIRD_GAP: (f32, f32) = (0.45, 5.0);
+
+/// ...and the same for the thaw: a drip is a drip and never a bed.
+const DRIP_GAP: (f32, f32) = (0.35, 3.5);
 
 // -------------------------------------------------------------- hooves
 
@@ -2179,6 +2767,37 @@ fn stride_sound(in_water: bool, ground: Material) -> Sfx {
     } else {
         Sfx::Material(Impact::Step, ground)
     }
+}
+
+/// How loud the tool that struck a blow is heard under the block it
+/// struck, and at what pitch -- `None` for a fist and for anything in
+/// the hand that is not a tool.
+///
+/// **A second sound rather than a different one.** The alternative
+/// considered was one recording per (tool material, block material)
+/// pair, which is a hundred and forty-four downloads for a distinction
+/// the bank already carries in twelve. What a blow actually is, is two
+/// things meeting: the rock rings, and under it there is a hard edge of
+/// copper or a lashed flake of flint. Both clips are already here, so
+/// the pair costs a second voice and nothing else.
+///
+/// **Quiet, and quieter still for a light head.** The block is what the
+/// player is working on and has to stay the loud half: a tool that
+/// matched it would sound like two blocks being hit at once. A third of
+/// the block's gain at the heavy end, an eighth at the light, so a flint
+/// knife is nearly all rock and an iron pick is a ringing edge.
+///
+/// **Lower for a heavy head**, by up to a fifth -- which is the one
+/// thing an ear reads mass by without being told. The same reasoning as
+/// `hand::heft`, which is where the weight comes from.
+fn tool_voice(held: Option<BlockId>) -> Option<(Material, f32, f32)> {
+    let id = held?;
+    // A held block is not a striking head: setting a slab of stone
+    // against a rock face is not a blow with it. `heft` gives a block a
+    // weight because it is carried; this asks a narrower question.
+    primitive_shared::blocks::definition(types::block_kind(id)).tool?;
+    let heft = crate::logic::hand::heft(held);
+    Some((Material::of(id), 0.12 + 0.18 * heft, 1.08 - 0.2 * heft))
 }
 
 #[cfg(test)]
@@ -2847,5 +3466,317 @@ mod tests {
         voices.hear(dt, &[animal(2, Species::Sheep, Vec3::new(10.0, 0.0, 0.0), 0.0, 0.0)], glam::DVec3::ZERO, false, &mut rng);
         let sheep = voices.hear(dt, &[animal(2, Species::Sheep, Vec3::new(2.0, 0.0, 0.0), 0.0, 0.0)], glam::DVec3::ZERO, false, &mut rng);
         assert!(sheep.is_empty());
+    }
+
+    // ------------------------------------------- the country's own bed
+
+    /// Noon in the middle of summer on the steppe: what the cicadas are
+    /// for.
+    fn summer_noon() -> Air {
+        Air {
+            sun: 0.9,
+            morning: false,
+            warmth: 28.0,
+            thaw: 0.0,
+            biome: Biome::Steppe,
+            wet: false,
+            shelter: Shelter::Open,
+            at_sea: false,
+        }
+    }
+
+    #[test]
+    fn the_steppe_rings_with_cicadas_at_noon_in_summer_and_is_silent_in_winter() {
+        // The season arrives as a temperature and nothing else -- so
+        // this is the same place, the same hour, and the only thing
+        // moved is what the year did to the air.
+        let summer = cicada_chorus(&summer_noon());
+        let winter = cicada_chorus(&Air { warmth: 4.0, ..summer_noon() });
+        assert!(summer > 0.9, "a summer steppe at noon heard {summer:.2}");
+        assert_eq!(winter, 0.0, "the steppe sang in the snow");
+    }
+
+    #[test]
+    fn cicadas_and_crickets_hand_over_at_dusk_rather_than_singing_together() {
+        // The two beds are mirrors of each other in the sun's height: a
+        // cicada is the heat of the day and a cricket is the evening. If
+        // both were loud at once a July night would be twice as noisy as
+        // a July afternoon, which is the wrong way round.
+        let warm = 22.0;
+        let air = |sun| Air { sun, warmth: warm, biome: Biome::Plains, ..summer_noon() };
+        let night = |sun| Night {
+            sun,
+            warmth: warm,
+            biome: Biome::Plains,
+            wet: false,
+            shelter: Shelter::Open,
+            at_sea: false,
+        };
+        assert!(cicada_chorus(&air(0.9)) > cricket_chorus(&night(0.9)), "noon belonged to the crickets");
+        assert!(cricket_chorus(&night(-0.5)) > cicada_chorus(&air(-0.5)), "midnight belonged to the cicadas");
+        // ...and at the horizon neither is at full, so the handover is a
+        // fade and not a swap.
+        assert!(cicada_chorus(&air(0.0)) < 0.2 && cricket_chorus(&night(0.0)) < 0.8);
+    }
+
+    #[test]
+    fn cicadas_are_silent_in_the_rain_underground_at_sea_and_on_the_ice() {
+        let noon = summer_noon();
+        for (what, air) in [
+            ("rain", Air { wet: true, ..noon }),
+            ("a mine", Air { shelter: Shelter::Enclosed, ..noon }),
+            ("the open sea", Air { at_sea: true, ..noon }),
+            ("the peaks", Air { biome: Biome::SnowyPeaks, ..noon }),
+            ("the tundra", Air { biome: Biome::Tundra, ..noon }),
+            ("midnight", Air { sun: -0.8, ..noon }),
+        ] {
+            assert_eq!(cicada_chorus(&air), 0.0, "cicadas sang in {what}");
+        }
+    }
+
+    #[test]
+    fn the_birds_sing_at_either_end_of_the_day_and_hardest_at_dawn() {
+        // The one thing this bed tells a player who has lost the clock
+        // underground: which end of the day they have come up into.
+        let spring = Air {
+            sun: 0.0,
+            morning: true,
+            warmth: 11.0,
+            thaw: 1.0,
+            biome: Biome::Forest,
+            wet: false,
+            shelter: Shelter::Open,
+            at_sea: false,
+        };
+        let dawn = dawn_chorus(&spring);
+        let dusk = dawn_chorus(&Air { morning: false, ..spring });
+        let noon = dawn_chorus(&Air { sun: 0.9, ..spring });
+        let midnight = dawn_chorus(&Air { sun: -0.9, ..spring });
+        assert!(dawn > 0.9, "a spring dawn in a wood heard {dawn:.2}");
+        assert!(dusk > 0.0 && dusk < dawn * 0.7, "dusk sang {dusk:.2} against dawn's {dawn:.2}");
+        assert_eq!(noon, 0.0, "the chorus was still going at noon");
+        assert_eq!(midnight, 0.0, "the chorus was going at midnight");
+    }
+
+    #[test]
+    fn a_frozen_morning_has_no_dawn_chorus() {
+        // Winter's silence, stated without the word winter: what stops
+        // the birds is the frost, which is what the season *is*.
+        let frozen = Air {
+            sun: 0.0,
+            morning: true,
+            warmth: 1.0,
+            thaw: 0.0,
+            biome: Biome::Taiga,
+            wet: false,
+            shelter: Shelter::Open,
+            at_sea: false,
+        };
+        assert_eq!(dawn_chorus(&frozen), 0.0);
+        // ...and the same morning eight degrees warmer is not silent.
+        assert!(dawn_chorus(&Air { warmth: 11.0, ..frozen }) > 0.0);
+    }
+
+    #[test]
+    fn a_thaw_drips_and_a_wet_autumn_at_the_same_temperature_does_not() {
+        // The whole reason `thawing` exists: no temperature can tell a
+        // March morning from a November one, and a drip belongs to only
+        // one of them.
+        use primitive_shared::season::{MIDSUMMER_DAY_OF_YEAR, WORLD_OPENS_ON_DAY, YEAR_DAYS};
+        let quarter = YEAR_DAYS / 4.0;
+        // Midwinter is half a year from midsummer; a quarter of a year
+        // after it is the spring equinox, and a quarter before it is the
+        // autumn one. Converted out of the year's own days into a
+        // world's, which is what the game counts.
+        let midwinter = MIDSUMMER_DAY_OF_YEAR + YEAR_DAYS / 2.0 - WORLD_OPENS_ON_DAY;
+        let spring = thawing(midwinter + quarter);
+        let autumn = thawing(midwinter - quarter);
+        assert!(spring > 0.95, "the spring equinox thawed at {spring:.2}");
+        assert_eq!(autumn, 0.0, "the year was thawing in the autumn");
+
+        let air = |thaw| Air {
+            sun: 0.4,
+            morning: true,
+            warmth: 3.0,
+            thaw,
+            biome: Biome::Taiga,
+            wet: false,
+            shelter: Shelter::Roofed,
+            at_sea: false,
+        };
+        assert!(eaves_drip(&air(spring)) > 0.5, "nothing ran off the eaves in a thaw");
+        assert_eq!(eaves_drip(&air(autumn)), 0.0, "the eaves dripped in October");
+    }
+
+    #[test]
+    fn nothing_drips_while_it_is_still_frozen_or_once_the_snow_has_gone() {
+        let thawing_taiga = Air {
+            sun: 0.4,
+            morning: true,
+            warmth: 3.0,
+            thaw: 1.0,
+            biome: Biome::Taiga,
+            wet: false,
+            shelter: Shelter::Roofed,
+            at_sea: false,
+        };
+        assert!(eaves_drip(&thawing_taiga) > 0.0);
+        for (what, air) in [
+            ("a hard frost", Air { warmth: -4.0, ..thawing_taiga }),
+            ("a warm week later", Air { warmth: 14.0, ..thawing_taiga }),
+            ("a desert", Air { biome: Biome::Desert, ..thawing_taiga }),
+            ("rain", Air { wet: true, ..thawing_taiga }),
+            ("a mine", Air { shelter: Shelter::Enclosed, ..thawing_taiga }),
+        ] {
+            assert_eq!(eaves_drip(&air), 0.0, "the eaves dripped in {what}");
+        }
+    }
+
+    #[test]
+    fn no_bed_ever_jumps_however_fast_the_world_changes() {
+        // **The test the whole `Level` type exists for.** Every one of
+        // these functions is a product of things a player can change in
+        // one step -- walk under a roof, cross a biome edge, step out of
+        // the rain -- and a gain that followed them frame for frame
+        // would click. The level is what stands between the two.
+        let dt = 1.0 / 60.0;
+        let mut level = Level::default();
+        let mut last = 0.0;
+        // Full on, full off, full on again, as abruptly as anything can
+        // ask.
+        for frame in 0..600 {
+            let wanted = if (frame / 100) % 2 == 0 { 1.0 } else { 0.0 };
+            let now = level.ease(wanted, dt);
+            assert!(
+                (now - last).abs() <= BED_SLEW * dt + 1e-6,
+                "the bed jumped from {last} to {now}"
+            );
+            last = now;
+        }
+        // ...and it actually arrives, rather than approaching for ever:
+        // a bed at a millionth of full gain is a voice the mixer has
+        // spent on silence.
+        for _ in 0..600 {
+            level.ease(0.0, dt);
+        }
+        assert_eq!(level.ease(0.0, dt), 0.0, "the bed never reached silence");
+    }
+
+    #[test]
+    fn no_bed_ever_jumps_over_a_whole_year() {
+        // The season turning must not be audible as an event. `Season`
+        // is a step function and none of these beds reads it: they read
+        // a temperature and `thawing`, both of which are sines. Walked
+        // day by day through four years, with the level easing at its
+        // own rate, the envelope has to stay continuous over every
+        // boundary -- including the one where `Season::at` changes its
+        // answer.
+        let dt = 1.0 / 60.0;
+        let mut level = Level::default();
+        let mut last = 0.0;
+        let mut worst = 0.0f32;
+        let mut seen_a_thaw = false;
+        let mut seen_a_dry_spell = false;
+        // A tenth of a day at a time, a frame of easing each: fast
+        // enough that a step in the underlying function would show as a
+        // jump of the whole step.
+        for tenth in 0..1600 {
+            let world_time = tenth as f32 * 0.1;
+            let air = Air {
+                sun: 0.4,
+                morning: true,
+                // The year's own swing, so the temperature moves the way
+                // the world moves it.
+                warmth: 8.0 + primitive_shared::season::ambient_offset_c(world_time),
+                thaw: thawing(world_time),
+                biome: Biome::Taiga,
+                wet: false,
+                shelter: Shelter::Roofed,
+                at_sea: false,
+            };
+            let wanted = eaves_drip(&air);
+            seen_a_thaw |= wanted > 0.3;
+            seen_a_dry_spell |= wanted == 0.0;
+            let now = level.ease(wanted, dt);
+            worst = worst.max((now - last).abs());
+            last = now;
+        }
+        assert!(seen_a_thaw, "four years went by without a thaw");
+        assert!(seen_a_dry_spell, "the eaves dripped all year round");
+        assert!(
+            worst <= BED_SLEW * dt + 1e-6,
+            "the year turned with a jump of {worst} in the envelope"
+        );
+    }
+
+    #[test]
+    fn a_roof_muffles_every_bed_by_the_same_amount_and_a_mine_silences_them_all() {
+        // One answer to "what is over my head", not three -- three
+        // copies is three chances to disagree about what a roof is.
+        let noon = summer_noon();
+        let open = cicada_chorus(&noon);
+        let roofed = cicada_chorus(&Air { shelter: Shelter::Roofed, ..noon });
+        assert!(roofed > 0.0 && roofed < open * 0.6);
+        assert_eq!(heard_through(Shelter::Enclosed), 0.0);
+        assert_eq!(heard_through(Shelter::Canopy), heard_through(Shelter::Open));
+    }
+
+    // ------------------------------------------------ the blow and the step
+
+    #[test]
+    fn a_heavier_tool_knocks_slower_and_lower_than_a_light_one() {
+        use crate::logic::hand::dig_seconds;
+        use primitive_shared::types::{BLOCK_FLINT_KNIFE, BLOCK_IRON_PICKAXE};
+        let flint = Some(BLOCK_FLINT_KNIFE);
+        let iron = Some(BLOCK_IRON_PICKAXE);
+        assert!(
+            dig_seconds(iron) > dig_seconds(flint),
+            "an iron pick swung at a flint knife's rate"
+        );
+        assert!(
+            dig_seconds(flint) > dig_seconds(None),
+            "a tool swung at a fist's rate"
+        );
+        let (_, flint_gain, flint_pitch) = tool_voice(flint).expect("a flint knife has a voice");
+        let (_, iron_gain, iron_pitch) = tool_voice(iron).expect("an iron pick has a voice");
+        assert!(iron_gain > flint_gain, "the heavier head was the quieter one");
+        assert!(iron_pitch < flint_pitch, "the heavier head was the higher one");
+    }
+
+    #[test]
+    fn the_blow_carries_the_tool_as_well_as_the_block() {
+        use primitive_shared::types::{BLOCK_COPPER_AXE, BLOCK_FLINT_KNIFE, BLOCK_STONE};
+        // The failure this exists to stop: a flint axe, a copper one and
+        // a fist all made the same noise against the same log, which is
+        // the whole of what a tool is, gone.
+        let flint = tool_voice(Some(BLOCK_FLINT_KNIFE)).expect("a flint knife has a voice");
+        let copper = tool_voice(Some(BLOCK_COPPER_AXE)).expect("a copper axe has a voice");
+        assert_eq!(flint.0, Material::Stone, "a knapped edge is not stone");
+        assert_eq!(copper.0, Material::Metal, "a cast head is not metal");
+        // A fist and a block in the hand are not striking heads: setting
+        // a slab of stone against a rock face is not a blow with it.
+        assert!(tool_voice(None).is_none(), "an empty hand rang");
+        assert!(tool_voice(Some(BLOCK_STONE)).is_none(), "a carried block rang");
+        // ...and the tool never drowns the block. The rock is what the
+        // player is working on; the tool is under it.
+        assert!(copper.1 < 0.4, "the tool was as loud as the block at {}", copper.1);
+    }
+
+    #[test]
+    fn a_creeping_step_is_far_quieter_than_a_sprinting_one() {
+        // There is no crouch key in this game, so going slowly *is*
+        // creeping, and this ratio is the whole of the mechanic. Stated
+        // on the numbers the footfall is played at rather than through a
+        // player and a chunk manager.
+        let effort = |speed: f32| {
+            (speed / primitive_shared::animals::NOMINAL_SPRINT_SPEED).clamp(CREEP_EFFORT, 1.15)
+        };
+        let creep = effort(0.8);
+        let sprint = effort(primitive_shared::animals::NOMINAL_SPRINT_SPEED);
+        assert_eq!(creep, CREEP_EFFORT, "a creep was not at the floor");
+        assert!(
+            sprint > creep * 3.5,
+            "a sprint is {sprint:.2} against a creep's {creep:.2}, which nobody would hear as an effort"
+        );
     }
 }
