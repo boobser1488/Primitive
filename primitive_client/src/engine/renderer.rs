@@ -404,15 +404,6 @@ fn glow_dir(sun_direction: Vec3) -> [f32; 4] {
 /// leaving it out would compile the terrain shader twice at startup.
 struct LookPipelines {
     chunk_pipeline: wgpu::RenderPipeline,
-    /// The depth prepass and the shaded pass that follows it, or `None`
-    /// on a build that was not asked for them.
-    ///
-    /// **Built only when the switch is on**, so a stock run compiles two
-    /// pipelines fewer -- which matters on a phone, where every pipeline
-    /// is compiled at startup and startup has a five-second watchdog on
-    /// it (see the Android notes in CLAUDE.md). See
-    /// `engine::opt::depth_prepass`.
-    prepass: Option<Prepass>,
     transparent_pipeline: wgpu::RenderPipeline,
     crack_pipeline: wgpu::RenderPipeline,
     cutout_pipeline: wgpu::RenderPipeline,
@@ -425,50 +416,6 @@ struct LookPipelines {
     /// was written for.
     actor_pipeline: wgpu::RenderPipeline,
     hand_pipeline: wgpu::RenderPipeline,
-}
-
-/// The two pipelines a depth prepass needs, when it is switched on.
-///
-/// **The same arithmetic in both, and that is the whole safety
-/// argument.** The prepass writes depth and the shaded pass tests against
-/// it with `LessEqual`, so a fragment survives only where its own depth
-/// equals what the prepass wrote there -- and "equals" is exact. A second
-/// vertex shader that computed the clip position by a different route
-/// could land a unit in the last place away and reject every fragment of
-/// a face, which draws as a hole in the world and nothing in the log. So
-/// `vs_depth` calls `terrain_vertex` and throws everything but the
-/// position away, and `VertexOutput` carries `@invariant` to take the
-/// compiler's freedom to fold the two differently along with it. See both
-/// in shader.wgsl.
-///
-/// **What wgpu will not allow, and it shaped this.** `fragment: None` is
-/// refused against a pass that has a colour attachment; a fragment stage
-/// that leaves a vertex output unconsumed is refused too. So the prepass
-/// is `vs_depth` (one output) into `fs_depth` (no inputs) with the colour
-/// target present and every channel masked off. What that costs on a
-/// desktop is the double-rate depth-only path the driver would otherwise
-/// have taken -- see the numbers in `engine::opt::depth_prepass`.
-///
-/// Rejected: writing the projection out again inside `vs_depth`. It reads
-/// better and it is exactly the risk above -- the decal nudge
-/// (`DECAL_DEPTH`) would have been written out a second time, and two
-/// copies of a depth calculation is how a hole appears on one device and
-/// not another.
-struct Prepass {
-    /// Depth only: no varyings, no texture fetch, no colour written.
-    depth: wgpu::RenderPipeline,
-    /// The terrain's own pipeline with `LessEqual` in place of `Less`,
-    /// which is what lets a fragment draw where the prepass already put
-    /// its depth.
-    ///
-    /// **It stands in for the solid pipeline for the whole of the main
-    /// pass**, entities and the crack and the hand included, because
-    /// those rebind it after the sky. `LessEqual` there means a face
-    /// exactly level with the terrain under it wins where it used to
-    /// lose -- which is the same tie the terrain's own seams turn on (see
-    /// `prepass_repro`), and one more reason this is a switch to measure
-    /// with and not a change to ship.
-    solid: wgpu::RenderPipeline,
 }
 
 impl LookPipelines {
@@ -532,102 +479,6 @@ impl LookPipelines {
             }),
             multisample,
             multiview: None,
-        });
-
-        // The depth prepass and its shaded twin, when the switch asks for
-        // them. See `Prepass` for why the vertex entry point is shared,
-        // and `engine::opt::depth_prepass` for what is being measured.
-        let prepass = crate::engine::opt::depth_prepass().then(|| {
-            let depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("chunk depth prepass"),
-                layout: Some(chunk_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &chunk_shader,
-                    entry_point: "vs_depth",
-                    buffers: &[Vertex::layout(), Vertex::instance_layout()],
-                },
-                // **Nothing written and nothing read.** `fragment: None`
-                // is what this wants and what wgpu refuses -- a pipeline
-                // with no colour target is incompatible with a pass that
-                // has a colour attachment -- so the target stays and every
-                // channel of it is masked off. `fs_depth` takes no inputs,
-                // so none of the terrain's ten varyings is interpolated
-                // for it and the vertex work that fed them is dead code.
-                // See `fs_depth` in shader.wgsl.
-                fragment: Some(wgpu::FragmentState {
-                    module: &chunk_shader,
-                    entry_point: "fs_depth",
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: config.format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::empty(),
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: Some(wgpu::Face::Back),
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample,
-                multiview: None,
-            });
-            let solid = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("chunk pipeline after a prepass"),
-                layout: Some(chunk_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &chunk_shader,
-                    entry_point: "vs_main",
-                    buffers: &[Vertex::layout(), Vertex::instance_layout()],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &chunk_shader,
-                    entry_point: "fs_solid",
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: config.format,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: Some(wgpu::Face::Back),
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    // **`LessEqual`, and the write left on.** Equal is
-                    // what a fragment that survived the prepass tests as,
-                    // so `Less` would reject the entire world. The write
-                    // stays because everything after this pass -- the
-                    // cut-out leaves, the sky, the entities, the water --
-                    // tests against a depth buffer this pass is still
-                    // responsible for, and writing a value that is
-                    // already there costs a tile-memory write and no
-                    // correctness.
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample,
-                multiview: None,
-            });
-            Prepass { depth, solid }
         });
 
         // The transparent pass. Three differences from the opaque one,
@@ -994,7 +845,6 @@ impl LookPipelines {
 
         Self {
             chunk_pipeline,
-            prepass,
             transparent_pipeline,
             crack_pipeline,
             cutout_pipeline,
@@ -1211,10 +1061,6 @@ pub struct GraphicsState {
     scene_blit_pipeline: wgpu::RenderPipeline,
 
     chunk_pipeline: wgpu::RenderPipeline,
-    /// The terrain drawn as a depth prepass and then shaded, when
-    /// `PRIMITIVE_OPT_DEPTH_PREPASS` asks for it. `None` otherwise, which
-    /// is every build nobody is measuring. See `Prepass`.
-    prepass: Option<Prepass>,
     /// Leaves: the only geometry whose shader may `discard`.
     cutout_pipeline: wgpu::RenderPipeline,
     /// Dropped items, which are sprites with a thickness rather than
@@ -2290,7 +2136,6 @@ impl GraphicsState {
         // step. See `LookPipelines` for why they are built out of line.
         let LookPipelines {
             chunk_pipeline,
-            prepass,
             transparent_pipeline,
             crack_pipeline,
             cutout_pipeline,
@@ -2644,7 +2489,6 @@ impl GraphicsState {
             size,
             resolution_setting,
             chunk_pipeline,
-            prepass,
             cutout_pipeline,
             item_pipeline,
             sky_pipeline,
@@ -2857,7 +2701,6 @@ impl GraphicsState {
             self.textures.split,
         );
         self.chunk_pipeline = look.chunk_pipeline;
-        self.prepass = look.prepass;
         self.transparent_pipeline = look.transparent_pipeline;
         self.crack_pipeline = look.crack_pipeline;
         self.cutout_pipeline = look.cutout_pipeline;
@@ -4007,18 +3850,7 @@ impl GraphicsState {
             // and a night by a campfire pays for the fire's walk. Everything
             // else in the pass is the same either way.
             let shadowed = self.shadows.as_ref().filter(|_| light.is_some() || lamps_lit);
-            // The prepass, if this frame gets one. Only where the plain
-            // pipelines are in force: the shadowed pair test with `Less`
-            // like everything else, and a third and fourth pipeline
-            // compiled for a configuration the device under test is not
-            // in (the phone's stage line reads `shadow 0.000`) would be
-            // two more shader compilations at every startup for nothing.
-            let prepass = self.prepass.as_ref().filter(|_| shadowed.is_none() && self.multi_draw);
-            let solid_pipeline = match (&prepass, shadowed) {
-                (Some(prepass), _) => &prepass.solid,
-                (None, Some(map)) => &map.solid,
-                (None, None) => &self.chunk_pipeline,
-            };
+            let solid_pipeline = shadowed.map_or(&self.chunk_pipeline, |map| &map.solid);
             let cutout_pipeline = shadowed.map_or(&self.cutout_pipeline, |map| &map.cutout);
             let shadow_group = shadowed.map(|map| &map.bind_group);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4030,20 +3862,22 @@ impl GraphicsState {
                         load: wgpu::LoadOp::Clear(1.0),
                         // **Nothing reads this buffer after the pass.**
                         // The scene blit samples colour, the screenshot
-                        // reads the swapchain, and the next frame clears
-                        // depth before it draws -- so on a tile-based GPU
-                        // the store is a copy of the whole depth buffer
-                        // out of tile memory for nobody. Behind
-                        // `PRIMITIVE_OPT_DEPTH_DISCARD` only because the
-                        // saving has to be measured on a device; the
-                        // picture cannot differ either way, a store op
-                        // being what happens after every test in the pass
-                        // has already run. See `engine::opt`.
-                        store: if crate::engine::opt::depth_store_discard() {
-                            wgpu::StoreOp::Discard
-                        } else {
-                            wgpu::StoreOp::Store
-                        },
+                        // reads the swapchain, the next frame clears depth
+                        // before it draws, and the texture is made with
+                        // `RENDER_ATTACHMENT` alone, so nothing *can*
+                        // sample it. On a tile-based GPU a store is a copy
+                        // of the whole depth buffer out of tile memory for
+                        // nobody.
+                        //
+                        // It was `Store`, and it was measured behind a
+                        // switch before it became this: on an Adreno 710
+                        // the solid pass came out at 14.20 ms against
+                        // 14.40, a difference inside the run's own noise.
+                        // Kept anyway, because free and harmless beats free
+                        // and conditional -- the picture cannot differ
+                        // either way, a store op being what happens after
+                        // every test in the pass has already run.
+                        store: wgpu::StoreOp::Discard,
                     }),
                     stencil_ops: None,
                 }),
@@ -4292,29 +4126,30 @@ impl GraphicsState {
 
             if self.multi_draw {
                 if solid_draws > 0 {
-                    // **Depth first, then the same triangles shaded.**
-                    // The prepass reuses the solid pass's own sub-draws:
-                    // the same buffer, the same ranges, the same near-to-
-                    // far order, so the two draws cannot come to disagree
-                    // about what the terrain is. Inside the pass and not
-                    // one of its own, because a second render pass over
-                    // the same attachments is a tile resolve and a tile
-                    // reload on the very hardware this is meant to help.
-                    // See `engine::opt::depth_prepass` for what it is
-                    // expected to cost and why it is a switch.
-                    if let Some(prepass) = prepass {
-                        pass.set_pipeline(&prepass.depth);
-                        pass.multi_draw_indexed_indirect(&self.indirect, 0, solid_draws);
-                        draw_calls += 1;
-                        // Back to the shaded pipeline, and its bind
-                        // groups with it: the prepass has the same
-                        // layout, so only the pipeline changed, but
-                        // saying so here is cheaper than the next reader
-                        // having to prove it.
-                        pass.set_pipeline(solid_pipeline);
-                        pass.set_bind_group(0, &self.globals_bind_group, &[]);
-                        pass.set_bind_group(1, &self.texture_bind_group, &[]);
-                    }
+                    // **Rejected: a depth prepass here**, the classic cure
+                    // for an opaque pass that shades pixels it then paints
+                    // over. It was built, measured on two machines and
+                    // taken out. The solid pass, the same seat, the same
+                    // frame:
+                    //
+                    // ```text
+                    //                GTX 1050 Ti     Adreno 710
+                    //   one pass      4.085 ms        14.40 ms
+                    //   prepass      19.634 ms        17.04 ms
+                    // ```
+                    //
+                    // It buys nothing because the draw order below is
+                    // already near to far: by the time a far chunk is
+                    // drawn the depth in front of it is written and its
+                    // fragments are rejected anyway. What it costs is every
+                    // triangle a second time -- and this pass sends a
+                    // triangle every three pixels, so triangles are exactly
+                    // what it cannot afford to double. On the desktop it
+                    // cost more still, because wgpu will not take a
+                    // pipeline with no colour target against a pass that
+                    // has one, so even the depth-only draw carried an
+                    // attachment and missed the driver's double-rate depth
+                    // path.
                     pass.multi_draw_indexed_indirect(&self.indirect, 0, solid_draws);
                     draw_calls += 1;
                 }
@@ -23197,20 +23032,19 @@ mod lod_repro;
 #[path = "atlas_split_repro.rs"]
 mod atlas_split_repro;
 
-/// The solid terrain drawn with a depth prepass and without it, and the
-/// two pictures compared to the byte. A child for the reason `lod_repro`
-/// is -- it fills the private `Globals` -- and a sibling of
-/// `view_distance_repro`, whose world it borrows.
-#[cfg(test)]
-#[path = "prepass_repro.rs"]
-mod prepass_repro;
-
 /// A render distance of twenty-four and the sea from inside it, through
 /// `offscreen_repro::draw_scene` at the player's own settings. A child for
 /// the reason `lod_repro` is; see the file.
 #[cfg(test)]
 #[path = "view_distance_repro.rs"]
 mod view_distance_repro;
+
+/// Which band of the world the solid pass's triangles are actually in,
+/// after the fog cull and the frustum. A child for the reason `lod_repro`
+/// is, and a sibling of `view_distance_repro`, whose world it borrows.
+#[cfg(test)]
+#[path = "lod_bands_repro.rs"]
+mod lod_bands_repro;
 
 /// Why the picture reads as plastic: the world at four hours from four
 /// bearings, through the real passes. A child for the reason `lod_repro` is.

@@ -136,7 +136,19 @@ pub(super) struct World {
 
 /// The disc the streamer keeps round `centre` at `radius`, generated and lit.
 pub(super) fn stream(centre: ChunkPos, radius: i32) -> World {
-    let generator = WorldGen::new(SEED);
+    stream_seeded(SEED, centre, radius)
+}
+
+/// `stream`, for a world that is not this file's own.
+///
+/// **A measurement that reproduces a device's report has to be of that
+/// device's world.** A report carries the seed on its `[F3]` line; the
+/// numbers it came with are about that terrain, and this file's `SEED` is
+/// a different landscape with a different share of hillside in it. See
+/// `lod_bands_repro`, which exists because a ratio taken from one world
+/// was applied to another.
+pub(super) fn stream_seeded(seed: u32, centre: ChunkPos, radius: i32) -> World {
+    let generator = WorldGen::new(seed);
     let probe = ChunkManager::new(radius);
     let mut positions = Vec::new();
     for dz in -radius..=radius {

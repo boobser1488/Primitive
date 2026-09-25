@@ -24,28 +24,80 @@
 //! input, so every menu tap on a device under test is a tap a human has to
 //! make. Anything that has to be compared on a device therefore has to be
 //! reachable from the environment, or it cannot be compared at all. That
-//! is what this module is: one switch per hypothesis, default off, so that
-//! a run with it and a run without it differ in exactly one thing.
+//! is what this module is: one switch per hypothesis, so that a run with
+//! one and a run without it differ in exactly one thing. Most are off
+//! until asked for; the one that has already won a comparison is on, and
+//! turns off (see `flag_or`).
 //!
 //! ## The switches
 //!
 //! | variable | what it does |
 //! |---|---|
-//! | `PRIMITIVE_OPT_DEPTH_DISCARD=1` | the main pass stops storing its depth buffer |
-//! | `PRIMITIVE_OPT_DEPTH_PREPASS=1` | the solid terrain lays depth down first, then shades |
-//! | `PRIMITIVE_OPT_TRILINEAR=1` | minification filters and mips blend, while magnification stays nearest |
+//! | `PRIMITIVE_OPT_TRILINEAR=0` | back to the point-sampled minification the game had before the device answered |
 //! | `PRIMITIVE_OPT_MIP_BIAS=-0.5` | the terrain fetch asks for a sharper mip level |
 //! | `PRIMITIVE_OPT_ANISO=4` | overrides the anisotropy setting |
 //! | `PRIMITIVE_OPT_RESOLUTION=50` | overrides the resolution scale, in per cent |
 //! | `PRIMITIVE_OPT_LOD=4` | overrides where the coarse bands start, in chunks |
+//! | `PRIMITIVE_OPT_VIEW=8` | overrides the render distance, in chunks |
 //!
 //! The last three change nothing about how the game draws -- they are the
 //! three settings the frame is most sensitive to, made reachable without a
 //! menu. The question "is this pass paying for pixels or for triangles?"
 //! is answered by halving the pixels and reading the stage line, and then
-//! by halving the triangles and reading it again. `lod.rs` answered it
-//! that way on a desktop and got "triangles"; whether a phone agrees is
-//! not a thing to assume, and until now it could not be asked.
+//! by halving the triangles and reading it again.
+//!
+//! ## What the device has already answered
+//!
+//! Fifty-five seconds a mode, restarted between them, the last `[F3]` line
+//! taken:
+//!
+//! ```text
+//! mode                fps  frame avg/p95/p99   gpu     solid   tris
+//! stock                54  18.7/19.8/20.4 ms   14.99   14.40   255k/340k
+//! PRIMITIVE_OPT_LOD=4  54  18.6/19.5/19.9 ms   14.78   14.19   230k/309k
+//! OPT_RESOLUTION=50    66  15.2/15.9/16.2 ms   11.80   11.16   255k/340k
+//! OPT_DEPTH_DISCARD=1  54  18.5/19.7/20.3 ms   14.81   14.20   255k/340k
+//! OPT_DEPTH_PREPASS=1  47  21.4/22.1/22.4 ms   17.61   17.04   255k/340k
+//! OPT_TRILINEAR=1      53  18.7/19.9/20.6 ms   15.00   14.37   255k/340k
+//! LOD=4 + RES=30       74  13.5/14.6/15.0 ms    8.88    8.14   230k/309k
+//! ```
+//!
+//! Four of those switches have done their job and are gone:
+//!
+//! * **Trilinear costs nothing** -- 14.37 against 14.40, inside the noise --
+//!   so it is what the game does now and the switch only turns it off.
+//! * **The depth prepass loses on the phone too**, 17.04 against 14.40,
+//!   the same way it lost on a desktop. Taken out; see the rejected note
+//!   beside the main pass in `renderer.rs`.
+//! * **Not storing the depth buffer is free and harmless** -- 14.20
+//!   against 14.40, which is noise -- so the frame just does it, and the
+//!   branch is gone.
+//! * **The frame is not purely triangle-bound after all.** Half the
+//!   resolution is a quarter of the pixels and took the solid pass down
+//!   22%, at the same 255k triangles. So roughly a fifth to a quarter of
+//!   the pass is fill, and the rest is geometry.
+//!
+//! And one did not do its job: `PRIMITIVE_OPT_LOD=4` took 10% of the
+//! triangles away where a coarse chunk sheds 56% of its own
+//! (`lod::CELL`). `lod_bands_repro` reproduces the device's frame to
+//! within a third of a per cent and says where the rest went: **a frame is
+//! not the world.** The fog cull takes the far ring and the frustum takes
+//! five sixths of what is left, and what survives is weighted towards the
+//! near chunks -- which are the ones no coarsening may touch. In-view solid
+//! triangles at that seat:
+//!
+//! ```text
+//!                     lod 10      lod 4
+//! render distance 12  339_339    258_846   -24%
+//! render distance  8  185_891    149_785
+//! ```
+//!
+//! So the ceiling on moving the bands in is about a quarter, not four
+//! fifths, and the render distance is the stronger of the two levers --
+//! which is why `PRIMITIVE_OPT_VIEW` now exists beside it. The device
+//! measured less than a quarter, so the `[F3]` line also carries
+//! `detail=fine/coarse/coarser` now: a setting that reached the mesher and
+//! one that did not looked identical from outside the phone.
 //!
 //! ## Read once
 //!
@@ -57,16 +109,23 @@
 
 use std::sync::OnceLock;
 
-/// Whether a switch is on. Anything but `0`, `false`, `off`, `no` and the
-/// empty string counts as on, so `=1` and `=yes` and a bare `=` that the
-/// env file wrote as an empty value all read the way they look.
-fn flag(name: &str) -> bool {
+/// Whether a switch is on, given what it is when nobody sets it. Anything
+/// but `0`, `false`, `off`, `no` and the empty string counts as on, so
+/// `=1` and `=yes` and a bare `=` that the env file wrote as an empty
+/// value all read the way they look.
+///
+/// **The default is a parameter because a switch that wins becomes the
+/// game.** Trilinear filtering was measured on a device, cost nothing and
+/// is now what the sampler does -- and the comparison that decided it has
+/// to stay available, or the next device cannot re-take it.
+/// `PRIMITIVE_OPT_TRILINEAR=0` is the whole reason for the argument.
+fn flag_or(name: &str, default: bool) -> bool {
     match std::env::var(name) {
         Ok(value) => !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "" | "0" | "false" | "off" | "no"
         ),
-        Err(_) => false,
+        Err(_) => default,
     }
 }
 
@@ -86,110 +145,36 @@ fn number<T: std::str::FromStr>(name: &str) -> Option<T> {
     }
 }
 
-/// **The main pass stops storing its depth buffer.**
+/// **Minification filters, magnification stays nearest.** On unless the
+/// environment says otherwise, which is what `PRIMITIVE_OPT_TRILINEAR=0`
+/// is for.
 ///
-/// The depth attachment is written with `StoreOp::Store` and nothing
-/// reads it: the scene blit samples colour, the screenshot reads the
-/// swapchain, and the next frame clears depth before it draws. On a
-/// desktop that store is a no-op the driver may not even honour. On a
-/// tile-based GPU it is a full copy of the depth buffer out of tile
-/// memory and into main memory, every frame -- at the phone's 1329x598
-/// scene that is 3.2 MB a frame, 190 MB a second, on a bus the whole
-/// device shares.
-///
-/// **The picture cannot change.** A store op decides what happens to the
-/// attachment *after* the pass; every test inside the pass has already
-/// run. The only way this could show is if something downstream sampled
-/// the depth texture, and nothing does -- `depth_view` appears in this
-/// crate as a render attachment and nowhere else.
-pub fn depth_store_discard() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| flag("PRIMITIVE_OPT_DEPTH_DISCARD"))
-}
-
-/// **The solid terrain draws twice: depth only, then shaded.**
-///
-/// The classic cure for an opaque pass that shades pixels it then paints
-/// over. The first draw writes nothing but depth -- no varyings, no
-/// texture fetch, every colour channel masked off; the second draws the
-/// same triangles with `LessEqual`, and every fragment that lost is
-/// rejected before its shader runs.
-///
-/// **What it is expected to cost rather than save, and why it is a switch
-/// rather than a change.** This repository has already measured the same
-/// idea twice and had it come out negative both times:
-///
-/// * The cut-out pass (see the note beside it in `renderer.rs`): a
-///   quarter of the pixels took it from 1.79 ms to 1.36, and a flat
-///   fragment shader to 1.56, so pixels were not what it was spending.
-/// * `lod.rs`: the solid pass sends 1.35 million triangles behind 0.9
-///   million pixels and ten times the pixels costs 19% more. The average
-///   terrain triangle is smaller than a pixel.
-///
-/// A prepass sends every triangle a second time, and a pass whose bill is
-/// triangles pays twice for a saving measured in pixels. On the phone's
-/// own numbers a triangle covers three pixels, which is worse than the
-/// desktop's ratio, not better.
-///
-/// So why is it here? Because a tile-based GPU has a thing a desktop does
-/// not: Adreno's low-resolution depth buffer is built during binning, and
-/// a depth-only draw is exactly what primes it. The honest answer is that
-/// nobody in this repository knows which way it goes on an Adreno, and
-/// one run with the switch and one without is a cheaper way to find out
-/// than an argument.
-///
-/// **On a desktop it is a rout, and the number is here so nobody has to
-/// re-derive it.** `prepass_repro::what_a_depth_prepass_costs`, the shore
-/// of the benchmark world at 1280x720, 113 chunks and 483 thousand solid
-/// triangles, on a GTX 1050 Ti:
-///
-/// ```text
-/// one pass:  4.085 ms a frame
-/// prepass:  19.634 ms a frame
-/// ```
-///
-/// Nearly five times, which is more than doubling the triangles can
-/// explain on its own -- a depth pass that still carries a colour
-/// attachment, masked or not, does not get the driver's double-rate
-/// depth-only path either. The saving it was buying is zero here, and the
-/// near-to-far sort is why: by the time a far chunk is drawn the depth
-/// buffer in front of it is already written, so there was no shading left
-/// to skip.
-///
-/// **Only where the device has multi-draw**, which is every Vulkan and
-/// D3D12 device and no GLES one. The prepass reuses the solid pass's own
-/// indirect sub-draws -- the same buffer, the same ranges, the same
-/// order -- and building a second per-chunk loop for the devices that
-/// cannot would be a second copy of the thing being measured.
-pub fn depth_prepass() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| flag("PRIMITIVE_OPT_DEPTH_PREPASS"))
-}
-
-/// **Minification filters, magnification stays nearest.**
-///
-/// At anisotropy 1 the block sampler is `Nearest` in all three modes --
-/// magnification, minification and the choice of mip (see
+/// At anisotropy 1 the block sampler used to be `Nearest` in all three
+/// modes -- magnification, minification and the choice of mip (see
 /// `texture::build_sampler`). The magnification half of that is
 /// deliberate and right: this is 16x16 pixel art and a linear filter
-/// smears it. The other two halves are not a decision, they are what
-/// falls out of building the sampler from one mode.
+/// smears it. The other two halves were not a decision, they were what
+/// fell out of building the sampler from one mode.
 ///
-/// What they do to the picture is what the phone photographed: ground
-/// running away from the camera is sampled at one point from one mip
-/// level chosen by the *longer* of the two derivatives, so a surface seen
-/// edge-on reads a level far coarser than it needs across its short axis,
-/// and there is no blend between levels to hide where one ends. That is
-/// "мыльная картинка" and it is free to fix -- trilinear minification is
-/// not a measurable cost on any GPU made this decade, and it changes
-/// nothing a player stands next to, because a magnified fragment never
-/// reaches the minification filter.
+/// What they did to the picture is what the phone photographed: ground
+/// running away from the camera sampled at one point from one mip level
+/// chosen by the *longer* of the two derivatives, so a surface seen
+/// edge-on read a level far coarser than it needed across its short axis,
+/// with no blend between levels to hide where one ended. That is "мыльная
+/// картинка".
 ///
-/// wgpu only refuses mixed modes when anisotropy is above 1, and this is
-/// for the case where it is 1.
+/// **It is on because the device says it is free**: the solid pass came
+/// out at 14.37 ms against 14.40 stock, which is noise on a run whose p99
+/// moves by half a millisecond. Nothing a player stands next to changes
+/// either, because a magnified fragment never reaches the minification
+/// filter. The switch stays so the comparison can be taken again on
+/// another device rather than believed.
+///
+/// wgpu only refuses mixed modes when anisotropy is above 1; above 1
+/// every mode is already Linear and this changes nothing.
 pub fn trilinear_minification() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| flag("PRIMITIVE_OPT_TRILINEAR"))
+    *ON.get_or_init(|| flag_or("PRIMITIVE_OPT_TRILINEAR", true))
 }
 
 /// **What the terrain's mip level is shifted by**, negative for sharper.
@@ -290,14 +275,13 @@ pub fn resolution_scale(setting: Option<f32>) -> Option<f32> {
 /// How far out the coarse bands start, given what the settings say. In
 /// chunks; zero is the simplification off.
 ///
-/// **The lever the phone's own numbers point at.** `lod.rs` measured the
-/// solid pass as bound by triangle count and not by pixels, and the
-/// device's stage line agrees: 240 thousand triangles behind 0.79 million
-/// pixels, which is a triangle every three pixels and every one of them
-/// billed at the 2x2 quad the rasteriser works in. The default is ten
-/// chunks inside a render distance of twelve, so only the outermost ring
-/// of the world is coarsened at all -- and moving the line in is the one
-/// change that takes triangles away rather than moving their cost around.
+/// **Measured, and smaller than it looks.** The default is ten chunks
+/// inside a render distance of twelve, so only the outermost ring of the
+/// world is coarsened at all -- which reads like a lever with most of its
+/// travel unused. It is not: `lod_bands_repro` puts moving the line from
+/// ten to four at -24% of the triangles in view, and an Adreno 710 at -10%
+/// of them, because the near band a player is standing in is a third of
+/// the frame and cannot be coarsened at any setting.
 ///
 /// It is a setting and a slider already. It is here because reaching that
 /// slider is a menu tap, and a phone cannot be driven.
@@ -313,19 +297,40 @@ pub fn lod_distance(setting: i32) -> i32 {
     }
 }
 
+/// The render distance, in chunks, given what the settings say.
+///
+/// **The other way to send fewer triangles, and the device has to say
+/// which is cheaper.** Coarsening keeps the world its own size and makes
+/// the far half of it blockier; a shorter render distance keeps every
+/// block where it is and stops the world sooner. They cost the player
+/// different things -- one takes detail off the hills, the other takes the
+/// hills away -- and they cost the GPU different things too: coarsening
+/// only removes triangles, while a shorter distance removes triangles, the
+/// chunks they live in, the memory that holds them and the fog they were
+/// fading into.
+///
+/// So this is here beside `lod_distance` to be measured against it rather
+/// than argued about. It is the same setting the RENDER DISTANCE row
+/// moves, and `ClientSettings::sanitise` clamps it by the same rule.
+pub fn view_distance(setting: i32) -> i32 {
+    static OVERRIDE: OnceLock<Option<i32>> = OnceLock::new();
+    match *OVERRIDE.get_or_init(|| number("PRIMITIVE_OPT_VIEW")) {
+        Some(chunks) => chunks,
+        None => setting,
+    }
+}
+
 /// One line for the log, so that a measurement taken from a device says
 /// on its face which build it came from. Printed once at startup and only
 /// when something is actually switched on -- a stock run stays silent.
 pub fn announce() {
     let mut on: Vec<String> = Vec::new();
-    if depth_store_discard() {
-        on.push("depth-discard".into());
-    }
-    if depth_prepass() {
-        on.push("depth-prepass".into());
-    }
-    if trilinear_minification() {
-        on.push("trilinear".into());
+    // Named when it is *off*, which is the state nobody asked for: a line
+    // that said "trilinear" on every stock run would be noise, and a run
+    // with the filtering turned back off is exactly the one whose numbers
+    // would otherwise be unexplainable a week later.
+    if !trilinear_minification() {
+        on.push("trilinear off".into());
     }
     if mip_bias() != 0.0 {
         on.push(format!("mip-bias {}", mip_bias()));
@@ -341,6 +346,9 @@ pub fn announce() {
     // confused in the log.
     if lod_distance(i32::MIN) != i32::MIN {
         on.push(format!("lod {} chunks", lod_distance(i32::MIN)));
+    }
+    if view_distance(i32::MIN) != i32::MIN {
+        on.push(format!("view {} chunks", view_distance(i32::MIN)));
     }
     if !on.is_empty() {
         println!("[opt] {}", on.join(", "));

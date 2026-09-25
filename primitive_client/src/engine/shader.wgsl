@@ -246,18 +246,7 @@ const FINE_V_SHIFT: u32 = 14u;
 const FINE_MASK: u32 = 16383u;
 const FINE_UNITS: f32 = 256.0;
 struct VertexOutput {
-    // **`@invariant`, and the depth prepass is why.** With
-    // `PRIMITIVE_OPT_DEPTH_PREPASS` the terrain is drawn twice -- once
-    // through `vs_depth` writing depth only, once through here testing
-    // `LessEqual` against what that wrote -- and "equal" is exact. A
-    // compiler free to reassociate the projection differently in the two
-    // entry points could land a unit in the last place apart, and a
-    // `LessEqual` that fails draws the clear colour where a face should
-    // be: a hole in the world, on one driver and not another. This
-    // attribute is the language's promise that the position is computed
-    // the same way wherever it appears. Off the prepass it costs the
-    // reassociation of four dot products and nothing else.
-    @invariant @builtin(position) clip_position: vec4<f32>,
+    @builtin(position) clip_position: vec4<f32>,
     // **Centroid, because the frame is multisampled.** With several
     // samples per pixel a pixel on the edge of a face is covered by
     // some of them and not others, and the fragment shader still runs
@@ -1269,28 +1258,6 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return terrain_vertex(in);
 }
 
-// The depth prepass's vertex shader: the same arithmetic as `vs_main` and
-// nothing else carried out of it.
-//
-// **It has to exist, and it has to be `terrain_vertex` and not a second
-// projection.** wgpu will not take a fragment stage that leaves a vertex
-// output unconsumed -- "Location[0] is provided by the previous stage
-// output but is not consumed as input by this stage" -- so a prepass whose
-// fragment shader reads nothing needs a vertex shader that writes nothing
-// but the position. Writing the projection out again here is how the two
-// draws come to disagree by a unit in the last place, which `LessEqual`
-// reads as a rejection and a player reads as a hole; calling the same
-// function is how they cannot. `@invariant` on `VertexOutput` closes what
-// is left, which is the compiler's freedom to fold the two differently.
-//
-// The decal nudge (`DECAL_DEPTH`) rides along for free, which it would not
-// have done in a hand-written copy -- and a decal drawn at its nudged depth
-// in one pass and its true depth in the other is exactly the hole above.
-@vertex
-fn vs_depth(in: VertexInput) -> @invariant @builtin(position) vec4<f32> {
-    return terrain_vertex(in).clip_position;
-}
-
 // The body of `vs_main`, as a function so the shadowed entry point and
 // the shadow caster can reuse it rather than carry a second copy of the
 // crop and tint decoding. Inlined by every compiler this runs through.
@@ -1847,29 +1814,6 @@ fn speck_colour(face: f32) -> vec4<f32> {
     if (f == 3u) { return vec4<f32>(1.0, 1.0, 0.0, 1.0); }
     if (f == 4u) { return vec4<f32>(1.0, 0.0, 1.0, 1.0); }
     return vec4<f32>(0.0, 1.0, 1.0, 1.0);
-}
-
-// **The depth prepass's fragment shader, which exists only because wgpu
-// will not take a pipeline without one.**
-//
-// A pipeline with `fragment: None` is refused against a pass that has a
-// colour attachment -- "render pipeline targets are incompatible with
-// render pass" -- and the prepass runs inside the main pass, beside the
-// shading it is there to save, because a depth-only pass of its own would
-// store the depth buffer out of tile memory and load it back, which on a
-// tile-based GPU is more than the prepass could ever return. So the
-// pipeline keeps a colour target and masks every channel off
-// (`ColorWrites::empty()`), and this is what sits behind the mask.
-//
-// **It declares no inputs, and that is the point.** A fragment entry that
-// took `VertexOutput` would have all ten of the terrain's varyings
-// interpolated for it -- the uv, the light terms, the shade cell, the
-// tint -- on every fragment of the world, twice a frame. Taking nothing
-// leaves the vertex shader's outputs unread, and every compiler this goes
-// through drops the work that fed them. See `renderer::Prepass`.
-@fragment
-fn fs_depth() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.0);
 }
 
 @fragment

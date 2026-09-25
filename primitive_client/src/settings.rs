@@ -1664,6 +1664,13 @@ impl ClientSettings {
             Some(place) => place.name().to_string(),
             None => MENU_SCENE_ANY.to_string(),
         };
+        // The environment first, and then the same clamp a settings file
+        // gets: `PRIMITIVE_OPT_VIEW` is the other way to send the solid
+        // pass fewer triangles, and it has to be measurable against
+        // `PRIMITIVE_OPT_LOD` on a device where changing either through
+        // the menu is a tap a human has to make. See
+        // `engine::opt::view_distance`.
+        self.render_distance_chunks = crate::engine::opt::view_distance(self.render_distance_chunks);
         self.render_distance_chunks = self.render_distance_chunks.clamp(1, MAX_RENDER_DISTANCE);
         // To the nearest stop the row can show, and NaN to the default: a
         // hand-edited radius of zero is a shadow picture of nothing, and

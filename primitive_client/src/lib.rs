@@ -6211,6 +6211,17 @@ fn run(
                         solid_indices_in_view: graphics.solid_indices_in_view_last_frame,
                         cutout_indices: graphics.cutout_indices_last_frame,
                         chunks_culled: graphics.chunks_culled_last_frame,
+                        // What the mesher actually built, counted here
+                        // because `chunk_lod` is where the answer is: one
+                        // `Detail` per loaded chunk, holding the level it
+                        // was meshed at. A walk over a few hundred entries
+                        // once a frame, and it is the only way from outside
+                        // a phone to tell a coarse band that moved from one
+                        // that did not. See `ui::debug::Info::chunk_levels`.
+                        chunk_levels: chunk_lod.values().fold([0usize; 3], |mut counts, built| {
+                            counts[(built.level as usize).min(2)] += 1;
+                            counts
+                        }),
                         underwater,
                         health,
                         max_health,

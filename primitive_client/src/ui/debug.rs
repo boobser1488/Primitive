@@ -199,6 +199,17 @@ pub struct FrameInfo {
     /// it and was, when it was first counted, the larger of the two.
     pub cutout_indices: u32,
     pub chunks_culled: usize,
+    /// How many loaded chunks were meshed at each detail level: full
+    /// detail, then the two coarse bands (`engine::lod`).
+    ///
+    /// **Here because a switch that did nothing looked exactly like a
+    /// switch that did little.** Moving the coarse bands in from ten
+    /// chunks to four took only a tenth of the triangles off an Adreno,
+    /// where the whole-world measurement in `lod.rs` says a coarse chunk
+    /// sheds over half of its own -- and from outside the device there was
+    /// no way to tell whether the setting had reached the mesher at all.
+    /// Now the line says so.
+    pub chunk_levels: [usize; 3],
     /// What the loaded world keeps on the heap for blocks and for light,
     /// in bytes, and the terrain arena's `(used, allocated)` on the card.
     ///
@@ -384,6 +395,10 @@ impl DebugStats {
                 info.loaded_chunks, info.pending_chunks, info.chunks_culled, info.render_distance,
             ),
             format!(
+                "detail  {} fine   {} coarse   {} coarser",
+                info.chunk_levels[0], info.chunk_levels[1], info.chunk_levels[2],
+            ),
+            format!(
                 "queues  mesh {}   arrivals {}   lighting {}",
                 info.queued_meshes, info.queued_arrivals, info.lighting_jobs,
             ),
@@ -478,7 +493,7 @@ impl DebugStats {
             "[F3] fps={:.0} frame(avg/p95/p99)={:.1}/{:.1}/{:.1}ms still={:.0}% | chunks loaded={} pending={} \
              mesh_queue={} arrivals={} lighting={} | meshed/s={} mesh_time/s={:.1}ms | \
              integrated/s={} chunk_time/s={:.1}ms upload/s={:.1}ms | \
-             players={} entities={} draws={} tris={}k/{}k cut={}k culled={} | \
+             players={} entities={} draws={} tris={}k/{}k cut={}k culled={} detail={}/{}/{} | \
              net in/out per s={}/{} | corrections={} stale_meshes={} |              frame sim/encode/wait/present={:.3}/{:.3}/{:.3}/{:.3}ms gpu={} aniso={}x msaa={}x sky/{} present={} |              gpu stages: {} | {}x{} ({:.1} Mpx) | time={} {} sun={:.0}% |              mem blocks={:.1}MB light={:.1}MB arena={:.1}/{:.1}MB",
             self.fps(),
             self.frame_times.iter().sum::<Duration>().as_secs_f32() * 1000.0
@@ -503,6 +518,9 @@ impl DebugStats {
             info.solid_indices_in_view / 3000,
             info.cutout_indices / 3000,
             info.chunks_culled,
+            info.chunk_levels[0],
+            info.chunk_levels[1],
+            info.chunk_levels[2],
             self.network_messages_in_this_second,
             self.network_messages_out_this_second,
             self.corrections_received,
@@ -776,6 +794,7 @@ mod tests {
             solid_indices_in_view: 0,
             cutout_indices: 0,
             chunks_culled: 30,
+            chunk_levels: [40, 20, 10],
             chunk_bytes: 0,
             light_bytes: 0,
             arena_bytes: (0, 0),

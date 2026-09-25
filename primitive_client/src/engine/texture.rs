@@ -2854,10 +2854,14 @@ pub fn build_sampler(device: &wgpu::Device, anisotropy: u16) -> wgpu::Sampler {
     // "мыльная картинка" -- ground running away from the eye fetched from
     // a level far coarser than its short axis needs.
     //
-    // Behind `PRIMITIVE_OPT_TRILINEAR` because it is a change to the
-    // picture and the device has to be shown both. wgpu only refuses
-    // mixed modes above anisotropy 1, so there is nothing to guard: above
-    // 1 every mode is already Linear and this changes nothing.
+    // **On, because the device was asked.** An Adreno 710 drew the solid
+    // pass in 14.37 ms with it and 14.40 without, which is noise on a run
+    // whose p99 moves by half a millisecond -- so the blur was being paid
+    // for nothing. `PRIMITIVE_OPT_TRILINEAR=0` puts the point sampling
+    // back, so the comparison can be re-taken on another device rather
+    // than believed. wgpu only refuses mixed modes above anisotropy 1, so
+    // there is nothing to guard: above 1 every mode is already Linear and
+    // this changes nothing.
     let minified = if crate::engine::opt::trilinear_minification() {
         wgpu::FilterMode::Linear
     } else {
