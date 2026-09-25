@@ -3130,9 +3130,16 @@ async fn tick_loop(ctx: Arc<Context>) {
             // decided for itself whether its own head was under water
             // would be a client that never drowns.
             for handle in &handles {
-                let (position, dead, downed) = {
+                let (position, dead, downed, lying) = {
                     let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-                    (state.position, state.vitals.is_dead(), state.vitals.is_downed())
+                    (
+                        state.position,
+                        state.vitals.is_dead(),
+                        state.vitals.is_downed(),
+                        // The yaw the sleeper was laid at, which is the way
+                        // their head points: see `lying_place`.
+                        state.sleeping_in.map(|_| state.yaw),
+                    )
                 };
                 if !dead {
                     // **A body on the ground breathes at the ground.** The
@@ -3166,10 +3173,22 @@ async fn tick_loop(ctx: Arc<Context>) {
                     // breath handed back every tick, and drowning deep
                     // under water was a matter of where you happened to
                     // be standing.
+                    //
+                    // **A sleeper's is the pillow's cell**, so the "went
+                    // under" a mod is handed names the cell the breath was
+                    // actually billed from (`geometry::lying_eye`) rather
+                    // than a cell a block over the sleeper's face.
+                    let head = match lying {
+                        Some(yaw) => primitive_shared::geometry::lying_eye(
+                            primitive_shared::geometry::narrow(position),
+                            yaw,
+                        ),
+                        None => (eye.0 as f32, eye.1 as f32, eye.2 as f32),
+                    };
                     let eye_cell = (
-                        eye.0.floor() as i32,
-                        eye.1.floor() as i32,
-                        eye.2.floor() as i32,
+                        head.0.floor() as i32,
+                        head.1.floor() as i32,
+                        head.2.floor() as i32,
                     );
                     // The rule itself lives in `head_under_water` now,
                     // because `PlayersApi::is_submerged` asks the same
@@ -3177,7 +3196,20 @@ async fn tick_loop(ctx: Arc<Context>) {
                     // the top of a full cell is exactly the sort of
                     // duplicate that took a player drowning on the sea
                     // floor to find the first time.
-                    let head_under = head_under_water_at(&ctx, primitive_shared::geometry::narrow(position), eye_height);
+                    // **A sleeper breathes at the pillow**, which is not
+                    // over their feet and not at a standing height: see
+                    // `body::sleeper_head_under_water`. Asked at
+                    // `EYE_HEIGHT`, a bedroom the river had got into took no
+                    // breath at all -- the same bug the downed body had, one
+                    // posture along.
+                    let head_under = match lying {
+                        Some(yaw) => primitive_shared::body::sleeper_head_under_water(
+                            primitive_shared::geometry::narrow(position),
+                            yaw,
+                            |x, y, z| ctx.world.cached_block(x, y, z),
+                        ),
+                        None => head_under_water_at(&ctx, primitive_shared::geometry::narrow(position), eye_height),
+                    };
                     // ...and whether the water is past the waist, which is
                     // what everybody else draws them by. See
                     // `Posture::Swimming`.
@@ -3554,8 +3586,15 @@ async fn tick_loop(ctx: Arc<Context>) {
                             .and_then(primitive_shared::body::Rest::of)
                             .is_none()
                     });
-                    // ...and so does one that something is hitting.
-                    let hurt = state.vitals.last_damage_elapsed() < 1.0;
+                    // ...and so does one that something is *hitting*
+                    // (`survival::Harm::Blow`). Not one the cold or a bad
+                    // swallow is working on: those used to wake a sleeper on
+                    // every tick of themselves, so a player who got into bed
+                    // the tick before the exposure clock next fired was
+                    // thrown straight back out of it with no wolf in sight.
+                    // The bed refuses a freezing body at the door instead
+                    // (`lie_down`), which is a refusal a player can act on.
+                    let hurt = state.vitals.last_blow_elapsed() < 1.0;
                     let woken = state.sleeping_in.is_some() && (bed_gone || hurt);
                     // A player who walked off their stool, or whose stool
                     // was broken under them, is not sitting on it any
@@ -15237,13 +15276,38 @@ fn lie_down(
         let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.sleeping_in.is_some() {
             Some(primitive_shared::notice::Notice::AlreadyAsleep)
-        } else if state.vitals.last_damage_elapsed() < HURT_RECENTLY_SECS {
+        } else if state.vitals.last_blow_elapsed() < HURT_RECENTLY_SECS {
             // Being hit is the one thing that must stop this, and the
             // check is "were you hit *recently*" rather than "is
             // something near you": the server would otherwise have to
             // scan for animals, and a scan that says "no" the instant
             // before a boar arrives is a scan that bought nothing.
+            //
+            // **Struck, and only struck** (`survival::Harm::Blow`). This
+            // read `last_damage_elapsed`, which every path that took health
+            // set -- so the hungry, the parched, the frozen, the sunstruck
+            // and the poisoned were all told "you cannot sleep while
+            // something is hurting you" and went looking for the something.
+            // Four of the five now say what is actually wrong; the fifth,
+            // bad water, is a thing you can sleep off and no longer keeps
+            // anybody up at all.
             Some(primitive_shared::notice::Notice::HurtCannotSleep)
+        } else if state.vitals.exposed_to_death() {
+            // **The blizzard and the salt flat**, on the same argument the
+            // empty stomach below gets: past `body::FREEZING` the cold is
+            // taking health every second, the night is charged in one step,
+            // and a player who lies down there is a player who wakes up
+            // dead. Refusing turns it into the decision it should be --
+            // light a fire, shut the door, put the wool on. Asked of the
+            // body's own temperature rather than of a damage clock, because
+            // the cold is a state and not an event: a clock would let a
+            // freezing player into bed in the gap between two ticks of it.
+            let cold = state.vitals.temperature() < primitive_shared::body::FREEZING;
+            Some(if cold {
+                primitive_shared::notice::Notice::TooColdToSleep
+            } else {
+                primitive_shared::notice::Notice::TooHotToSleep
+            })
         } else if state.vitals.nourishment() <= 0.0 {
             // **An empty stomach or an empty waterskin keeps you up.**
             // The night's hunger and thirst are charged all at once when
@@ -20293,6 +20357,56 @@ mod butchering_tests {
             assert!(
                 errors(&mut rx).iter().any(|e| e == code),
                 "the refusal to sleep while {says} said nothing about it"
+            );
+        }
+    }
+
+    /// The bed used to answer every one of these with "you cannot sleep
+    /// while something is hurting you", because hunger, thirst, the cold,
+    /// the heat and bad water all went down the blow's path. A player who
+    /// crawled in out of a blizzard went looking for the animal.
+    #[test]
+    fn a_bed_says_what_is_actually_wrong_and_only_a_blow_is_called_a_blow() {
+        use primitive_shared::body::{CHILLED, FREEZING, SCALDING};
+        let at = (0, FLOOR + 1, 0);
+        // The cold, the heat, and something with teeth.
+        for (warmth, code) in [
+            (FREEZING - 4.0, "TooColdToSleep"),
+            (SCALDING + 4.0, "TooHotToSleep"),
+        ] {
+            let (ctx, handle, mut rx) = a_hunter();
+            assert!(ctx.world.set_block(at.0, at.1, at.2, primitive_shared::types::BLOCK_BED));
+            handle.state.lock().unwrap().vitals.set_warmth(warmth, 0.0);
+            use_block(&ctx, &handle, at);
+            assert_eq!(handle.state.lock().unwrap().sleeping_in, None, "slept at {warmth} degrees");
+            let said = errors(&mut rx);
+            assert!(said.iter().any(|e| e == code), "the bed said {said:?} at {warmth} degrees, not {code}");
+            assert!(
+                !said.iter().any(|e| e == "HurtCannotSleep"),
+                "the weather was reported as something hitting the player",
+            );
+        }
+        // ...and a blow still is one.
+        {
+            let (ctx, handle, mut rx) = a_hunter();
+            assert!(ctx.world.set_block(at.0, at.1, at.2, primitive_shared::types::BLOCK_BED));
+            handle.state.lock().unwrap().vitals.hurt(2.0, "a boar");
+            use_block(&ctx, &handle, at);
+            assert_eq!(handle.state.lock().unwrap().sleeping_in, None, "slept with a boar on them");
+            assert!(errors(&mut rx).iter().any(|e| e == "HurtCannotSleep"), "a blow stopped saying it was one");
+        }
+        // Merely cold is a reason to go to bed, not a reason to be turned
+        // away from it: the line is where the cold starts taking health.
+        {
+            let (ctx, handle, mut rx) = a_hunter();
+            assert!(ctx.world.set_block(at.0, at.1, at.2, primitive_shared::types::BLOCK_BED));
+            handle.state.lock().unwrap().vitals.set_warmth(CHILLED - 1.0, 0.0);
+            use_block(&ctx, &handle, at);
+            assert_eq!(
+                handle.state.lock().unwrap().sleeping_in,
+                Some(at),
+                "a chilled player was turned away from a bed: {:?}",
+                errors(&mut rx),
             );
         }
     }

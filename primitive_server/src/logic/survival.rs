@@ -281,6 +281,29 @@ pub enum Outcome {
     Died { cause: String },
 }
 
+/// What took the health: the one distinction `lose` is written round.
+///
+/// **"Was the player hurt" is two questions**, and for a long time this
+/// module only had an answer to one of them. Everything that wants to know
+/// reads it for a different reason -- mending waits on *any* health lost,
+/// the bed waits on being *struck* -- and a body freezing in a blizzard is
+/// the case where the two answers differ and the wrong one was being given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Harm {
+    /// Something in the world hit this body: an animal, a spear, a fall, a
+    /// stalagmite, a fire, a lungful of water, a lungful of smoke. Delays
+    /// mending, and it is the one thing that shuts the bed.
+    Blow,
+    /// The body failing on its own: hunger, thirst, the cold, the heat, bad
+    /// water, a bad mushroom. Delays mending -- it is health going -- and
+    /// is not a blow, because there is nothing standing over the player.
+    Ailing,
+    /// A cut bleeding into a sleeve (`mend`). Neither: what stops a bleeding
+    /// body mending is said plainly in `regenerate` instead, and counted as
+    /// a blow it would have been a player who could never lie down.
+    Bleeding,
+}
+
 pub struct Vitals {
     health: f32,
     dead: bool,
@@ -290,6 +313,8 @@ pub struct Vitals {
     /// Whether the last accepted transform said the player was airborne.
     airborne: bool,
     last_damage: Instant,
+    /// When something last *struck* this body. See [`Harm`].
+    last_blow: Instant,
     /// The value the client was last told, so we only send changes.
     last_reported: f32,
     /// What the player is carrying, in kilograms.
@@ -497,6 +522,7 @@ impl Vitals {
             // immediately rather than waiting out a delay they never
             // earned.
             last_damage: Instant::now() - std::time::Duration::from_secs(3600),
+            last_blow: Instant::now() - std::time::Duration::from_secs(3600),
             last_reported: MAX_HEALTH,
             breath: BREATH_SECONDS,
             carried_kg: 0.0,
@@ -718,30 +744,50 @@ impl Vitals {
         self.hurt(damage, "fell from a great height")
     }
 
-    /// Applies damage and reports what it did.
+    /// Applies damage from something that *struck* this body, and reports
+    /// what it did: an animal, a fall, a fire, a lungful of water.
     pub fn hurt(&mut self, amount: f32, cause: &str) -> Outcome {
-        self.lose(amount, cause, true)
+        self.lose(amount, cause, Harm::Blow)
     }
 
-    /// Health going, and whether what took it *struck*.
+    /// Applies damage the body is doing to itself -- hunger, thirst, the
+    /// cold, the heat, bad water, a bad mushroom -- and reports what it did.
     ///
-    /// **Bleeding is not a blow**, and that is the whole reason this is two
-    /// functions. A blow restarts the quiet time before healing and wakes a
-    /// sleeper (both read `last_damage`); a cut bleeding into a sleeve does
-    /// neither. Counted as a blow, a player with a cut could not lie down
-    /// at all -- every tick of it would wake them, and the bed would turn
-    /// them away as somebody "something is still hitting". What stops a
-    /// bleeding body mending is said plainly instead, in `regenerate`.
+    /// **The same health down the same path, and not the same event.** See
+    /// [`Harm`]: the difference is what `last_blow` is allowed to say.
+    fn ail(&mut self, amount: f32, cause: &str) -> Outcome {
+        self.lose(amount, cause, Harm::Ailing)
+    }
+
+    /// Health going, and what took it.
     ///
-    /// Both halves end in the same place, so a death by either is one
+    /// **Bleeding was the first thing that was not a blow, and it was not
+    /// the last.** A blow restarts the quiet time before healing and shuts
+    /// the bed (`last_blow`); a cut bleeding into a sleeve does neither, or
+    /// a player with a cut could not lie down at all. Hunger, thirst, the
+    /// cold, the heat and bad water are the middle case and used to be sent
+    /// down the blow's path with everything else, so a player who crawled
+    /// into bed out of a blizzard was told **"you cannot sleep while
+    /// something is hurting you"** -- a sentence about a wolf, said about
+    /// the weather, with nothing anywhere near them. They read it as a bug,
+    /// looked for the animal, and found the cold only by dying of it.
+    ///
+    /// All three end in the same place, so a death by any of them is one
     /// `Outcome::Died` down the one reporting path.
-    fn lose(&mut self, amount: f32, cause: &str, struck: bool) -> Outcome {
+    fn lose(&mut self, amount: f32, cause: &str, harm: Harm) -> Outcome {
         use primitive_shared::downed::{Cause, Down, OVERKILL};
         if self.dead || amount.is_nan() || amount <= 0.0 {
             return Outcome::Unchanged;
         }
-        if struck {
+        // **Mending waits on all three of them minus the bleeding**, which is
+        // the old rule under a new name: a body that is losing health to the
+        // cold is not a body that is putting health back, and saying so here
+        // is cheaper than a second reason inside `regenerate`.
+        if harm != Harm::Bleeding {
             self.last_damage = Instant::now();
+        }
+        if harm == Harm::Blow {
+            self.last_blow = Instant::now();
         }
         let kind = Cause::of(cause);
         // **Already down: the clock pays, not the health.** What the clock
@@ -1053,14 +1099,28 @@ impl Vitals {
         Outcome::Changed
     }
 
-    /// How long since anything last hurt this player, in seconds.
+    /// How long since something last *struck* this player, in seconds.
     ///
-    /// Read by the sleep gesture, which refuses while something is
-    /// still hitting you. The field it reads is the same one the
-    /// regeneration delay uses, so the two can never disagree about
-    /// what "recently" means.
-    pub fn last_damage_elapsed(&self) -> f32 {
-        self.last_damage.elapsed().as_secs_f32()
+    /// Read by the sleep gesture, which refuses while something is still
+    /// hitting you. **Not the same clock the mending delay reads** -- it
+    /// was, and that is why a bed answered a body freezing to death with
+    /// "you cannot sleep while something is hurting you". See [`Harm`].
+    pub fn last_blow_elapsed(&self) -> f32 {
+        self.last_blow.elapsed().as_secs_f32()
+    }
+
+    /// Is the cold or the heat taking health right now?
+    ///
+    /// **The state, not a clock.** The bed asks this rather than "did
+    /// anything hurt you in the last ten seconds", because the cold is not
+    /// an event: a player standing in a blizzard is freezing in every tick
+    /// and in none of them was anything done to them. Past
+    /// `body::FREEZING` or `body::SCALDING`, which is the line where
+    /// exposure starts costing health (`body::exposure_damage_per_second`)
+    /// -- merely *chilled* is a fine reason to go to bed, and the bed is
+    /// where a cold player ought to be.
+    pub fn exposed_to_death(&self) -> bool {
+        primitive_shared::body::exposure_damage_per_second(self.body_c) > 0.0
     }
 
     /// Every wound on this player: what the client is sent and what the
@@ -1160,7 +1220,7 @@ impl Vitals {
         }
         let mending = self.injuries.step(dt, asleep);
         if mending.blood > 0.0 {
-            self.lose(mending.blood, "bled to death", false)
+            self.lose(mending.blood, "bled to death", Harm::Bleeding)
         } else {
             Outcome::Unchanged
         }
@@ -1417,7 +1477,7 @@ impl Vitals {
                 taken += food::STARVATION_DAMAGE;
             }
         }
-        self.hurt(taken, "starved")
+        self.ail(taken, "starved")
     }
 
     /// **A night slept at home**: rested for `comfort::RESTED_SECONDS` from
@@ -1548,7 +1608,7 @@ impl Vitals {
         // toadstool, whose harm below comes out of the body it raised.
         self.offer(primitive_shared::downed::Rescue::Food);
         if let Some(harm) = food::harm(block) {
-            return self.hurt(harm.health, "ate something they should not have");
+            return self.ail(harm.health, "ate something they should not have");
         }
         Outcome::Changed
     }
@@ -1743,7 +1803,7 @@ impl Vitals {
         } else {
             "died of heatstroke"
         };
-        self.hurt(damage, cause)
+        self.ail(damage, cause)
     }
 
     // ---- water ----
@@ -1786,7 +1846,7 @@ impl Vitals {
             return Outcome::Unchanged;
         }
         // Only the seconds spent dry, for the reason `digest` gives.
-        self.hurt(
+        self.ail(
             body::DEHYDRATION_PER_SECOND * Self::empty_for(before, rate * dt, dt),
             "died of thirst",
         )
@@ -1950,7 +2010,7 @@ impl Vitals {
         }
         let spent = dt.min(self.sick_for);
         self.sick_for -= spent;
-        self.hurt(body::SICKNESS_PER_SECOND * spent, "drank bad water")
+        self.ail(body::SICKNESS_PER_SECOND * spent, "drank bad water")
     }
 
     /// Is the client's copy of the three meters out of date?
@@ -2033,6 +2093,10 @@ impl Vitals {
         // be told about the restored health, and pretending it already
         // knows would leave a fresh spawn showing an empty bar.
         self.last_damage = Instant::now() - std::time::Duration::from_secs(3600);
+        // ...and the blow that killed them is not still landing on the body
+        // that came back: a respawn into a bed the player had been mauled
+        // beside used to be refused for ten seconds (`HURT_RECENTLY_SECS`).
+        self.last_blow = self.last_damage;
     }
 
     /// Forgets any fall in progress.
@@ -2841,7 +2905,59 @@ mod tests {
         vitals.set_injuries(wounds);
         vitals.mend(1.0, true);
         assert!(vitals.health() < MAX_HEALTH, "the cut did not bleed");
-        assert!(vitals.last_damage_elapsed() > 60.0, "a bleeding cut counted as a blow");
+        assert!(vitals.last_blow_elapsed() > 60.0, "a bleeding cut counted as a blow");
+    }
+
+    /// The five ways a body kills itself, and none of them is a blow.
+    ///
+    /// They all were, and the bed read `last_damage` to decide whether to
+    /// take a sleeper: a player freezing in a blizzard was told "you cannot
+    /// sleep while something is hurting you" with nothing anywhere near
+    /// them. Mending still waits on every one of them -- health going is
+    /// health going -- which is the other half of the property and the
+    /// reason there are two clocks rather than one.
+    #[test]
+    fn the_cold_the_heat_the_hunger_the_thirst_and_a_sickness_take_health_and_none_of_them_is_a_blow() {
+        /// A way the body kills itself, and what it is called in a failure.
+        type Ailment = (&'static str, fn(&mut Vitals));
+        let cases: [Ailment; 5] = [
+            ("the cold", |v| {
+                v.set_warmth(body::FREEZING - 6.0, 0.0);
+                v.warm(body::Exposure::air(-40.0), 0.0, 0.0, 0.0, 1.0);
+            }),
+            ("the heat", |v| {
+                v.set_warmth(body::SCALDING + 6.0, 0.0);
+                v.warm(body::Exposure::air(80.0), 0.0, 0.0, 0.0, 1.0);
+            }),
+            ("hunger", |v| {
+                v.set_nourishment(0.0);
+                v.digest(Effort::IDLE, 60.0);
+            }),
+            ("thirst", |v| {
+                v.set_hydration(0.0);
+                v.drink_down(body::Exertion::RESTING, 60.0);
+            }),
+            ("a sickness", |v| {
+                v.swallow_illness(30.0);
+                // Past `body::DIGESTION_SECONDS` in one step, so what was
+                // swallowed has arrived and is being felt.
+                v.sicken(300.0);
+            }),
+        ];
+        for (what, harm) in cases {
+            let mut vitals = Vitals::new();
+            // A blow long ago, so the clocks start together and a test that
+            // passes by never having been touched is not possible.
+            vitals.last_damage = Instant::now() - std::time::Duration::from_secs(3600);
+            vitals.last_blow = vitals.last_damage;
+            harm(&mut vitals);
+            assert!(vitals.health() < MAX_HEALTH, "{what} took no health at all");
+            assert!(vitals.last_blow_elapsed() > 60.0, "{what} was counted as a blow");
+            assert!(
+                vitals.last_damage.elapsed().as_secs_f32() < REGEN_DELAY_SECS,
+                "{what} took health and left the body mending through it",
+            );
+        }
     }
 
     #[test]

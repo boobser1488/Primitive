@@ -1742,6 +1742,12 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::Notice(Notice::HurtCannotSleep), en: "you cannot sleep while something is hurting you", simple: "you cannot sleep while you are being hurt", ru: "нельзя уснуть, пока вас ранят", pl: "nie zaśniesz, kiedy coś cię rani" },
     Line { msg: Msg::Notice(Notice::TooHungryToSleep), en: "you are too hungry to sleep", simple: "you are too hungry to sleep", ru: "слишком голодны, чтобы уснуть", pl: "jesteś zbyt głodny, żeby zasnąć" },
     Line { msg: Msg::Notice(Notice::TooThirstyToSleep), en: "you are too thirsty to sleep", simple: "you are too thirsty to sleep", ru: "слишком хочется пить, чтобы уснуть", pl: "jesteś zbyt spragniony, żeby zasnąć" },
+    // **The cold is not a blow and no longer says it is**: these two took
+    // over from `HurtCannotSleep` for a body the weather is killing. The
+    // words name the fire the player has to light, because a refusal that
+    // does not say what to do about it is a refusal that reads as a bug.
+    Line { msg: Msg::Notice(Notice::TooColdToSleep), en: "you are too cold to sleep - warm yourself first", simple: "you are too cold to sleep - get warm first", ru: "слишком холодно, чтобы уснуть - сначала согрейтесь", pl: "jest zbyt zimno, żeby zasnąć - najpierw się ogrzej" },
+    Line { msg: Msg::Notice(Notice::TooHotToSleep), en: "you are too hot to sleep - cool down first", simple: "you are too hot to sleep - cool down first", ru: "слишком жарко, чтобы уснуть - сначала остыньте", pl: "jest zbyt gorąco, żeby zasnąć - najpierw ostygnij" },
     Line { msg: Msg::Notice(Notice::BedTaken), en: "somebody is already asleep there", simple: "somebody is already sleeping there", ru: "там уже кто-то спит", pl: "ktoś już tam śpi" },
     Line { msg: Msg::Notice(Notice::SeatTaken), en: "somebody is already sitting there", simple: "somebody is already sitting there", ru: "там уже кто-то сидит", pl: "ktoś już tam siedzi" },
     Line { msg: Msg::Notice(Notice::NoRoomToSit), en: "there is no room to sit there", simple: "there is no room to sit there", ru: "там негде сесть", pl: "nie ma tam miejsca, żeby usiąść" },

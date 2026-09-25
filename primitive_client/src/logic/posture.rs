@@ -22,14 +22,13 @@ use primitive_shared::protocol::Posture;
 /// what sitting at a table looks like.
 pub const SEATED_EYE: f32 = 0.82;
 
-/// How high the eye is above the mattress, lying: a head on a pillow.
-pub const LYING_EYE: f32 = 0.28;
-
-/// How far toward the head of the bed the eye is from the middle of the
-/// body, which is where the server lays a sleeper's feet: most of a
-/// body's half-length, so the view is from the pillow and not from the
-/// sleeper's navel.
-pub const LYING_HEAD_REACH: f32 = 0.72;
+// **Where a lying eye is, and how high, now live in
+// `primitive_shared::geometry`** (`LYING_EYE`, `LYING_HEAD_REACH`,
+// `lying_eye`). They were `pub const`s here, and then the server had to ask
+// the world whether a sleeper's face was under water and had nothing to ask
+// it with -- so it asked at standing height, and a bedroom the river had got
+// into cost a sleeper no breath at all while this file drew them the water.
+// One definition, read from both sides.
 
 /// How far a sleeper looks up when they lie down, in radians.
 ///
@@ -105,8 +104,8 @@ impl Resting {
             Resting::Standing => Vec3::Y * EYE_HEIGHT,
             Resting::Sitting { .. } => Vec3::Y * SEATED_EYE,
             Resting::Lying { head_yaw } => {
-                let (sin, cos) = head_yaw.sin_cos();
-                Vec3::new(cos * LYING_HEAD_REACH, LYING_EYE, sin * LYING_HEAD_REACH)
+                let at = primitive_shared::geometry::lying_eye((0.0, 0.0, 0.0), head_yaw);
+                Vec3::new(at.0, at.1, at.2)
             }
         };
         feet + offset.as_dvec3()

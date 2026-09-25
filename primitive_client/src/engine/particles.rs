@@ -1018,16 +1018,24 @@ impl Particles {
     /// `collides` already refused; the other rejected fix was lighting smoke
     /// by the fire's own cell, which would have made the cloud bright
     /// instead of black and left it standing inside the block.
-    fn smoke_under(&mut self, at: Vec3, room: f32) -> bool {
+    ///
+    /// `open` is whether the sky is over the fire (`headroom` found no
+    /// ceiling at all): out of doors a puff lives longer and is born bigger,
+    /// so the plume is a column somebody on a hill can see rather than a
+    /// wisp somebody standing over it can. See `SMOKE_LIFE_OPEN`.
+    fn smoke_under(&mut self, at: Vec3, room: f32, open: bool) -> bool {
+        let (spans, sizes) = if open {
+            (SMOKE_LIFE_OPEN, SMOKE_SIZE_OPEN)
+        } else {
+            (SMOKE_LIFE, SMOKE_SIZE)
+        };
         // Where the tallest puff's top would be at the moment it is born.
-        let swollen = SMOKE_SIZE.1 * (1.0 + SMOKE_GROWTH);
+        let swollen = sizes.1 * (1.0 + SMOKE_GROWTH);
         let clear = room - SMOKE_BIRTH_HEIGHT - swollen;
         if clear <= 0.0 {
             return false;
         }
-        let life = self
-            .between(SMOKE_LIFE.0, SMOKE_LIFE.1)
-            .min(seconds_to_rise(clear));
+        let life = self.between(spans.0, spans.1).min(seconds_to_rise(clear));
         let offset = Vec3::new(
             self.between(-0.16, 0.16),
             SMOKE_BIRTH_HEIGHT,
@@ -1042,7 +1050,7 @@ impl Particles {
             self.between(0.7, 1.2),
             self.between(-0.45, 0.45),
         );
-        let size = self.between(SMOKE_SIZE.0, SMOKE_SIZE.1);
+        let size = self.between(sizes.0, sizes.1);
         // Which of `SMOKE_GREYS` this puff wears, carried in the field
         // only a chip reads -- the same seat blood's shade rides in,
         // and for the same reason: a fifth field on `Particle` would be
@@ -1132,21 +1140,29 @@ impl Particles {
             if self.hearths[index].smoke_in > 0.0 {
                 continue;
             }
+            // **Is the sky over it?** Asked here rather than in
+            // `smoke_under`, because the answer also sets the *rate*: an
+            // open plume is taller and thinner (`SMOKE_LIFE_OPEN`), and a
+            // tall plume emitted at the roofed rate is the same column of
+            // smoke costing two and a half times the particles.
+            let room = headroom(chunks, (x, y, z));
+            let open = room >= SMOKE_HEADROOM_MAX as f32;
             let nearness = 1.0 - (distance / SMOKE_RANGE).clamp(0.0, 1.0);
             // **Green or wet fuel smokes harder** (`wildfire::SMOULDERING`,
             // set on the block by the server, which knows the fuel): the
             // plume a player sees is the room the server is filling.
             let smouldering = chunks.block_at(x, y, z).is_some_and(primitive_shared::wildfire::smoulders);
             let thick = if smouldering { primitive_shared::wildfire::SMOULDER_SMOKE } else { 1.0 };
-            let rate = SMOKE_PER_SECOND * thick * (SMOKE_FAR_SHARE + (1.0 - SMOKE_FAR_SHARE) * nearness);
+            let outdoors = if open { SMOKE_OPEN_SHARE } else { 1.0 };
+            let rate =
+                SMOKE_PER_SECOND * thick * outdoors * (SMOKE_FAR_SHARE + (1.0 - SMOKE_FAR_SHARE) * nearness);
             let wait = self.wait_for(rate);
             self.hearths[index].smoke_in = wait;
             if distance <= SMOKE_RANGE && smoking < SMOKE_MAX {
                 // **Only as far as the air goes.** See `headroom`: a
                 // puff that would rise into a block is not born, or dies
                 // under it, rather than being drawn black inside it.
-                let room = headroom(chunks, (x, y, z));
-                if self.smoke_under(centre, room) {
+                if self.smoke_under(centre, room, open) {
                     smoking += 1;
                 }
             }
@@ -1840,11 +1856,27 @@ pub const FLOAT_TEXEL: (u8, u8) = (14, 11);
 /// replaced cost, and it sweeps a thirty-metre circle in under twenty
 /// seconds while finding anything close in a fraction of one. See
 /// `find_hearths` for the bias that buys the second half of that.
-const COLUMNS_PER_SECOND: f32 = 240.0;
-const COLUMN_BURST: usize = 24;
-const FIRE_RANGE: f32 = 30.0;
-const FIRE_BELOW: i32 = 5;
-const FIRE_ABOVE: i32 = 7;
+///
+/// **The numbers were a clearing's and are now a hillside's.** Thirty
+/// blocks out and five down was exactly enough to find the fire you are
+/// standing beside, and it made "somebody is camped over there" a thing a
+/// player could only learn by walking into the camp. Smoke is the one thing
+/// in this game that says *there are other people* across a distance, and
+/// from the top of a down -- which is thirty blocks over its folds
+/// (`landforms::DOWNS_HEIGHT`) -- neither the range nor the band reached a
+/// hearth in the valley at all.
+///
+/// Sixty-four out, forty down and eighteen up. The down is the deeper one on
+/// purpose: a fire is nearly always *below* a player who can see far, because
+/// seeing far is standing high. The circle is four and a half times the area,
+/// so the sweep is paid for with the rate -- seven hundred columns a second
+/// through seven hundred hash lookups, and the cells within a column are an
+/// array walk, not a lookup each.
+const COLUMNS_PER_SECOND: f32 = 700.0;
+const COLUMN_BURST: usize = 48;
+const FIRE_RANGE: f32 = 64.0;
+const FIRE_BELOW: i32 = 40;
+const FIRE_ABOVE: i32 = 18;
 
 /// How far a fire found earlier is kept.
 ///
@@ -1880,7 +1912,13 @@ const SMOKE_PER_SECOND: f32 = 7.0;
 /// distance is the *rate*: at the rim a fire emits a third as often,
 /// which is a plume that still reads at the size it is drawn and costs
 /// a third as many particles.
-const SMOKE_RANGE: f32 = FIRE_RANGE;
+///
+/// **`FIRE_KEEP` and not `FIRE_RANGE`**, because the search is a circle on
+/// the ground and this is a distance through the air: a hearth found sixty
+/// blocks out and thirty below is sixty-seven away, and measured against the
+/// search's own radius it would be a fire the client remembers, draws sparks
+/// on, and never smokes.
+const SMOKE_RANGE: f32 = FIRE_KEEP;
 const SMOKE_FAR_SHARE: f32 = 0.33;
 
 /// The most puffs alive at once, over every fire together.
@@ -1890,7 +1928,7 @@ const SMOKE_FAR_SHARE: f32 = 0.33;
 /// is under a tenth of `MAX` and about a thousandth of what one chunk
 /// of terrain draws, and it is the number a phone is being protected
 /// from: a hamlet of eight fires cannot cost more than one.
-const SMOKE_MAX: usize = 160;
+const SMOKE_MAX: usize = 240;
 
 /// How long a puff lasts, where it is born relative to the fire's cell,
 /// how grey it is, how opaque at its strongest, and how much it swells
@@ -1910,10 +1948,37 @@ const SMOKE_MAX: usize = 160;
 const SMOKE_LIFE: (f32, f32) = (2.2, 3.6);
 /// How big a puff is born, smallest and largest, before `SMOKE_GROWTH`.
 const SMOKE_SIZE: (f32, f32) = (0.13, 0.2);
-/// How far over a fire's floor smoke is looked for a ceiling, in blocks.
-/// Past it a puff has faded before it could arrive (`SMOKE_LIFE` at the
-/// fastest rise is under seven blocks).
-const SMOKE_HEADROOM_MAX: i32 = 8;
+
+/// The same three for a fire with the open sky over it, and the share of the
+/// rate such a fire emits at.
+///
+/// **A plume under a roof and a plume in the open are different things, and
+/// only one of them is a signal.** Indoors the smoke hits a ceiling in a
+/// couple of blocks and the numbers above are the whole of it. Outdoors it
+/// goes up until the wind takes it, and that column is what tells somebody on
+/// a hill that there is a camp in the valley -- which was the ask, and which
+/// a three-block wisp of hand-sized quads could not do at forty blocks.
+///
+/// Longer-lived, larger, and emitted at **less than half the rate**, so the
+/// plume is twice the height for the same number of particles: a tall plume
+/// and a dense one are two different budgets, and only the first is worth
+/// paying for. Fewer, bigger, longer puffs is also what smoke actually looks
+/// like from a distance -- the eye resolves the column, not the puffs.
+const SMOKE_LIFE_OPEN: (f32, f32) = (5.0, 8.0);
+const SMOKE_SIZE_OPEN: (f32, f32) = (0.22, 0.34);
+const SMOKE_OPEN_SHARE: f32 = 0.45;
+
+/// How far over a fire's floor smoke is looked for a ceiling, in blocks, and
+/// therefore also what counts as "the sky is over this fire": a fire with
+/// nothing within this of it is out of doors as far as its plume is
+/// concerned.
+///
+/// **Eight became sixteen with `SMOKE_LIFE_OPEN`.** The life of a puff is cut
+/// to the time it would take to reach the ceiling (`seconds_to_rise`), so the
+/// headroom is a ceiling on the plume as well as on the puff: at eight, a
+/// puff that was given eight seconds of life was handed back three, and the
+/// tall plume was tall in the constants and three blocks high in the world.
+const SMOKE_HEADROOM_MAX: i32 = 16;
 
 /// How much open air there is over the floor of `cell`, in blocks, up to
 /// `SMOKE_HEADROOM_MAX`: the height of the first block above it that the
@@ -2593,9 +2658,11 @@ mod tests {
             particles.update(&chunks, dt);
         }
         let expected_sparks = (EMBERS_PER_SECOND * seconds) as usize;
-        // The fire is two blocks from the player, so the smoke rate is
-        // the full one.
-        let expected_puffs = (SMOKE_PER_SECOND * seconds) as usize;
+        // The fire is two blocks from the player, so the distance takes
+        // nothing off the rate -- but it stands in the open, and an open
+        // fire's plume is deliberately taller and thinner than a roofed
+        // one's (`SMOKE_OPEN_SHARE`), which is where the rest of it goes.
+        let expected_puffs = (SMOKE_PER_SECOND * SMOKE_OPEN_SHARE * seconds) as usize;
         assert!(
             sparks * 4 > expected_sparks * 3 && sparks < expected_sparks * 5 / 4,
             "{sparks} sparks in {seconds}s where {expected_sparks} were asked for"
@@ -2703,6 +2770,64 @@ mod tests {
                 assert!(seen > 0, "a fire with a ceiling three blocks up gave no smoke at all");
             }
         }
+    }
+
+    /// **Smoke is how one player's camp reaches another player's eye**, and
+    /// for the whole life of this file it could not: the look was thirty
+    /// blocks across and five *down*, so a hearth in a valley was invisible
+    /// from the down above it -- which is the one place a player stands when
+    /// they are looking for somewhere to go. See `FIRE_BELOW`.
+    #[test]
+    fn a_fire_in_the_valley_is_found_and_smoking_when_it_is_looked_down_on_from_a_hill() {
+        let (chunks, _) = world_with_a_fire();
+        // On a crown twenty-six blocks over the fire and eight out from it:
+        // the old band reached five down and would have swept this circle
+        // for ever without ever looking at the right height.
+        let hill = Vec3::new(4.5, 36.0, 12.5);
+        let mut particles = Particles::new();
+        burn(&mut particles, &chunks, hill, 20.0, 60.0);
+        assert_eq!(
+            particles.hearths.iter().map(|h| h.cell).collect::<Vec<_>>(),
+            vec![(4, 10, 4)],
+            "twenty seconds looking down at a lit fire and it was never found",
+        );
+        assert!(
+            count(&particles, Look::Smoke) > 0,
+            "the fire was found from the hill and drew no smoke for the hill to see",
+        );
+    }
+
+    /// ...and what is seen from there has to be a *column*. A plume three
+    /// blocks high is a smudge at forty; the open-air numbers
+    /// (`SMOKE_LIFE_OPEN`) are what make it a line going up.
+    #[test]
+    fn a_fire_under_the_open_sky_sends_its_smoke_higher_than_one_under_a_roof() {
+        use primitive_shared::types::{ChunkPos, BLOCK_PLANKS};
+        let tallest = |roof: Option<usize>| {
+            let (mut chunks, at) = world_with_a_fire();
+            if let Some(gap) = roof {
+                let mut chunk = chunks.get(ChunkPos::new(0, 0)).unwrap().clone();
+                chunk.set(4, 10 + gap, 4, BLOCK_PLANKS);
+                chunks.insert(chunk);
+            }
+            let mut particles = Particles::new();
+            let mut top = 0.0f64;
+            for _ in 0..(20.0 * 60.0) as usize {
+                particles.fires(&chunks, at, 1.0 / 60.0);
+                particles.update(&chunks, 1.0 / 60.0);
+                for puff in particles.live.iter().filter(|p| p.look == Look::Smoke) {
+                    top = top.max(puff.position.y - 10.0);
+                }
+            }
+            top
+        };
+        let open = tallest(None);
+        let roofed = tallest(Some(4));
+        assert!(open > 5.0, "an open fire's plume reached {open:.1} blocks: that is a smudge, not a column");
+        assert!(
+            open > roofed * 1.5,
+            "open sky {open:.1} blocks against a roof's {roofed:.1}: the sky buys nothing",
+        );
     }
 
     #[test]
@@ -3001,7 +3126,7 @@ mod tests {
                     BLOCK_STONE,
                 );
                 particles.ember(ahead);
-                particles.smoke_under(ahead - Vec3::Y * SMOKE_BIRTH_HEIGHT, f32::INFINITY);
+                particles.smoke_under(ahead - Vec3::Y * SMOKE_BIRTH_HEIGHT, f32::INFINITY, true);
                 particles.weather(1.0, Precipitation::Rain, ahead - Vec3::Y * CEILING, Vec3::ZERO, 0.1);
                 particles.weather(1.0, Precipitation::Snow, ahead - Vec3::Y * CEILING, Vec3::ZERO, 0.1);
                 for look in [Look::Splash, Look::Stain, Look::Cloud] {

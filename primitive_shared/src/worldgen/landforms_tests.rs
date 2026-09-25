@@ -238,17 +238,25 @@ fn an_old_worlds_new_chunks_are_the_old_generators_to_the_block() {
 /// `Beds::at`). Both move the new world's ground on purpose and neither
 /// moves an older world's: the Regional and Earth prints above are the same
 /// numbers they were, which is what says so.
+///
+/// **Six of the eight taken again when the ground started telling a newcomer
+/// where to go** (`landforms`, "What the ground tells a newcomer"): shingle
+/// and flint on the banks of fresh water, bare paths worn to a pond, talus
+/// round a cave mouth, copper showing in a steep hillside. The two that did
+/// not move are chunks with none of those things in them, which is the other
+/// half of the assertion -- the tells are *somewhere*, not everywhere. The
+/// Regional and Earth prints above did not move at all.
 #[test]
 fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
     let held: [((i32, i32), u64); 8] = [
-        ((0, 0), 0x97b3_43ff_fad1_8dec),
-        ((5, -3), 0xcf83_1c9b_c2f9_14eb),
+        ((0, 0), 0xcdc1_48db_f291_184b),
+        ((5, -3), 0x9747_dbca_d0c9_496b),
         ((-40, 90), 0x844e_9b4e_9783_f206),
-        ((313, -77), 0xdc81_e29b_9c13_a260),
-        ((-1875, -1875), 0x533f_3977_1909_dda6),
-        ((-1868, -1872), 0x396e_628e_6c7d_adb3),
+        ((313, -77), 0xebf1_8edf_53aa_d500),
+        ((-1875, -1875), 0x42b3_115c_25ea_d3e8),
+        ((-1868, -1872), 0x5da3_7ada_5c77_630d),
         ((-1864, -1864), 0xba6b_a426_448c_80a1),
-        ((-1873, -1866), 0xd37f_bd17_a9fd_b7cd),
+        ((-1873, -1866), 0x5257_7fdd_6bfb_50a1),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(true));
@@ -278,10 +286,15 @@ fn the_landforms_lay_the_same_lips_every_time() {
         // Taken again with the rest when the country got its grain
         // (`landforms::GRAIN_HEIGHT`): a slope with a grain in it is a slope
         // with other lips on it, which is most of the point.
-        ((0, 0), 0x5642_2980_e2f9_8834),
-        ((5, -3), 0x2a3b_08c1_65f9_d83b),
-        ((-1875, -1875), 0x4bdb_23ae_c2bd_e84f),
-        ((-1868, -1872), 0x04ec_b72a_5331_6d27),
+        //
+        // ...and again when the ground started telling a newcomer where to
+        // go (`landforms`, "What the ground tells a newcomer"): shingle at
+        // fresh water, bare paths to a pond, talus round a cave mouth and
+        // copper in a hillside all write into cells a lip then reads.
+        ((0, 0), 0x0fe5_0f0f_2c10_d0db),
+        ((5, -3), 0xa806_653a_f684_7c5b),
+        ((-1875, -1875), 0xd3ef_f6d9_0e79_0cc5),
+        ((-1868, -1872), 0x9860_50f9_01eb_4359),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     for ((x, z), print) in held {

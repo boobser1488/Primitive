@@ -542,6 +542,43 @@ pub const PLAYER_HEIGHT: f32 = 1.8;
 /// Camera height above the feet.
 pub const EYE_HEIGHT: f32 = 1.62;
 
+/// How high the eye is above the mattress, lying: a head on a pillow.
+///
+/// **Here and not in the client**, because the server has to ask the world
+/// the same questions at the same point the client draws from. It asked them
+/// at [`EYE_HEIGHT`], which is a standing head: a sleeper's breath was being
+/// judged a block and a third above the sleeper's face, so a bedroom flooded
+/// to the top of the bed took no breath at all while the client drew the
+/// water. The downed body was the same bug and was fixed on its own
+/// (`downed::CRAWL_EYE`); this is the other half of it.
+pub const LYING_EYE: f32 = 0.28;
+
+/// How far toward the head of the bed the eye is from the middle of the
+/// body, which is where the server lays a sleeper's feet: most of a
+/// body's half-length, so the view is from the pillow and not from the
+/// sleeper's navel.
+pub const LYING_HEAD_REACH: f32 = 0.72;
+
+/// Where a sleeper's eye is, given where the server laid their feet and
+/// which way their head points (`protocol::Posture::Lying`'s yaw, in the
+/// `Camera::forward` convention).
+///
+/// **Both parts of it, and the horizontal one is the part that gets
+/// forgotten.** A body lying across two cells has its feet at the seam and
+/// its head most of a half-body along -- so the cell the eye is in is not
+/// the cell the feet are in, and a rule that only lowers the eye answers
+/// about the wrong column. Everything that asks about a sleeper's head --
+/// the camera, the fog, the breath -- comes through here.
+#[inline]
+pub fn lying_eye(feet: (f32, f32, f32), head_yaw: f32) -> (f32, f32, f32) {
+    let (sin, cos) = head_yaw.sin_cos();
+    (
+        feet.0 + cos * LYING_HEAD_REACH,
+        feet.1 + LYING_EYE,
+        feet.2 + sin * LYING_HEAD_REACH,
+    )
+}
+
 /// The tallest lip a walking player rides over instead of stopping
 /// dead against.
 ///
