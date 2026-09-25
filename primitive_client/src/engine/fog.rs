@@ -76,25 +76,26 @@
 use glam::Vec3;
 
 use crate::engine::sky::Sky;
+use crate::engine::water::WaterTint;
 use crate::logic::chunk_manager::{ChunkManager, NEIGHBOUR_OFFSETS};
 use crate::settings::ClientSettings;
 use primitive_shared::types::{blocks_the_sky, CHUNK_SIZE_Y};
 
-/// The colour deep water closes in to.
-///
-/// Not the surface colour: looking *through* water is a longer path than
-/// looking *at* it, so it lands somewhere darker and greener than the
-/// blue the surface shows.
-///
-/// **It is also the colour the sky pass paints under water, and it has to
-/// be.** It used to be `(0.10, 0.28, 0.38)` while `fs_sky` painted 55% of
-/// it and the terrain's murk trended to 55% of it too -- so everything the
-/// fog had finished with, eighteen blocks out, landed on a colour brighter
-/// than what was behind it, and the far bed and the underside of the
-/// surface stood out of the water as flat bright bands with the darker sky
-/// between them. The 55% was the colour a swimmer had been looking at all
-/// along, so it became the colour, and both shaders read it unscaled.
-const UNDERWATER: Vec3 = Vec3::new(0.055, 0.154, 0.209);
+// **The colour deep water closes in to used to be a constant here**, one
+// teal for every water in the world: `(0.055, 0.154, 0.209)`, and before
+// that `(0.10, 0.28, 0.38)` while `fs_sky` painted 55% of it and the
+// terrain's murk trended to 55% of it too -- so everything the fog had
+// finished with, eighteen blocks out, landed on a colour brighter than what
+// was behind it, and the far bed and the underside of the surface stood out
+// of the water as flat bright bands with the darker sky between them. The
+// 55% was the colour a swimmer had been looking at all along, so it became
+// the colour, and both shaders read it unscaled.
+//
+// It is `water::WaterTint::murk` now -- the water's own colour, at the
+// luminance that constant had, so every measurement taken of a temperate
+// lake still holds and only the hue moved. What has *not* changed is the
+// rule that put the number here in the first place: the fog, the sky pass
+// under water and the terrain's murk are one colour or they are bands.
 
 /// Where the underwater fog starts, as a fraction of where it ends.
 ///
@@ -348,14 +349,19 @@ pub struct Fog {
 impl Fog {
     /// The fog for this frame, from the sky, the settings and where the
     /// player's head is.
+    /// `underwater` is `None` in the air and `Some(water)` when the head
+    /// is in one -- **and which water it is matters**, because the murk is
+    /// that water's own colour now and not one teal for the whole world.
+    /// See `water::WaterTint::murk`.
     pub fn for_frame(
         settings: &ClientSettings,
         sky: &Sky,
         render_distance_chunks: i32,
         enabled: bool,
-        underwater: bool,
+        underwater: Option<WaterTint>,
     ) -> Self {
-        let (start, end) = if underwater {
+        let submerged = underwater.is_some();
+        let (start, end) = if submerged {
             let end = settings.underwater_fog_distance;
             (end * UNDERWATER_START, end)
         } else {
@@ -364,7 +370,7 @@ impl Fog {
 
         // Under water there is no horizon to glow: the colour is the
         // water's, and a sunset mixed into it would put orange in a lake.
-        let (glow, haze) = if underwater {
+        let (glow, haze) = if submerged {
             (glam::Vec4::ZERO, glam::Vec4::ZERO)
         } else {
             (sky.horizon_glow(settings.lighting), sky.sun_haze(settings.lighting))
@@ -374,7 +380,7 @@ impl Fog {
             start,
             end,
             enabled,
-            underwater,
+            underwater: submerged,
             underground: 0.0,
             glow,
             haze,
@@ -525,8 +531,12 @@ impl Fog {
     /// scatters everything, so a long look through it trends toward its
     /// own brightness rather than keeping the sky's colour at full
     /// strength.
-    fn color(sky: &Sky, underwater: bool, lighting: crate::engine::lighting::Quality) -> Vec3 {
-        if underwater {
+    fn color(
+        sky: &Sky,
+        underwater: Option<WaterTint>,
+        lighting: crate::engine::lighting::Quality,
+    ) -> Vec3 {
+        if let Some(water) = underwater {
             // **As dark as the hour.** This was `UNDERWATER` and nothing
             // else, and everything it is mixed with is not a constant: the
             // bed, the lid and the terrain are lit by the sky, and at
@@ -537,11 +547,22 @@ impl Fog {
             // box under a black surface. Scaled by how bright the sky is
             // now against a clear day, which is what the fog in the air
             // already follows, and by the same number the weather and the
-            // moon move. Noon is `UNDERWATER` exactly, so the day, and every
-            // measurement taken of it, is unchanged.
+            // moon move. Noon in plain water is `UNDERWATER`'s luminance
+            // exactly, so the day, and every measurement taken of it, is as
+            // bright as it was.
+            //
+            // **And it is this water's colour and not one teal for the
+            // world.** `UNDERWATER` was a constant, which meant a swimmer
+            // in a peat bog and a swimmer in a glacier lake were in the
+            // same water -- the one place a colour by biome shows most,
+            // because under water the murk is most of the frame. The hue
+            // comes off the same palette the surface is painted from
+            // (`water::WaterTint::murk`), which is what stops the lid a
+            // swimmer is looking up at being one water and the haze under
+            // it another.
             let luma = |c: Vec3| c.dot(Vec3::new(0.2126, 0.7152, 0.0722));
             let now = luma(sky.sky_color_for(lighting)) / luma(crate::engine::sky::DAY_SKY);
-            return UNDERWATER * now.clamp(0.0, 1.0);
+            return water.murk() * now.clamp(0.0, 1.0);
         }
 
         let sky = sky.sky_color_for(lighting);
@@ -780,7 +801,7 @@ mod tests {
         // the game pays for a mechanic about caves.
         let settings = ClientSettings::default();
         for hour in [0.0, 0.25, 0.5, 0.75] {
-            for underwater in [false, true] {
+            for underwater in [None, Some(WaterTint::PLAIN)] {
                 let plain = Fog::for_frame(&settings, &sky_at(hour), 12, true, underwater);
                 let mut same = plain;
                 same.go_underground(0.0);
@@ -792,7 +813,7 @@ mod tests {
     #[test]
     fn under_ground_the_distance_is_black_and_much_nearer() {
         let settings = ClientSettings::default();
-        let surface = Fog::for_frame(&settings, &sky_at(0.5), 12, true, false);
+        let surface = Fog::for_frame(&settings, &sky_at(0.5), 12, true, None);
         let mut cave = surface;
         cave.go_underground(1.0);
         assert!(cave.end < surface.end, "the cave has to close the world in");
@@ -817,7 +838,7 @@ mod tests {
         // a way to see further than the setting allows.
         let settings = ClientSettings::default();
         for chunks in [2, 4, 8, 16, 24] {
-            let surface = Fog::for_frame(&settings, &sky_at(0.5), chunks, true, false);
+            let surface = Fog::for_frame(&settings, &sky_at(0.5), chunks, true, None);
             let mut cave = surface;
             cave.go_underground(1.0);
             assert!(
@@ -836,7 +857,7 @@ mod tests {
         // and the sky is drawn from it -- so a black one with the haze
         // switched off would be a black sky nobody asked for.
         let settings = ClientSettings::default();
-        let off = Fog::for_frame(&settings, &sky_at(0.5), 12, false, false);
+        let off = Fog::for_frame(&settings, &sky_at(0.5), 12, false, None);
         let mut still_off = off;
         still_off.go_underground(1.0);
         assert_eq!(still_off, off, "F is a switch, and it was off");
@@ -848,7 +869,7 @@ mod tests {
         // anything can be seen, and the rock decides that no daylight is
         // arriving to make it green.
         let settings = ClientSettings::default();
-        let lake = Fog::for_frame(&settings, &sky_at(0.5), 12, true, true);
+        let lake = Fog::for_frame(&settings, &sky_at(0.5), 12, true, Some(WaterTint::PLAIN));
         let mut flooded = lake;
         flooded.go_underground(1.0);
         assert_eq!(flooded.end, lake.end, "the water's range is the water's");
@@ -864,8 +885,8 @@ mod tests {
         // the surface the far hills are still drawn, and underground
         // they are not.
         let settings = ClientSettings::default();
-        let midnight = Fog::for_frame(&settings, &sky_at(0.0), 12, true, false);
-        let mut cave = Fog::for_frame(&settings, &sky_at(0.5), 12, true, false);
+        let midnight = Fog::for_frame(&settings, &sky_at(0.0), 12, true, None);
+        let mut cave = Fog::for_frame(&settings, &sky_at(0.5), 12, true, None);
         cave.go_underground(1.0);
         assert!(
             cave.end < midnight.end * 0.5,
@@ -887,10 +908,10 @@ mod tests {
             ..ClientSettings::default()
         };
         let sunset = sky_at(0.75);
-        let open = Fog::for_frame(&settings, &sunset, 12, true, false);
+        let open = Fog::for_frame(&settings, &sunset, 12, true, None);
         assert!(open.glow.w > 0.5 && open.haze.length() > 0.1, "the open air lost its sunset");
 
-        let lake = Fog::for_frame(&settings, &sunset, 12, true, true);
+        let lake = Fog::for_frame(&settings, &sunset, 12, true, Some(WaterTint::PLAIN));
         assert_eq!((lake.glow, lake.haze), (glam::Vec4::ZERO, glam::Vec4::ZERO), "orange in a lake");
 
         let mut tunnel = open;
@@ -902,13 +923,17 @@ mod tests {
     #[test]
     fn under_water_the_range_collapses_and_the_colour_changes() {
         let settings = ClientSettings::default();
-        let air = Fog::for_frame(&settings, &sky_at(0.5), 12, true, false);
-        let water = Fog::for_frame(&settings, &sky_at(0.5), 12, true, true);
+        let air = Fog::for_frame(&settings, &sky_at(0.5), 12, true, None);
+        let water = Fog::for_frame(&settings, &sky_at(0.5), 12, true, Some(WaterTint::PLAIN));
 
         assert!(water.end < air.end, "water should close the world in");
         assert!(water.start < water.end);
         assert_ne!(water.color, air.color);
-        assert_eq!(water.color, UNDERWATER);
+        assert_eq!(water.color, WaterTint::PLAIN.murk());
+        // ...and it is *this* water and not one colour for every water.
+        let marsh = WaterTint { chill: 0.35, silt: 0.0, depth: 1.0 };
+        let bog = Fog::for_frame(&settings, &sky_at(0.5), 12, true, Some(marsh));
+        assert_ne!(bog.color, water.color, "a marsh and a lake are the same murk");
     }
 
     /// **A lake at night is as dark as the night over it.** The colour
@@ -922,11 +947,11 @@ mod tests {
         let settings = ClientSettings::default();
         for quality in crate::engine::lighting::Quality::ALL {
             let settings = ClientSettings { lighting: quality, ..settings.clone() };
-            let noon = Fog::for_frame(&settings, &sky_at(0.5), 12, true, true);
-            assert_eq!(noon.color, UNDERWATER, "noon moved at {quality:?}");
+            let noon = Fog::for_frame(&settings, &sky_at(0.5), 12, true, Some(WaterTint::PLAIN));
+            assert_eq!(noon.color, WaterTint::PLAIN.murk(), "noon moved at {quality:?}");
             for hour in [0.0, 0.1, 0.9, 0.95] {
-                let water = Fog::for_frame(&settings, &sky_at(hour), 12, true, true);
-                let air = Fog::for_frame(&settings, &sky_at(hour), 12, true, false);
+                let water = Fog::for_frame(&settings, &sky_at(hour), 12, true, Some(WaterTint::PLAIN));
+                let air = Fog::for_frame(&settings, &sky_at(hour), 12, true, None);
                 assert!(
                     water.color.length() <= air.color.length(),
                     "at {hour} ({quality:?}) the water {:?} is brighter than the air {:?}",
@@ -943,8 +968,8 @@ mod tests {
         // The whole trick: terrain has to fade into the horizon, so the
         // fog is the sky's own colour and changes with the hour.
         let settings = ClientSettings::default();
-        let noon = Fog::for_frame(&settings, &sky_at(0.5), 12, true, false);
-        let midnight = Fog::for_frame(&settings, &sky_at(0.0), 12, true, false);
+        let noon = Fog::for_frame(&settings, &sky_at(0.5), 12, true, None);
+        let midnight = Fog::for_frame(&settings, &sky_at(0.0), 12, true, None);
         assert_ne!(noon.color, midnight.color);
         assert!(noon.color.length() > midnight.color.length(), "night is darker");
     }
@@ -952,12 +977,12 @@ mod tests {
     #[test]
     fn distance_culling_is_offered_only_where_it_is_free() {
         let settings = ClientSettings::default();
-        let plain = Fog::for_frame(&settings, &sky_at(0.5), 12, true, false);
+        let plain = Fog::for_frame(&settings, &sky_at(0.5), 12, true, None);
         assert_eq!(plain.cull_distance(), Some(plain.end));
 
         // Off: nothing is invisible at distance any more.
         assert_eq!(
-            Fog::for_frame(&settings, &sky_at(0.5), 12, false, false).cull_distance(),
+            Fog::for_frame(&settings, &sky_at(0.5), 12, false, None).cull_distance(),
             None
         );
         // Under water the terrain and the sky finish on one colour now
@@ -965,12 +990,12 @@ mod tests {
         // stopped a swimmer drawing the whole disc to paint it flat. The
         // GPU half of that claim is
         // `under_water_the_terrain_past_the_fog_is_the_colour_of_the_sky_behind_it`.
-        let lake = Fog::for_frame(&settings, &sky_at(0.5), 12, true, true);
+        let lake = Fog::for_frame(&settings, &sky_at(0.5), 12, true, Some(WaterTint::PLAIN));
         assert_eq!(lake.cull_distance(), Some(lake.end));
         // ...but not with F pressed: the murk still dims the far bed, and
         // without the fog it never lands on the sky's colour.
         assert_eq!(
-            Fog::for_frame(&settings, &sky_at(0.5), 12, false, true).cull_distance(),
+            Fog::for_frame(&settings, &sky_at(0.5), 12, false, Some(WaterTint::PLAIN)).cull_distance(),
             None
         );
         // ...and not in a flooded cave, for the cave's reason below.
@@ -997,7 +1022,7 @@ mod tests {
         // sky under its last eighth. The range is laid out against that
         // reach now, so it is finished there before any clamp is asked.
         let settings = ClientSettings::default();
-        let mut fog = Fog::for_frame(&settings, &sky_at(0.5), 8, true, false);
+        let mut fog = Fog::for_frame(&settings, &sky_at(0.5), 8, true, None);
         let reach = ChunkManager::reach_blocks(8);
         assert!(fog.end <= reach, "the fade ends at {} past the disc at {reach}", fog.end);
         // The clamp still matters where something nearer ends the world:
@@ -1011,11 +1036,11 @@ mod tests {
 
         // A reach further out than the fade already is changes nothing:
         // the player's own setting is the shorter of the two and stays.
-        let mut wide = Fog::for_frame(&settings, &sky_at(0.5), 8, true, false);
+        let mut wide = Fog::for_frame(&settings, &sky_at(0.5), 8, true, None);
         wide.clamp_to(10_000.0);
         assert_eq!(wide.end, unclamped);
         // ...and neither does nonsense.
-        let mut junk = Fog::for_frame(&settings, &sky_at(0.5), 8, true, false);
+        let mut junk = Fog::for_frame(&settings, &sky_at(0.5), 8, true, None);
         junk.clamp_to(f32::NAN);
         junk.clamp_to(-5.0);
         assert_eq!(junk.end, unclamped);
@@ -1035,7 +1060,7 @@ mod tests {
         let settings = ClientSettings::default();
         for chunks in 4..=crate::settings::MAX_RENDER_DISTANCE {
             let reach = ChunkManager::reach_blocks(chunks);
-            let fog = Fog::for_frame(&settings, &sky_at(0.5), chunks, true, false);
+            let fog = Fog::for_frame(&settings, &sky_at(0.5), chunks, true, None);
             assert_eq!(fog.end, reach, "at {chunks} chunks the fog ends at {} and the world at {reach}", fog.end);
             assert!(
                 fog.start >= reach * settings.fog_start_share - 1e-3,
@@ -1046,7 +1071,7 @@ mod tests {
         }
         // At the report's own distance, in the report's terms: the fog does
         // not begin before the three-quarter mark.
-        let at_24 = Fog::for_frame(&settings, &sky_at(0.5), 24, true, false);
+        let at_24 = Fog::for_frame(&settings, &sky_at(0.5), 24, true, None);
         assert!(at_24.start / 16.0 > 16.0, "the fog begins {} chunks out at 24", at_24.start / 16.0);
     }
 
@@ -1068,8 +1093,8 @@ mod tests {
         // Fog that ends at a fixed distance is fog that hides the world
         // on a machine that could draw it.
         let settings = ClientSettings::default();
-        let near = Fog::for_frame(&settings, &sky_at(0.5), 4, true, false);
-        let far = Fog::for_frame(&settings, &sky_at(0.5), 16, true, false);
+        let near = Fog::for_frame(&settings, &sky_at(0.5), 4, true, None);
+        let far = Fog::for_frame(&settings, &sky_at(0.5), 16, true, None);
         assert!(far.end > near.end);
         assert!(far.start > near.start);
     }
@@ -1078,18 +1103,18 @@ mod tests {
     fn smoke_closes_the_view_in_and_colours_it_even_with_the_haze_off() {
         let settings = ClientSettings::default();
         let sky = sky_at(12.0);
-        let clear = Fog::for_frame(&settings, &sky, 12, true, false);
+        let clear = Fog::for_frame(&settings, &sky, 12, true, None);
         let mut smoky = clear;
         smoky.fill_with_smoke(1.0);
         assert!(smoky.end <= SMOKE_END + 1e-3, "full smoke still sees {} blocks", smoky.end);
         assert!((smoky.color - SMOKE).length() < 1e-3);
-        let mut off = Fog::for_frame(&settings, &sky, 12, false, false);
+        let mut off = Fog::for_frame(&settings, &sky, 12, false, None);
         off.fill_with_smoke(1.0);
         assert!(off.enabled && off.end <= SMOKE_END + 1e-3, "switching haze off hid the smoke");
         let mut none = clear;
         none.fill_with_smoke(0.0);
         assert_eq!(none, clear, "no smoke changed the fog");
-        let mut under = Fog::for_frame(&settings, &sky, 12, true, true);
+        let mut under = Fog::for_frame(&settings, &sky, 12, true, Some(WaterTint::PLAIN));
         let water = under;
         under.fill_with_smoke(1.0);
         assert_eq!(under, water, "smoke got under the water");
@@ -1099,7 +1124,7 @@ mod tests {
     fn the_dawn_mist_closes_the_view_without_closing_it_to_a_room() {
         let settings = ClientSettings::default();
         let sky = sky_at(12.0);
-        let clear = Fog::for_frame(&settings, &sky, 12, true, false);
+        let clear = Fog::for_frame(&settings, &sky, 12, true, None);
         let mut misty = clear;
         misty.lie_as_mist(1.0);
         assert!(misty.end < clear.end, "the mist did not close the view at all");
@@ -1115,11 +1140,11 @@ mod tests {
         assert!(half.end > misty.end && half.end < clear.end);
         // Nothing hangs on a mist, so a player who turned the haze off
         // keeps it off -- unlike the smoke, which is a warning.
-        let mut off = Fog::for_frame(&settings, &sky, 12, false, false);
+        let mut off = Fog::for_frame(&settings, &sky, 12, false, None);
         let was = off;
         off.lie_as_mist(1.0);
         assert_eq!(off, was, "the mist turned the distance haze back on");
-        let mut under = Fog::for_frame(&settings, &sky, 12, true, true);
+        let mut under = Fog::for_frame(&settings, &sky, 12, true, Some(WaterTint::PLAIN));
         let water = under;
         under.lie_as_mist(1.0);
         assert_eq!(under, water, "the mist got under the water");

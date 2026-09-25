@@ -298,6 +298,110 @@ pub fn cooled_by_altitude(temperature: f32, gy: i32) -> f32 {
     (temperature - altitude * CLIMATE_LAPSE_PER_BLOCK).clamp(0.0, 1.0)
 }
 
+/// What colours the water standing in a column, as the two smooth axes
+/// the renderer's water palette runs on: how cold the water is, and what
+/// is suspended in it.
+///
+/// Both come back 0..1, and they are handed a climate the caller has
+/// already sampled -- the mesher holds one per column for the foliage
+/// tint and every water face in that column reads the same pair, so
+/// colouring a sea costs no noise at all.
+///
+/// **`silt` is signed about its middle.** Nought is peat, the brown of a
+/// marsh; a half is water carrying nothing; one is rock flour, the milky
+/// turquoise of melt off ice. The two ends cannot happen in one place --
+/// peat forms in sodden flat lowland, flour comes off high ground -- so
+/// one axis carries both, and the byte a vertex has room for carries the
+/// pair (`mesh::pack_tint`).
+///
+/// **Fields and not the `Biome` enum**, for the reason `climate_column`
+/// gives about grass: a biome is a classification with edges, and a
+/// colour taken from one draws a line across the water exactly where two
+/// of them meet. A marsh shades into the lake beyond it here the way its
+/// grass already does.
+///
+/// **What this deliberately does not ask is whether the water is the
+/// sea.** Telling a bay from a marsh wants the continent spline, which is
+/// eight octaves `biome_from` only pays for on a shoreline; and it is not
+/// needed, because what separates them is already carried per face -- a
+/// marsh is one or two cells deep and a bay is twelve, and the shader
+/// fades the peat out with the column under it (`WATER_PEAT_SHALLOW`). A
+/// river mouth coming out brown at its edges and blue down its channel is
+/// what a river mouth does.
+#[inline]
+pub fn water_climate_of(
+    temperature: f32,
+    humidity: f32,
+    ground_wetness: f32,
+    surface_y: i32,
+) -> (f32, f32) {
+    // A lake is as cold as the air over it, lapse rate and all: a tarn
+    // under a peak is colder than the lake in the valley below it even
+    // where the climate map reads one country.
+    let chill = 1.0 - cooled_by_altitude(temperature, surface_y);
+    let above = (surface_y - SEA_LEVEL).max(0) as f32;
+    // **Peat wants rain and flat ground together.** Rain alone is a
+    // rainforest, whose rivers run clear; what makes water brown is a
+    // season of dead leaves lying in it with nowhere to go, and "nowhere
+    // to go" is the waterline -- and the *first few blocks over it* as
+    // well, because that is where a bog is. Measured: the northern bog of
+    // seed 1337 stands five over the sea, and a ramp that started falling
+    // at nought took a quarter of its peat away and drew it half a lake.
+    // Flat to four, gone by twenty.
+    //
+    // **The rain has the ground's own share added to it, and without that
+    // there is no marsh at all.** Measured on seed 1337: a temperate
+    // marsh's plain rainfall is 0.533 and the sea forty chunks away reads
+    // 0.544 -- the weather does not know a marsh is there. What knows is
+    // `mosaic_wetness`, the field that put the marsh in the biome map in
+    // the first place, and the rule beside it ("a glade is a hole in the
+    // trees, not a change of weather") is about the *air*: peat in
+    // standing water is a fact about the ground, which is exactly what
+    // that field describes.
+    let peat = ramp(PEAT_FROM, PEAT_FULL, humidity + ground_wetness)
+        * (1.0 - ramp(4.0, 20.0, above));
+    // **Flour wants height, and cold on top of it.** Rock ground to
+    // powder under ice is what makes a mountain lake that particular
+    // opaque turquoise; a warm tarn at the same height is merely clear
+    // and cold, so the height carries most of it and the cold the rest.
+    //
+    // **Twenty blocks up, not fifty.** Fifty is where a peak is, and there
+    // is no standing water there: searched over three thousand blocks of
+    // seed 1337, the highest water the generator puts down near the origin
+    // is a brook in hill country. A hill brook is exactly the water this
+    // colour is for -- cold, quick and carrying ground rock -- so the band
+    // starts where the hills do.
+    let flour = ramp(20.0, 55.0, above) * (0.4 + 0.6 * ramp(0.45, 0.80, chill));
+    (chill, (0.5 + 0.5 * flour - 0.5 * peat).clamp(0.0, 1.0))
+}
+
+/// Where water starts turning brown, and where it is peat through and
+/// through, on the rain the ground has already had its own share added to.
+///
+/// **The low end is `CLIMATE_WET` and a hair**, the line the classifier
+/// makes a marsh at, which is not a coincidence worth hiding: the water is
+/// brown where the biome map says a marsh is, and it gets there by the
+/// same sum.
+///
+/// The hair and the width are measured rather than chosen. On seed 1337,
+/// rain plus ground: the temperate sea 0.538, its shallows 0.569, a river
+/// 0.610, a northern sea 0.654, a northern bog 0.674, a temperate marsh
+/// 0.723. So the band has to clear the open sea, leave a river only
+/// tinted, and be finished by the bog -- which is the whole of these two
+/// numbers.
+const PEAT_FROM: f32 = CLIMATE_WET + 0.03;
+/// See [`PEAT_FROM`].
+const PEAT_FULL: f32 = CLIMATE_WET + 0.12;
+
+/// A smooth nought-to-one between two edges: Hermite, which is what WGSL's
+/// `smoothstep` is -- so a term written here and a term written in the
+/// shader mean one curve and not two that nearly agree.
+#[inline]
+fn ramp(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// How high a column counts as, for cooling, in blocks above the sea.
 ///
 /// **The first twenty-two blocks at full rate, the rest at half.** The
@@ -3652,6 +3756,36 @@ impl WorldGen {
     /// leaf. `climate_at` is the convenient form for everything else.
     pub fn climate_column(&self, gx: i32, gz: i32) -> (f32, f32) {
         { let (px, pz) = self.on_planet(gx, gz); self.climate_column_on_planet(px, pz) }
+    }
+
+    /// The water colour of a column, for the one caller that has not got a
+    /// climate in hand: the fog, which has to know what water a swimmer's
+    /// head is in and is asked once a frame rather than once a column.
+    ///
+    /// The mesher does *not* come through here -- it has the climate
+    /// already, for the leaves -- so this is `water_climate_of` with the
+    /// sampling in front of it and nothing else.
+    pub fn water_climate(&self, gx: i32, gz: i32, surface_y: i32) -> (f32, f32) {
+        let (temperature, humidity) = self.climate_column(gx, gz);
+        water_climate_of(temperature, humidity, self.ground_wetness(gx, gz, surface_y), surface_y)
+    }
+
+    /// **What the ground itself adds to the rain**, in the 0..1 units
+    /// `climate_column` speaks: glades, groves, and the wet bottom of a
+    /// valley. See `mosaic_wetness`, which is where it comes from and
+    /// which the biome classifier already reads.
+    ///
+    /// Public because the water colour reads it (`water_climate_of`) and
+    /// the mesher has to be able to sample it per column. It is *not* the
+    /// air a player feels, and the note beside `mosaic_wetness` says why:
+    /// a glade is a hole in the trees, not a change of weather. A peat bog
+    /// is a hole in the trees with water in it.
+    pub fn ground_wetness(&self, gx: i32, gz: i32, surface_y: i32) -> f32 {
+        let (px, pz) = self.on_planet(gx, gz);
+        // The mosaic works in the generator's -1..1; the climate the
+        // caller holds is the client's 0..1, so the rate halves with the
+        // range exactly as `CLIMATE_LAPSE_PER_BLOCK` does.
+        (self.mosaic_wetness(px, pz, surface_y) * 0.5) as f32
     }
 
     fn climate_column_on_planet(&self, gx: i32, gz: i32) -> (f32, f32) {

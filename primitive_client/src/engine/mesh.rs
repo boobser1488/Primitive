@@ -63,7 +63,10 @@ pub struct Vertex {
     ///              are in `uv` (see `LAYER_TOP_SHIFT`)
     /// bits 24..31  foliage tint, 0 = none (see `pack_tint`); 226 and up
     ///              once meant a texture crop and mean nothing now (see
-    ///              `FINE_UV_BIT`, which took its place in `uv`)
+    ///              `FINE_UV_BIT`, which took its place in `uv`). On a
+    ///              translucent face the same packing is the *water's*
+    ///              climate, which is the byte's other reading and cannot
+    ///              meet the first: water is not foliage
     /// ```
     ///
     /// **Why not three separate attributes.** A chunk of real terrain is
@@ -95,7 +98,9 @@ pub struct Vertex {
     /// ```text
     /// bits 0..4    u, 0..=31
     /// bits 5..9    v, 0..=31
-    /// bits 10..28  spare (a fine coordinate uses 0..27, see `FINE_UV_BIT`)
+    /// bits 10..14  cells of water under a water lid, 0 elsewhere (see
+    ///              `WATER_DEPTH_SHIFT`)
+    /// bits 15..28  spare (a fine coordinate uses 0..27, see `FINE_UV_BIT`)
     /// bits 29..30  the layer's tenth and eleventh bits (`LAYER_TOP_SHIFT`)
     /// bit  31      `FINE_UV_BIT`
     /// ```
@@ -312,6 +317,60 @@ pub const FINE_UV_BIT: u32 = 1 << 31;
 /// keeps each rock's colour (a cut in granite is granite) and costs a branch
 /// on fragments that nearly never take it.
 pub const CHIPPED_BIT: u32 = 1 << 28;
+
+// ---- what a *water* vertex puts in the coordinate word ----
+//
+// **A translucent face reads `uv` its own way, and it has to.** The tint
+// byte used to carry the depth of the column under a water lid, which left
+// nowhere to say what *kind* of water it is -- so every sea, marsh and
+// glacier lake in the world was the one blue its picture happens to be.
+//
+// The byte cannot hold a climate either, and the arithmetic says why
+// rather than the taste. The water palette runs from a marsh brown to an
+// open blue: a fifteen-step axis, which is what the foliage tint uses and
+// is invisible *there*, moves the blue channel by a seventh of that range
+// per step -- linear 0.02 on a colour whose blue is 0.02, which is a
+// visible band drawn across a marsh every dozen blocks. The grass gets
+// away with fifteen because its palette is a hue shift over a green
+// picture; the water's palette is the whole colour. It wants some
+// thirteen bits, and the coordinate word has them spare.
+//
+// It has them spare because **water is the one thing the mesher never
+// merges** (see `MERGE_COPLANAR_FACES` and the note on `water_depth` in
+// shader.wgsl), so its texture coordinate is nought or one cell and needs
+// a bit, not five -- and the one fraction it ever wants is where a
+// shallow or sloped surface cuts its own side (`liquid_crop`), which is
+// eight bits of a cell rather than the fourteen a model's box takes.
+//
+// ```text
+// bit  0        u: 0 or 1 cell
+// bits 1..8     v, in 255ths of a cell (0 or 255 unless the side is cut)
+// bits 9..13    cells of water under this face, and only under a lid
+// bits 14..27   the water's climate (`water::WaterTint::code`)
+// bit  28       spare
+// bits 29..30   the layer's tenth and eleventh bits, as everywhere
+// bit  31       always nought: a water face is never a fine coordinate
+// ```
+//
+// Must match the `translucent` arm of `terrain_vertex` in shader.wgsl.
+const WATER_V_SHIFT: u32 = 1;
+/// v in 255ths, which is a sixteenth of a texel on the sixteen-texel grid
+/// every picture in this game is drawn on -- the same resolution
+/// `FINE_UNITS` gives a model's face, in a third of the bits.
+const WATER_V_UNITS: f32 = 255.0;
+const WATER_V_MASK: u32 = 255;
+const WATER_DEPTH_SHIFT: u32 = 9;
+const WATER_DEPTH_MASK: u32 = 31;
+const _: () = assert!(MAX_WATER_DEPTH <= WATER_DEPTH_MASK);
+/// Where the water's climate sits, and how wide it is.
+///
+/// Fourteen bits, spent as sixty-four steps of how cold the water is and
+/// two hundred and fifty-six of what is suspended in it -- see
+/// `water::WaterTint::code` for why the grid is not square. At that
+/// spacing one step moves the picture by a thousandth of a channel, which
+/// is well under the dither already in `terrain/water.png`.
+pub(crate) const WATER_CLIMATE_SHIFT: u32 = 14;
+pub(crate) const WATER_CLIMATE_MASK: u32 = (1 << 14) - 1;
 
 /// **The chip picture**, drawn on the texel grid every picture in the game is
 /// drawn on: the strokes of a pick down the face, each a dark groove with a
@@ -710,6 +769,32 @@ impl Vertex {
         self
     }
 
+    /// **The coordinate word a face of water carries**, which is not the
+    /// one anything else carries: its place in the picture, what colour
+    /// the water is, and how much of it stands under this face.
+    ///
+    /// `cells` is nought on everything but a lid -- see
+    /// `liquid_depth_below` for why a wall of a waterfall must not be
+    /// handed the depth of the pool it falls into. See the bit table at
+    /// [`WATER_CLIMATE_SHIFT`] for the rest.
+    pub fn liquid(mut self, uv: [f32; 2], climate: u32, cells: u32) -> Self {
+        debug_assert!(
+            (0.0..=1.0).contains(&uv[0]) && (0.0..=1.0).contains(&uv[1]),
+            "a face of water covering {uv:?} cells -- liquids are never merged"
+        );
+        debug_assert!(climate <= WATER_CLIMATE_MASK, "a water climate of {climate}");
+        debug_assert!(cells <= WATER_DEPTH_MASK, "{cells} cells of water do not fit in five bits");
+        // The layer's top bits share this word and are kept, exactly as
+        // `with_fine_uv` keeps them: overwriting the word whole would draw
+        // layer 1500 as layer 476.
+        self.uv = (self.uv & LAYER_TOP_MASK)
+            | u32::from(uv[0] >= 0.5)
+            | (((uv[1] * WATER_V_UNITS).round().clamp(0.0, WATER_V_UNITS) as u32) << WATER_V_SHIFT)
+            | (cells << WATER_DEPTH_SHIFT)
+            | (climate << WATER_CLIMATE_SHIFT);
+        self
+    }
+
     /// Marks a cropped face as the cut face of a part-dug block. See
     /// [`CHIPPED_BIT`]; after `with_fine_uv`, which writes the whole word.
     pub fn chipped(mut self) -> Self {
@@ -723,6 +808,12 @@ impl Vertex {
     /// shows up as the whole world wearing the wrong textures.
     #[allow(dead_code)]
     pub fn uv(&self) -> [f32; 2] {
+        if self.packed & TRANSLUCENT_BIT != 0 {
+            return [
+                (self.uv & 1) as f32,
+                ((self.uv >> WATER_V_SHIFT) & WATER_V_MASK) as f32 / WATER_V_UNITS,
+            ];
+        }
         if self.uv & FINE_UV_BIT != 0 {
             return [
                 (self.uv & FINE_MASK) as f32 / FINE_UNITS,
@@ -745,6 +836,16 @@ impl Vertex {
     #[allow(dead_code)]
     pub fn tint(&self) -> u32 {
         self.packed >> TINT_SHIFT
+    }
+
+    /// The water's climate and the cells of it under this face. See
+    /// [`WATER_CLIMATE_SHIFT`]; meaningless on anything not translucent.
+    #[allow(dead_code)]
+    pub fn water(&self) -> (u32, u32) {
+        (
+            (self.uv >> WATER_CLIMATE_SHIFT) & WATER_CLIMATE_MASK,
+            (self.uv >> WATER_DEPTH_SHIFT) & WATER_DEPTH_MASK,
+        )
     }
 
     #[allow(dead_code)]
@@ -2945,6 +3046,13 @@ pub fn build_mesh(
     // are bare stone. NaN is the "not yet" marker -- no real climate can
     // be one, and it costs no second array to say so.
     let mut climate = [[f32::NAN; 2]; CHUNK_SIZE_X * CHUNK_SIZE_Z];
+    // ...and what the *ground* adds to the rain, which only the water
+    // reads (`worldgen::water_climate_of`) and which is a fifth sample.
+    // Its own array, not a third slot in the one above: a chunk of leaves
+    // would pay for a field nothing green looks at, and a chunk of sea
+    // would pay four samples for the two it uses. Lazily, on the same
+    // terms, and NaN means the same thing.
+    let mut ground_wetness = [f32::NAN; CHUNK_SIZE_X * CHUNK_SIZE_Z];
 
     for y in 0..ceiling {
         for z in 0..CHUNK_SIZE_Z as i32 {
@@ -2966,13 +3074,56 @@ pub fn build_mesh(
                 // What climate this block grew in, for anything alive.
                 // Zero -- "no tint" -- for everything else, which is
                 // most of the world.
-                let tint = if is_foliage(id) {
+                let mut sampled_climate = || {
                     let column = z as usize * CHUNK_SIZE_X + x as usize;
                     if climate[column][0].is_nan() {
                         let (temperature, humidity) = world.climate_column(gx, gz);
                         climate[column] = [temperature, humidity];
                     }
-                    let [temperature, humidity] = climate[column];
+                    climate[column]
+                };
+                // **What colour the water in this cell is**, where the cell
+                // is water: the climate a face of it carries in its
+                // coordinate word (`WATER_CLIMATE_SHIFT`), not in the tint
+                // byte -- the byte has fifteen steps an axis and the water
+                // palette wants a colour, which is the whole argument at
+                // that constant.
+                //
+                // Off the climate the leaves overhead already sampled, so
+                // colouring an ocean costs no noise: `water_climate_of` is
+                // handed the pair rather than taking it.
+                //
+                // Through the same type the fog reads the code back with,
+                // so a vertex and the murk round a swimmer's head cannot
+                // disagree about what a code means. `depth` is the face's
+                // own cell here; the column under it rides in the same
+                // word and the shader puts the two together.
+                let water_code = if is_liquid(id) {
+                    let [temperature, humidity] = sampled_climate();
+                    // One sample a column, taken at whichever cell of the
+                    // column the scan reaches first -- which is the
+                    // lowest, the loop climbing. That matters only for the
+                    // `low` term inside it, which is already saturated
+                    // under the waterline where nearly all water is; and
+                    // one value a column is the point, because two cells
+                    // of one pond disagreeing about their colour is the
+                    // seam this whole palette is written to avoid.
+                    let column = z as usize * CHUNK_SIZE_X + x as usize;
+                    if ground_wetness[column].is_nan() {
+                        ground_wetness[column] = world.ground_wetness(gx, gz, y);
+                    }
+                    let (chill, silt) = primitive_shared::worldgen::water_climate_of(
+                        temperature,
+                        humidity,
+                        ground_wetness[column],
+                        y,
+                    );
+                    crate::engine::water::WaterTint { chill, silt, depth: 1.0 }.code()
+                } else {
+                    0
+                };
+                let tint = if is_foliage(id) {
+                    let [temperature, humidity] = sampled_climate();
                     pack_tint(cooled_by_altitude(temperature, y), humidity)
                 } else {
                     // ...or what is on its surface, for the few blocks that
@@ -4405,54 +4556,51 @@ pub fn build_mesh(
                                 } else {
                                     MOTTLED_BIT
                                 },
-                            // One byte, three readings that cannot
-                            // meet: a translucent face is neither
-                            // foliage nor cropped, and a cropped side
-                            // is never foliage.
-                            if translucent_flag != 0 {
-                                // **Only the surface carries a depth**,
-                                // and the reason is what the number
-                                // means: `liquid_depth_below` counts the
-                                // water *under* this cell, which is what
-                                // a ray crosses when it goes down
-                                // through the top of a lake and has
-                                // nothing to do with what it crosses
-                                // through a *wall*. A waterfall is one
-                                // cell thick and stands over a pool, so
-                                // its sides were handed the pool's depth
-                                // -- four and five -- and drawn at an
-                                // alpha of 0.95 and 0.97 where a sheet
-                                // of falling water is 0.72. Two things
-                                // came of that, and a player
-                                // photographed the second: the fall
-                                // stopped being water and became a slab
-                                // of blue paint, and the far wall of the
-                                // column -- which the blended pass
-                                // composites over the near one, because
-                                // it draws with no back-face culling and
-                                // in emission order inside a chunk --
-                                // stopped blending into it and became a
-                                // hard-edged patch of somebody else's
-                                // transparency hanging in mid-fall.
-                                //
-                                // 1 is `WATER_ALPHA` exactly (the
-                                // shader fades from the first cell), so
-                                // every vertical face of water is
-                                // drawn exactly as it was before the
-                                // fade existed, and the fade keeps the
-                                // face it was measured on. See
-                                // `WATER_DEPTH_FADE` in shader.wgsl.
-                                if face_index == 0 {
-                                    *water_depth.get_or_insert_with(|| {
-                                        liquid_depth_below(cache, x, y, z)
-                                    })
-                                } else {
-                                    1
-                                }
-                            } else {
-                                tint
-                            },
+                            // The byte is a foliage tint or what lies on a
+                            // surface. A face of water has neither and
+                            // carries its climate in the coordinate word,
+                            // where there is room for a colour rather than
+                            // for fifteen steps of one (see
+                            // `WATER_CLIMATE_SHIFT`).
+                            tint,
                         );
+                        // **What a face of water carries instead**: where
+                        // it is in its picture, what colour the water is,
+                        // and how much of it stands under this face.
+                        //
+                        // **Only the surface carries one**, and the
+                        // reason is what the number means:
+                        // `liquid_depth_below` counts the water *under*
+                        // this cell, which is what a ray crosses when it
+                        // goes down through the top of a lake and has
+                        // nothing to do with what it crosses through a
+                        // *wall*. A waterfall is one cell thick and
+                        // stands over a pool, so its sides were handed
+                        // the pool's depth -- four and five -- and drawn
+                        // at an alpha of 0.95 and 0.97 where a sheet of
+                        // falling water is 0.72. Two things came of
+                        // that, and a player photographed the second:
+                        // the fall stopped being water and became a slab
+                        // of blue paint, and the far wall of the column
+                        // -- which the blended pass composites over the
+                        // near one, because it draws with no back-face
+                        // culling and in emission order inside a chunk
+                        // -- stopped blending into it and became a
+                        // hard-edged patch of somebody else's
+                        // transparency hanging in mid-fall.
+                        //
+                        // A side is one cell of water by definition, and
+                        // the shader reads a face with no depth on it as
+                        // exactly that: `WATER_ALPHA` and nothing faded,
+                        // which is how every vertical face of water was
+                        // drawn before the fade existed. See
+                        // `WATER_DEPTH_FADE` in shader.wgsl.
+                        let cells_under = if translucent_flag != 0 && face_index == 0 {
+                            *water_depth
+                                .get_or_insert_with(|| liquid_depth_below(cache, x, y, z))
+                        } else {
+                            0
+                        };
                         // `face_uv` puts v 0 at a side's top edge and 1 at
                         // its foot, so scaling v by the height keeps the
                         // top rows and cuts the rest.
@@ -4500,6 +4648,18 @@ pub fn build_mesh(
                             (1.0 - (bottom + corner[1] * (corner_top - bottom))).clamp(0.0, 1.0)
                         };
                         vertices.push(match (bite_crop, side_crop) {
+                            // **Water first**, because a face of water
+                            // reads the coordinate word its own way
+                            // (`WATER_CLIMATE_SHIFT`) and none of the arms
+                            // below apply to it: it is never bitten and
+                            // `side_crop` leaves it out on purpose. The
+                            // cut a shallow or sloped surface makes in its
+                            // own side rides in the same word.
+                            _ if translucent_flag != 0 => vertex.liquid(
+                                [uv[0], if liquid_crop { liquid_v() } else { uv[1] }],
+                                water_code,
+                                cells_under,
+                            ),
                             (None, false) if liquid_crop => vertex.with_fine_uv([uv[0], liquid_v()]),
                             (Some([du, dv]), _) if cut => vertex.with_fine_uv([uv[0] * du, uv[1] * dv]).chipped(),
                             (Some([du, dv]), _) => vertex.with_fine_uv([uv[0] * du, uv[1] * dv]),
@@ -5266,7 +5426,7 @@ fn emit_merged(
 /// the shader's fade has flattened out long before this many blocks, so
 /// counting further would cost the loop and change nothing. The count
 /// stops at the bottom of the chunk, which is stone, so it terminates.
-const MAX_WATER_DEPTH: u32 = 24;
+pub(crate) const MAX_WATER_DEPTH: u32 = 24;
 
 fn liquid_depth_below(cache: &Neighbourhood, x: i32, y: i32, z: i32) -> u32 {
     let mut depth = 0;
@@ -9023,7 +9183,7 @@ mod tests {
             (
                 [1.0, 1.0],
                 MAX_TEXTURE_LAYERS - 1,
-                pack_light(9, 4, 2, 3) | TRANSLUCENT_BIT,
+                pack_light(9, 4, 2, 3),
                 pack_tint(1.0, 1.0),
             ),
         ] {
@@ -9033,6 +9193,42 @@ mod tests {
             assert_eq!(v.light(), light, "light did not survive packing");
             assert_eq!(v.tint(), tint, "tint did not survive packing");
             assert_eq!(v.position, [1.0, 2.0, 3.0]);
+        }
+    }
+
+    /// **A face of water packs three things into the coordinate word and
+    /// gives all three back**, and the layer it shares the word with
+    /// comes out too.
+    ///
+    /// The water reading is the one the shader picks on the translucent
+    /// bit alone (`WATER_CLIMATE_SHIFT`), so there is no flag saying which
+    /// reading is in force and nothing would report a field written over
+    /// its neighbour. What it would look like is a lake wearing another
+    /// climate's colour, or -- worse, because it is silent -- the far half
+    /// of a sea drawn at the wrong transparency.
+    #[test]
+    fn a_face_of_water_packs_its_own_word_and_gives_it_back() {
+        for layer in [0u32, 255, 256, 511, 512, 1024, MAX_TEXTURE_LAYERS - 1] {
+            for (uv, climate, cells) in [
+                ([0.0f32, 0.0], 0u32, 0u32),
+                ([1.0, 1.0], WATER_CLIMATE_MASK, MAX_WATER_DEPTH),
+                // A sloped or shallow surface cutting its own side, which
+                // is the one fraction a face of water ever wants.
+                ([1.0, 0.375], 9_001, 0),
+                ([0.0, 0.875], 1, 1),
+            ] {
+                let light = pack_light(15, 9, 2, 5) | TRANSLUCENT_BIT | MOTTLED_BIT;
+                let v = Vertex::tinted([1.0, 2.0, 3.0], [1.0, 1.0], layer, light, 0)
+                    .liquid(uv, climate, cells);
+                let back = v.uv();
+                assert!(
+                    (back[0] - uv[0]).abs() < 1e-6 && (back[1] - uv[1]).abs() < 0.005,
+                    "layer {layer}: {uv:?} came back as {back:?}"
+                );
+                assert_eq!(v.water(), (climate, cells), "layer {layer} corrupted the water");
+                assert_eq!(v.tex_layer(), layer, "the water word ate the layer's top bits");
+                assert_eq!(v.uv & FINE_UV_BIT, 0, "a face of water claimed a fine coordinate");
+            }
         }
     }
 
@@ -9657,8 +9853,10 @@ mod tests {
     /// wrong picture.
     #[test]
     fn a_layer_past_the_old_ceiling_of_two_hundred_and_fifty_six_survives_the_packing() {
-        // The vertex.
-        let light = pack_light(15, 9, 2, 5) | TRANSLUCENT_BIT | MOTTLED_BIT;
+        // The vertex. Not translucent: a face of water reads this word
+        // its own way and is held to it by
+        // `a_face_of_water_packs_its_own_word_and_gives_it_back`.
+        let light = pack_light(15, 9, 2, 5) | MOTTLED_BIT;
         for layer in [0, 1, 255, 256, 257, 511, 512, 1023, 1024, 1536, MAX_TEXTURE_LAYERS - 1] {
             let v = Vertex::tinted([1.0, 2.0, 3.0], [4.0, 5.0], layer, light, 233);
             assert_eq!(v.tex_layer(), layer, "layer {layer} did not survive the vertex");
@@ -13115,11 +13313,12 @@ mod transparency_tests {
                     BLOCK_AIR
                 }
             }));
+            // A flat sea has no sides, so every face here is a lid.
             let depths: std::collections::BTreeSet<u32> = out
                 .vertices
                 .iter()
                 .filter(|v| v.light() & TRANSLUCENT_BIT != 0)
-                .map(|v| v.tint())
+                .map(|v| v.water().1)
                 .collect();
             assert_eq!(
                 depths,
@@ -13129,33 +13328,38 @@ mod transparency_tests {
         }
     }
 
-    /// The byte has three readings and they must not meet.
+    /// **The two words do not trespass on each other.**
     ///
-    /// Foliage tints run 1..=225; a water depth is not one, and the
-    /// thing that keeps them apart is that a translucent face is never
-    /// foliage. Said out loud here, because the day someone gives glass
-    /// or ice the translucent bit is the day this stops being true by
-    /// accident.
+    /// A face of water reads the coordinate word its own way
+    /// (`WATER_CLIMATE_SHIFT`) and leaves the tint byte alone; everything
+    /// else reads the byte and leaves the water's bits alone. Said out
+    /// loud here, because the day somebody gives glass or ice the
+    /// translucent bit is the day one of those stops being true by
+    /// accident -- and the symptom would be a pane of glass wearing a
+    /// sea's colour, or a lake wearing a leaf's.
     #[test]
-    fn nothing_but_water_carries_a_water_depth() {
+    fn nothing_but_water_reads_the_coordinate_word_as_water() {
         let out = mesh_of(&cache_of(|_, y, _| match y {
             0..=3 => BLOCK_STONE,
             4 => BLOCK_WATER,
             5 => BLOCK_LEAVES,
             _ => BLOCK_AIR,
         }));
+        let mut water = 0;
         for v in &out.vertices {
-            let translucent = v.light() & TRANSLUCENT_BIT != 0;
-            if translucent {
-                let depth = v.tint();
-                assert!(
-                    (1..=MAX_WATER_DEPTH).contains(&depth),
-                    "a water face said its depth was {depth}"
-                );
+            if v.light() & TRANSLUCENT_BIT == 0 {
+                continue;
             }
+            water += 1;
+            let (climate, depth) = v.water();
+            assert!(depth <= MAX_WATER_DEPTH, "a water face said its depth was {depth}");
+            assert!(climate <= WATER_CLIMATE_MASK);
+            assert_eq!(v.tint(), 0, "a face of water wrote a tint byte as well");
+            assert_eq!(v.uv & FINE_UV_BIT, 0, "a face of water claimed a fine coordinate");
         }
+        assert!(water > 0, "the fixture drew no water");
         // ...and the opaque world still uses the byte for what it
-        // always did: a leaf is tinted, and a tint is not a depth.
+        // always did: a leaf is tinted, and a tint is not a climate.
         assert!(out
             .vertices
             .iter()
@@ -13526,22 +13730,20 @@ mod liquid_surface_tests {
         for index in &mesh.indices[mesh.sprite_end as usize..] {
             let v = &mesh.vertices[*index as usize];
             let face = (v.light() >> 10) & 7;
+            let depth = v.water().1;
             if face == 0 {
                 // The pool is three cells deep and the fall two more,
                 // so every surface in the fixture is 3 or 5 -- and
-                // never 1, or the fade would have nothing to do.
+                // never nought, or the fade would have nothing to do.
                 assert!(
-                    v.tint() == 3 || v.tint() == 5,
-                    "a water surface carries depth {}, not the column under it",
-                    v.tint()
+                    depth == 3 || depth == 5,
+                    "a water surface carries depth {depth}, not the column under it"
                 );
                 tops += 1;
             } else {
                 assert_eq!(
-                    v.tint(),
-                    1,
-                    "a vertical face of water carries depth {} -- the fade is                      measuring the column below a wall again",
-                    v.tint()
+                    depth, 0,
+                    "a vertical face of water carries depth {depth} -- the fade is                      measuring the column below a wall again"
                 );
                 sides += 1;
             }

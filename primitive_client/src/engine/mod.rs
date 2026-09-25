@@ -66,6 +66,7 @@ pub mod renderer;
 pub mod shadow;
 pub mod sky;
 pub mod texture;
+pub mod water;
 
 /// One graphics device, shared by every test that needs one.
 ///

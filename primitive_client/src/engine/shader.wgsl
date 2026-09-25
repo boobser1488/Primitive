@@ -211,6 +211,21 @@ const SURFACE_TINT_BASE: u32 = 226u;
 // toward the eye by `DECAL_DEPTH` and wears no tint. Must match `DECAL_TINT`
 // in mesh.rs, which weighs it against a lift and a pipeline bias.
 const DECAL_TINT: u32 = 255u;
+// **How a face of water reads the coordinate word.** Must match the bit
+// table at `mesh::WATER_CLIMATE_SHIFT`, which says why water has a reading
+// of its own: it carries a colour, and a colour does not fit in the tint
+// byte the rest of the world's climate rides in.
+const WATER_V_SHIFT: u32 = 1u;
+const WATER_V_UNITS: f32 = 255.0;
+const WATER_V_MASK: u32 = 255u;
+const WATER_DEPTH_SHIFT: u32 = 9u;
+const WATER_DEPTH_MASK: u32 = 31u;
+const WATER_CLIMATE_SHIFT: u32 = 14u;
+const WATER_CLIMATE_MASK: u32 = 16383u;
+// Steps of each climate axis; must match `CHILL_STEPS` and `SILT_STEPS` in
+// engine/water.rs, which says why they differ.
+const WATER_CHILL_STEPS: u32 = 32u;
+const WATER_SILT_STEPS: u32 = 512u;
 // How far, as a share of the depth range: sixteen steps of a 32-bit float
 // buffer where the ground is (depth past a half, where a step is 2^-24) --
 // and more the more edge-on the eye sees the face, which is the polygon
@@ -390,6 +405,83 @@ fn foliage_tint(code: u32) -> vec3<f32> {
     );
 }
 
+// ---- what colour water is ----
+//
+// **Eight colours and three curves, and every one of them is written
+// twice**: here, where the surface is painted, and in `engine::water`,
+// where the murk a swimmer sees at distance is worked out on the CPU and
+// handed over as the fog colour. `water::tests::the_shader_paints_the_
+// water_this_file_mixes` parses this text and holds the two together --
+// they were allowed to drift once, and the note over `fog::UNDERWATER`
+// says what that looked like.
+//
+// Read `engine::water`'s module note for what the colour is made of. The
+// short of it: the climate as two smooth fields and never a biome, the
+// depth of the column under the face, and the sky on it as a highlight
+// rather than a wash.
+const WATER_MEDIAN: vec3<f32> = vec3<f32>(0.041, 0.147, 0.509);
+const WATER_DEEP_COLD: vec3<f32> = vec3<f32>(0.014, 0.038, 0.115);
+const WATER_DEEP_WARM: vec3<f32> = vec3<f32>(0.012, 0.070, 0.330);
+const WATER_SHOAL: vec3<f32> = vec3<f32>(1.60, 1.90, 1.35);
+const WATER_SHOAL_TROPIC: vec3<f32> = vec3<f32>(2.40, 3.20, 1.55);
+const WATER_PEAT_WARM: vec3<f32> = vec3<f32>(0.045, 0.030, 0.012);
+const WATER_PEAT_COLD: vec3<f32> = vec3<f32>(0.026, 0.020, 0.011);
+const WATER_FLOUR_WARM: vec3<f32> = vec3<f32>(0.045, 0.150, 0.185);
+const WATER_FLOUR_COLD: vec3<f32> = vec3<f32>(0.038, 0.130, 0.170);
+const WATER_SHOAL_CELLS: f32 = 5.0;
+const WATER_TROPIC_FROM: f32 = 0.45;
+const WATER_TROPIC_FULL: f32 = 1.00;
+const WATER_PEAT_SHALLOW: f32 = 2.0;
+const WATER_PEAT_DEEP: f32 = 10.0;
+
+// **What every water takes out of everything, per block, whatever colour
+// it is**: even the channel a water lets through is dimmed by being
+// looked through, and without a floor the brightest channel of a marsh
+// would reach a swimmer undimmed over twenty blocks.
+const ABSORB_FLOOR: f32 = 0.06;
+// How much absorption one e-fold of the murk's hue stands for.
+//
+// Chosen so that plain temperate water lands on the three constants this
+// replaced -- (0.42, 0.11, 0.06), measured and argued over -- rather than
+// on a new number nobody has looked at. See where it is used.
+const ABSORB_PER_LOG: f32 = 0.27;
+
+// The water's own colour, as a multiplier over its picture.
+//
+// `code` is the fourteen bits a translucent vertex carries in its
+// coordinate word (`water::WaterTint::code`): how cold the water is, and
+// what is suspended in it. `depth` is the cells of column under the face.
+//
+// The divide by `WATER_MEDIAN` is what makes the picture a *ripple* rather
+// than a colour: the texel's deviation from its own middle survives and
+// the hue is entirely this palette's. Without it a marsh wanted a red
+// multiplier of fourteen over a blue picture, and a multiplier of fourteen
+// turns a dither into stripes.
+fn water_body(code: u32, depth: f32) -> vec3<f32> {
+    let index = min(code, WATER_CHILL_STEPS * WATER_SILT_STEPS - 1u);
+    let warmth = 1.0 - f32(index / WATER_SILT_STEPS) / f32(WATER_CHILL_STEPS - 1u);
+    let silt = f32(index % WATER_SILT_STEPS) / f32(WATER_SILT_STEPS - 1u);
+    // Peat below the middle of the axis, flour above it, nothing in the
+    // middle -- two half-ranges rather than one square, because the
+    // average of brown and turquoise is mud.
+    let flour = clamp(silt * 2.0 - 1.0, 0.0, 1.0);
+    // ...and peat only where the water is shallow enough to be a marsh.
+    // This is what tells a creek from the bay it runs into without asking
+    // the continent spline; see `worldgen::water_climate_of`.
+    let peat = clamp(1.0 - silt * 2.0, 0.0, 1.0)
+        * (1.0 - smoothstep(WATER_PEAT_SHALLOW, WATER_PEAT_DEEP, depth));
+
+    let clear = mix(WATER_DEEP_COLD, WATER_DEEP_WARM, warmth);
+    var body = mix(clear, mix(WATER_PEAT_COLD, WATER_PEAT_WARM, warmth), peat);
+    body = mix(body, mix(WATER_FLOUR_COLD, WATER_FLOUR_WARM, warmth), flour);
+
+    // The bed, showing through what little column there is.
+    let shallow = clamp(1.0 - (depth - 1.0) / WATER_SHOAL_CELLS, 0.0, 1.0);
+    let tropic = smoothstep(WATER_TROPIC_FROM, WATER_TROPIC_FULL, warmth);
+    let shoal = mix(vec3<f32>(1.0), mix(WATER_SHOAL, WATER_SHOAL_TROPIC, tropic), shallow);
+    return body * shoal / WATER_MEDIAN;
+}
+
 // How the light budget is split between the beam and the sky.
 //
 // They sum to one, and both colours arrive at luminance one, so this
@@ -549,9 +641,21 @@ const SHOULDER_ROOM: f32 = 0.15;
 // half of the sea came out the colour of the haze over it and the water
 // stopped being water. A real sea is rough at every scale, and the roughness
 // is what stops the grazing reflection ever getting there -- every facet
-// points somewhere else. Five and a half tenths leaves the sea its own blue
-// at any angle, and it is still most of the picture where it matters.
-const WATER_SHEEN: f32 = 0.55;
+// points somewhere else.
+//
+// **It was five and a half tenths and is now three**, and the player who
+// asked for it put it exactly right: "от неба она голубая" -- the water
+// was taking its colour from the sky instead of having one. Five and a
+// half tenths is a reasonable ceiling for a *mirror*; it is far too much
+// for a wash, and the far half of any open water in the game came out the
+// pale blue of the haze over it. Three tenths still lays the horizon along
+// the water at a grazing angle -- which is the shape the eye reads as a
+// surface -- and leaves the near and middle field the water's own colour,
+// which is now a colour and not a picture (see `water_body`).
+//
+// The sun's own glitter is not scaled with it: a highlight is a highlight
+// and the complaint was never about the highlight.
+const WATER_SHEEN: f32 = 0.30;
 // What water gives back at normal incidence -- the real number, and it
 // matters: at nought a pond looked straight down into goes dead, and this is
 // the faint sheen a still puddle has from directly above.
@@ -563,7 +667,12 @@ const WATER_F0: f32 = 0.02;
 // twenty-fourth, which is where this started, the path was a soft white
 // patch a third of the frame wide and read as a bloom rather than as the
 // sun on water.
-const WATER_GLITTER: f32 = 0.75;
+//
+// **Its own ceiling now, and the number is the product of the two it used
+// to be** (0.75 through `WATER_SHEEN` at 0.55): the sun's path on the
+// water is exactly what it was measured to be, while the sky's wash came
+// down by nearly half. See where it is used.
+const WATER_GLITTER: f32 = 0.41;
 
 // **What rain leaves on what it falls on**, as a multiplier over the albedo.
 //
@@ -1351,6 +1460,19 @@ fn terrain_vertex(in: VertexInput) -> VertexOutput {
             f32((in.uv_cells >> FINE_V_SHIFT) & FINE_MASK),
         ) / FINE_UNITS;
     }
+    if ((light & TRANSLUCENT_BIT) != 0u) {
+        // **A face of water reads this word its own way**, because it has
+        // three things to put in it and nothing else has: where it is in
+        // its picture, how much water stands under it, and what colour the
+        // water is. It can afford the room because water is the one thing
+        // the mesher never merges, so a coordinate is nought or one cell
+        // and wants a bit rather than five. See `mesh::WATER_CLIMATE_SHIFT`
+        // for the bit table and for why a colour does not fit in the byte.
+        uv = vec2<f32>(
+            f32(in.uv_cells & 1u),
+            f32((in.uv_cells >> WATER_V_SHIFT) & WATER_V_MASK) / WATER_V_UNITS,
+        );
+    }
     out.clip_position = globals.view_proj * vec4<f32>(world, 1.0);
     out.uv = uv;
     out.tex_layer = ((in.packed >> LAYER_SHIFT) & LAYER_MASK)
@@ -1375,11 +1497,22 @@ fn terrain_vertex(in: VertexInput) -> VertexOutput {
         out.clip_position.z = out.clip_position.z - DECAL_SCALE * (DECAL_DEPTH + DECAL_SLOPE / over) * out.clip_position.w;
     }
     if (out.translucent != 0u) {
-        // The byte's second reading, and the translucent bit is what
-        // picks it: water is not foliage, so the two cannot meet. See the
-        // note beside `liquid_depth_below` in mesh.rs.
-        out.water_depth = f32(code);
-        out.tint = vec3<f32>(1.0);
+        // **How much water stands under this face.** Only the lid of a
+        // body of water carries a count; a side carries nought, and
+        // reading that as one cell is what keeps every vertical face of
+        // water drawn exactly as it was before the fade existed.
+        let cells = (in.uv_cells >> WATER_DEPTH_SHIFT) & WATER_DEPTH_MASK;
+        out.water_depth = max(f32(cells), 1.0);
+        // ...and what colour this water is. Negative, which is how the
+        // fragment shader is told the tint covers the whole texel rather
+        // than only the green of it -- the same road a surface tint takes
+        // (see `foliage_tint`), and the right one here for the same
+        // reason: water's colour is the water's, not a shift of whatever
+        // its picture happens to be.
+        out.tint = -water_body(
+            (in.uv_cells >> WATER_CLIMATE_SHIFT) & WATER_CLIMATE_MASK,
+            out.water_depth,
+        );
     } else {
         out.tint = foliage_tint(code);
         out.water_depth = 0.0;
@@ -2356,17 +2489,34 @@ fn shade_lit_sky(in: VertexOutput, sampled: vec4<f32>, lambert: f32, sun_sky: f3
     // absorbing with depth, and that is a property of the medium rather
     // than a distance cue the player may switch off.
     if (globals.extra.z > 0.5) {
-        // Beer-Lambert per channel, red soaked up fastest. Even at zero
-        // distance there is water between the eye and everything, so
-        // there is a floor under the absorption.
-        let absorb = vec3<f32>(0.42, 0.11, 0.06);
+        // Beer-Lambert per channel, and **what it takes out is read off
+        // the water's own colour**.
+        //
+        // It was three constants -- (0.42, 0.11, 0.06), red soaked up
+        // fastest -- which is the right shape for a clear lake and the
+        // wrong one for every other water there is: a marsh takes the
+        // *blue* out first, which is the whole reason it is brown. The
+        // fog colour under water is the murk of the water the head is in
+        // (`water::WaterTint::murk`), so its hue already says which
+        // channel survives; a channel that comes back at a fraction of
+        // the brightest one is a channel this water eats, and the log of
+        // that fraction is what a Beer-Lambert coefficient is.
+        //
+        // Rejected: a second uniform carrying the absorption. It would be
+        // the same three numbers derived from the same colour, in a place
+        // where nothing holds the two together -- and the last time two
+        // halves of the underwater look were free to disagree, the far
+        // bed stood out of the water in flat bright bands.
+        let medium = max(globals.fog_color.rgb, vec3<f32>(1e-4));
+        let share = medium / max(max(medium.r, medium.g), medium.b);
+        let absorb = ABSORB_FLOOR - ABSORB_PER_LOG * log(share);
         let depth = distance + 1.5;
         color *= exp(-absorb * depth);
         // ...and everything trends toward the colour of the water rather
         // than to black, or deep water reads as a cave. The fog colour
         // unscaled: it is what `fs_sky` paints under water and what the fog
         // below finishes on, and it took all three agreeing to stop the far
-        // bed standing out of the water in bands (see `fog::UNDERWATER`).
+        // bed standing out of the water in bands (see `water::WaterTint::murk`).
         let murk = clamp(depth / 26.0, 0.0, 0.85);
         color = mix(color, globals.fog_color.rgb, murk);
     }
@@ -2407,8 +2557,8 @@ fn shade_lit_sky(in: VertexOutput, sampled: vec4<f32>, lambert: f32, sun_sky: f3
         let g2 = grazing * grazing;
         let mirrored = vec3<f32>(ray.x, -ray.y, ray.z);
         let sky_seen = glow_over(globals.fog_color.rgb, mirrored);
-        let fresnel = (WATER_F0 + (1.0 - WATER_F0) * g2 * g2 * grazing) * WATER_SHEEN;
-        color = mix(color, sky_seen, fresnel);
+        let schlick = WATER_F0 + (1.0 - WATER_F0) * g2 * g2 * grazing;
+        color = mix(color, sky_seen, schlick * WATER_SHEEN);
         // ...and the sun itself, where the mirrored ray points at it. Two
         // squarings and a cube rather than a `pow`, the way `glow_over`
         // shapes its halo.
@@ -2416,13 +2566,19 @@ fn shade_lit_sky(in: VertexOutput, sampled: vec4<f32>, lambert: f32, sun_sky: f3
         let f2 = facing * facing;
         let f8 = f2 * f2 * f2 * f2;
         let f24 = f8 * f8 * f8;
-        // **Through the same Fresnel as the sky.** The sun is part of what
-        // the surface reflects, so it obeys the same rule: two per cent of
-        // it straight down and nearly all of it along. Added on its own it
-        // was a white disc on the water under the sun whatever the angle,
-        // which reads as a lens artefact rather than as a sun path -- and a
-        // pond looked straight into had a lamp in it.
-        color = color + globals.sun_color.rgb * (globals.sun.w * WATER_GLITTER * fresnel * f24 * f24);
+        // **Through the same Fresnel as the sky, and through its own
+        // ceiling.** The sun is part of what the surface reflects, so it
+        // obeys the same curve: two per cent of it straight down and
+        // nearly all of it along. Added on its own it was a white disc on
+        // the water under the sun whatever the angle, which reads as a
+        // lens artefact rather than as a sun path -- and a pond looked
+        // straight into had a lamp in it.
+        //
+        // The *ceiling* is its own, though, and it used to be `WATER_SHEEN`
+        // as well. That was fine while the two wanted the same number and
+        // wrong the moment the sky's wash came down: a highlight is a
+        // highlight, and nobody complained about the highlight.
+        color = color + globals.sun_color.rgb * (globals.sun.w * WATER_GLITTER * schlick * f24 * f24);
     }
 
     // **The air between here and the eye**, which used to be nothing at all
