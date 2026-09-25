@@ -471,7 +471,7 @@ impl LookPipelines {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
@@ -545,7 +545,7 @@ impl LookPipelines {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
@@ -607,7 +607,7 @@ impl LookPipelines {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 // Tests but does not write, so the quad lies on the face
                 // without taking the depth slot from it.
                 depth_write_enabled: false,
@@ -668,7 +668,7 @@ impl LookPipelines {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
@@ -708,7 +708,7 @@ impl LookPipelines {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
@@ -755,7 +755,7 @@ impl LookPipelines {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 // Writes nothing, and survives only where the depth
                 // buffer is still at the far plane -- which is exactly
                 // where no terrain was drawn. Sky first with terrain
@@ -898,7 +898,7 @@ fn model_pipeline(
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
+            format: depth_format(),
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -1303,7 +1303,13 @@ pub struct Scene<'a> {
 /// is what puts the wait at the top of the frame where it belongs.
 pub struct Frame(wgpu::SurfaceTexture);
 
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// The depth format, re-exported here because this file is where every
+/// attachment and every pipeline that uses it is written.
+///
+/// It is a function and not a constant since `PRIMITIVE_OPT_DEPTH16`: see
+/// `engine::opt::depth_format` for what the smaller buffer buys on a
+/// tile-based GPU and what it costs a decal.
+use crate::engine::opt::depth_format;
 
 /// Which instance a chunk's draw reads its offset from.
 ///
@@ -1965,8 +1971,33 @@ impl GraphicsState {
         let sample_count = choose_sample_count(
             msaa,
             adapter.get_texture_format_features(surface_format).flags,
-            adapter.get_texture_format_features(DEPTH_FORMAT).flags,
+            adapter.get_texture_format_features(depth_format()).flags,
             !format_feature_features(&adapter).is_empty(),
+        );
+        // **Whether this device can do half-precision arithmetic**, said
+        // out loud at startup and nowhere used yet.
+        //
+        // The device's own numbers put 8.2 ms of the solid pass in the
+        // fragment shader (see `engine::opt`), and on a mobile GPU the
+        // usual next move after that is `f16`: half the register pressure
+        // and, on the simple vector work, twice the rate. It is not free
+        // to adopt -- WGSL has no precision qualifier, so every value that
+        // goes half has to say so by type, and the shading chain would
+        // have to be written twice to stay switchable -- so it is not
+        // worth starting until two things are known: that the device
+        // offers `SHADER_F16` at all, and which of the four ablations the
+        // time is actually in. Transcendentals (`exp`, `pow`,
+        // `inverseSqrt`, `smoothstep`) run at the same rate either way, so
+        // f16 pays for the light and the tint and not for the fog's ramp.
+        //
+        // This line answers the first of the two without a build.
+        println!(
+            "shader f16: {}",
+            if adapter.features().contains(wgpu::Features::SHADER_F16) {
+                "offered"
+            } else {
+                "not offered by this adapter"
+            }
         );
         // One line, and the shortfall named in it: "msaa: 1x" on a
         // machine whose settings say 4 is a question, and this is where
@@ -2226,7 +2257,7 @@ impl GraphicsState {
             // Exactly the sky's own depth state: survives only where the
             // depth buffer is still at the far plane, and writes nothing.
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: wgpu::StencilState::default(),
@@ -2339,7 +2370,7 @@ impl GraphicsState {
             // depth state -- but with the test always passing and no
             // writes, so the crosshair sits on top of everything.
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::Always,
                 stencil: wgpu::StencilState::default(),
@@ -2394,7 +2425,7 @@ impl GraphicsState {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::Always,
                 stencil: wgpu::StencilState::default(),
@@ -2444,7 +2475,7 @@ impl GraphicsState {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
@@ -2643,7 +2674,7 @@ impl GraphicsState {
                 &self.globals_bind_group_layout,
                 &self.texture_bind_group_layout,
                 self.config.format,
-                DEPTH_FORMAT,
+                depth_format(),
                 self.sample_count,
                 crate::engine::shadow::RESOLUTION,
                 (MAX_CHUNK_DRAWS * std::mem::size_of::<[f32; 4]>()) as u64,
@@ -5023,7 +5054,7 @@ fn create_scene_target(
 /// The sample count the main pass will actually use.
 ///
 /// `requested` is the setting; the two flag sets are what the adapter
-/// reports for the swapchain format and for `DEPTH_FORMAT`. The answer
+/// reports for the swapchain format and for the depth format. The answer
 /// is the largest power of two not above the request that *both*
 /// formats can be rendered at and that the colour format can be
 /// resolved from -- one attachment at a count the other lacks is a
@@ -5192,7 +5223,7 @@ fn create_depth_view(
         mip_level_count: 1,
         sample_count,
         dimension: wgpu::TextureDimension::D2,
-        format: DEPTH_FORMAT,
+        format: depth_format(),
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
@@ -16319,7 +16350,7 @@ pub(crate) mod offscreen_repro {
                     conservative: false,
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
+                    format: depth_format(),
                     depth_write_enabled: write_depth,
                     depth_compare: wgpu::CompareFunction::Less,
                     stencil: wgpu::StencilState::default(),
@@ -16372,7 +16403,7 @@ pub(crate) mod offscreen_repro {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: wgpu::StencilState::default(),
@@ -16453,7 +16484,7 @@ pub(crate) mod offscreen_repro {
             mip_level_count: 1,
             sample_count: samples,
             dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
+            format: depth_format(),
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
@@ -17076,7 +17107,7 @@ pub(crate) mod offscreen_repro {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
@@ -17135,7 +17166,7 @@ pub(crate) mod offscreen_repro {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
+            format: depth_format(),
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
@@ -17713,7 +17744,7 @@ pub(crate) mod offscreen_repro {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
@@ -17777,7 +17808,7 @@ pub(crate) mod offscreen_repro {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
@@ -17819,7 +17850,7 @@ pub(crate) mod offscreen_repro {
             mip_level_count: 1,
             sample_count: samples,
             dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
+            format: depth_format(),
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
@@ -18465,7 +18496,7 @@ pub(crate) mod offscreen_repro {
             }),
             primitive: no_cull,
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
@@ -18498,7 +18529,7 @@ pub(crate) mod offscreen_repro {
             }),
             primitive: no_cull,
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
@@ -18547,7 +18578,7 @@ pub(crate) mod offscreen_repro {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
+            format: depth_format(),
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
@@ -18926,7 +18957,7 @@ mod shadow_tools {
                             conservative: false,
                         },
                         depth_stencil: Some(wgpu::DepthStencilState {
-                            format: DEPTH_FORMAT,
+                            format: depth_format(),
                             depth_write_enabled: true,
                             depth_compare: wgpu::CompareFunction::Less,
                             stencil: wgpu::StencilState::default(),
@@ -18948,7 +18979,7 @@ mod shadow_tools {
                 &globals_layout,
                 &texture_layout,
                 FORMAT,
-                DEPTH_FORMAT,
+                depth_format(),
                 samples,
                 crate::engine::shadow::RESOLUTION,
                 (MAX_CHUNK_DRAWS * std::mem::size_of::<[f32; 4]>()) as u64,
@@ -18991,7 +19022,7 @@ mod shadow_tools {
                 texture("shadow tool samples", samples, FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT)
                     .create_view(&Default::default())
             });
-            let depth_view = texture("shadow tool depth", samples, DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT)
+            let depth_view = texture("shadow tool depth", samples, depth_format(), wgpu::TextureUsages::RENDER_ATTACHMENT)
                 .create_view(&Default::default());
             Self {
                 device,
@@ -19795,7 +19826,7 @@ mod lighting_tools {
                     conservative: false,
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
+                    format: depth_format(),
                     depth_write_enabled: write,
                     depth_compare: wgpu::CompareFunction::Less,
                     stencil: wgpu::StencilState::default(),
@@ -19831,7 +19862,7 @@ mod lighting_tools {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: wgpu::StencilState::default(),
@@ -20049,7 +20080,7 @@ mod lighting_tools {
                         &globals_layout,
                         &texture_layout,
                         FORMAT,
-                        DEPTH_FORMAT,
+                        depth_format(),
                         samples,
                         crate::engine::shadow::RESOLUTION,
                         (MAX_CHUNK_DRAWS * std::mem::size_of::<[f32; 4]>()) as u64,
@@ -20124,7 +20155,7 @@ mod lighting_tools {
                 texture("lighting tool samples", samples, FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT)
                     .create_view(&Default::default())
             });
-            let depth_view = texture("lighting tool depth", samples, DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT)
+            let depth_view = texture("lighting tool depth", samples, depth_format(), wgpu::TextureUsages::RENDER_ATTACHMENT)
                 .create_view(&Default::default());
             Self {
                 device,
@@ -23610,7 +23641,7 @@ mod raft_repro {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             })
@@ -24010,7 +24041,7 @@ mod raft_repro {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: DEPTH_FORMAT,
+                format: depth_format(),
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             })
