@@ -151,6 +151,32 @@ impl Quality {
 /// A phone was never going to start anywhere else: nobody has measured
 /// it there, and the phone is where arithmetic per pixel was already
 /// found to be dear.
+///
+/// **Two steps by the clock, three by eye** (re-measured while the
+/// graphics presets were being laid out, because a preset that spends a
+/// step has to know what the step costs). `what_the_lighting_costs` over
+/// the forest at 1920x1080 with four samples on a GTX 1050 Ti, the median
+/// frame of each row:
+///
+/// ```text
+///                        simple   balanced   high
+/// into the sunset, noon  13.542   14.381     14.408
+/// into the sunset, dusk  13.514   14.405     14.402
+/// sun behind, noon       13.407   14.186     14.221
+/// sun behind, dusk       13.376   14.200     14.206
+/// ...the same, shadowed  22.684   23.097     23.213
+/// ```
+///
+/// Simple to Balanced is 0.78-0.89 ms, six per cent, in every view and at
+/// every hour -- a step, and the reason this default is Simple. **Balanced
+/// to High is not a step by the clock**: 0.03 ms at most and negative in
+/// one of the four, which is noise on a 13.4 ms frame. With shadows on it
+/// is 0.1-0.2 ms, which is the extra filter taps and is still under one
+/// per cent. What High buys is the halo round a low sun and a softer
+/// shadow edge, and those are looked at rather than timed
+/// (`what_the_lighting_looks_like`). Written down so that nobody prices
+/// the top step again from the note above, which was taken over a savanna
+/// on a different day and says 0.16-0.68 ms for the *first* step.
 pub fn default_quality() -> Quality {
     Quality::Simple
 }

@@ -192,7 +192,16 @@ pub struct ClientSettings {
     /// hands a desktop 1.0 and only a touch platform the automatic
     /// choice, because a monitor's pixels were chosen by the person
     /// looking at them and a phone's were not.
-    #[serde(default = "default_resolution_scale")]
+    /// **Written to the file as the word `auto`, not left out.** `None` is a
+    /// choice the row can be stepped onto -- it is the step below sixty per
+    /// cent -- and serde writes an absent `Option` as an absent key, which
+    /// on the next launch is the *missing* key and therefore the platform
+    /// default. So a desktop player who stepped down to AUTO found
+    /// themselves back at 100% every time they restarted, with nothing in
+    /// the file to say why. See `resolution_scale_field`. A file that
+    /// genuinely has no such key still means "whatever this platform
+    /// starts at", which is what an upgrade must keep meaning.
+    #[serde(default = "default_resolution_scale", with = "resolution_scale_field")]
     pub resolution_scale: Option<f32>,
     /// How much smaller than the frame the sky is drawn, before being
     /// stretched back over it. 1 draws it at full size.
@@ -358,6 +367,20 @@ pub struct ClientSettings {
     /// the day it appears is a regression report.
     #[serde(default)]
     pub plant_shadows: crate::engine::shadow::PlantShadows,
+    /// How many hearths throw a shadow of their own: none, the nearest, the
+    /// nearest four, or every one in reach ("добавь настройку теней от
+    /// костров"). See `lamp_shadow::FireShadows` for why a *count* is the
+    /// only honest knob here, and what each step costs.
+    ///
+    /// **All in a file from before the row**, for the rule every switch above
+    /// follows: it is what the game drew then, and a setting that changes the
+    /// picture on the day it appears is a regression report.
+    ///
+    /// Does nothing while `shadows` is Off -- there is no shadowed pipeline
+    /// for a fire to be drawn through -- which is what the row says when it
+    /// is asked (`Setting::FireShadows`).
+    #[serde(default)]
+    pub fire_shadows: crate::engine::lamp_shadow::FireShadows,
     /// How much colour the light carries: Simple, Balanced or High. See
     /// `engine::lighting` for what each step does and how it reaches the
     /// shader.
@@ -1234,6 +1257,58 @@ fn default_resolution_scale() -> Option<f32> {
     }
 }
 
+/// The word `resolution_scale` is written as when the game is choosing.
+///
+/// The same word the row shows (`Msg::Auto`), lower case, because that is
+/// how everything else in this file is written -- `shadows = "hard"`,
+/// `lighting = "balanced"`.
+const RESOLUTION_AUTO: &str = "auto";
+
+/// How the resolution share is written down and read back.
+///
+/// A number, or the word `auto` for the game's own choice. Three ways were
+/// weighed:
+///
+/// * **Leaving `None` out**, which is what serde does by itself and what
+///   this is here to stop: the key's absence already means "the platform
+///   default", so AUTO on a desktop was written as nothing and read back as
+///   100%.
+/// * **A second boolean key** (`resolution_auto = true`). Two keys for one
+///   choice, and a file where they disagree has no right answer.
+/// * **A sentinel number**, 0 or -1. It is a number in a field of numbers,
+///   so the clamp has to know it is not one, and a player reading the file
+///   learns nothing from it.
+mod resolution_scale_field {
+    use serde::{Deserialize, Serialize};
+
+    pub fn serialize<S: serde::Serializer>(value: &Option<f32>, serializer: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(scale) => scale.serialize(serializer),
+            None => super::RESOLUTION_AUTO.serialize(serializer),
+        }
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<f32>, D::Error> {
+        /// A share, a whole number of them (`resolution_scale = 1`, which a
+        /// hand-edited file is entitled to say), or a word.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Written {
+            Share(f32),
+            Whole(i64),
+            Named(String),
+        }
+        Ok(match Written::deserialize(deserializer)? {
+            Written::Share(scale) => Some(scale),
+            Written::Whole(scale) => Some(scale as f32),
+            // Anything else is a typo, and a typo means the same as no
+            // opinion -- `clamp` would have had to answer for it anyway.
+            Written::Named(name) if name.eq_ignore_ascii_case(super::RESOLUTION_AUTO) => None,
+            Written::Named(_) => super::default_resolution_scale(),
+        })
+    }
+}
+
 /// How many pixels the automatic choice aims to draw.
 ///
 /// 1.6 million -- comfortably more than the 1280x720 this game was
@@ -1417,6 +1492,7 @@ impl Default for ClientSettings {
             shadows: crate::engine::shadow::Mode::Off,
             shadow_distance: default_shadow_distance(),
             plant_shadows: crate::engine::shadow::PlantShadows::Trees,
+            fire_shadows: crate::engine::lamp_shadow::FireShadows::All,
             lighting: crate::engine::lighting::default_quality(),
             detail_distance: 0.7,
             lod_distance_chunks: default_lod_distance(),
@@ -1562,6 +1638,389 @@ impl ClientSettings {
             }
         }
         self.clamp();
+    }
+}
+
+/// Every graphics row a preset owns, in one value.
+///
+/// **The list is the contract.** A field in here is a field the NABOR row
+/// sets when it is stepped and a field that turns the row to СВОЙ when it is
+/// touched on its own; a field outside it is one the row never reads and
+/// never writes. Written as a struct rather than as nineteen lines of
+/// assignment in two places precisely so that those two questions cannot
+/// drift apart: `Preset::of` compares one of these against another, and a
+/// field added to `set_graphics` but forgotten in `graphics` would not
+/// compile.
+///
+/// What is deliberately *not* here, and why: the language, the name, the
+/// look sensitivity, the two volumes, vsync and the interface size. None of
+/// them is about how well the world is drawn -- vsync is a choice about the
+/// screen, the interface size is about the player's eyes, and a graphics
+/// preset that silently muted the music would be the sort of thing that
+/// teaches a player never to touch the top row again. The field of view is
+/// out for the same reason: it costs nothing and it is taste. The menu
+/// backdrop is out because it is about the *menu*, not the world -- and
+/// therefore stepping it must not turn the set to СВОЙ either, which falls
+/// out of it not being here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Graphics {
+    pub render_distance_chunks: i32,
+    pub resolution_scale: Option<f32>,
+    pub msaa: u32,
+    pub anisotropy: u16,
+    pub shadows: crate::engine::shadow::Mode,
+    pub shadow_distance: f32,
+    pub plant_shadows: crate::engine::shadow::PlantShadows,
+    pub fire_shadows: crate::engine::lamp_shadow::FireShadows,
+    pub lighting: crate::engine::lighting::Quality,
+    pub block_shade: bool,
+    pub sky_scale: u32,
+    pub fog_enabled: bool,
+    pub ambient_occlusion: f32,
+    pub detail_distance: f32,
+    pub lod_distance_chunks: i32,
+    pub lod_quality: crate::engine::lod::Quality,
+    pub cloudiness: f32,
+    pub transparent_leaves_chunks: i32,
+    pub relief_chunks: i32,
+}
+
+/// A whole graphics screen in one row: "НАБОР".
+///
+/// ## Why five named steps and a sixth that cannot be chosen
+///
+/// The screen below this row has nineteen questions on it, most of which
+/// only mean anything to somebody who has read the field they set. A player
+/// whose game runs badly wants to answer one question -- "make it cheaper"
+/// -- and a player on a strong machine wants to answer the other one once.
+/// The rows stay, because every one of them was added for a player who
+/// wanted exactly that knob; the preset is the way in for everyone else.
+///
+/// [`Preset::Custom`] is not a step the row can be *put* on: it is what the
+/// row *reads* when the settings match none of the five. It is derived, not
+/// stored -- `Preset::of` compares the live settings against each table --
+/// and that is the whole reason the menu cannot lie about it. A stored
+/// preset is a second copy of nineteen fields, and the first time a player
+/// steps a single row it is a copy that disagrees with them: the screen says
+/// ВЫСОКИЙ while the settings are something else, which is the exact failure
+/// the owner named when asking for this.
+///
+/// ## Where the numbers come from
+///
+/// **The two middle steps are the two defaults the game already ships**, one
+/// for each kind of machine. LOW, field for field, is `ClientSettings`'s
+/// Android default; MEDIUM is its desktop one. That is not a coincidence
+/// arranged after the fact -- it is the constraint the table was built under,
+/// because a new row must not move a single existing player's picture, and
+/// because the phone's default is the one combination that has been measured
+/// at sixty frames a second on an Adreno 710 (see CLAUDE.md, "Where the frame
+/// goes"). So a desktop opens on СРЕДНИЙ and a phone on НИЗКИЙ, both of them
+/// showing exactly the game their owner had yesterday.
+///
+/// The three steps out from there are each a different lever, because the
+/// measurement says no one lever wins a frame back:
+///
+/// * **ULTRA** spends the render distance (24 chunks against 6), turns the
+///   simplification off entirely, and turns on every picture the game has:
+///   soft shadows out to 192 blocks with the plants in them, the High light,
+///   the full-size sky, eight samples and sixteen-tap anisotropy.
+/// * **HIGH** is the same picture at half the reach, with the *hard* shadows
+///   -- which is the cheaper of the two steps (`shadow::Mode`) -- and the
+///   coarse bands left on.
+/// * **POTATO** is the phone step. Everything that can be off is off, the
+///   world is four chunks across at six tenths of the pixels, and what
+///   survives is exactly what the owner said had to: the world is there,
+///   the water is there, and the night is still night (`ambient_light` is
+///   not a graphics field and no preset touches it).
+///
+/// ## Rejected
+///
+/// * **A preset that also sets vsync.** It is the single biggest thing a
+///   player can do to their frame rate and it is not a picture setting: a
+///   preset that unlocked the frame rate would be one that made the game
+///   tear, on a row whose promise is "make it look worse and run better".
+/// * **Storing the chosen preset in the file** -- see above.
+/// * **Hiding the rows a preset owns.** It would make the screen shorter and
+///   it would take away the one thing the rows are for: a player whose
+///   machine is fast at everything except shadows has to be able to say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preset {
+    /// None of the five: the player has stepped a row of their own.
+    Custom,
+    Potato,
+    Low,
+    Medium,
+    High,
+    Ultra,
+}
+
+impl Preset {
+    /// The five a player can actually choose, cheapest first -- the order the
+    /// row walks, so that pressing *right* makes the picture better, as on
+    /// every other row on the screen.
+    pub const CHOOSABLE: [Preset; 5] = [Preset::Potato, Preset::Low, Preset::Medium, Preset::High, Preset::Ultra];
+
+    /// The whole graphics screen this step stands for.
+    ///
+    /// **Read the two middle rows against `ClientSettings::default()`**: LOW
+    /// is the Android default and MEDIUM the desktop one, field for field.
+    /// `the_two_middle_steps_are_the_defaults_this_machine_already_had` is
+    /// what holds that, and it is the test to read first if a default here
+    /// ever moves.
+    pub fn graphics(self) -> Graphics {
+        use crate::engine::lamp_shadow::FireShadows;
+        use crate::engine::lighting::Quality as Light;
+        use crate::engine::lod::Quality as Lod;
+        use crate::engine::shadow::{Mode, PlantShadows};
+        match self {
+            // Custom has no table of its own: it is what the settings read
+            // as when they match none of the five. Asked for one anyway --
+            // by a hand-edited file, or by a caller that walked `CHOOSABLE`
+            // wrong -- it gives back the middle, which is the answer that
+            // changes least.
+            Preset::Custom | Preset::Medium => Graphics {
+                render_distance_chunks: 6,
+                resolution_scale: Some(1.0),
+                msaa: 4,
+                anisotropy: 4,
+                shadows: Mode::Off,
+                shadow_distance: 96.0,
+                plant_shadows: PlantShadows::Trees,
+                fire_shadows: FireShadows::All,
+                lighting: Light::Simple,
+                block_shade: true,
+                sky_scale: 3,
+                fog_enabled: true,
+                ambient_occlusion: 0.45,
+                detail_distance: 0.7,
+                lod_distance_chunks: 10,
+                lod_quality: Lod::Normal,
+                cloudiness: 0.45,
+                transparent_leaves_chunks: 6,
+                relief_chunks: 4,
+            },
+            // The phone, and the one row on the screen that is allowed to
+            // ask the game to pick a resolution: `None` is `auto`, which
+            // sizes itself to the screen it wakes up on
+            // (`auto_resolution_scale`). On a desktop at 1080p that comes
+            // out at 90%, which is a real step down from MEDIUM's 100% and
+            // still a step a monitor's owner can read.
+            Preset::Low => Graphics {
+                render_distance_chunks: 6,
+                resolution_scale: None,
+                msaa: 1,
+                anisotropy: 1,
+                shadows: Mode::Off,
+                shadow_distance: 64.0,
+                plant_shadows: PlantShadows::Trees,
+                fire_shadows: FireShadows::All,
+                lighting: Light::Simple,
+                block_shade: false,
+                sky_scale: 3,
+                fog_enabled: true,
+                ambient_occlusion: 0.45,
+                detail_distance: 0.7,
+                lod_distance_chunks: 10,
+                lod_quality: Lod::Normal,
+                cloudiness: 0.45,
+                transparent_leaves_chunks: 6,
+                relief_chunks: 4,
+            },
+            // **Playable, not a joke.** The fog stays on: at four chunks the
+            // world ends close enough that without it the edge is a wall,
+            // and a wall is worse to look at than haze. The water, the
+            // night and the light map are untouched -- none of them is a
+            // graphics field. What goes is everything that is drawn *as
+            // well as* the world: shadows of any kind, the blocks' own
+            // shade, the creases, the stones' thickness, the holes in the
+            // canopy, the clouds, and three fifths of the tufts.
+            Preset::Potato => Graphics {
+                render_distance_chunks: 4,
+                resolution_scale: Some(0.6),
+                msaa: 1,
+                anisotropy: 1,
+                shadows: Mode::Off,
+                shadow_distance: 32.0,
+                plant_shadows: PlantShadows::Off,
+                fire_shadows: FireShadows::Off,
+                lighting: Light::Simple,
+                block_shade: false,
+                sky_scale: 4,
+                fog_enabled: true,
+                ambient_occlusion: 0.0,
+                detail_distance: 0.2,
+                lod_distance_chunks: 4,
+                lod_quality: Lod::Coarse,
+                cloudiness: 0.0,
+                transparent_leaves_chunks: 0,
+                relief_chunks: 0,
+            },
+            // Twice the world MEDIUM draws, with the hard shadows on. Hard
+            // rather than Soft because it is the cheaper step and the one
+            // whose edge is the edge of a block, which is the look this
+            // game's shadows were asked for.
+            Preset::High => Graphics {
+                render_distance_chunks: 12,
+                resolution_scale: Some(1.0),
+                msaa: 4,
+                anisotropy: 8,
+                shadows: Mode::Hard,
+                shadow_distance: 96.0,
+                plant_shadows: PlantShadows::Trees,
+                fire_shadows: FireShadows::Few,
+                lighting: Light::Balanced,
+                block_shade: true,
+                sky_scale: 2,
+                fog_enabled: true,
+                ambient_occlusion: 0.45,
+                detail_distance: 0.85,
+                lod_distance_chunks: 12,
+                lod_quality: Lod::Fine,
+                cloudiness: 0.45,
+                transparent_leaves_chunks: 8,
+                relief_chunks: 6,
+            },
+            // The whole streamed world, meshed block for block to its edge.
+            // `lod_distance_chunks: 0` is the simplification off, which is
+            // the one step here that costs triangles rather than pixels --
+            // see `engine::lod_bands_repro` for where they are.
+            Preset::Ultra => Graphics {
+                render_distance_chunks: MAX_RENDER_DISTANCE,
+                resolution_scale: Some(1.0),
+                msaa: 8,
+                anisotropy: 16,
+                shadows: Mode::Soft,
+                shadow_distance: 192.0,
+                plant_shadows: PlantShadows::All,
+                fire_shadows: FireShadows::All,
+                lighting: Light::High,
+                block_shade: true,
+                sky_scale: 1,
+                fog_enabled: true,
+                ambient_occlusion: 0.6,
+                detail_distance: 1.0,
+                lod_distance_chunks: 0,
+                lod_quality: Lod::Fine,
+                cloudiness: 0.45,
+                transparent_leaves_chunks: crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE,
+                relief_chunks: 8,
+            },
+        }
+    }
+
+    /// Which step these settings are on, or [`Preset::Custom`].
+    ///
+    /// Derived on every read rather than remembered. It is a comparison of
+    /// nineteen fields against five tables -- ninety-five comparisons, once,
+    /// when a settings row is drawn -- against a stored field that would be
+    /// wrong the first time anybody stepped a row.
+    pub fn of(settings: &ClientSettings) -> Preset {
+        let wanted = settings.graphics();
+        Self::CHOOSABLE.into_iter().find(|preset| preset.graphics() == wanted).unwrap_or(Preset::Custom)
+    }
+
+    /// The step this machine's defaults are on.
+    ///
+    /// **Where the row goes when it is pressed from СВОЙ.** СВОЙ is not on
+    /// the ring -- there is no table to apply -- so the first press has to
+    /// land somewhere, and the only honest somewhere is the set this machine
+    /// ships with: MEDIUM on a desktop, LOW on a phone, worked out from
+    /// `ClientSettings::default()` rather than written down twice.
+    ///
+    /// Rejected: **landing on POTATO** (the ring's first step), which is
+    /// what a naive "step from -1" gives and which would take a player who
+    /// nudged one row and pressed right down to four chunks at six tenths of
+    /// the pixels.
+    pub fn shipped() -> Preset {
+        Self::of(&ClientSettings::default())
+    }
+
+    /// One step along the ring, held at both ends; from [`Preset::Custom`],
+    /// [`Preset::shipped`]. Walked rather than wrapped, for the reason
+    /// `Setting::Lighting` gives.
+    pub fn step(self, delta: i32) -> Preset {
+        let Some(at) = Self::CHOOSABLE.iter().position(|preset| *preset == self) else {
+            return Self::shipped();
+        };
+        Self::CHOOSABLE[(at as i32 + delta).clamp(0, Self::CHOOSABLE.len() as i32 - 1) as usize]
+    }
+}
+
+impl ClientSettings {
+    /// The graphics rows as they stand. See [`Graphics`].
+    pub fn graphics(&self) -> Graphics {
+        Graphics {
+            render_distance_chunks: self.render_distance_chunks,
+            resolution_scale: self.resolution_scale,
+            msaa: self.msaa,
+            anisotropy: self.anisotropy,
+            shadows: self.shadows,
+            shadow_distance: self.shadow_distance,
+            plant_shadows: self.plant_shadows,
+            fire_shadows: self.fire_shadows,
+            lighting: self.lighting,
+            block_shade: self.block_shade,
+            sky_scale: self.sky_scale,
+            fog_enabled: self.fog_enabled,
+            ambient_occlusion: self.ambient_occlusion,
+            detail_distance: self.detail_distance,
+            lod_distance_chunks: self.lod_distance_chunks,
+            lod_quality: self.lod_quality,
+            cloudiness: self.cloudiness,
+            transparent_leaves_chunks: self.transparent_leaves_chunks,
+            relief_chunks: self.relief_chunks,
+        }
+    }
+
+    /// Puts every graphics row where `graphics` says, and leaves everything
+    /// else exactly as it was.
+    ///
+    /// Not followed by `sanitize` here: the caller does that, and it is the
+    /// same caller that does it for a single stepped row (`Setting::step`).
+    /// A table with a value outside a clamp would then be a table that reads
+    /// back as СВОЙ, which is what
+    /// `every_step_survives_being_written_down_and_read_back` catches.
+    pub fn set_graphics(&mut self, graphics: Graphics) {
+        let Graphics {
+            render_distance_chunks,
+            resolution_scale,
+            msaa,
+            anisotropy,
+            shadows,
+            shadow_distance,
+            plant_shadows,
+            fire_shadows,
+            lighting,
+            block_shade,
+            sky_scale,
+            fog_enabled,
+            ambient_occlusion,
+            detail_distance,
+            lod_distance_chunks,
+            lod_quality,
+            cloudiness,
+            transparent_leaves_chunks,
+            relief_chunks,
+        } = graphics;
+        self.render_distance_chunks = render_distance_chunks;
+        self.resolution_scale = resolution_scale;
+        self.msaa = msaa;
+        self.anisotropy = anisotropy;
+        self.shadows = shadows;
+        self.shadow_distance = shadow_distance;
+        self.plant_shadows = plant_shadows;
+        self.fire_shadows = fire_shadows;
+        self.lighting = lighting;
+        self.block_shade = block_shade;
+        self.sky_scale = sky_scale;
+        self.fog_enabled = fog_enabled;
+        self.ambient_occlusion = ambient_occlusion;
+        self.detail_distance = detail_distance;
+        self.lod_distance_chunks = lod_distance_chunks;
+        self.lod_quality = lod_quality;
+        self.cloudiness = cloudiness;
+        self.transparent_leaves_chunks = transparent_leaves_chunks;
+        self.relief_chunks = relief_chunks;
     }
 }
 
@@ -2417,6 +2876,174 @@ mod file_tests {
         assert_eq!(parsed.sky_scale, 2);
     }
 
+    /// **A settings file for each step, so a step can be measured.**
+    ///
+    /// ```text
+    /// PRESET_FILES=C:/absolute/dir cargo test -p primitive_client --lib \
+    ///     the_preset_files_for_measuring -- --ignored --nocapture
+    /// ```
+    ///
+    /// The steps are a table in this file and the benchmark is a whole game
+    /// reading `client_settings.toml`, and the way those two meet without
+    /// anybody typing nineteen numbers five times is for the table to write
+    /// the file. Copy one over `client_settings.toml` and run
+    /// `PRIMITIVE_AUTOSTART=night PRIMITIVE_BENCH=60 PRIMITIVE_VSYNC=0`.
+    ///
+    /// A tool rather than an assertion: what it writes is checked by
+    /// `every_step_survives_being_written_down_and_read_back`, which is the
+    /// same round trip without the disk.
+    #[test]
+    #[ignore = "a tool: writes a settings file per preset to PRESET_FILES"]
+    fn the_preset_files_for_measuring() {
+        let out = std::env::var("PRESET_FILES").unwrap_or_else(|_| ".".to_string());
+        std::fs::create_dir_all(&out).expect("output directory");
+        for preset in Preset::CHOOSABLE {
+            let mut settings = ClientSettings::default();
+            settings.set_graphics(preset.graphics());
+            // The conditions the measurement is taken under, and the same
+            // for every step: the frame rate uncapped and the console line
+            // printing. See CLAUDE.md, "vsync = true caps the frame rate
+            // and hides everything".
+            settings.window_width = 1920;
+            settings.window_height = 1080;
+            settings.vsync = false;
+            settings.fullscreen = false;
+            settings.debug_overlay_on_start = true;
+            settings.sanitize();
+            assert_eq!(Preset::of(&settings), preset, "the file would not be the step it claims to be");
+            let name = format!("{out}/client_settings.{preset:?}.toml").to_lowercase();
+            std::fs::write(&name, toml::to_string_pretty(&settings).expect("serialise")).expect("write");
+            println!("{name}");
+        }
+    }
+
+    /// **The row must be invisible on the day it ships.**
+    ///
+    /// A preset that named no step for the settings a player already has
+    /// would greet every one of them with СВОЙ -- which is true, and useless,
+    /// and looks like the row is broken. So the two middle steps are the two
+    /// defaults the game ships, field for field: MEDIUM on a desktop, LOW on
+    /// a phone. Read `Preset::graphics` if this goes red; it is the table
+    /// that has drifted from `ClientSettings::default`, or the default that
+    /// has moved without the table.
+    #[test]
+    fn the_two_middle_steps_are_the_defaults_this_machine_already_had() {
+        let shipped = Preset::of(&ClientSettings::default());
+        assert_ne!(shipped, Preset::Custom, "a fresh install is on no named set at all");
+        let wanted = if cfg!(target_os = "android") { Preset::Low } else { Preset::Medium };
+        assert_eq!(shipped, wanted, "this machine's defaults are not the step they are meant to be");
+        assert_eq!(Preset::shipped(), shipped, "the row would step out of СВОЙ onto a different set from the one that shipped");
+        // ...and the *other* middle step is the other platform's, which is
+        // the half of the claim this machine cannot check by running: the
+        // five fields below are every one the two defaults differ in, so if
+        // one of them stops differing the two steps have quietly become one.
+        let (low, medium) = (Preset::Low.graphics(), Preset::Medium.graphics());
+        assert_eq!(
+            (low.resolution_scale.is_none(), low.msaa, low.anisotropy, low.block_shade),
+            (true, 1, 1, false),
+            "LOW is no longer the phone's default"
+        );
+        assert_eq!((medium.resolution_scale, medium.msaa, medium.anisotropy, medium.block_shade), (Some(1.0), 4, 4, true), "MEDIUM is no longer the desktop's default");
+    }
+
+    #[test]
+    fn every_step_is_a_different_picture_from_the_one_beside_it() {
+        // Named lists are cheap to write and easy to write twice over; two
+        // steps that differ in nothing are a menu offering the player a
+        // choice that does nothing.
+        for (at, preset) in Preset::CHOOSABLE.iter().enumerate() {
+            for other in &Preset::CHOOSABLE[at + 1..] {
+                assert_ne!(preset.graphics(), other.graphics(), "{preset:?} and {other:?} are the same set of settings");
+            }
+        }
+        // And the order is the order the row walks: pressing right never
+        // asks for less world or a coarser sky.
+        for pair in Preset::CHOOSABLE.windows(2) {
+            let (cheap, dear) = (pair[0].graphics(), pair[1].graphics());
+            assert!(cheap.render_distance_chunks <= dear.render_distance_chunks, "{:?} draws more world than {:?}", pair[0], pair[1]);
+            assert!(cheap.sky_scale >= dear.sky_scale, "{:?} draws a finer sky than {:?}", pair[0], pair[1]);
+            assert!(cheap.detail_distance <= dear.detail_distance, "{:?} draws tufts further than {:?}", pair[0], pair[1]);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn a_set_writes_every_graphics_row_and_touches_nothing_else() {
+        // A screen the player has already arranged to their taste: none of
+        // these is about how well the world is drawn, and a preset that
+        // muted the music or unlocked the frame rate would be a row nobody
+        // dares press twice. See `settings::Graphics` for the list.
+        let mut arranged = ClientSettings::default();
+        arranged.username = "ingvar".to_string();
+        arranged.language = crate::ui::lang::Language::Russian;
+        arranged.vsync = false;
+        arranged.ui_scale = 1.35;
+        arranged.fov_degrees = 95.0;
+        arranged.mouse_sensitivity = 0.004;
+        arranged.master_volume = 0.15;
+        arranged.music_volume = 0.0;
+        arranged.menu_background = false;
+        arranged.view_bob = 0.3;
+        arranged.sanitize();
+        for preset in Preset::CHOOSABLE {
+            let mut trial = arranged.clone();
+            trial.set_graphics(preset.graphics());
+            trial.sanitize();
+            assert_eq!(trial.graphics(), preset.graphics(), "{preset:?} did not survive the clamp a hand-edited file goes through");
+            assert_eq!(Preset::of(&trial), preset, "{preset:?} does not read back as itself");
+            assert_eq!(trial.username, arranged.username, "{preset:?} renamed the player");
+            assert_eq!(trial.language, arranged.language, "{preset:?} changed the language");
+            assert_eq!(trial.vsync, arranged.vsync, "{preset:?} touched vsync");
+            assert_eq!(trial.ui_scale, arranged.ui_scale, "{preset:?} resized the interface");
+            assert_eq!(trial.fov_degrees, arranged.fov_degrees, "{preset:?} moved the field of view");
+            assert_eq!(trial.mouse_sensitivity, arranged.mouse_sensitivity, "{preset:?} changed how the view turns");
+            assert_eq!((trial.master_volume, trial.music_volume), (arranged.master_volume, arranged.music_volume), "{preset:?} changed the volume");
+            assert_eq!(trial.menu_background, arranged.menu_background, "{preset:?} turned the menu backdrop about");
+            assert_eq!(trial.view_bob, arranged.view_bob, "{preset:?} changed how the view bobs");
+            // `Keybinds` has no `PartialEq` and does not need one for this:
+            // what it is written to the file as is the whole of what it is.
+            assert_eq!(
+                toml::to_string(&trial.keybinds).expect("keys serialise"),
+                toml::to_string(&arranged.keybinds).expect("keys serialise"),
+                "{preset:?} rebound a key"
+            );
+        }
+    }
+
+    #[test]
+    fn every_step_survives_being_written_down_and_read_back() {
+        // The row is derived from the fields rather than stored, so a value
+        // the file rounds or the clamp moves is a set that reads as СВОЙ the
+        // next time the game opens -- with nothing at all to say why.
+        for preset in Preset::CHOOSABLE {
+            let mut settings = ClientSettings::default();
+            settings.set_graphics(preset.graphics());
+            settings.sanitize();
+            let text = toml::to_string_pretty(&settings).expect("settings should serialise");
+            let parsed = ClientSettings::parse(&text, SETTINGS_PATH);
+            assert_eq!(Preset::of(&parsed), preset, "{preset:?} came back from the file as something else");
+        }
+    }
+
+    #[test]
+    fn the_lowest_step_is_still_a_game_a_person_can_play() {
+        // "наибольшее число кадров при играбельной картинке": the world is
+        // visible, the water is visible, the night is still night. The first
+        // two are the render distance and the fog; the third is
+        // `ambient_light`, which is not a graphics field at all and which no
+        // preset may therefore reach -- that is the property being pinned
+        // here, because "make it cheap" and "make it bright enough to see"
+        // are exactly the two things that get confused.
+        let potato = Preset::Potato.graphics();
+        assert!(potato.render_distance_chunks >= 3, "the world ends inside the player's own build");
+        assert!(potato.fog_enabled, "with no fog the end of a four-chunk world is a wall");
+        assert!(potato.resolution_scale.is_some_and(|scale| scale >= RESOLUTION_SCALES[0]), "the lowest step draws fewer pixels than the row can step back to");
+        let mut trial = ClientSettings::default();
+        let (night, boost) = (trial.ambient_light, trial.block_light_boost);
+        trial.set_graphics(potato);
+        assert_eq!((trial.ambient_light, trial.block_light_boost), (night, boost), "the lowest step turned the lights up");
+    }
+
     #[test]
     fn shadows_are_off_until_the_player_asks_for_them() {
         // Both roads to a settings struct: a fresh install, and a file
@@ -2521,6 +3148,32 @@ mod file_tests {
         assert_eq!(parsed.resolution_scale, Some(1.0));
         #[cfg(target_os = "android")]
         assert_eq!(parsed.resolution_scale, None, "a phone decides for itself");
+    }
+
+    #[test]
+    fn the_automatic_resolution_is_written_down_and_comes_back() {
+        // **The step below sixty per cent is a step the row can be put on**,
+        // and serde writes an absent `Option` as an absent key -- which is
+        // the same file a player who has never touched the row has, and
+        // therefore reads back as the platform's default. A desktop player
+        // who chose AUTO got 100% back on every restart.
+        let settings = ClientSettings { resolution_scale: None, ..ClientSettings::default() };
+        let text = toml::to_string_pretty(&settings).expect("settings should serialise");
+        assert!(text.contains("resolution_scale = \"auto\""), "the automatic choice was not written down: {text}");
+        assert_eq!(ClientSettings::parse(&text, SETTINGS_PATH).resolution_scale, None, "the automatic choice did not come back");
+        // ...and a number still round-trips as a number.
+        let settings = ClientSettings { resolution_scale: Some(0.75), ..ClientSettings::default() };
+        let text = toml::to_string_pretty(&settings).expect("settings should serialise");
+        assert_eq!(ClientSettings::parse(&text, SETTINGS_PATH).resolution_scale, Some(0.75));
+        // A file from before the word, and one with a whole number or a
+        // typo in it: the first two are what they say, the third is the
+        // platform's own answer rather than a parse error that would throw
+        // the whole file away.
+        assert_eq!(ClientSettings::parse("fov_degrees = 81.0\n", SETTINGS_PATH).resolution_scale, default_resolution_scale());
+        assert_eq!(ClientSettings::parse("resolution_scale = 1\n", SETTINGS_PATH).resolution_scale, Some(1.0));
+        let typo = ClientSettings::parse("resolution_scale = \"atuo\"\nfov_degrees = 81.0\n", SETTINGS_PATH);
+        assert_eq!(typo.resolution_scale, default_resolution_scale());
+        assert_eq!(typo.fov_degrees, 81.0, "a typo in one row threw the rest of the file away");
     }
 
     #[test]

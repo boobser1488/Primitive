@@ -222,6 +222,99 @@ pub const RECENTRE_AFTER: i32 = 12;
 /// flood fill; it only stops casting, and it is the furthest one.
 pub const MAX_LAMPS: usize = 16;
 
+/// How many of the fires round the player throw a shadow
+/// (`ClientSettings::fire_shadows`).
+///
+/// **The one number in this whole mechanism a player can afford to move.**
+/// Everything else here is fixed by what the shader and this file have to
+/// agree about: the grid is [`SIDE`] cells because the shader says
+/// `LAMP_SIDE`, a ray is [`MAX_STEPS`] long because it says `LAMP_STEPS`,
+/// the volume is taken again after [`RECENTRE_AFTER`] blocks. Change any of
+/// those and the CPU's copy of the walk and the GPU's stop being the same
+/// walk. The *count* is different: it is `lamps.volume.w`, a number in a
+/// uniform the shader's loop reads at run time, so it moves between one
+/// frame and the next with no pipeline rebuilt and no texture rewritten --
+/// which is what lets this row apply while the player is still looking at
+/// it, the way `GraphicsState::set_msaa` does the hard way.
+///
+/// And it is the number that costs: the loop in `lamp_visibility` walks up
+/// to [`MAX_STEPS`] cells per fire per lit fragment, times four at the Soft
+/// step. A fire dropped from the list still lights the world exactly as it
+/// did -- the flood fill is the server's and this setting cannot reach it --
+/// it just stops putting pillars between itself and the floor.
+///
+/// **Off is not the same as turning shadows off**, and that is the point of
+/// having the row: the sun keeps its map and its walk, and only the hearths
+/// stop casting. It is also the one step that can take the whole shadowed
+/// pipeline out of a *night* frame, where the sun is down and the fires were
+/// the only reason to be in it (`renderer::render`, `lamps_lit`).
+///
+/// **What each step costs** (`renderer::lighting_tools::what_the_fires_shadows_cost`,
+/// a camp of forty-nine hearths at midnight seen from among them, 1920x1080
+/// with four samples on a GTX 1050 Ti -- a deliberately worst case):
+///
+/// ```text
+///          fires    hard, ms   soft, ms
+/// Off      0        2.131      2.033
+/// One      1        4.201      8.563
+/// Few      4        5.567     13.442
+/// All      16       7.984     18.039
+/// ```
+///
+/// Two things to read off it. The Soft edge is four rays, so the row costs
+/// about four times as much there -- sixteen milliseconds between the ends,
+/// more than a whole frame. And sixteen fires are under three times one
+/// fire, not sixteen, because a fire that cannot beat one already seen is
+/// never walked to.
+///
+/// Rejected: **a distance in blocks.** It reads like the shadow-distance row
+/// above it and it would be a lie -- a fire's reach is its light level, at
+/// most fourteen cells (`MAX_STEPS`), and every fire inside the volume is
+/// already within twenty blocks of the eye. There is no distance left to
+/// give away; there is only a number of hearths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FireShadows {
+    /// No hearth casts. The light map's even disc, which is what the game
+    /// drew before `lamp_shadow` existed.
+    Off,
+    /// The nearest one only -- the fire the player is sitting at.
+    One,
+    /// The nearest four: a camp, rather than a village.
+    Few,
+    /// Every fire the volume holds, up to [`MAX_LAMPS`]. What the game did
+    /// before this row, and therefore the default.
+    #[default]
+    All,
+}
+
+impl FireShadows {
+    /// Every step, cheapest first -- the order the settings row walks, so
+    /// that pressing *right* makes the picture better, as on every other row.
+    pub const ALL: [FireShadows; 4] = [FireShadows::Off, FireShadows::One, FireShadows::Few, FireShadows::All];
+
+    /// How many fires are handed to the shader.
+    ///
+    /// Four for `Few` rather than eight: four is a hearth, a kiln and the two
+    /// torches of one camp, which is the scene this row exists for, and the
+    /// shader's loop skips a fire that cannot beat one already seen -- so
+    /// past the first few the count costs less than it looks.
+    pub fn lamps(self) -> usize {
+        match self {
+            FireShadows::Off => 0,
+            FireShadows::One => 1,
+            FireShadows::Few => 4,
+            FireShadows::All => MAX_LAMPS,
+        }
+    }
+
+    /// Walked, not wrapped, for the reason `Setting::Lighting` gives.
+    pub fn step(self, delta: i32) -> Self {
+        let at = Self::ALL.iter().position(|step| *step == self).unwrap_or(3) as i32;
+        Self::ALL[(at + delta).clamp(0, Self::ALL.len() as i32 - 1) as usize]
+    }
+}
+
 /// The most cells one ray steps through. **Must match `LAMP_STEPS` in
 /// `shader.wgsl`.** Fourteen cells of reach walked in three axes is at most
 /// forty-two crossings -- and only on the exact diagonal, where the reach
@@ -355,14 +448,21 @@ impl Volume {
         Self { min, cells, lamps, top, heights, lows }
     }
 
-    /// The uniform for a frame: the [`MAX_LAMPS`] fires nearest `eye`, and
-    /// where they and the volume are relative to `render_origin`.
+    /// The uniform for a frame: the fires nearest `eye` that `fires` asks
+    /// for, and where they and the volume are relative to `render_origin`.
     ///
     /// The render origin is a whole number of blocks, so every coordinate
     /// here is a small whole number (and a half) exactly, however far out the
     /// world is -- the subtraction is done in `f64` before anything is
     /// narrowed.
-    pub fn uniform(&self, eye: Vec3, render_origin: Vec3) -> LampUniform {
+    ///
+    /// **`grid` is written whatever the count is**, including at
+    /// [`FireShadows::Off`]: it is the sun's flag, not the fires'. The Hard
+    /// step walks this same volume toward the sun (see the module note), and
+    /// a player who turned the hearths' shadows off and lost every block edge
+    /// the sun draws within twenty blocks of them would rightly call that a
+    /// bug in the shadows row rather than a setting.
+    pub fn uniform(&self, eye: Vec3, render_origin: Vec3, fires: FireShadows) -> LampUniform {
         let origin = render_origin.as_dvec3();
         let relative = |cell: [i32; 3], half: f64| {
             [
@@ -377,7 +477,7 @@ impl Volume {
             centre.distance_squared(eye)
         };
         nearest.sort_by(|a, b| apart(a).total_cmp(&apart(b)));
-        nearest.truncate(MAX_LAMPS);
+        nearest.truncate(fires.lamps());
         let mut uniform = LampUniform::zeroed();
         let corner = relative(self.min, 0.0);
         uniform.volume = [corner[0], corner[1], corner[2], nearest.len() as f32];
@@ -698,7 +798,7 @@ mod tests {
         let volume = Volume { min: [999_968, 38, -2_000_032], cells: Vec::new(), lamps, top: 40, heights: Vec::new(), lows: Vec::new() };
         let eye = Vec3::new(1_000_060.0, 71.0, -2_000_000.0);
         let origin = Vec3::new(1_000_048.0, 64.0, -2_000_016.0);
-        let uniform = volume.uniform(eye, origin);
+        let uniform = volume.uniform(eye, origin, FireShadows::All);
         assert_eq!(uniform.volume, [-80.0, -26.0, -16.0, MAX_LAMPS as f32]);
         assert_eq!(uniform.grid, [1.0, 41.0, 0.0, 0.0], "the shader is not told there is a volume, or how high it goes");
         let handed: Vec<f32> = uniform.lamps.iter().map(|lamp| lamp[0]).collect();
@@ -706,6 +806,42 @@ mod tests {
         // sixteen nearest are the ones from 1_000_036 to 1_000_081.
         assert!(handed.iter().all(|&x| (36.5 - 48.0..=81.5 - 48.0).contains(&x)), "a far fire was handed over: {handed:?}");
         assert_eq!(uniform.lamps[0], [12.5, 6.5, 16.5, 12.0], "the nearest fire is not first, or not where it is");
+    }
+
+    /// **The row hands over fewer fires and nothing else.**
+    ///
+    /// The ones it keeps are the nearest ones, in the same order, at the same
+    /// places -- so a player stepping the row down watches the furthest
+    /// hearth's shadow go out and the one they are sitting at stay exactly
+    /// as it was. And `grid` is untouched at every step, because the sun's
+    /// walk reads it (see `uniform`).
+    #[test]
+    fn a_cheaper_step_drops_the_furthest_fires_and_leaves_the_sun_its_volume() {
+        let lamps = (0..40).map(|i| Lamp { cell: [1_000_000 + i * 3, 70, -2_000_000], level: 12 }).collect();
+        let volume = Volume { min: [999_968, 38, -2_000_032], cells: Vec::new(), lamps, top: 40, heights: Vec::new(), lows: Vec::new() };
+        let eye = Vec3::new(1_000_060.0, 71.0, -2_000_000.0);
+        let origin = Vec3::new(1_000_048.0, 64.0, -2_000_016.0);
+        let all = volume.uniform(eye, origin, FireShadows::All);
+        for step in FireShadows::ALL {
+            let uniform = volume.uniform(eye, origin, step);
+            assert_eq!(uniform.volume[3] as usize, step.lamps(), "{step:?} handed the shader the wrong number of fires");
+            assert_eq!(uniform.volume[..3], all.volume[..3], "{step:?} moved the volume");
+            assert_eq!(uniform.grid, all.grid, "{step:?} took the sun's volume away with the fires'");
+            for slot in 0..step.lamps() {
+                assert_eq!(uniform.lamps[slot], all.lamps[slot], "{step:?}: fire {slot} is not the one ALL puts there");
+            }
+        }
+        assert_eq!(volume.uniform(eye, origin, FireShadows::Off).lamps, [[0.0; 4]; MAX_LAMPS], "a fire was handed over with the row off");
+    }
+
+    #[test]
+    fn the_fire_row_walks_cheapest_to_dearest_and_stops_at_both_ends() {
+        let counts: Vec<usize> = FireShadows::ALL.iter().map(|step| step.lamps()).collect();
+        assert_eq!(counts, vec![0, 1, 4, MAX_LAMPS], "the steps are not cheapest first");
+        assert!(counts.windows(2).all(|pair| pair[0] < pair[1]), "two steps hand over the same number of fires");
+        assert_eq!(FireShadows::Off.step(-1), FireShadows::Off, "the row wrapped round off the bottom");
+        assert_eq!(FireShadows::All.step(1), FireShadows::All, "the row wrapped round off the top");
+        assert_eq!(FireShadows::default(), FireShadows::All, "a file from before the row opens with fewer shadows than it had");
     }
 
     #[test]
