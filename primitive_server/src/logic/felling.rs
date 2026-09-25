@@ -193,6 +193,17 @@ pub struct Felled {
     /// branches, which are sticks rather than timber. See
     /// [`sticks_from_twigs`].
     pub twigs: u32,
+    /// The wild hives that were stuck to this trunk, and what was in each
+    /// (`bees::honey_in`). Their cells are in `cleared` with the rest of the
+    /// tree; this is what they held, so the caller can pay for them.
+    ///
+    /// **Listed apart from the leaves and the twigs because a hive is not a
+    /// yield, it is a raid.** A tree that came down with a hive on it has
+    /// put a player's hand in the comb whether they meant it or not, and
+    /// the caller stings them for it (`lib::sting_from_bees`). Without that
+    /// the axe would be the way to take honey without paying the bees, and
+    /// the whole of what a hive costs is the bees (`bees`).
+    pub hives: Vec<((i32, i32, i32), BlockId)>,
 }
 
 impl Felled {
@@ -371,10 +382,20 @@ pub fn fell(
     let mut plan = Felled::default();
     let (x, y, z) = stump;
 
+    // **A hive comes down with the log it was stuck to even when no tree
+    // does.** The cut that takes the top log of a trunk, or one column of a
+    // bole the rest of which still stands, fells nothing -- and the comb on
+    // that log was still left hanging on a cell that is now air. Written at
+    // each way out rather than once at the end, because three of the ways
+    // out are returns and the last one has to come *after* the lane is
+    // chosen (see `take_the_hives`).
+    let hive_on_the_cut = |plan: &mut Felled| take_the_hives(plan, std::iter::once(&stump), &look);
+
     // What is standing on the cut. One log above the cut is a tree; none
     // is a single block somebody placed, and felling that would be a
     // block that turns into a different block for no reason.
     let Some(wood) = look(x, y + 1, z).filter(|&b| is_standing_trunk(b)) else {
+        hive_on_the_cut(&mut plan);
         return plan;
     };
 
@@ -389,6 +410,7 @@ pub fn fell(
         .iter()
         .any(|&(bx, bz)| (bx, bz) != (x, z) && stands_on_the_ground(&look, (bx, y, bz), wood))
     {
+        hive_on_the_cut(&mut plan);
         return plan;
     }
 
@@ -414,6 +436,7 @@ pub fn fell(
         tallest = tallest.max(trunk.len() - before);
     }
     if trunk.is_empty() {
+        hive_on_the_cut(&mut plan);
         return plan;
     }
 
@@ -500,7 +523,67 @@ pub fn fell(
     let length = if old { tallest } else { trunk.len() };
     plan.wood = block_kind(wood);
     lay_timber(&mut plan, stump, &look, feller, length, total, None);
+    // **The hives on it come down with it** -- *after* the lane is chosen,
+    // for two reasons: `lay_timber` weighs the crown by counting `cleared`
+    // (`lean_towards`), and a comb counted as a leaf would tip a tree a cell
+    // the wrong way; and the hive is still standing in the world while the
+    // lane is measured, so a comb at the stump's own height would block the
+    // fall as the trunk it hangs on does. See [`take_the_hives`].
+    take_the_hives(&mut plan, trunk.iter().chain(&limbs), &look);
+    // ...and the cut itself, which is not in the trunk: the walk starts a
+    // cell above it. A hive hung on the very log the axe took is the tree's
+    // as much as one two cells higher.
+    hive_on_the_cut(&mut plan);
     plan
+}
+
+/// The wild hives stuck to the cells of a trunk that is coming down, added
+/// to the plan.
+///
+/// **A hive is not held up by anything** (`blocks`, "Hung on a trunk, not
+/// stood on anything": there is air under a hive, and that is where the bees
+/// go in), so nothing in the world took it down when the tree under it went
+/// -- and felling an oak with a hive on it left the comb hanging five cells
+/// up in an empty clearing, still filling on the growth clock and still
+/// stinging whoever reached it. Nothing said what tree it had been on.
+///
+/// Rejected: **making a hive propped, so the general support pass takes it.**
+/// That pass looks *down*, and a hive's support is the wall beside it; giving
+/// it `types::support_at`'s second direction would mean the generator, the
+/// placing rules and the collapse pass all learning a third kind of support
+/// for one block that is never placed by hand. The tree that carried the hive
+/// is the one thing that knows it was there, and it is here.
+///
+/// Rejected too: **leaving the comb and clearing nothing**, on the argument
+/// that a hive is worth more standing. A player who fells the tree has felled
+/// the hive; a comb floating over a stump is the picture this whole module
+/// exists to remove.
+fn take_the_hives<'a>(
+    plan: &mut Felled,
+    wood: impl Iterator<Item = &'a (i32, i32, i32)>,
+    look: &impl Fn(i32, i32, i32) -> Option<BlockId>,
+) {
+    for &(tx, ty, tz) in wood {
+        for (dx, dz) in DIRECTIONS {
+            let at = (tx + dx, ty, tz + dz);
+            let Some(hive) = look(at.0, at.1, at.2).filter(|&b| primitive_shared::bees::is_hive(b)) else {
+                continue;
+            };
+            // **Only a hive stuck to *this* cell.** The side is in the id
+            // (`types::hive_side`, the direction toward the bark), so a comb
+            // on a neighbouring tree whose cell happens to touch this trunk
+            // is left where it is -- felling one tree must not rob the tree
+            // beside it.
+            if primitive_shared::types::hive_side(hive).step() != (-dx, -dz) {
+                continue;
+            }
+            if plan.hives.iter().any(|&(cell, _)| cell == at) {
+                continue;
+            }
+            plan.cleared.push(at);
+            plan.hives.push((at, hive));
+        }
+    }
 }
 
 /// The columns of the trunk standing on the cut at `(x, y, z)`: the four of
@@ -974,7 +1057,9 @@ fn fell_branches(
     falling.sort_unstable();
     plan.leaves = leaves.len() as u32;
     plan.cleared = leaves;
-    plan.cleared.extend(falling);
+    // Copied rather than moved: the pieces are read again below, to find the
+    // hives that were stuck to them.
+    plan.cleared.extend(falling.iter().copied());
 
     // An oak's timber, or a birch's: the pieces wear its bark.
     plan.wood = wood;
@@ -986,6 +1071,13 @@ fn fell_branches(
             plan.spare = length as u32;
         }
     }
+    // ...and the hives, last, for the reason the log path takes them last:
+    // the lane is already chosen. **A tree of branches carries them too** --
+    // `worldgen::is_trunk`, which is what `place_hives` asks of the column
+    // it hangs one on, says yes to a bough as well as to a log -- so a hive
+    // left out of this path is a comb over a cleared crown in every wood the
+    // generator grows out of pieces.
+    take_the_hives(&mut plan, falling.iter().chain(std::iter::once(&stump)), look);
     Some(plan)
 }
 
@@ -1201,6 +1293,73 @@ pub fn unheld_palm_crown(
 mod tests {
     use super::*;
     use primitive_shared::types::{block_axis, BLOCK_AIR, BLOCK_STONE};
+
+    /// **A hive is part of the tree it grew on, and a felled tree takes it.**
+    ///
+    /// Nothing holds a hive up (`blocks`, `propped: false`), so felling the
+    /// oak under one left the comb hanging in the air over an empty stump --
+    /// still filling, still stinging, attached to a trunk that was on the
+    /// ground beside it. `take_the_hives` is what brings it down, and what
+    /// the plan hands back is the honey that was in it so the caller can
+    /// drop it and charge the bees for it.
+    #[test]
+    fn a_felled_tree_takes_the_hive_off_its_own_trunk_and_leaves_the_neighbours_alone() {
+        use primitive_shared::bees::{hive_holding, honey_in, HIVE_FULL};
+        use primitive_shared::types::{hive_against, Facing};
+
+        // Two trees a few cells apart, each with a hive on the side facing
+        // the other, and the near one is cut at the foot.
+        let g = 20;
+        let world = Wood::new(g)
+            .tree(0, 0, 6)
+            .tree(4, 0, 6)
+            // On the east wall of the near trunk: the comb is in the cell at
+            // +x, and its side points back west at the bark.
+            .put((1, g + 5, 0), hive_against(hive_holding(HIVE_FULL), Facing::West))
+            // ...and on the west wall of the far one, in the cell at 3.
+            .put((3, g + 5, 0), hive_against(hive_holding(1), Facing::East))
+            .put((0, g + 1, 0), BLOCK_AIR);
+        let plan = fell((0, g + 1, 0), world.look(), None);
+
+        assert!(
+            plan.cleared.contains(&(1, g + 5, 0)),
+            "the hive on the felled trunk was left hanging in the air: {:?}",
+            plan.hives
+        );
+        assert_eq!(plan.hives.len(), 1, "a fall took a hive that was not on its trunk: {:?}", plan.hives);
+        assert_eq!(plan.hives[0].0, (1, g + 5, 0));
+        assert_eq!(honey_in(plan.hives[0].1), HIVE_FULL, "the fall forgot what was in the comb");
+        assert!(
+            !plan.cleared.contains(&(3, g + 5, 0)),
+            "felling one tree robbed the hive on the tree beside it"
+        );
+    }
+
+    /// A tree with nothing on it still reports no hives, and the comb's cell
+    /// is never counted as crown: the lane is chosen before the hives are
+    /// taken, so a hive cannot tip a tree over (see `fell`).
+    #[test]
+    fn a_hive_on_a_trunk_does_not_change_which_way_the_tree_goes() {
+        use primitive_shared::bees::{hive_holding, HIVE_FULL};
+        use primitive_shared::types::{hive_against, Facing};
+
+        let g = 20;
+        let bare = Wood::new(g).tree(0, 0, 6).put((0, g + 1, 0), BLOCK_AIR);
+        let plain = fell((0, g + 1, 0), bare.look(), None);
+        assert!(plain.hives.is_empty(), "a tree with no hive on it reported one");
+
+        let hived = Wood::new(g)
+            .tree(0, 0, 6)
+            .put((1, g + 5, 0), hive_against(hive_holding(HIVE_FULL), Facing::West))
+            .put((0, g + 1, 0), BLOCK_AIR);
+        let with = fell((0, g + 1, 0), hived.look(), None);
+        assert_eq!(
+            direction_of(&with, (0, 0)),
+            direction_of(&plain, (0, 0)),
+            "the comb on the trunk changed the way the tree fell"
+        );
+        assert_eq!(with.laid, plain.laid, "the comb on the trunk moved the logs");
+    }
 
     #[test]
     fn a_dead_tree_with_no_crown_falls_and_lays_every_log_it_was() {

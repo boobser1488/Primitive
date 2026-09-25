@@ -11506,6 +11506,38 @@ pub(crate) fn fell_tree(
             items.spawn(drop, count, primitive_shared::geometry::wide(at), (0.0, 0.0, 0.0), None, Instant::now());
         }
     }
+    // **A tree comes down with the hives that were on it**
+    // (`felling::Felled::hives`). Their cells were cleared with the rest of
+    // the trunk above; this is what they held. Nothing holds a hive up
+    // (`blocks`, `propped: false`), so before this a felled oak left its
+    // comb hanging five cells up over an empty stump, still filling and
+    // still stinging.
+    //
+    // **What it gives is what a hand in it would have given** -- the honey,
+    // or the wax of an empty comb (`types::block_drop`) -- at the stump with
+    // the timber, and not the emptied comb back: there is no trunk left to
+    // stick it to.
+    //
+    // **And the bees have the feller.** Without the stings the axe would be
+    // the way to take honey for nothing, and the whole price of a hive is
+    // the bees (`bees`). No held item is read: an axe is what fells a tree,
+    // and a fire lit under it still calms them (`hive_is_smoked`).
+    for (cell, hive) in plan.hives {
+        if let Some(drop) = primitive_shared::types::block_drop(hive) {
+            let count = u32::from(primitive_shared::types::block_drop_count(hive));
+            ctx.items.lock().unwrap_or_else(|e| e.into_inner()).spawn(
+                drop,
+                count,
+                primitive_shared::geometry::wide(at),
+                (0.0, 0.0, 0.0),
+                None,
+                Instant::now(),
+            );
+        }
+        if let Some(handle) = feller {
+            sting_from_bees(ctx, handle, hive, cell, None);
+        }
+    }
 
     let count = changes.len() as u32;
     broadcast_changes(ctx, changes);
@@ -14574,20 +14606,49 @@ fn pass_the_night(ctx: &Arc<Context>, handles: &[Arc<players::PlayerHandle>]) {
         sleep_through_to_dawn(ctx, handles);
         return;
     }
-    // Where each sleeper lies and how exposed it is, read under each
-    // player's own lock; the world and the animals are asked afterwards, so
-    // no player lock is ever held across the animals' one.
-    let beds: Vec<(PlayerId, (f32, f32, f32), f32)> = handles
-        .iter()
-        .filter_map(|h| {
-            let state = h.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.sleeping_in.map(|_| (h.id, primitive_shared::geometry::narrow(state.position), state.surroundings.enclosure))
-        })
-        .collect();
+    // Where each sleeper lies and how exposed it is. Each player's own lock
+    // is taken and let go of again before the world is walked, and the
+    // animals are asked afterwards, so no player lock is ever held across
+    // the animals' one.
+    //
+    // **The room round the bed is looked at now, not remembered.** It used
+    // to be `surroundings`, which is the periodic survey and is up to
+    // `comfort::SURVEY_SECONDS` -- four seconds -- old, while the night is
+    // judged `body::NIGHT_PASSES_AFTER_SECONDS` -- two and a half -- after
+    // the eyes close. A player who walked in, shut the door behind them and
+    // clicked the bed was therefore as likely as not judged on the reading
+    // taken while they were still standing outside it, and the wolves came
+    // through a wall: a shut door is the dearest answer to the night there
+    // is (`animals::found_asleep_odds`) and it has to be read, not recalled.
+    // One flood fill per sleeper per night, and the reading is kept, so the
+    // night's other question -- whether this was a night at home
+    // (`comfort::rests_at_home`) -- is answered off the same one.
+    let mut asked: Vec<(PlayerId, (f32, f32, f32), f32)> = Vec::new();
+    for handle in handles {
+        let Some(at) = ({
+            let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+            state
+                .sleeping_in
+                .map(|_| primitive_shared::geometry::narrow(state.position))
+        }) else {
+            continue;
+        };
+        let feet = (at.0.floor() as i32, at.1.floor() as i32, at.2.floor() as i32);
+        let place = primitive_shared::comfort::survey(
+            |x, y, z| ctx.world.cached_block(x, y, z),
+            feet,
+        );
+        {
+            let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.surroundings = place;
+            state.since_survey = 0.0;
+        }
+        asked.push((handle.id, at, place.enclosure));
+    }
     let mut found: Vec<PlayerId> = Vec::new();
     {
         let mut animals = ctx.animals.lock().unwrap_or_else(|e| e.into_inner());
-        for (who, at, enclosure) in beds {
+        for (who, at, enclosure) in asked {
             let fire = logic::animals::fire_keeps_the_night_off(&*ctx.world, at);
             let odds = primitive_shared::animals::found_asleep_odds(enclosure, fire);
             if !animals.find_the_sleeper(&*ctx.world, at, odds).is_empty() {
@@ -19358,6 +19419,54 @@ mod butchering_tests {
         assert!(smoked > 0.0, "a smoked raid cost nothing at all");
     }
 
+    /// **A hive goes with the tree it grew on, and the honey with it.**
+    ///
+    /// Nothing holds a hive up (`blocks`, `propped: false`), so felling the
+    /// trunk under one used to leave the comb hanging in the air over an
+    /// empty stump -- still filling on the growth clock, still stinging
+    /// whoever climbed to it, stuck to a tree that was lying on the ground
+    /// beside it. `felling::take_the_hives` brings it down and this is the
+    /// other half: what was in it lands with the timber rather than being
+    /// deleted by the axe.
+    #[test]
+    fn felling_the_tree_a_hive_hangs_on_puts_its_honey_on_the_ground_with_the_timber() {
+        use primitive_shared::bees::{hive_holding, HIVE_FULL};
+        use primitive_shared::types::{hive_against, Facing, BLOCK_HONEY, BLOCK_LOG};
+
+        let (ctx, handle, _rx) = a_hunter();
+        // A bare trunk well away from the player, its foot already cut, with
+        // a full hive on the east wall of the log at FLOOR + 5.
+        let stump = (8, FLOOR + 1, 8);
+        // Cleared wide enough that whatever the generator put here is not
+        // read as a second tree: `fell` asks the cells round the cut before
+        // it asks anything else (`fell_branches`).
+        for y in FLOOR + 1..=FLOOR + 8 {
+            for dz in -2..=2 {
+                for dx in -2..=2 {
+                    assert!(ctx.world.set_block(stump.0 + dx, y, stump.2 + dz, BLOCK_AIR));
+                }
+            }
+        }
+        for y in FLOOR + 2..=FLOOR + 6 {
+            assert!(ctx.world.set_block(stump.0, y, stump.2, BLOCK_LOG));
+        }
+        let comb = (stump.0 + 1, FLOOR + 5, stump.2);
+        assert!(ctx.world.set_block(comb.0, comb.1, comb.2, hive_against(hive_holding(HIVE_FULL), Facing::West)));
+
+        assert!(fell_tree(&ctx, stump, Some(&handle)) > 0, "the trunk did not come down");
+
+        assert!(
+            ctx.world.cached_block(comb.0, comb.1, comb.2).is_some_and(is_air),
+            "the comb was left hanging in the air over the stump"
+        );
+        let honey: u32 = on_the_ground(&ctx)
+            .into_iter()
+            .filter(|&(block, _)| block_kind(block) == BLOCK_HONEY)
+            .map(|(_, count)| count)
+            .sum();
+        assert_eq!(u32::from(HIVE_FULL), honey, "a full hive felled with its tree gave {honey} honey");
+    }
+
     #[test]
     fn stings_never_kill_a_healthy_player_in_one_raid_and_never_take_the_last_of_anybodys_health() {
         use primitive_shared::bees::{hive_holding, stings, HIVE_FULL};
@@ -19767,6 +19876,60 @@ mod butchering_tests {
         assert!(!said.iter().any(|s| s == "WokenByWolves"), "{said:?}");
         assert!((ctx.clock.time_of_day() - DAWN).abs() < 1e-4, "a quiet night did not pass to dawn");
         assert!(handle.state.lock().unwrap().asleep_since.is_none(), "morning came and the sleeper is still asleep");
+    }
+
+    /// A room with no way into it round the cell `at`: two courses of wall
+    /// on the ring two cells out and a roof over the lot.
+    fn a_shut_room(ctx: &Arc<Context>, at: (i32, i32, i32)) {
+        for dx in -2i32..=2 {
+            for dz in -2i32..=2 {
+                for dy in 0..=1 {
+                    if dx.abs() == 2 || dz.abs() == 2 {
+                        assert!(ctx.world.set_block(at.0 + dx, at.1 + dy, at.2 + dz, BLOCK_STONE));
+                    }
+                }
+                assert!(ctx.world.set_block(at.0 + dx, at.1 + 2, at.2 + dz, BLOCK_STONE));
+            }
+        }
+    }
+
+    #[test]
+    fn a_door_shut_a_moment_before_the_eyes_close_is_still_a_shut_door_to_the_night() {
+        // The bed stands in a room with no way into it, and the survey the
+        // server is carrying is the one taken out of doors -- which is what
+        // a player who walks in, shuts the door behind them and clicks the
+        // bed leaves behind, because the survey runs every
+        // `comfort::SURVEY_SECONDS` and the night is judged
+        // `body::NIGHT_PASSES_AFTER_SECONDS` after the eyes close. Judged
+        // off that memory the wolves came through the wall.
+        use primitive_shared::animals::Species;
+        let (ctx, handle, mut rx) = a_hunter();
+        a_clearing(&ctx);
+        let at = (0, FLOOR + 1, 0);
+        a_shut_room(&ctx, at);
+        assert!(ctx.world.set_block(at.0, at.1, at.2, primitive_shared::types::BLOCK_BED));
+        // Inside the room, within reach of the bed.
+        handle.state.lock().unwrap().position = (0.5, f64::from(FLOOR) + 1.0, 1.5);
+        ctx.clock.set_time_of_day(0.8);
+        use_block(&ctx, &handle, at);
+        assert!(handle.state.lock().unwrap().sleeping_in.is_some(), "could not lie down");
+        handle.state.lock().unwrap().surroundings = primitive_shared::comfort::Surroundings::default();
+        ctx.animals.lock().unwrap().set_sleeper_dice(Some(0.0));
+        let _ = errors(&mut rx);
+
+        pass_the_night(&ctx, std::slice::from_ref(&handle));
+
+        let said = errors(&mut rx);
+        assert!(
+            ctx.animals.lock().unwrap().positions_of(Species::Wolf).is_empty(),
+            "the night sent wolves into a room with no way into it"
+        );
+        assert!(!said.iter().any(|s| s == "WokenByWolves"), "{said:?}");
+        assert!(
+            (ctx.clock.time_of_day() - DAWN).abs() < 1e-4,
+            "the night behind a shut door did not pass to dawn: it is {}",
+            ctx.clock.time_of_day()
+        );
     }
 
     #[test]
