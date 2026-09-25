@@ -51,8 +51,8 @@ const SHADER: &str = include_str!("shader.wgsl");
 /// changes nothing.
 const TERMS: [(&str, &str); 5] = [
     ("const AIR_DEPTH: f32 = 0.34;", "const AIR_DEPTH: f32 = 0.0;"),
-    ("const WATER_SHEEN: f32 = 0.55;", "const WATER_SHEEN: f32 = 0.0;"),
-    ("const WATER_GLITTER: f32 = 0.75;", "const WATER_GLITTER: f32 = 0.0;"),
+    ("const WATER_SHEEN: f32 = 0.30;", "const WATER_SHEEN: f32 = 0.0;"),
+    ("const WATER_GLITTER: f32 = 0.41;", "const WATER_GLITTER: f32 = 0.0;"),
     ("const WET_DARKEN: f32 = 0.70;", "const WET_DARKEN: f32 = 1.0;"),
     ("const LEAF_GLOW: f32 = 0.55;", "const LEAF_GLOW: f32 = 0.0;"),
 ];

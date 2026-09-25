@@ -2165,6 +2165,8 @@ fn run(
                             if scene_behind.is_some() { render_origin } else { Vec3::ZERO },
                             Eye {
                                 underwater: false,
+                                // ...so there is no water round it either.
+                                water: crate::engine::water::WaterTint::PLAIN,
                                 // The backdrop is a hillside in the open
                                 // air, and there is no eye in a world to
                                 // ask about a roof over it.
@@ -3020,6 +3022,18 @@ fn run(
                         render_origin,
                         Eye {
                             underwater,
+                            // **Which water, from the camera and not from
+                            // the feet.** A player standing waist-deep in
+                            // a marsh is looking across it, and one who
+                            // has ducked under is inside it; the murk is
+                            // the second one's and the first sees none of
+                            // it. The same eye `underground` is asked of,
+                            // and for the same reason.
+                            water: crate::engine::water::WaterTint::around_the_eye(
+                                &worldgen,
+                                |x, y, z| chunks.block_at(x, y, z),
+                                camera.position.as_vec3(),
+                            ),
                             underground: underground_fraction,
                             smoke: {
                                 smoke_shown += (smoke - smoke_shown) * (dt * 1.5).min(1.0);
@@ -3754,6 +3768,15 @@ fn close_chat(
 /// rather than grouping.
 struct Eye {
     underwater: bool,
+    /// **Which water**, where `underwater` is true.
+    ///
+    /// The murk a swimmer sees is that water's own colour now
+    /// (`water::WaterTint::murk`) rather than one teal for the world, and
+    /// the fog is where it is decided -- so the eye has to arrive carrying
+    /// it. Always filled in, even out of the water, because the thing that
+    /// reads it is a `then_some` and a colour nobody looks at costs two
+    /// noise samples a frame.
+    water: crate::engine::water::WaterTint,
     /// How much of the sky is shut out where the eye is, 0..1, already
     /// settled over time by `fog::Underground`.
     underground: f32,
@@ -3932,12 +3955,13 @@ fn frame_params(
     render_origin: Vec3,
     eye: Eye,
 ) -> FrameParams {
-    let Eye { underwater, underground, smoke, mist, health_fraction, held } = eye;
+    let Eye { underwater, water, underground, smoke, mist, health_fraction, held } = eye;
     // What distance looks like this frame, worked out in one place --
     // see `engine::fog`, which exists because the colour, the range and
     // the underwater case used to live in three files that each held a
     // third of the answer.
-    let mut fog = fog::Fog::for_frame(settings, sky, render_distance, fog_enabled, underwater);
+    let mut fog =
+        fog::Fog::for_frame(settings, sky, render_distance, fog_enabled, underwater.then_some(water));
     // Before the clamp, because both only ever pull the fade *in* and
     // the clamp is the one that knows where the streamed world stops:
     // taking the cave's twenty-four blocks and then letting the disc

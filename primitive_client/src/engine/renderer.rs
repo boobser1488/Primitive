@@ -16325,8 +16325,52 @@ pub(crate) mod offscreen_repro {
     /// because everything else moved too. Here both variants are drawn
     /// by one process on one device from one mesh, and the only
     /// difference between the two pictures is the source string.
+    /// **In plain water**, which is what a tool gets when it has no world
+    /// to ask.
+    ///
+    /// This function is handed meshes and a camera and no generator, so it
+    /// cannot know what water its camera is standing in -- and the murk is
+    /// that water's own colour now (`water::WaterTint::murk`). A tool that
+    /// puts its eye in a marsh or a glacier lake says which with
+    /// `draw_scene_in_water`, or it photographs the right surface over the
+    /// wrong haze.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_scene(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        textures: &TextureManager,
+        settings: &crate::settings::ClientSettings,
+        camera: &Camera,
+        sky: &crate::engine::sky::Sky,
+        meshes: &[(ChunkPos, crate::engine::mesh::MeshBuffers)],
+        size: (u32, u32),
+        chunk_source: &str,
+        fog_clamp: Option<f32>,
+        backdrop: Option<wgpu::Color>,
+        submerged: bool,
+        samples: u32,
+    ) -> image::RgbaImage {
+        draw_scene_in_water(
+            device,
+            queue,
+            textures,
+            settings,
+            camera,
+            sky,
+            meshes,
+            size,
+            chunk_source,
+            fog_clamp,
+            backdrop,
+            submerged,
+            samples,
+            crate::engine::water::WaterTint::PLAIN,
+        )
+    }
+
+    /// The same, with the water named. See `draw_scene`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_scene_in_water(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         textures: &TextureManager,
@@ -16361,6 +16405,8 @@ pub(crate) mod offscreen_repro {
         // `a_plant_under_multisampling_has_no_hairline_over_its_top`),
         // and this tool could not have found it.
         samples: u32,
+        // Which water the eye is in, where it is in one. See `draw_scene`.
+        water: crate::engine::water::WaterTint,
     ) -> image::RgbaImage {
         use wgpu::util::DeviceExt;
 
@@ -16374,7 +16420,7 @@ pub(crate) mod offscreen_repro {
             sky,
             settings.render_distance_chunks,
             true,
-            submerged,
+            submerged.then_some(water),
         );
         if let Some(radius) = fog_clamp {
             fog.clamp_to(radius);
@@ -20442,7 +20488,7 @@ mod lighting_tools {
             let origin = scene.origin;
             // The game's own fog for this frame: range, colour, glow, and
             // the cave's closing-in.
-            let mut fog = crate::engine::fog::Fog::for_frame(&settings, &sky, RENDER_DISTANCE, true, false);
+            let mut fog = crate::engine::fog::Fog::for_frame(&settings, &sky, RENDER_DISTANCE, true, None);
             fog.go_underground(scene.underground);
             let aspect = self.width as f32 / self.height as f32;
             let view = glam::Mat4::look_at_rh(eye, at, Vec3::Y);
@@ -23893,7 +23939,7 @@ mod raft_repro {
                 let settings = crate::settings::ClientSettings { lighting: quality, ..Default::default() };
                 let sky = crate::engine::sky::Sky::new(time_of_day, 900.0);
                 let sun = sky.sun_direction();
-                let fog = crate::engine::fog::Fog::for_frame(&settings, &sky, RENDER_DISTANCE, true, false);
+                let fog = crate::engine::fog::Fog::for_frame(&settings, &sky, RENDER_DISTANCE, true, None);
                 let aspect = WIDTH as f32 / HEIGHT as f32;
                 let eye_rel = eye - ORIGIN;
                 let view_proj = glam::Mat4::perspective_rh(80.0f32.to_radians(), aspect, 0.05, 1000.0)
@@ -24293,7 +24339,7 @@ mod raft_repro {
                 let settings = crate::settings::ClientSettings { lighting: quality, ..Default::default() };
                 let sky = crate::engine::sky::Sky::new(time_of_day, 900.0);
                 let sun = sky.sun_direction();
-                let fog = crate::engine::fog::Fog::for_frame(&settings, &sky, RENDER_DISTANCE, true, false);
+                let fog = crate::engine::fog::Fog::for_frame(&settings, &sky, RENDER_DISTANCE, true, None);
                 let aspect = WIDTH as f32 / HEIGHT as f32;
                 let eye_rel = eye - ORIGIN;
                 let view_proj = glam::Mat4::perspective_rh(80.0f32.to_radians(), aspect, 0.05, 1000.0)

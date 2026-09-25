@@ -318,7 +318,7 @@ fn what_water_looks_like_in_a_generated_world() {
                         .iter()
                         .map(|v| {
                             let (a, b, c) = world_of(v.position);
-                            format!("({a:.2},{b:.2},{c:.2}) f{} d{}", (v.light() >> 10) & 7, v.tint())
+                            format!("({a:.2},{b:.2},{c:.2}) f{} d{}", (v.light() >> 10) & 7, v.water().1)
                         })
                         .collect();
                     println!("  chunk {:?}: {}", (pos.x, pos.z), described.join("  "));
@@ -959,5 +959,360 @@ fn what_leaves_and_ice_look_like() {
         let path = format!("{out}/leafice_{tag}_{seat}.png");
         png.save(&path).expect("write png");
         println!("  {seat:>14} -> {path}");
+    }
+}
+
+/// **The water of every country the palette has a colour for**, through
+/// the real passes: the open sea, the shallows off a beach, a river, a
+/// marsh, a northern bog, a tarn in the mountains, the tropics and the
+/// northern ocean -- each at noon, at sunset, at night and from under its
+/// own lid.
+///
+/// ```text
+/// GPU_REPRO_DIR=C:/abs/shots cargo test -p primitive_client --lib \
+///     what_the_water_of_every_country_looks_like -- --ignored --nocapture
+/// ```
+///
+/// **`WATER_BEFORE=1` is the control build**, and it is a control build
+/// rather than a second checkout for the reason written over
+/// `offscreen_repro::draw_scene`: two runs of two binaries differ in
+/// everything. It compiles the terrain shader with the water palette
+/// returning white -- so the surface wears its picture's own blue, as it
+/// did -- and with the sky's half-mirror back at 0.55. One process, one
+/// device, one mesh, and the only difference between the two pictures is
+/// the source string.
+///
+/// What it cannot put back is the colour *under* water: the murk is the
+/// fog colour and the sky pass reads the same uniform, so a "before"
+/// swimmer would be half of each. The submerged seats are therefore taken
+/// after the change only, and the note is here so that nobody reads the
+/// pair as one.
+///
+/// Places are *found*, not typed: each is searched for round the origin of
+/// a world in the right zone, and the tool prints the column it stood on
+/// so a picture can be taken from the same eye again.
+///
+/// `WATER_PLACES=marsh,bog` photographs only those.
+#[test]
+#[ignore = "a tool: needs a GPU; photographs the water of eight countries"]
+fn what_the_water_of_every_country_looks_like() {
+    use primitive_shared::worldgen::{Biome, Preset, Zone};
+
+    let Some((device, queue)) = crate::engine::test_gpu() else {
+        println!("no GPU adapter on this machine; skipping");
+        return;
+    };
+    let out = std::env::var("GPU_REPRO_DIR").unwrap_or_else(|_| ".".to_string());
+    std::fs::create_dir_all(&out).expect("output directory");
+    let before = std::env::var("WATER_BEFORE").is_ok();
+    let tag = if before { "before" } else { "after" };
+    let only = std::env::var("WATER_PLACES").ok();
+    let settings = settings();
+    let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
+    let textures = TextureManager::load(device, queue, assets, settings.anisotropy).expect("textures load");
+    let layers = textures.face_layers();
+
+    // The water palette, taken out without taking anything else out. Both
+    // replacements must bite, or the "before" is silently the "after".
+    let source = include_str!("shader.wgsl").replace("\r\n", "\n");
+    let shader = if before {
+        let plain = source
+            .replace("return body * shoal / WATER_MEDIAN;", "return vec3<f32>(1.0);")
+            .replace("const WATER_SHEEN: f32 = 0.30;", "const WATER_SHEEN: f32 = 0.55;");
+        assert!(plain.contains("return vec3<f32>(1.0);"), "the water palette is not where it was");
+        assert!(plain.contains("WATER_SHEEN: f32 = 0.55"), "the sheen is not where it was");
+        plain
+    } else {
+        source
+    };
+
+    let country = |name, zone, biome, depth, above| Country { name, zone, biome, depth, above };
+    let places = [
+        country("sea", Zone::Temperate, Some(Biome::Ocean), 12..=24, 0),
+        country("shallows", Zone::Temperate, Some(Biome::Ocean), 1..=3, 0),
+        country("river", Zone::Temperate, Some(Biome::River), 1..=6, 0),
+        country("marsh", Zone::Temperate, Some(Biome::Swamp), 1..=4, 0),
+        country("bog", Zone::North, Some(Biome::Bog), 1..=4, 0),
+        // Water in hill country, asked for by height rather than by
+        // biome. It comes back with a cave lake under the mountains and
+        // nothing else -- see `what_a_tarn_in_the_hills_looks_like`, which
+        // is where that finding is written down and photographed round.
+        country("high", Zone::Temperate, None, 1..=24, SEA_LEVEL + 25),
+        country("tropics", Zone::Tropics, Some(Biome::Ocean), 1..=4, 0),
+        country("northern_sea", Zone::North, Some(Biome::Ocean), 8..=24, 0),
+    ];
+
+    for Country { name, zone, biome, depth, above } in places {
+        if only.as_deref().is_some_and(|list| !list.split(',').any(|s| s == name)) {
+            continue;
+        }
+        let world = WorldGen::with_zone(seed(), Preset::Normal, zone);
+        let Some((x, top, z, cells)) = find_biome_water(&world, biome, &depth, above) else {
+            println!("{name}: no {biome:?} water {depth:?} deep at {above} or over, near the origin");
+            continue;
+        };
+        let (chill, silt) = world.water_climate(x, z, top);
+        let (warmth, wet) = world.climate_column(x, z);
+        let ground = world.ground_wetness(x, z, top);
+        let tint = crate::engine::water::WaterTint { chill, silt, depth: cells as f32 };
+        println!(
+            "{name}: ({x}, {top}, {z}), {cells} cells deep\n  \
+             climate warmth {warmth:.3} rain {wet:.3} + ground {ground:.3} \
+             -> chill {chill:.2} silt {silt:.2}\n  \
+             surface {:?}\n  murk {:?}",
+            tint.body(),
+            tint.murk()
+        );
+        let meshes = patch(&world, ChunkPos::from_global(x, z).0, 2, &layers);
+        let (fx, fy, fz) = (x as f32 + 0.5, top as f32, z as f32 + 0.5);
+        // (seat, eye, yaw, pitch, under water, hour)
+        let seats: Vec<(&str, Vec3, f32, f32, bool, f32)> = vec![
+            ("noon_across", Vec3::new(fx - 7.0, fy + 3.0, fz), 0.0, -14.0, false, 0.50),
+            ("noon_down", Vec3::new(fx - 2.5, fy + 2.2, fz), 0.0, -40.0, false, 0.50),
+            ("sunset", Vec3::new(fx - 7.0, fy + 3.0, fz), 0.0, -14.0, false, 0.73),
+            ("night", Vec3::new(fx - 7.0, fy + 3.0, fz), 0.0, -14.0, false, 0.02),
+            ("under", Vec3::new(fx, fy - 0.4, fz), 0.0, 0.0, true, 0.50),
+            ("under_up", Vec3::new(fx, fy - 0.4, fz), 0.0, 45.0, true, 0.50),
+        ];
+        for (seat, eye, yaw, pitch, submerged, hour) in seats {
+            // The murk is after-only; see the note on this test.
+            if before && submerged {
+                continue;
+            }
+            let sky = Sky::new(hour, 900.0);
+            let mut camera = Camera::new(eye.as_dvec3(), SIZE.0 as f32 / SIZE.1 as f32);
+            camera.yaw = yaw.to_radians();
+            camera.pitch = pitch.to_radians();
+            camera.fov_y_radians = settings.fov_degrees.to_radians();
+            let mut png = crate::engine::renderer::offscreen_repro::draw_scene_in_water(
+                device, queue, &textures, &settings, &camera, &sky, &meshes, SIZE,
+                &shader, None, None, submerged, settings.msaa.max(1), tint,
+            );
+            // Opaque, as the window shows it: see the note in `leafice`.
+            for pixel in png.pixels_mut() {
+                pixel.0[3] = 255;
+            }
+            let path = format!("{out}/water_{tag}_{name}_{seat}.png");
+            png.save(&path).expect("write png");
+            println!("  {seat:>12} -> {path}");
+        }
+    }
+}
+
+/// One country to go and photograph the water of: where in the world, what
+/// biome to stand in, how deep the water has to be and how high its
+/// surface has to stand.
+///
+/// **The height is asked for instead of a biome, not as well as one.**
+/// Water in the hills is a river or a pool that the classifier names after
+/// the country round it; what makes it glacier-coloured is the altitude
+/// (`worldgen::water_climate_of`), so that is the thing to ask for.
+struct Country {
+    name: &'static str,
+    zone: primitive_shared::worldgen::Zone,
+    biome: Option<primitive_shared::worldgen::Biome>,
+    depth: std::ops::RangeInclusive<u32>,
+    above: i32,
+}
+
+/// The first column of `biome` round a world's origin whose water stands
+/// the wanted number of cells deep, as (x, the top of the water, z, cells).
+///
+/// The biome is asked of the chunk's middle first, which is a few noise
+/// samples; only a chunk that answers right is generated, which is the
+/// expensive part. Rings outward, so the answer is the nearest one and the
+/// same one every run.
+fn find_biome_water(
+    world: &WorldGen,
+    biome: Option<primitive_shared::worldgen::Biome>,
+    cells: &std::ops::RangeInclusive<u32>,
+    above: i32,
+) -> Option<(i32, i32, i32, u32)> {
+    // **Asked for height, the search takes the best it finds** rather than
+    // the first that clears a bar. There is very little standing water
+    // high up -- see the note on the flour band in `water_climate_of` --
+    // and a bar is how a tool comes back with nothing at all and says
+    // less than a brook twenty blocks up would have.
+    let mut highest: Option<(i32, i32, i32, u32)> = None;
+    for ring in 0..48i32 {
+        let mut ring_positions = Vec::new();
+        for dz in -ring..=ring {
+            for dx in -ring..=ring {
+                if dx.abs() == ring || dz.abs() == ring {
+                    ring_positions.push(ChunkPos::new(dx, dz));
+                }
+            }
+        }
+        for pos in ring_positions {
+            let (mx, mz) = (pos.x * 16 + 8, pos.z * 16 + 8);
+            if biome.is_some_and(|want| world.biome_at(mx, mz) != want)
+                || (above > 0 && world.height_at(mx, mz) < above - 8)
+            {
+                continue;
+            }
+            let chunk = world.generate_chunk(pos);
+            for z in 4..CHUNK_SIZE_Z - 4 {
+                for x in 4..CHUNK_SIZE_X - 4 {
+                    for y in (1..CHUNK_SIZE_Y - 1).rev() {
+                        if !is_liquid(chunk.get(x, y, z)) || chunk.get(x, y + 1, z) != BLOCK_AIR {
+                            continue;
+                        }
+                        if above > 0 {
+                            let mut deep = 0u32;
+                            while (deep as usize) < y && is_liquid(chunk.get(x, y - deep as usize, z)) {
+                                deep += 1;
+                            }
+                            let here = (pos.x * 16 + x as i32, y as i32, pos.z * 16 + z as i32, deep);
+                            if highest.is_none_or(|(_, best, _, _)| here.1 > best) {
+                                highest = Some(here);
+                            }
+                            break;
+                        }
+                        // The column under it, counted as the mesher
+                        // counts it under a lid.
+                        let mut deep = 0u32;
+                        while (deep as usize) < y && is_liquid(chunk.get(x, y - deep as usize, z)) {
+                            deep += 1;
+                        }
+                        if cells.contains(&deep) {
+                            return Some((
+                                pos.x * 16 + x as i32,
+                                y as i32,
+                                pos.z * 16 + z as i32,
+                                deep,
+                            ));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    highest
+}
+
+/// **A tarn, at the height a tarn sits**, through the real passes.
+///
+/// ```text
+/// GPU_REPRO_DIR=C:/abs/shots cargo test -p primitive_client --lib \
+///     what_a_tarn_in_the_hills_looks_like -- --ignored --nocapture
+/// ```
+///
+/// **The basin is cut by hand, and that is a finding and not a shortcut.**
+/// `what_the_water_of_every_country_looks_like` searches a world for
+/// standing water high up and does not find any: over three thousand
+/// blocks of seed 1337, every column whose ground stands twenty-five over
+/// the sea holds water only in a cave -- the highest it found was a lake
+/// at y 21, under the mountains. The generator's rivers fade out as the
+/// land rises (`scale::RiverOrder::fades`) and nothing else fills a
+/// hollow. So the one colour in the palette that wants altitude cannot be
+/// photographed where the generator put it, and this cuts the hollow
+/// instead.
+///
+/// Everything else is real: the climate is the generator's at that
+/// column, the mesh is `build_mesh`, and the palette and the passes are
+/// the game's.
+///
+/// `TARN_HEIGHT=<y>` moves the lid; the default is where the flour band
+/// is full (`worldgen::water_climate_of`).
+#[test]
+#[ignore = "a tool: needs a GPU; photographs glacier-fed water, which the generator does not place"]
+fn what_a_tarn_in_the_hills_looks_like() {
+    use primitive_shared::types::{BLOCK_GRASS, BLOCK_STONE, BLOCK_WATER, CHUNK_VOLUME};
+
+    let Some((device, queue)) = crate::engine::test_gpu() else {
+        println!("no GPU adapter on this machine; skipping");
+        return;
+    };
+    let out = std::env::var("GPU_REPRO_DIR").unwrap_or_else(|_| ".".to_string());
+    std::fs::create_dir_all(&out).expect("output directory");
+    let surface = std::env::var("TARN_HEIGHT")
+        .ok()
+        .and_then(|h| h.parse::<usize>().ok())
+        .unwrap_or((SEA_LEVEL + 50) as usize);
+    let settings = settings();
+    let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
+    let textures = TextureManager::load(device, queue, assets, settings.anisotropy).expect("textures load");
+    let layers = textures.face_layers();
+    let world = WorldGen::new(seed());
+
+    // A shelving basin, as `renderer::water_world` cuts one: the depth is
+    // half of what the palette does, so a box of one depth would show half
+    // the answer.
+    const SPAN: i32 = 5;
+    let mut chunks = ChunkManager::new(64);
+    for cz in 0..SPAN {
+        for cx in 0..SPAN {
+            let mut blocks = vec![BLOCK_AIR; CHUNK_VOLUME];
+            for z in 0..CHUNK_SIZE_Z {
+                for x in 0..CHUNK_SIZE_X {
+                    let wx = cx * CHUNK_SIZE_X as i32 + x as i32;
+                    let wz = cz * CHUNK_SIZE_Z as i32 + z as i32;
+                    let bed = if (16..=60).contains(&wx) && (10..=66).contains(&wz) {
+                        let shelf = ((wx - 16) / 4).clamp(0, 10);
+                        (surface as i32 - 1 - shelf).max(1) as usize
+                    } else {
+                        surface
+                    };
+                    for y in 0..=bed {
+                        blocks[Chunk::index(x, y, z)] = if y == bed && bed == surface {
+                            BLOCK_GRASS
+                        } else {
+                            BLOCK_STONE
+                        };
+                    }
+                    for y in (bed + 1)..=surface {
+                        blocks[Chunk::index(x, y, z)] = BLOCK_WATER;
+                    }
+                }
+            }
+            chunks.insert(Chunk { pos: ChunkPos::new(cx, cz), blocks });
+        }
+    }
+    let mut light = LightMap::new();
+    let positions: Vec<ChunkPos> =
+        (0..SPAN).flat_map(|cz| (0..SPAN).map(move |cx| ChunkPos::new(cx, cz))).collect();
+    for pos in &positions {
+        light.load_chunk(&chunks, *pos);
+    }
+    let mut cache = Box::<Neighbourhood>::default();
+    let mut meshes = Vec::new();
+    for pos in &positions {
+        cache.fill(*pos, &chunks, &light);
+        let mut buffers = MeshBuffers::default();
+        build_mesh(*pos, &cache, &layers, &world, &mut buffers);
+        meshes.push((*pos, buffers));
+    }
+
+    let (chill, silt) = world.water_climate(40, 38, surface as i32);
+    let tint = crate::engine::water::WaterTint { chill, silt, depth: 6.0 };
+    println!(
+        "tarn: lid at y {surface}, chill {chill:.2} silt {silt:.2}\n  surface {:?}\n  murk {:?}",
+        tint.body(),
+        tint.murk()
+    );
+    // (seat, eye, yaw, pitch, under water, hour)
+    let seats: [(&str, Vec3, f32, f32, bool, f32); 4] = [
+        ("noon_across", Vec3::new(10.5, surface as f32 + 3.0, 38.5), 0.0, -14.0, false, 0.50),
+        ("noon_down", Vec3::new(30.5, surface as f32 + 4.0, 38.5), 0.0, -45.0, false, 0.50),
+        ("sunset", Vec3::new(10.5, surface as f32 + 3.0, 38.5), 0.0, -14.0, false, 0.73),
+        ("under", Vec3::new(40.5, surface as f32 - 1.5, 38.5), 0.0, 0.0, true, 0.50),
+    ];
+    for (seat, eye, yaw, pitch, submerged, hour) in seats {
+        let sky = Sky::new(hour, 900.0);
+        let mut camera = Camera::new(eye.as_dvec3(), SIZE.0 as f32 / SIZE.1 as f32);
+        camera.yaw = yaw.to_radians();
+        camera.pitch = pitch.to_radians();
+        camera.fov_y_radians = settings.fov_degrees.to_radians();
+        let mut png = crate::engine::renderer::offscreen_repro::draw_scene_in_water(
+            device, queue, &textures, &settings, &camera, &sky, &meshes, SIZE,
+            include_str!("shader.wgsl"), None, None, submerged, settings.msaa.max(1), tint,
+        );
+        for pixel in png.pixels_mut() {
+            pixel.0[3] = 255;
+        }
+        let path = format!("{out}/water_after_tarn_{seat}.png");
+        png.save(&path).expect("write png");
+        println!("  {seat:>12} -> {path}");
     }
 }

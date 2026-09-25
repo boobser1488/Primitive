@@ -622,7 +622,7 @@ impl<'a> Rig<'a> {
         let settings = crate::settings::ClientSettings { lighting: quality, ..Default::default() };
         let sky = crate::engine::sky::Sky::new(time_of_day, 900.0);
         let sun = sky.sun_direction();
-        let fog = crate::engine::fog::Fog::for_frame(&settings, &sky, RENDER_DISTANCE, true, false);
+        let fog = crate::engine::fog::Fog::for_frame(&settings, &sky, RENDER_DISTANCE, true, None);
         let aspect = self.width as f32 / self.height as f32;
         let eye_rel = eye - ORIGIN;
         let view_proj = self.view_proj(camera);

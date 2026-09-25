@@ -531,7 +531,7 @@ fn what_particles_look_like_where_they_are() {
             }
         }
         let sun = sky.sun_direction();
-        let fog = crate::engine::fog::Fog::for_frame(&settings, &sky, RENDER_DISTANCE, true, view.underwater);
+        let fog = crate::engine::fog::Fog::for_frame(&settings, &sky, RENDER_DISTANCE, true, view.underwater.then_some(crate::engine::water::WaterTint::PLAIN));
         let aspect = WIDTH as f32 / HEIGHT as f32;
         let view_proj = camera.view_proj_about(ORIGIN);
         let eye_rel = (camera.position - ORIGIN.as_dvec3()).as_vec3();

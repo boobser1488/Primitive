@@ -215,7 +215,7 @@ pub(super) fn mesh_world(
 
 /// The fog for a frame, built the way `frame_params` builds it.
 pub(super) fn fog_for(settings: &ClientSettings, sky: &Sky, submerged: bool) -> Fog {
-    let mut fog = Fog::for_frame(settings, sky, settings.render_distance_chunks, true, submerged);
+    let mut fog = Fog::for_frame(settings, sky, settings.render_distance_chunks, true, submerged.then_some(crate::engine::water::WaterTint::PLAIN));
     fog.clamp_to(ChunkManager::reach_blocks(settings.render_distance_chunks));
     fog
 }
@@ -623,7 +623,7 @@ fn under_water_the_terrain_past_the_fog_is_the_colour_of_the_sky_behind_it() {
     let mut camera = Camera::new((Vec3::new(4.5, 20.5, 8.5)).as_dvec3(), 1.0);
     camera.yaw = 0.0;
     camera.fov_y_radians = 90f32.to_radians();
-    let fog = Fog::for_frame(&settings, &sky, settings.render_distance_chunks, true, true);
+    let fog = Fog::for_frame(&settings, &sky, settings.render_distance_chunks, true, Some(crate::engine::water::WaterTint::PLAIN));
     assert!(fog.end < 27.0, "the wall is not past the fog, so this tests nothing");
     // 128 across, because `draw_scene` reads the frame back a row at a time
     // and a row has to be a whole number of 256-byte blocks; 96 was refused.
