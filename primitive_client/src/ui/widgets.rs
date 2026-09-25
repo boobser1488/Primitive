@@ -495,6 +495,10 @@ pub enum Piece {
 
 impl Piece {
     /// Every piece, in the order the array holds them.
+    ///
+    /// Test-only: the game reaches a piece by name, and only the
+    /// harnesses that turn vertices back into pixels walk the list.
+    #[cfg(test)]
     pub const ALL: [Piece; 15] = [
         Piece::Panel,
         Piece::Tray,
@@ -514,6 +518,7 @@ impl Piece {
     ];
 
     /// The file it is drawn in, under `assets/textures/`.
+    #[cfg(test)]
     pub fn file(self) -> &'static str {
         crate::engine::texture::EXTRA_TEXTURES[crate::engine::texture::EXTRA_UI_SKIN + self as usize]
     }

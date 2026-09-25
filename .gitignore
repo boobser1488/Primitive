@@ -45,3 +45,4 @@ gpu_*.png
 # A hand-off prompt for a new work session: private notes, not the project.
 /HANDOFF.md
 /требования.txt
+/ui-skin-shots/

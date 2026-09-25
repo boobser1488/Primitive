@@ -1665,7 +1665,7 @@ fn skin_picture(piece: crate::ui::widgets::Piece) -> &'static image::RgbaImage {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .expect("the skin cache");
-    *cache.entry(piece.file()).or_insert_with(|| {
+    cache.entry(piece.file()).or_insert_with(|| {
         let bytes = crate::embedded::texture(piece.file()).expect("the skin is compiled in");
         let image = image::load_from_memory(bytes).expect("a skin picture").to_rgba8();
         // Leaked rather than kept in the map by value: a picture is a
