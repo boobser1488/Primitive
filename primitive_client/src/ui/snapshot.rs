@@ -304,45 +304,7 @@ fn ui_snapshot() {
     // it -- and for that the bar's own outline is the whole of what
     // matters. See `hotbar::TOP`, which is the line they must clear.
     {
-        use crate::ui::hotbar::{BOTTOM, PAD, SLOT, UNTEXTURED};
-        let mut vertices = Vec::new();
-        let mut box_quad = |x0: f32, y0: f32, x1: f32, y1: f32, tint: [f32; 4]| {
-            for (x, y) in [
-                (x0, y0),
-                (x1, y0),
-                (x1, y1),
-                (x0, y0),
-                (x1, y1),
-                (x0, y1),
-            ] {
-                vertices.push(HotbarVertex {
-                    position: [x, y],
-                    uv: [0.0, 0.0],
-                    tex_layer: UNTEXTURED,
-                    tint,
-                });
-            }
-        };
-        // The backdrop, then the ten slots inside it.
-        let pitch = SLOT + 0.012;
-        let total = pitch * 10.0 - 0.012;
-        box_quad(
-            -total / 2.0 - PAD,
-            BOTTOM - PAD,
-            total / 2.0 + PAD,
-            BOTTOM + SLOT + PAD,
-            [0.12, 0.12, 0.14, 0.92],
-        );
-        for slot in 0..10 {
-            let centre = crate::ui::hotbar::slot_centre(slot, 10);
-            box_quad(
-                centre - SLOT / 2.0,
-                BOTTOM,
-                centre + SLOT / 2.0,
-                BOTTOM + SLOT,
-                [0.30, 0.31, 0.34, 1.0],
-            );
-        }
+        let mut vertices = belt_stand_in(font, 0);
         let mut belt = Inventory::new();
         belt.put_in_slot(0, Stack::new(BLOCK_COBBLESTONE, 41));
         belt.put_in_slot(3, Stack::new(BLOCK_COAL, 7));
@@ -481,22 +443,7 @@ fn ui_snapshot() {
         // whether a slot is reachable. Drawn as outlines rather than
         // slots -- what is being looked at is the clearance.
         {
-            use crate::ui::hotbar::{BOTTOM, PAD, SLOT, UNTEXTURED};
-            let mut bar = Vec::new();
-            let mut box_quad = |x0: f32, y0: f32, x1: f32, y1: f32, tint: [f32; 4]| {
-                for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)] {
-                    bar.push(HotbarVertex { position: [x, y], uv: [0.0, 0.0], tex_layer: UNTEXTURED, tint });
-                }
-            };
-            let pitch = SLOT + 0.012;
-            let total = pitch * 10.0 - 0.012;
-            box_quad(-total / 2.0 - PAD, BOTTOM - PAD, total / 2.0 + PAD, BOTTOM + SLOT + PAD,
-                     [0.12, 0.12, 0.14, 0.92]);
-            for slot in 0..10 {
-                let centre = crate::ui::hotbar::slot_centre(slot, 10);
-                box_quad(centre - SLOT / 2.0, BOTTOM, centre + SLOT / 2.0, BOTTOM + SLOT,
-                         [0.30, 0.31, 0.34, 1.0]);
-            }
+            let mut bar = belt_stand_in(font, 0);
             crate::ui::widgets::scale_about(
                 &mut bar,
                 crate::ui::widgets::anchor::BOTTOM(width() as f32 / height() as f32),
@@ -691,7 +638,13 @@ fn ui_snapshot() {
     // layout has only ever been checked against the shortest words it
     // will ever hold.
     let mut settings = crate::settings::ClientSettings::default();
-    let worlds = crate::logic::worlds::Worlds::load(std::path::Path::new("saves"));
+    // **Worlds made for the picture, not whatever is in `saves/`.** This
+    // read the developer's own folder, so the picture of the screen
+    // everybody touches was empty on a fresh checkout and different on
+    // every machine -- and the row is now four facts wide (a date, a
+    // day, a season, a size), none of which can be looked at in a list
+    // that has nothing in it.
+    let (saves, worlds) = a_few_worlds();
     let mut menu = crate::ui::menu::Menu::new(crate::ui::menu::ServerList::default());
     // The extensions screen is empty on a client that has not asked a
     // server anything, and empty is exactly the state that needs no
@@ -713,6 +666,7 @@ fn ui_snapshot() {
             (crate::ui::menu::Screen::Worlds, "menu_worlds"),
             (crate::ui::menu::Screen::Settings, "menu_settings"),
             (crate::ui::menu::Screen::CreatingWorld, "menu_new_world"),
+            (crate::ui::menu::Screen::RenamingWorld(0), "menu_rename_world"),
             (crate::ui::menu::Screen::Servers, "menu_servers"),
             (crate::ui::menu::Screen::Paused, "menu_paused"),
             (crate::ui::menu::Screen::Editing(None), "menu_server_form"),
@@ -766,7 +720,56 @@ fn ui_snapshot() {
         menu.set_extensions(a_servers_extensions());
     }
 
+    let _ = std::fs::remove_dir_all(&saves);
     println!("wrote the screens to {out}");
+}
+
+/// A saves folder with a handful of worlds in it, for the pictures of
+/// the screen that lists them.
+///
+/// Every row is a different *kind* of row, because the only thing a
+/// picture of a list can answer is whether the rows read: one played
+/// minutes ago, one a season in, one left in the middle of a winter, one
+/// never opened at all, and a name long enough to be truncated. The
+/// caller removes the folder.
+fn a_few_worlds() -> (std::path::PathBuf, crate::logic::worlds::Worlds) {
+    use crate::logic::worlds::{unix_now, Worlds};
+    use primitive_shared::worldgen::{Preset, Zone};
+    let root = std::env::temp_dir().join(format!("primitive-snapshot-worlds-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a saves folder");
+    let mut worlds = Worlds::load(&root);
+    // (name, seed, days of world time, minutes since it was played, bytes)
+    let made = [
+        ("Дом у реки", 1_209_552_189u32, Some(93.4f32), Some(3u64), 3_300_000usize),
+        ("Highland camp", 77, Some(14.2), Some(2 * 24 * 60), 840_000),
+        ("A very long name for one world", 42, Some(212.7), Some(9 * 24 * 60), 21_000_000),
+        ("Fresh start", 5, None, None, 0),
+    ];
+    for (name, seed, days, ago, bytes) in made {
+        let index = worlds
+            .create_in(name, seed, Preset::Normal, Zone::Temperate)
+            .expect("a world");
+        let directory = worlds.list()[index].directory.clone();
+        if let Some(days) = days {
+            std::fs::write(directory.join("clock.txt"), format!("{days}\n")).expect("a clock");
+        }
+        if bytes > 0 {
+            std::fs::write(directory.join("edits.bin"), vec![0u8; bytes]).expect("some edits");
+        }
+        if let Some(ago) = ago {
+            // Straight into the metadata, because `mark_played` can only
+            // say "now" and what a row is read for is the difference
+            // between "just now" and "nine days ago".
+            let meta = directory.join("world.toml");
+            let text = std::fs::read_to_string(&meta).expect("the metadata");
+            let when = unix_now().saturating_sub(ago * 60);
+            let text = text.replace("last_played = 0", &format!("last_played = {when}"));
+            std::fs::write(&meta, text).expect("the metadata");
+        }
+    }
+    let worlds = Worlds::load(&root);
+    (root, worlds)
 }
 
 /// What a small server with a few things installed would answer.
@@ -1147,6 +1150,36 @@ fn write_grown(path: &str, vertices: &[HotbarVertex], font: FontAtlas, scale: f3
     let mut grown = vertices.to_vec();
     crate::ui::widgets::scale_about(&mut grown, (0.0, 0.0), scale);
     write(path, &grown, font);
+}
+
+/// The belt, without the block icons that need a graphics card.
+///
+/// **The real backdrop and the real cells**, out of the same pictures
+/// `hotbar::build_into` draws them from, and the chosen square marked
+/// the way it marks it. Three pictures in this file drew a stand-in of
+/// their own for the bar -- a flat plate and ten flat squares -- and all
+/// three therefore showed a belt the game has not drawn since the skin
+/// arrived. A stand-in for the *icons* is honest, because a block's
+/// texture lives on the card; a stand-in for the furniture is a picture
+/// of a different program.
+fn belt_stand_in(font: FontAtlas, selected: usize) -> Vec<HotbarVertex> {
+    use crate::ui::hotbar::{BACKDROP, BOTTOM, GAP, MAX_SLOTS, PAD, SELECTED_RING, SLOT, TOP};
+    use crate::ui::widgets::{Painter, Piece, Rect, FIELD_TILE, WELL};
+    let mut p = Painter::onto(font, Vec::new());
+    let total = (SLOT + GAP) * MAX_SLOTS as f32 - GAP;
+    let backdrop = Rect::new(-total / 2.0 - PAD, BOTTOM - PAD, total / 2.0 + PAD, TOP);
+    if !p.nine(backdrop, Piece::Panel, BACKDROP, Some(FIELD_TILE)) {
+        p.quad(backdrop, BACKDROP);
+    }
+    for slot in 0..MAX_SLOTS {
+        let centre = crate::ui::hotbar::slot_centre(slot, MAX_SLOTS);
+        let cell = Rect::new(centre - SLOT / 2.0, BOTTOM, centre + SLOT / 2.0, BOTTOM + SLOT);
+        p.cell(cell, WELL);
+        if slot == selected {
+            let _ = p.cell_mark(cell, Piece::SlotSelected, SELECTED_RING);
+        }
+    }
+    p.into_vertices()
 }
 
 /// Turns the quads into pixels.
@@ -1735,7 +1768,7 @@ fn skin_picture(piece: crate::ui::widgets::Piece) -> &'static image::RgbaImage {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .expect("the skin cache");
-    *cache.entry(piece.file()).or_insert_with(|| {
+    cache.entry(piece.file()).or_insert_with(|| {
         let bytes = crate::embedded::texture(piece.file()).expect("the skin is compiled in");
         let image = image::load_from_memory(bytes).expect("a skin picture").to_rgba8();
         // Leaked rather than kept in the map by value: a picture is a
@@ -2628,20 +2661,8 @@ fn ui_audit_snapshot() {
         // on a phone -- the thumbs. Nobody plays with all of it up, and that
         // is the point: anything that can collide does so here.
         {
-            use crate::ui::hotbar::{BOTTOM, PAD, SLOT};
             use crate::ui::widgets::{anchor, scale_about, Painter};
-            let mut v = Vec::new();
-            let box_quad = |v: &mut Vec<HotbarVertex>, x0: f32, y0: f32, x1: f32, y1: f32, tint: [f32; 4]| {
-                for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)] {
-                    v.push(HotbarVertex { position: [x, y], uv: [0.0, 0.0], tex_layer: UNTEXTURED, tint });
-                }
-            };
-            let total = (SLOT + 0.012) * 10.0 - 0.012;
-            box_quad(&mut v, -total / 2.0 - PAD, BOTTOM - PAD, total / 2.0 + PAD, BOTTOM + SLOT + PAD, [0.12, 0.12, 0.14, 0.92]);
-            for slot in 0..10 {
-                let centre = crate::ui::hotbar::slot_centre(slot, 10);
-                box_quad(&mut v, centre - SLOT / 2.0, BOTTOM, centre + SLOT / 2.0, BOTTOM + SLOT, [0.30, 0.31, 0.34, 1.0]);
-            }
+            let mut v = belt_stand_in(font, 0);
             let refusal = match language {
                 Language::Russian => "возвращён: слишком далеко от мира",
                 _ => "moved back: too far from the world",

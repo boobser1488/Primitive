@@ -355,13 +355,14 @@ impl Worlds {
         self.create_in(name, seed, preset, Zone::default())
     }
 
-    /// Creates a world laid in a zone, and returns its index. What the
-    /// new-world form calls; `create` is this in the temperate zone, which
-    /// is every world the tests make.
+    /// Creates a world laid in a zone at the newest generator's scale.
     ///
-    /// Every new world is drawn by the newest generator -- the Earth's
-    /// scale with its landforms; a world that already has edits on older
-    /// ground stays on the generator that drew it (`Scale`).
+    /// Tests only, like `create` above it and for the same reason: the
+    /// new-world form asks for all five things now (`create_at`), and a
+    /// second way in that quietly picks one of them is a way for a later
+    /// caller to forget to ask. It kept its name because a dozen tests
+    /// say it.
+    #[cfg(test)]
     pub fn create_in(&mut self, name: &str, seed: u32, preset: Preset, zone: Zone) -> Result<usize, String> {
         self.create_at(name, seed, preset, zone, Scale::default())
     }

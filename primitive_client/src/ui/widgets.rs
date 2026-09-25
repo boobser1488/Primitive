@@ -495,6 +495,13 @@ pub enum Piece {
 
 impl Piece {
     /// Every piece, in the order the array holds them.
+    ///
+    /// **Test-only, and it is not an accident.** Nothing in the game
+    /// walks this list: a widget names the one piece it draws. What
+    /// needs the whole run is the check that holds it against
+    /// `texture::EXTRA_TEXTURES`, and the harness that turns a vertex
+    /// list back into pixels without a card.
+    #[cfg(test)]
     pub const ALL: [Piece; 15] = [
         Piece::Panel,
         Piece::Tray,
@@ -514,6 +521,10 @@ impl Piece {
     ];
 
     /// The file it is drawn in, under `assets/textures/`.
+    ///
+    /// Test-only, like [`Piece::ALL`]: the game reaches its pictures by
+    /// layer, and the name is what a check and a snapshot need.
+    #[cfg(test)]
     pub fn file(self) -> &'static str {
         crate::engine::texture::EXTRA_TEXTURES[crate::engine::texture::EXTRA_UI_SKIN + self as usize]
     }
@@ -871,6 +882,37 @@ pub const TEXT_BAD: [f32; 4] = [1.00, 0.74, 0.64, 1.0];
 pub const TEXT_GOOD: [f32; 4] = [0.58, 0.88, 0.52, 1.0];
 
 pub const SCRIM: [f32; 4] = [0.03, 0.03, 0.04, 0.62];
+
+// ---- the note beside the pointer ----
+//
+// See [`Painter::note`]. These were `inventory_screen`'s, and the
+// reasoning on each of them is its own.
+
+/// The plate a note is written on: the deepest recess the stone has.
+///
+/// **It was a blue-black** -- `[0.04, 0.05, 0.07]`, with a blue-grey
+/// hairline round it -- and it was the one cold thing on a warm screen:
+/// a chest is stone and wood and amber, and the note naming what was in
+/// it was a scrap of the menu pasted over the top. The same darkness, a
+/// shade under in fact, so every ink measured against it still clears;
+/// the stone's cast and the stone's lit edge, so it reads as part of the
+/// slab it is lying on.
+pub const NOTE_BACK: [f32; 4] = [0.050, 0.043, 0.036, 0.97];
+pub const NOTE_FRAME: [f32; 4] = Theme::STONE.light;
+/// The hairline round a note.
+pub const NOTE_EDGE: f32 = 0.002;
+/// **A note is dark, so it is written in the dark skin's ink.**
+///
+/// A panel is pale stone and everything printed on it is near-black -- a
+/// note that inherited the panel's ink was black text on a black box: a
+/// line that was *there*, and unreadable, which is the worst of both.
+pub const NOTE_INK: [f32; 4] = Theme::DARK.ink;
+pub const NOTE_DIM: [f32; 4] = Theme::DARK.ink_dim;
+pub const NOTE_GOOD: [f32; 4] = [0.52, 0.88, 0.55, 1.0];
+pub const NOTE_BAD: [f32; 4] = [1.00, 0.48, 0.42, 1.0];
+/// A note is a second line about something else on the screen, so it is
+/// written at the size every second line is. See [`size`].
+pub const NOTE_SCALE: f32 = size::NOTE;
 
 /// **Every size any of the world's screens writes at, and there are
 /// five.**
@@ -2423,6 +2465,72 @@ impl Painter {
 
     pub fn panel(&mut self, rect: Rect) {
         self.slab(rect, self.theme.panel);
+    }
+
+    /// A note beside the pointer: a few lines in a dark box, kept inside
+    /// `bounds`.
+    ///
+    /// **One tooltip for the whole game, and it is here because there
+    /// was one and it was not.** The box, its colours, its padding and
+    /// the arithmetic that keeps it on screen lived in
+    /// `inventory_screen`, where the chest and the hearth reached into
+    /// it by name; anything outside that file -- a menu row, a map mark
+    /// -- had the choice of a second copy or no note at all, and a
+    /// second copy of a tooltip is a second tooltip that looks slightly
+    /// wrong.
+    ///
+    /// ## The rules it keeps
+    ///
+    /// * **Up and to the right of the pointer**, then pulled back inside
+    ///   `bounds` at *both* ends. A note wider than the room to the
+    ///   right used to slide left with nothing stopping it sliding past
+    ///   the panel's own edge.
+    /// * **`bounds` is the band a note is allowed, not the whole
+    ///   panel.** The caller decides: on the pack it is the content
+    ///   band, because a note taken from the top row of the recipe grid
+    ///   was drawn over the tab strip and hid the word RUCKSACK
+    ///   completely. A tooltip explains a control; covering a different
+    ///   control to do it is the one thing it may not do.
+    /// * **The hairline comes out of the room rather than being added to
+    ///   the box**, because `border` draws *outside* the rectangle it is
+    ///   given: a note flush against the edge would hang its own outline
+    ///   two thousandths past it.
+    ///
+    /// Written in the dark skin's ink whichever theme the painter is
+    /// carrying: the plate is dark, and a note that inherited a stone
+    /// panel's ink was black text on a black box.
+    pub fn note(&mut self, cursor: (f32, f32), lines: &[(String, [f32; 4])], bounds: Rect) {
+        if lines.is_empty() {
+            return;
+        }
+        let scale = NOTE_SCALE;
+        let width = lines
+            .iter()
+            .map(|(text, _)| ink_width(text, scale))
+            .fold(0.0, f32::max)
+            + 0.020;
+        let line_height = cell_height(scale) + 0.006;
+        // Padding at both ends, and enough of it: the last line's
+        // descenders were sitting on the bottom edge of the box.
+        let height = line_height * lines.len() as f32 + 0.020;
+        let x0 = (cursor.0 + 0.014)
+            .min(bounds.x1 - width - NOTE_EDGE)
+            .max(bounds.x0 + NOTE_EDGE);
+        let y0 = (cursor.1 + 0.012)
+            .min(bounds.y1 - height - NOTE_EDGE)
+            .max(bounds.y0 + NOTE_EDGE);
+        let rect = Rect::new(x0, y0, x0 + width, y0 + height);
+        self.quad(rect, NOTE_BACK);
+        self.border(rect, NOTE_EDGE, NOTE_FRAME);
+        for (n, (text, colour)) in lines.iter().enumerate() {
+            self.text(
+                text,
+                rect.x0 + 0.010,
+                rect.y1 - 0.010 - n as f32 * line_height,
+                scale,
+                *colour,
+            );
+        }
     }
 
     /// A raised slab of stone: the fill, then a bevel.

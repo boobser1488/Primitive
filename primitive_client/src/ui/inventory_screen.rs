@@ -2219,49 +2219,18 @@ pub(crate) fn held_stack(
 
 // ---- tooltip ----
 
-/// The plate a note is written on: the deepest recess the stone has.
+/// The note beside the pointer, in the one place it is defined.
 ///
-/// **It was a blue-black** -- `[0.04, 0.05, 0.07]`, with the blue-grey
-/// `RULE` round it -- and it was the one cold thing on a warm screen: a
-/// chest is stone and wood and amber, and the note naming what was in it
-/// was a scrap of the menu pasted over the top. The same darkness, a
-/// shade under in fact, so every ink measured against it still clears;
-/// the stone's cast and the stone's lit edge, so it reads as part of the
-/// slab it is lying on.
-const TOOLTIP_BG: [f32; 4] = [0.050, 0.043, 0.036, 0.97];
-const TOOLTIP_EDGE: [f32; 4] = widgets::Theme::STONE.light;
-/// **A tooltip is dark, so it is written in the dark skin's ink.**
-///
-/// The panel under it is pale stone and everything printed on that is
-/// near-black -- and a tooltip that inherited the panel's ink was black
-/// text on a black box: a line that was *there*, and unreadable, which
-/// is the worst of both. See `widgets::Theme`.
-const TOOLTIP_INK: [f32; 4] = widgets::Theme::DARK.ink;
-const TOOLTIP_DIM: [f32; 4] = widgets::Theme::DARK.ink_dim;
-const TOOLTIP_GOOD: [f32; 4] = [0.52, 0.88, 0.55, 1.0];
-const TOOLTIP_BAD: [f32; 4] = [1.00, 0.48, 0.42, 1.0];
-
-/// A tooltip is a second line about something else on the screen, so it
-/// is written at the size every second line is. See `widgets::size`.
-const TOOLTIP_SCALE: f32 = widgets::size::NOTE;
-
-/// Names what the cursor is over.
-///
-/// Block textures at icon size are not self-explanatory -- cobblestone
-/// and stone are the same grey square to anyone who has not learned them
-/// -- and the weight is the number the whole load mechanic turns on, so
-/// it belongs where the player is deciding what to carry.
-/// One line of text in a box, beside the pointer and inside `bounds`.
-///
-/// The tooltip's box, without the part that decides what to say -- so
-/// the chest and the hearth can have one without a second copy of the
-/// arithmetic that keeps it on screen.
-pub(crate) fn hover_note(p: &mut Painter, cursor: (f32, f32), text: &str, bounds: Rect) {
-    note_box(p, cursor, &[(text.to_string(), TOOLTIP_INK)], bounds);
-}
-
-/// The hairline round a note.
-const NOTE_EDGE: f32 = 0.002;
+/// **These were six colours, a size and forty lines of arithmetic here**,
+/// and the chest and the hearth reached into this file by name to get
+/// them. A tooltip is not a thing the pack owns: it is a note beside a
+/// pointer, and any screen may want one. Both halves moved to
+/// `widgets` -- see `Painter::note` -- and these are the names this file
+/// already used, kept so the screen reads as it did.
+use crate::ui::widgets::{
+    NOTE_BAD as TOOLTIP_BAD, NOTE_DIM as TOOLTIP_DIM, NOTE_GOOD as TOOLTIP_GOOD,
+    NOTE_INK as TOOLTIP_INK,
+};
 
 /// The band a note may be drawn in: the panel, less the furniture at the
 /// top of it.
@@ -2277,55 +2246,13 @@ fn note_bounds() -> Rect {
     Rect::new(panel.x0 + PANEL_PAD, panel.y0, panel.x1 - PANEL_PAD, content_top())
 }
 
-/// The box itself: lines, sized, placed and drawn.
-fn note_box(p: &mut Painter, cursor: (f32, f32), lines: &[(String, [f32; 4])], bounds: Rect) {
-    let scale = TOOLTIP_SCALE;
-    let width = lines
-        .iter()
-        .map(|(text, _)| widgets::ink_width(text, scale))
-        .fold(0.0, f32::max)
-        + 0.020;
-    let line_height = widgets::cell_height(scale) + 0.006;
-    // Padding at both ends, and enough of it: the last line's
-    // descenders were sitting on the bottom edge of the box.
-    let height = line_height * lines.len() as f32 + 0.020;
-    // Up and to the right of the pointer, then pulled back inside the
-    // panel: a tooltip that runs off the screen is worse than none.
-    //
-    // **Clamped at the near edges as well as the far ones**, which it
-    // was not. A note wider than the room to the right of the cursor was
-    // slid left until it fitted, with nothing stopping it sliding past
-    // the panel's own left edge; and `bounds` reaching to the top of the
-    // panel meant a note taken from the top row of the recipe grid was
-    // drawn over the tab strip -- in the picture that started this pass,
-    // the word RUCKSACK was completely covered by a note about a beam.
-    // A tooltip is a thing that explains a control; covering a different
-    // control to do it is the one thing it may not do. See
-    // `note_bounds`.
-    //
-    // The hairline is taken off the room rather than added to the box,
-    // because `Painter::border` draws *outside* the rectangle it is
-    // given: a note pushed flush against the edge of the band would
-    // hang its own outline two thousandths past it. The same trap
-    // `hud::BAR_WIDTH` is written the way it is to avoid.
-    let x0 = (cursor.0 + 0.014)
-        .min(bounds.x1 - width - NOTE_EDGE)
-        .max(bounds.x0 + NOTE_EDGE);
-    let y0 = (cursor.1 + 0.012)
-        .min(bounds.y1 - height - NOTE_EDGE)
-        .max(bounds.y0 + NOTE_EDGE);
-    let rect = Rect::new(x0, y0, x0 + width, y0 + height);
-    p.quad(rect, TOOLTIP_BG);
-    p.border(rect, NOTE_EDGE, TOOLTIP_EDGE);
-    for (n, (text, colour)) in lines.iter().enumerate() {
-        p.text(
-            text,
-            rect.x0 + 0.010,
-            rect.y1 - 0.010 - n as f32 * line_height,
-            scale,
-            *colour,
-        );
-    }
+/// One line of text in a box, beside the pointer and inside `bounds`.
+///
+/// The tooltip's box, without the part that decides what to say -- so
+/// the chest and the hearth can have one without a second copy of the
+/// arithmetic that keeps it on screen.
+pub(crate) fn hover_note(p: &mut Painter, cursor: (f32, f32), text: &str, bounds: Rect) {
+    p.note(cursor, &[(text.to_string(), TOOLTIP_INK)], bounds);
 }
 
 #[allow(clippy::too_many_arguments)] // it is a note about everything on the screen
@@ -2343,7 +2270,7 @@ fn tooltip(
     // wound needs. On a phone this is what a tap on an arm with empty hands
     // shows, which is how a player with no pointer reads the figure.
     if let Some(part) = body_part_at(cursor) {
-        note_box(p, cursor, &crate::ui::mannequin::lines(part, injuries, language), note_bounds());
+        p.note(cursor, &crate::ui::mannequin::lines(part, injuries, language), note_bounds());
         return;
     }
     // A body square, before the pack: the four are outside the grid, so
@@ -2359,7 +2286,7 @@ fn tooltip(
         let Some(name) = part_name(part, language) else {
             return;
         };
-        note_box(p, cursor, &[(name.to_string(), TOOLTIP_INK)], note_bounds());
+        p.note(cursor, &[(name.to_string(), TOOLTIP_INK)], note_bounds());
         return;
     }
     let lines = match slot_place_at(cursor).and_then(|place| slot_in_place(tab, place)) {
@@ -2404,7 +2331,7 @@ fn tooltip(
         },
     };
 
-    note_box(p, cursor, &lines, note_bounds());
+    p.note(cursor, &lines, note_bounds());
 
 }
 
@@ -2542,7 +2469,16 @@ pub fn sort_button_rect() -> Rect {
     // otherwise have stayed where the content now starts, sitting on the
     // tabs. `panel_rect().y1` is the header band's ceiling by
     // construction, so this cannot drift again.
-    let top = panel_rect().y1 - 0.014;
+    // **A whole `PANEL_BORDER` down, not fourteen thousandths.** The
+    // panel is a picture with a stitched frame eight texels deep, and the
+    // button was placed against the flat edge the panel had before that:
+    // its top sixteen thousandths were printed *on the stitching*, which
+    // on a phone -- where the button is a finger tall and the frame is
+    // the same size it always is -- read as a control glued half over the
+    // edge of the screen. The frame's inner line is what everything else
+    // on this panel clears (`PANEL_PAD` is the same number), and it is
+    // what the right edge below already clears.
+    let top = panel_rect().y1 - widgets::PANEL_BORDER;
     let right = recipe_left() + recipe_grid_width();
     Rect::new(right - SORT_WIDTH, top - widgets::tappable(SORT_HEIGHT), right, top)
 }

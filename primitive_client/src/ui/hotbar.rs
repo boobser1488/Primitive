@@ -53,7 +53,7 @@ pub const MAX_HOTBAR_VERTICES: usize = MAX_SLOTS * 16 * 6 + 256;
 /// health row relative to the bar, and two modules laying the same bar
 /// out from two sets of numbers is how they end up half a slot apart.
 pub const SLOT: f32 = 0.080;
-const GAP: f32 = 0.012;
+pub(crate) const GAP: f32 = 0.012;
 pub const BOTTOM: f32 = -0.94;
 /// How far the backdrop reaches past the slots on every side.
 ///
@@ -88,7 +88,7 @@ pub const RIGHT: f32 = -LEFT;
 /// where they should fail rather than the test suite.
 const _: () = assert!(BOTTOM > -1.0 && BOTTOM + SLOT < 1.0);
 const _: () = assert!(crate::logic::inventory::SLOTS >= MAX_SLOTS);
-const BACKDROP: [f32; 4] = [0.05, 0.06, 0.09, 0.72];
+pub(crate) const BACKDROP: [f32; 4] = [0.05, 0.06, 0.09, 0.72];
 /// The recess each slot sits in.
 ///
 /// The bar used to be frames drawn straight over the world, so an empty
@@ -110,7 +110,7 @@ const FRAME_SELECTED: [f32; 4] = [1.0, 0.95, 0.55, 1.0];
 /// The pack's own `HIGHLIGHT_SOURCE_RING`, at full alpha because the
 /// picture carries its own: one mark for one thing, and "this is the one
 /// I am holding" is the same thing on the belt as it is in the pack.
-const SELECTED_RING: [f32; 4] = [1.0, 0.85, 0.35, 1.0];
+pub(crate) const SELECTED_RING: [f32; 4] = [1.0, 0.85, 0.35, 1.0];
 const ICON_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const ICON_TINT_DIM: [f32; 4] = [0.72, 0.72, 0.72, 1.0];
 

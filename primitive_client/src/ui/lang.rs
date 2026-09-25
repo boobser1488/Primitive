@@ -247,6 +247,41 @@ pub enum Msg {
     MinutesAgo,
     HoursAgo,
     DaysAgo,
+    // ---- what a world's row says about it ----
+    //
+    // A world is remembered by what happened in it, not by when the file
+    // was written: "the one I got through the first winter in" is how a
+    // player names a save out loud. So the row carries the world's own
+    // calendar -- the day it was left on and the season that is -- beside
+    // the date and the size.
+    /// `day 27`, the time lived in a world.
+    Day,
+    /// `seed 12345`, lower case: the row is a sentence, not a heading.
+    SeedShort,
+    SeasonSpring,
+    SeasonSummer,
+    SeasonAutumn,
+    SeasonWinter,
+    /// The two things a world list has always been missing.
+    Rename,
+    CopyWorld,
+    RenameThisWorld,
+    /// What a copy is called: the original's name and this after it.
+    CopySuffix,
+    WorldsHelpWithRename,
+    /// The new-world form's fifth row: how big the country is drawn.
+    WorldScale,
+    ScaleLandforms,
+    ScaleEarth,
+    ScaleRegional,
+    ScaleLandformsHelp,
+    ScaleEarthHelp,
+    ScaleRegionalHelp,
+    /// What the name row explains while it is being typed into.
+    NameHelp,
+    /// The keys on a form with one box on it: no field to switch to.
+    RenameFormHelp,
+    RenameFormHelpTouch,
     // ---- confirmation ----
     CannotBeUndone,
     ConfirmHelp,
@@ -1114,6 +1149,30 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::MinutesAgo,   en: "min ago",       simple: "min ago",   ru: "мин назад", pl: "min temu" },
     Line { msg: Msg::HoursAgo,     en: "h ago",         simple: "h ago",     ru: "ч назад", pl: "godz. temu" },
     Line { msg: Msg::DaysAgo,      en: "d ago",         simple: "d ago",     ru: "дн. назад", pl: "dni temu" },
+
+    // ---- what a world's row says about it ----
+    Line { msg: Msg::Day,          en: "day",           simple: "day",       ru: "день", pl: "dzień" },
+    Line { msg: Msg::SeedShort,    en: "seed",          simple: "number",    ru: "сид", pl: "ziarno" },
+    Line { msg: Msg::SeasonSpring, en: "spring",        simple: "spring",    ru: "весна", pl: "wiosna" },
+    Line { msg: Msg::SeasonSummer, en: "summer",        simple: "summer",    ru: "лето", pl: "lato" },
+    Line { msg: Msg::SeasonAutumn, en: "autumn",        simple: "autumn",    ru: "осень", pl: "jesień" },
+    Line { msg: Msg::SeasonWinter, en: "winter",        simple: "winter",    ru: "зима", pl: "zima" },
+    Line { msg: Msg::Rename,       en: "RENAME",        simple: "CALL IT SOMETHING ELSE", ru: "ПЕРЕИМЕНОВАТЬ", pl: "ZMIEŃ NAZWĘ" },
+    Line { msg: Msg::CopyWorld,    en: "COPY",          simple: "MAKE A SPARE", ru: "КОПИЯ", pl: "KOPIA" },
+    Line { msg: Msg::RenameThisWorld, en: "RENAME THIS WORLD", simple: "CALL THIS WORLD SOMETHING ELSE", ru: "ПЕРЕИМЕНОВАТЬ МИР", pl: "ZMIEŃ NAZWĘ ŚWIATA" },
+    // A space in front, because it is stuck on the end of a name.
+    Line { msg: Msg::CopySuffix,   en: " (copy)",       simple: " (spare)",  ru: " (копия)", pl: " (kopia)" },
+    Line { msg: Msg::WorldsHelpWithRename, en: "enter play   N new   R rename   C copy   del remove", simple: "enter play   N make one   R rename   C spare   del throw away", ru: "ввод играть   N создать   R переименовать   C копия   del удалить", pl: "enter graj   N nowy   R nazwa   C kopia   del usuń" },
+    Line { msg: Msg::WorldScale,   en: "HOW BIG THE WORLD IS", simple: "HOW BIG THE WORLD IS", ru: "РАЗМАХ МИРА", pl: "ROZMACH ŚWIATA" },
+    Line { msg: Msg::ScaleLandforms, en: "A PLANET",    simple: "A WHOLE PLANET", ru: "ПЛАНЕТА", pl: "PLANETA" },
+    Line { msg: Msg::ScaleEarth,   en: "A PLANET, NO HILL COUNTRY", simple: "A PLANET, FLATTER", ru: "ПЛАНЕТА БЕЗ ХОЛМОВ", pl: "PLANETA BEZ WZGÓRZ" },
+    Line { msg: Msg::ScaleRegional, en: "AN ARCHIPELAGO", simple: "SMALL ISLANDS", ru: "АРХИПЕЛАГ", pl: "ARCHIPELAG" },
+    Line { msg: Msg::ScaleLandformsHelp, en: "oceans and continents at the Earth's size: hill country, steppe, rivers that reach the sea", simple: "as big as the real Earth: hills, open grass, rivers that run to the sea", ru: "океаны и материки земного размера: холмы, степь, реки до самого моря", pl: "oceany i kontynenty wielkości Ziemi: wzgórza, step, rzeki do morza" },
+    Line { msg: Msg::ScaleEarthHelp, en: "the same planet as it was drawn before the hill country -- for a world begun then", simple: "the same big world, the way it looked before the hills were added", ru: "та же планета, как её рисовали до холмов -- для мира, начатого тогда", pl: "ta sama planeta sprzed wzgórz -- dla świata zaczętego wtedy" },
+    Line { msg: Msg::ScaleRegionalHelp, en: "islands a kilometre across and weather that turns over every seven: everything is a walk away", simple: "small islands close together: everything is a short walk", ru: "острова в километр и погода, меняющаяся каждые семь: всё в пешей доступности", pl: "wyspy po kilometrze, pogoda co siedem: wszystko na piechotę" },
+    Line { msg: Msg::NameHelp,     en: "what this world will be called in the list", simple: "what to call it in the list", ru: "как этот мир будет называться в списке", pl: "jak ten świat będzie się nazywał na liście" },
+    Line { msg: Msg::RenameFormHelp, en: "enter renames   esc cancels", simple: "enter renames   esc goes back", ru: "ввод переименовать   esc отмена", pl: "enter zmienia nazwę   esc anuluje" },
+    Line { msg: Msg::RenameFormHelpTouch, en: "tap RENAME, or tap beside the panel to go back", simple: "tap RENAME, or tap outside to go back", ru: "коснитесь ПЕРЕИМЕНОВАТЬ или рядом с панелью, чтобы выйти", pl: "dotknij ZMIEŃ NAZWĘ lub obok panelu, by wyjść" },
 
     Line { msg: Msg::CannotBeUndone, en: "this cannot be undone", simple: "there is no way back", ru: "это нельзя отменить", pl: "tego nie można cofnąć" },
     Line { msg: Msg::ConfirmHelp,  en: "Y confirms   N or esc cancels", simple: "Y means yes   N or esc means no", ru: "Y подтвердить   N или esc отменить", pl: "Y potwierdza   N lub esc anuluje" },

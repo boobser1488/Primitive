@@ -1335,6 +1335,16 @@ fn run(
                         }
                     }
 
+                    Action::OpenWorlds => {
+                        // **The calendar and the size, re-read.** Both
+                        // change while a world is being played and the
+                        // list is loaded once, at launch -- so a player
+                        // who came back from a world saw the day they
+                        // started it on. In place, so no row moves under
+                        // the selection: see `Worlds::refresh_facts`.
+                        worlds.refresh_facts();
+                    }
+
                     Action::CreateWorld => {
                         let name = menu.name_input.text().trim().to_string();
                         // A blank box rolls a seed: see `ui::menu::random_seed`.
@@ -1343,7 +1353,7 @@ fn run(
                         } else {
                             menu.seed_input.text().parse::<u32>().unwrap_or(settings.singleplayer_seed)
                         };
-                        match worlds.create_in(&name, seed, menu.world_preset, menu.world_zone) {
+                        match worlds.create_at(&name, seed, menu.world_preset, menu.world_zone, menu.world_scale) {
                             Ok(index) => {
                                 menu.world_selected = index;
                                 menu.screen = Screen::Worlds;
@@ -1371,6 +1381,57 @@ fn run(
                         Ok(name) => menu.notice = Some((format!("deleted {name}").into(), true)),
                         Err(reason) => menu.notice = Some((reason.into(), false)),
                     },
+
+                    Action::RenameWorld(index) => {
+                        // The box opens on the name the world has, the
+                        // way the edit-server form opens on the entry:
+                        // a rename that started from an empty field
+                        // would be a retype.
+                        if let Some(world) = worlds.get(index) {
+                            menu.set_focused_text(&world.name.clone());
+                        }
+                    }
+
+                    Action::CommitRename(index) => {
+                        let name = menu.name_input.text().trim().to_string();
+                        match worlds.rename(index, &name) {
+                            Ok(name) => {
+                                menu.world_selected = index;
+                                menu.notice = Some((format!("renamed to {name}").into(), true));
+                            }
+                            Err(reason) => {
+                                // Back onto the form: the player has
+                                // just typed something and needs to see
+                                // why it was refused, beside what they
+                                // typed.
+                                menu.open(Screen::RenamingWorld(index));
+                                menu.notice = Some((reason.into(), false));
+                            }
+                        }
+                    }
+
+                    Action::CopyWorld(index) => {
+                        // The copy's name is the original's with a word
+                        // after it, in the player's own language --
+                        // `Worlds::copy` then finds it a folder that
+                        // does not collide.
+                        let name = worlds.get(index).map(|world| {
+                            format!(
+                                "{}{}",
+                                world.name,
+                                settings.language.text(ui::lang::Msg::CopySuffix)
+                            )
+                        });
+                        if let Some(name) = name {
+                            match worlds.copy(index, &name) {
+                                Ok(at) => {
+                                    menu.world_selected = at;
+                                    menu.notice = Some((format!("copied to {name}").into(), true));
+                                }
+                                Err(reason) => menu.notice = Some((reason.into(), false)),
+                            }
+                        }
+                    }
 
                     Action::EditUsername => menu.begin_username_edit(settings.username.clone()),
 

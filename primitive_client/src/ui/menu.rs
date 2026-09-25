@@ -30,7 +30,7 @@ use crate::ui::field::{Motion, TextField};
 use crate::ui::widgets::{self, Painter, Rect};
 use crate::logic::worlds::{self, Worlds};
 use crate::ui::lang::{Language, Msg};
-use primitive_shared::worldgen::{Preset, Zone};
+use primitive_shared::worldgen::{Preset, Scale, Zone};
 
 /// The skin every screen in this file is drawn in. See `widgets::Theme`.
 const MENU: widgets::Theme = widgets::Theme::DARK;
@@ -223,6 +223,20 @@ pub enum Screen {
     Worlds,
     /// The new-world form: name and seed.
     CreatingWorld,
+    /// The one-field form that gives a world a new name.
+    ///
+    /// **Its own screen rather than an edit in the row**, which was the
+    /// other candidate. A row that turns into a field is a row whose
+    /// height, hit test and scrolling all have two answers, on the one
+    /// list in the game a phone scrolls with a thumb -- and the field
+    /// would then be under the finger that opened it. A screen with one
+    /// box on it is the same arrangement the new-world form already has,
+    /// and the player has seen it.
+    ///
+    /// The index is carried in the screen rather than remembered in a
+    /// field, for `Confirm`'s reason: it is impossible to arrive here and
+    /// rename a world other than the one that was asked about.
+    RenamingWorld(usize),
     Servers,
     /// The add/edit server form. `Some(index)` edits an existing entry.
     Editing(Option<usize>),
@@ -527,6 +541,24 @@ impl ListRows {
             panel.y1 - self.pad,
         )
     }
+}
+
+/// Which row of the new-world form the help line under it is about.
+///
+/// Every row on that form now has something to say -- what a seed is,
+/// what a world type is, where you wake, how big the country is -- and
+/// there is room under the panel for exactly one line of it. This is
+/// which one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FormRow {
+    Name,
+    Seed,
+    /// What the form opens explaining, because it is the row a player
+    /// who has just pressed NEW is most likely to be undecided about.
+    #[default]
+    Preset,
+    Zone,
+    Scale,
 }
 
 /// Which field of the current form has focus.
@@ -1143,6 +1175,19 @@ pub enum Action {
     /// actually removes anything.
     AskDeleteWorld(usize),
     ConfirmedDeleteWorld(usize),
+    /// Open the rename form on this world, with its current name in the
+    /// box.
+    RenameWorld(usize),
+    /// Write the name that is in the box. Carried out by `main.rs`,
+    /// which owns the saves folder.
+    CommitRename(usize),
+    /// Duplicate a world, keeping the original exactly as it is.
+    ///
+    /// **No confirmation gate, unlike DELETE**, and the asymmetry is the
+    /// point: a gate exists in front of a thing that cannot be undone,
+    /// and the worst a stray COPY can do is put one more row in a list
+    /// that has a DELETE beside it.
+    CopyWorld(usize),
     CreateWorld,
     /// Step the world type on the new-world form: `+1` forward, `-1`
     /// back. A step rather than a `Set`, so the row behaves like every
@@ -1152,6 +1197,8 @@ pub enum Action {
     /// Step the zone on the new-world form, the same way. See
     /// `worldgen::Zone`.
     StepZone(i32),
+    /// Step how big the country is drawn. See `worldgen::Scale`.
+    StepScale(i32),
     /// Roll a seed into the new-world form's seed box. See `random_seed`.
     RollSeed,
 
@@ -1245,12 +1292,26 @@ pub struct Menu {
     /// Where on the planet the new-world form will lay it. Kept and reset
     /// exactly like the preset beside it. See `worldgen::Zone`.
     pub world_zone: Zone,
-    /// Whether the line under the form is explaining the zone rather than
-    /// the world type: whichever row was stepped last. One line explains the
-    /// thing just changed, because two lines of help would push the buttons
-    /// off a phone held sideways, and a help line about the row the player is
-    /// not looking at is a line nobody reads.
-    explaining_zone: bool,
+    /// How big a country the new-world form will draw. See
+    /// `worldgen::Scale`.
+    ///
+    /// **The one choice on this form that is not better or worse.** The
+    /// landforms are the planet at the Earth's size; the regional world
+    /// is an archipelago where the next island is a walk rather than a
+    /// voyage. Which of those a player wants is a question about the game
+    /// they mean to play, which is what this form is for -- and it was a
+    /// constant in `Worlds::create_in` that nobody could see.
+    pub world_scale: Scale,
+    /// Which row the line under the form is explaining: whichever was
+    /// touched last.
+    ///
+    /// **A row rather than a flag**, and it grew from one because two
+    /// booleans for three rows is a state that can say "both". One line
+    /// explains the thing just changed, because a form with a help line
+    /// under every row would push the buttons off a phone held sideways,
+    /// and a line about the row the player is not looking at is a line
+    /// nobody reads.
+    explaining: FormRow,
     pub focus: Field,
     /// True while the name row of the settings screen is being typed
     /// into. The row turns into a text field and swallows keys.
@@ -1516,6 +1577,82 @@ fn zone_help(zone: Zone) -> Msg {
     }
 }
 
+fn scale_label(scale: Scale) -> Msg {
+    match scale {
+        Scale::Landforms => Msg::ScaleLandforms,
+        Scale::Earth => Msg::ScaleEarth,
+        Scale::Regional => Msg::ScaleRegional,
+    }
+}
+
+fn scale_help(scale: Scale) -> Msg {
+    match scale {
+        Scale::Landforms => Msg::ScaleLandformsHelp,
+        Scale::Earth => Msg::ScaleEarthHelp,
+        Scale::Regional => Msg::ScaleRegionalHelp,
+    }
+}
+
+/// The next scale along, wrapping.
+///
+/// **Newest first, which is the other way round from `Scale::ALL`.** That
+/// list is oldest-first because it is a history; this is a control, and a
+/// control that opens on the newest generator should step to the
+/// second-newest when it is pressed once, not back through two versions
+/// of the world to the archipelago.
+fn step_scale(scale: Scale, delta: i32) -> Scale {
+    const ORDER: [Scale; 3] = [Scale::Landforms, Scale::Earth, Scale::Regional];
+    let at = ORDER.iter().position(|&s| s == scale).unwrap_or(0) as i32;
+    let count = ORDER.len() as i32;
+    ORDER[(at + delta).rem_euclid(count) as usize]
+}
+
+/// What a world's row says about it under its name.
+///
+/// **Four facts, and the order is the order they are asked in.** When
+/// was I last here; how long did I live there and what time of year is
+/// it now; how much disk is this; and, last because it is the one a
+/// player rarely wants, which seed it was made from. Last is also where
+/// the truncation starts, and that is the same decision: a row too
+/// narrow for all of it loses the seed rather than the date.
+///
+/// A world nobody has opened says so and stops -- a row reading "day 1,
+/// spring, 4 kB" about a folder that has never been entered is four
+/// facts and no information.
+fn world_detail(world: &worlds::World, now: u64, language: Language) -> String {
+    let say = |msg: Msg| language.text(msg);
+    let mut parts: Vec<String> = Vec::new();
+    match world.played_on() {
+        Some(date) => {
+            parts.push(world.played_description(now, language));
+            parts.push(date);
+        }
+        None => parts.push(say(Msg::NeverPlayed).to_string()),
+    }
+    if let (Some(day), Some(season)) = (world.day(), world.season()) {
+        parts.push(format!("{} {day}, {}", say(Msg::Day), say(season_name(season))));
+    }
+    if world.bytes > 0 {
+        parts.push(worlds::size_description(world.bytes));
+    }
+    if let Some(seed) = world.seed {
+        parts.push(format!("{} {seed}", say(Msg::SeedShort)));
+    }
+    // Three spaces between facts rather than a bullet: the font has no
+    // middle dot, and a comma would read as part of the fact before it.
+    parts.join("   ")
+}
+
+fn season_name(season: primitive_shared::season::Season) -> Msg {
+    use primitive_shared::season::Season;
+    match season {
+        Season::Spring => Msg::SeasonSpring,
+        Season::Summer => Msg::SeasonSummer,
+        Season::Autumn => Msg::SeasonAutumn,
+        Season::Winter => Msg::SeasonWinter,
+    }
+}
+
 /// A one-line note under a list.
 ///
 /// Two kinds because the notes come from two places: fixed phrases the
@@ -1560,7 +1697,8 @@ impl Menu {
             seed_input: TextField::new(),
             world_preset: Preset::Normal,
             world_zone: Zone::Temperate,
-            explaining_zone: false,
+            world_scale: Scale::default(),
+            explaining: FormRow::default(),
             focus: Field::Name,
             editing_username: false,
             username_pending: None,
@@ -2054,17 +2192,27 @@ impl Menu {
                 }
                 Key::Escape => Some(self.apply(Action::Back)),
                 Key::Char('n') | Key::Char('N') => Some(self.apply(Action::NewWorld)),
+                // R and C, not F2 and Ctrl-C: this menu's keys are all
+                // single letters (A and E on the server list, N here),
+                // and a screen that learned a function key for one of
+                // its six buttons would be a screen with two habits.
+                Key::Char('r') | Key::Char('R') if self.world_count > 0 => {
+                    Some(self.apply(Action::RenameWorld(self.world_selected)))
+                }
+                Key::Char('c') | Key::Char('C') if self.world_count > 0 => {
+                    Some(self.apply(Action::CopyWorld(self.world_selected)))
+                }
                 Key::Delete { .. } if self.world_count > 0 => {
                     Some(self.apply(Action::AskDeleteWorld(self.world_selected)))
                 }
                 _ => None,
             },
 
-            Screen::Editing(_) | Screen::CreatingWorld => {
-                let save = if matches!(self.screen, Screen::CreatingWorld) {
-                    Action::CreateWorld
-                } else {
-                    Action::Save
+            Screen::Editing(_) | Screen::CreatingWorld | Screen::RenamingWorld(_) => {
+                let save = match self.screen {
+                    Screen::CreatingWorld => Action::CreateWorld,
+                    Screen::RenamingWorld(index) => Action::CommitRename(index),
+                    _ => Action::Save,
                 };
                 match key {
                     Key::Tab => self.cycle_field(),
@@ -2220,8 +2368,10 @@ impl Menu {
     /// True when keystrokes should go into a field rather than be read
     /// as shortcuts.
     pub fn accepts_text(&self) -> bool {
-        matches!(self.screen, Screen::Editing(_) | Screen::CreatingWorld)
-            || (matches!(self.screen, Screen::Settings) && self.editing_username)
+        matches!(
+            self.screen,
+            Screen::Editing(_) | Screen::CreatingWorld | Screen::RenamingWorld(_)
+        ) || (matches!(self.screen, Screen::Settings) && self.editing_username)
     }
 
     fn field_mut(&mut self) -> &mut TextField {
@@ -2326,6 +2476,10 @@ impl Menu {
         self.focus = match (&self.screen, self.focus) {
             (Screen::CreatingWorld, Field::Name) => Field::Seed,
             (Screen::CreatingWorld, _) => Field::Name,
+            // One box, so Tab is a no-op rather than a jump into a
+            // field this screen does not draw -- which would be a
+            // keystroke that types into nothing visible.
+            (Screen::RenamingWorld(_), _) => Field::Name,
             (_, Field::Name) => Field::Address,
             _ => Field::Name,
         };
@@ -2422,7 +2576,9 @@ impl Menu {
                     }
                     Screen::TouchControls | Screen::Controls => Screen::Settings,
                     Screen::Extensions => (*self.came_from).clone(),
-                    Screen::CreatingWorld | Screen::Confirm { .. } => Screen::Worlds,
+                    Screen::CreatingWorld
+                    | Screen::RenamingWorld(_)
+                    | Screen::Confirm { .. } => Screen::Worlds,
                     _ => Screen::Main,
                 };
             }
@@ -2456,15 +2612,30 @@ impl Menu {
             }
             Action::Focus(field) => {
                 self.focus = *field;
+                // The line under the new-world form follows the row the
+                // player is on, and a box being typed into is a row they
+                // are on: before this, tapping NAME or SEED left the help
+                // explaining a world type nobody was looking at, and the
+                // sentence saying what a seed *is* could only be reached
+                // by stepping a different row.
+                self.explaining = match field {
+                    Field::Name => FormRow::Name,
+                    Field::Seed => FormRow::Seed,
+                    _ => self.explaining,
+                };
                 self.place_caret_under_cursor(*field);
             }
             Action::StepPreset(delta) => {
                 self.world_preset = self.world_preset.step(*delta);
-                self.explaining_zone = false;
+                self.explaining = FormRow::Preset;
             }
             Action::StepZone(delta) => {
                 self.world_zone = self.world_zone.step(*delta);
-                self.explaining_zone = true;
+                self.explaining = FormRow::Zone;
+            }
+            Action::StepScale(delta) => {
+                self.world_scale = step_scale(self.world_scale, *delta);
+                self.explaining = FormRow::Scale;
             }
             Action::RollSeed => {
                 // Into the box, not straight into a world: the number is
@@ -2482,7 +2653,9 @@ impl Menu {
                 self.drop_typed_username();
                 self.screen = match self.screen {
                     Screen::Connecting { .. } | Screen::Failed { .. } => (*self.came_from).clone(),
-                    Screen::CreatingWorld | Screen::Confirm { .. } => Screen::Worlds,
+                    Screen::CreatingWorld
+                    | Screen::RenamingWorld(_)
+                    | Screen::Confirm { .. } => Screen::Worlds,
                     // Cancelling the add/edit server form returns to the
                     // server list.
                     _ => Screen::Servers,
@@ -2509,10 +2682,30 @@ impl Menu {
                 // made a tropical world should not make every world after
                 // it in the tropics without having chosen to.
                 self.world_zone = Zone::Temperate;
-                self.explaining_zone = false;
+                // ...and the scale, which is the newest generator: a
+                // player who once made an archipelago should not make
+                // every world after it out of islands by accident.
+                self.world_scale = Scale::default();
+                self.explaining = FormRow::default();
                 self.focus = Field::Name;
                 self.notice = None;
                 self.screen = Screen::CreatingWorld;
+            }
+            Action::RenameWorld(index) => {
+                self.world_selected = *index;
+                self.notice = None;
+                self.focus = Field::Name;
+                // `main.rs` puts the world's current name in the box,
+                // since it owns the saves folder -- the same division
+                // `EditUsername` makes. Cleared here so a form that is
+                // opened before that happens is empty rather than
+                // holding the last thing anybody typed anywhere.
+                self.name_input.clear();
+                self.screen = Screen::RenamingWorld(*index);
+            }
+            Action::CommitRename(_) => {
+                // Carried out by `main.rs`; this only closes the form.
+                self.screen = Screen::Worlds;
             }
             Action::AskDeleteWorld(index) => {
                 self.world_selected = *index;
@@ -2872,7 +3065,10 @@ impl Menu {
             .map(|(x, y)| (x.to_bits(), y.to_bits()))
             .hash(&mut h);
         let caret_on_screen = self.editing_username
-            || matches!(self.screen, Screen::Editing(_) | Screen::CreatingWorld);
+            || matches!(
+                self.screen,
+                Screen::Editing(_) | Screen::CreatingWorld | Screen::RenamingWorld(_)
+            );
         if caret_on_screen {
             self.caret_visible().hash(&mut h);
         }
@@ -2888,6 +3084,11 @@ impl Menu {
             world.name.hash(&mut h);
             world.seed.hash(&mut h);
             world.last_played.hash(&mut h);
+            // The calendar and the size are on the row now, and both
+            // change while a world is being played -- a key that left
+            // them out is a row that goes on saying the day before last.
+            world.world_time.map(f32::to_bits).hash(&mut h);
+            world.bytes.hash(&mut h);
         }
         // The world rows show a rough age ("3 min ago") measured from
         // the wall clock, so the clock's minute is part of the picture.
@@ -2961,6 +3162,9 @@ impl Menu {
                 self.build_failed(&mut p, hover, ctx, &label, &reason)
             }
             Screen::Paused => self.build_paused(&mut p, hover, ctx),
+            Screen::RenamingWorld(index) => {
+                self.build_rename_world(&mut p, hover, ctx, index)
+            }
         }
 
         *out = p.into_vertices();
@@ -2972,7 +3176,6 @@ impl Menu {
         // them* when there is no room -- never the same number squeezed.
         let layout = ctx.layout;
         self.backdrop(p, ctx);
-        self.title(p, say(ctx, Msg::Worlds), 0.86);
 
         // Built from the bottom of the glass upward, because that is
         // where the furniture under the list is pinned; the panel takes
@@ -2983,16 +3186,44 @@ impl Menu {
         let row_y0 = back_y0 + button_height + layout.at(0.08);
         let notice_y = row_y0 + button_height + layout.at(0.11);
 
-        let half_width = layout.panel_half_width(0.95);
-        let panel = Rect::new(
-            -half_width,
-            notice_y + layout.at(0.06),
-            half_width,
-            0.66,
-        );
-        p.panel(panel);
-
         let worlds = ctx.worlds.list();
+
+        let half_width = layout.panel_half_width(0.95);
+        let floor = notice_y + layout.at(0.06);
+        // **Rule 2 at the top of `widgets`: a panel is sized to what is
+        // in it, never to the worst case.** This one reached from the
+        // furniture to a fixed 0.66 whatever was in the list, so the
+        // screen a player actually has -- three or four worlds on a
+        // panel with room for eight -- was a slab with a hole in the
+        // bottom two thirds of it.
+        //
+        // **Its floor stays where it always was and its top is what
+        // moves.** The other way round -- top pinned, floor rising --
+        // would pull the whole list up the glass as worlds are added,
+        // so the row a thumb reaches for would be somewhere new every
+        // time one is made. The title follows the top down instead,
+        // which is a word moving rather than a target moving.
+        //
+        // Three rows is the floor: below that the panel is smaller than
+        // the sentence an empty list has to hold, and a list is a place
+        // before it is a list.
+        let pad = layout.at(0.03);
+        let gap = layout.at(0.014);
+        let row_height = layout.at(0.11).max(layout.finger());
+        let wanted = worlds.len().max(3) as f32;
+        let top = (floor + pad * 2.0 + row_height * wanted + gap * (wanted - 1.0)).min(0.66);
+        let panel = Rect::new(-half_width, floor, half_width, top);
+        p.panel(panel);
+        // **The title follows the panel down**, and never further up
+        // than the 0.86 it has always been at. A heading pinned to the
+        // top of the glass over a panel that is now as tall as its
+        // contents is a word on its own in an empty half of the screen,
+        // which is the hole rule 2 moved rather than closed.
+        self.title(
+            p,
+            say(ctx, Msg::Worlds),
+            (panel.y1 + layout.at(0.06) + widgets::cell_height(3.0)).min(0.86),
+        );
         if worlds.is_empty() {
             p.text_centred(
                 say(ctx, crate::ui::lang::by_input(Msg::NoWorldsYet, Msg::NoWorldsYetTouch)),
@@ -3006,9 +3237,6 @@ impl Menu {
             );
         }
 
-        let pad = layout.at(0.03);
-        let gap = layout.at(0.014);
-        let row_height = layout.at(0.11).max(layout.finger());
         let mut y = panel.y1 - pad - row_height;
         // `n` rows have `n - 1` gaps between them; counting one after
         // the last throws away a row that had room for itself.
@@ -3048,16 +3276,24 @@ impl Menu {
             if selected || self.is_hovered(rect, cursor) {
                 p.border(rect, 0.003, if selected { MENU.accent } else { MENU.dark });
             }
-            let detail = format!(
-                "seed {}   {}",
-                world.seed.unwrap_or(ctx.settings.singleplayer_seed),
-                world.played_description(now, ctx.settings.language)
-            );
+            // **What the world *is*, not what its file is.** The row
+            // used to be a seed and "3 d ago", which answers neither of
+            // the two questions anybody opens this screen with: which of
+            // these was I last in, and which one is the one I got through
+            // the winter in. See `world_detail`.
+            let detail = world_detail(world, now, ctx.settings.language);
             p.row_labels(
                 rect,
                 layout.at(0.025),
                 &world.name,
-                if selected { widgets::TEXT } else { MENU.ink_dim },
+                // **The name is the bright ink whether the row is
+                // chosen or not.** It was the quiet one, so a list of
+                // four worlds was four dim names and four dim detail
+                // lines at the same weight, with nothing to run an eye
+                // down. What the highlight says is already said by the
+                // row's own fill and its amber edge; what the ink has to
+                // say is "this is the name and that is the note".
+                if selected { widgets::TEXT } else { MENU.ink },
                 &detail,
                 MENU.ink_dim,
                 layout.content(),
@@ -3106,28 +3342,141 @@ impl Menu {
         // buttons are as wide as the room they stand under.
         let span = (panel.x0, panel.x1);
         let column_gap = layout.at(BUTTON_GAP);
-        for (column, label, action, enabled) in [
-            (0, say(ctx, Msg::Play), Action::PlayWorld(selected), any),
-            (1, say(ctx, Msg::New), Action::NewWorld, true),
-            (2, say(ctx, Msg::Delete), Action::AskDeleteWorld(selected), any),
+        // **Six buttons in the two rows that were already there.** The
+        // screen had PLAY, NEW, DELETE and a BACK alone under the middle
+        // column, so a third of the furniture was empty air -- and the
+        // two things a list of saves has always wanted, a new name and a
+        // spare copy, had nowhere to be. RENAME and COPY take the two
+        // columns beside BACK, which stays in the middle where it is
+        // drawn today: nothing moved, two things arrived.
+        //
+        // The five that act on a world are dark until there is one, so
+        // the screen a new install opens on offers exactly the one thing
+        // there is to do.
+        for (row_y, buttons) in [
+            (
+                row_y0,
+                [
+                    (say(ctx, Msg::Play), Action::PlayWorld(selected), any),
+                    (say(ctx, Msg::New), Action::NewWorld, true),
+                    (say(ctx, Msg::Delete), Action::AskDeleteWorld(selected), any),
+                ],
+            ),
+            (
+                back_y0,
+                [
+                    (say(ctx, Msg::Rename), Action::RenameWorld(selected), any),
+                    (say(ctx, Msg::Back), Action::Back, true),
+                    (say(ctx, Msg::CopyWorld), Action::CopyWorld(selected), any),
+                ],
+            ),
         ] {
-            let (x0, x1) = columns(span, 3, column_gap, column, column);
-            self.add_button(p, cursor, Rect::new(x0, row_y0, x1, row_y0 + button_height), label, action, enabled);
+            for (column, (label, action, enabled)) in buttons.into_iter().enumerate() {
+                let (x0, x1) = columns(span, 3, column_gap, column, column);
+                self.add_button(
+                    p,
+                    cursor,
+                    Rect::new(x0, row_y, x1, row_y + button_height),
+                    label,
+                    action,
+                    enabled,
+                );
+            }
         }
-        let (x0, x1) = columns(span, 3, column_gap, 1, 1);
+
+        p.text_centred(
+            say(
+                ctx,
+                crate::ui::lang::by_input(Msg::WorldsHelpWithRename, Msg::WorldsHelpTouch),
+            ),
+            0.0,
+            help_top,
+            0.8,
+            widgets::TEXT_DIM,
+        );
+    }
+
+    /// The rename form: one box, two buttons, and the name that is in it.
+    ///
+    /// **The new-world form with four rows taken out**, deliberately: it
+    /// is laid out by the same `FormRows`, so the box is the same size in
+    /// the same place and dodges the on-screen keyboard the same way. A
+    /// screen with one field on it that was arranged by hand would be the
+    /// one form on this menu whose field a phone's keyboard could cover.
+    fn build_rename_world(
+        &mut self,
+        p: &mut Painter,
+        cursor: Option<(f32, f32)>,
+        ctx: &MenuContext,
+        index: usize,
+    ) {
+        let layout = ctx.layout;
+        self.backdrop(p, ctx);
+        let rows = FormRows::plan(layout, 1, (0.48, 0.22, 0.08, 0.03));
+        if layout.keyboard_top().is_none() {
+            self.title(p, say(ctx, Msg::RenameThisWorld), 0.74);
+        }
+
+        let half_width = layout.panel_half_width(0.95);
+        let panel = Rect::new(-half_width, rows.panel_bottom(1), half_width, rows.top);
+        p.panel(panel);
+
+        let pad = layout.at(0.05);
+        let (label_x, label_y, rect) = rows.row(panel, pad, 0);
+        p.text(say(ctx, Msg::Name), label_x, label_y, rows.label_size, MENU.ink_dim);
+        p.text_field(
+            rect,
+            &self.name_input,
+            say(ctx, Msg::WorldNamePlaceholder),
+            self.focus == Field::Name,
+            self.caret_visible(),
+        );
+        self.hot.push((rect, Action::Focus(Field::Name)));
+        self.field_boxes.push((rect, Field::Name));
+
+        let content = layout.within(panel.y0 + 1.0 - 0.03, 0.44);
+        let notice_y = panel.y0 - content.at(0.06);
+        if let Some((text, good)) = self.notice_line(ctx) {
+            let colour = if good { widgets::TEXT_GOOD } else { widgets::TEXT_BAD };
+            p.text_centred(&text, 0.0, notice_y, content.at(0.9), colour);
+        } else {
+            // **The folder is not moving, and saying so is the point.**
+            // A player renaming a save is asking "will this lose it"; the
+            // honest answer is a sentence, and it is the same sentence
+            // `Worlds::rename` explains itself with.
+            p.text_centred(
+                say(ctx, Msg::NameHelp),
+                0.0,
+                notice_y,
+                content.at(0.8),
+                widgets::TEXT_DIM,
+            );
+        }
+
+        let button_height = content.at(0.10).max(content.finger());
+        let button_y = notice_y - content.at(0.09) - button_height / 2.0;
+        let span = (panel.x0, panel.x1);
+        let column_gap = layout.at(BUTTON_GAP);
+        let (y0, y1) = (button_y - button_height / 2.0, button_y + button_height / 2.0);
+        let (x0, x1) = columns(span, 2, column_gap, 0, 0);
         self.add_button(
             p,
             cursor,
-            Rect::new(x0, back_y0, x1, back_y0 + button_height),
-            say(ctx, Msg::Back),
-            Action::Back,
-            true,
+            Rect::new(x0, y0, x1, y1),
+            say(ctx, Msg::Rename),
+            Action::CommitRename(index),
+            !self.name_input.text().trim().is_empty(),
         );
+        let (x0, x1) = columns(span, 2, column_gap, 1, 1);
+        self.add_button(p, cursor, Rect::new(x0, y0, x1, y1), say(ctx, Msg::Cancel), Action::Cancel, true);
 
+        // **Not the new-world form's line**, which names a key this
+        // screen has not got: there is one box here, so "tab switches
+        // field" is an instruction to press a key that does nothing.
         p.text_centred(
-            say(ctx, crate::ui::lang::by_input(Msg::WorldsHelp, Msg::WorldsHelpTouch)),
+            say(ctx, crate::ui::lang::by_input(Msg::RenameFormHelp, Msg::RenameFormHelpTouch)),
             0.0,
-            help_top,
+            button_y - button_height / 2.0 - content.at(0.11),
             0.8,
             widgets::TEXT_DIM,
         );
@@ -3160,17 +3509,31 @@ impl Menu {
         // as it was and closes the gap to the *next* label instead, which
         // is the gap that was only ever air; the panel starts a little
         // higher, under a title moved up to match.
-        let rows = FormRows::plan(layout, 4, (0.48, 0.22, 0.08, 0.03));
+        //
+        // **Five rows since the country's size came onto it.** That was a
+        // constant in `Worlds::create_in` -- every world was the newest
+        // generator and nobody could ask for the archipelago -- and it is
+        // the one choice here with no better answer, so it is a row.
+        // `FormRows` takes the count, so the pitch closes to hold it and
+        // the panel does not grow off the bottom of a phone; what pays
+        // for the fifth row is the air between labels, which was only
+        // ever air.
+        const ROWS: usize = 5;
+        let rows = FormRows::plan(layout, ROWS, (0.48, 0.22, 0.08, 0.03));
         if layout.keyboard_top().is_none() {
             self.title(p, say(ctx, Msg::NewWorld), 0.74);
         }
 
         let half_width = layout.panel_half_width(0.95);
-        let panel = Rect::new(-half_width, rows.panel_bottom(4), half_width, rows.top);
+        let panel = Rect::new(-half_width, rows.panel_bottom(ROWS), half_width, rows.top);
         p.panel(panel);
 
         let pad = layout.at(0.05);
-        for (index, msg) in [Msg::Name, Msg::Seed, Msg::WorldType, Msg::Climate].into_iter().enumerate() {
+        for (index, msg) in
+            [Msg::Name, Msg::Seed, Msg::WorldType, Msg::Climate, Msg::WorldScale]
+                .into_iter()
+                .enumerate()
+        {
             let (label_x, label_y, rect) = rows.row(panel, pad, index);
             p.text(say(ctx, msg), label_x, label_y, rows.label_size, MENU.ink_dim);
             match index {
@@ -3213,6 +3576,12 @@ impl Menu {
                     self.hot.push((field, Action::Focus(Field::Seed)));
                     self.field_boxes.push((field, Field::Seed));
                     self.add_button(p, cursor, button, say(ctx, Msg::RollSeed), Action::RollSeed, true);
+                }
+                4 => {
+                    // How big the country is: the archipelago the game
+                    // shipped with, or the planet. See `Scale`.
+                    let value = say(ctx, scale_label(self.world_scale));
+                    self.stepper(p, cursor, layout, rect, value, Action::StepScale(-1), Action::StepScale(1));
                 }
                 3 => {
                     // The zone: stepped, on the world type's terms, and
@@ -3259,10 +3628,12 @@ impl Menu {
             // What the chosen type *is*, under the row that chose it:
             // "TEST" means nothing until something says the world is a
             // flat field with one of everything already built on it.
-            let help = if self.explaining_zone {
-                zone_help(self.world_zone)
-            } else {
-                preset_help(self.world_preset)
+            let help = match self.explaining {
+                FormRow::Name => Msg::NameHelp,
+                FormRow::Seed => Msg::SeedHelp,
+                FormRow::Preset => preset_help(self.world_preset),
+                FormRow::Zone => zone_help(self.world_zone),
+                FormRow::Scale => scale_help(self.world_scale),
             };
             p.text_centred(
                 say(ctx, help),
@@ -5079,6 +5450,18 @@ mod tests {
     struct Fixture {
         settings: ClientSettings,
         worlds: Worlds,
+        /// A folder of real saves, where a test asked for some. Kept so
+        /// it is removed when the fixture goes, rather than left in the
+        /// machine's temp directory once per run of the suite.
+        saves: Option<std::path::PathBuf>,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let Some(saves) = &self.saves {
+                let _ = std::fs::remove_dir_all(saves);
+            }
+        }
     }
 
     impl Fixture {
@@ -5090,6 +5473,37 @@ mod tests {
                 worlds: Worlds::load(
                     std::env::temp_dir().join("primitive-menu-tests-no-such-folder"),
                 ),
+                saves: None,
+            }
+        }
+
+        /// The same, over `count` real worlds on disk.
+        ///
+        /// **Real ones, because the screen reads them.** The buttons that
+        /// act on a world are dark while the list is empty, so a test that
+        /// only told the menu how many rows to expect
+        /// (`Menu::set_world_count`) would find nothing pressable and
+        /// would be checking the empty screen it did not mean to check.
+        fn with_worlds(count: usize) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "primitive-menu-worlds-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&root).expect("a saves folder");
+            let mut worlds = Worlds::load(&root);
+            for index in 0..count {
+                worlds
+                    .create_in(&format!("World {index}"), index as u32, Preset::Normal, Zone::Temperate)
+                    .expect("a world");
+            }
+            Self {
+                settings: ClientSettings::default(),
+                worlds: Worlds::load(&root),
+                saves: Some(root),
             }
         }
 
@@ -5182,6 +5596,12 @@ mod tests {
         menu.build(&fixture.ctx())
     }
 
+    /// The same, over a list of real worlds. See `Fixture::with_worlds`.
+    fn build_over_worlds(menu: &mut Menu, count: usize) -> Vec<crate::ui::hotbar::HotbarVertex> {
+        let fixture = Fixture::with_worlds(count);
+        menu.build(&fixture.ctx())
+    }
+
     fn hot_rect(menu: &Menu, wanted: &Action) -> Option<Rect> {
         menu.hot
             .iter()
@@ -5213,6 +5633,7 @@ mod tests {
             ("paused", Screen::Paused),
             ("worlds", Screen::Worlds),
             ("world_form", Screen::CreatingWorld),
+            ("rename_world", Screen::RenamingWorld(0)),
             ("servers", Screen::Servers),
             ("server_form", Screen::Editing(None)),
             ("settings", Screen::Settings),
@@ -5246,8 +5667,22 @@ mod tests {
     }
 
     /// Everything a screen offered to be pressed, at this layout.
-    fn targets_on(screen: Screen, layout: widgets::Layout) -> Vec<(Rect, Action)> {
-        let fixture = Fixture::new();
+    /// Every pressable thing on a screen, at a given shape and size.
+    ///
+    /// **Over a list that has worlds in it**, and that is not a detail:
+    /// five of the six buttons under the world list are dark while the
+    /// list is empty, and a dark button is not in `hot` at all. Built
+    /// against an empty fixture, the test that keeps controls on the
+    /// glass was checking NEW and BACK and nothing else -- on the screen
+    /// with the most controls on it.
+    ///
+    /// The fixture is the caller's so that sixteen shapes do not mean
+    /// sixteen folders of saves made and removed.
+    fn targets_on(
+        fixture: &Fixture,
+        screen: Screen,
+        layout: widgets::Layout,
+    ) -> Vec<(Rect, Action)> {
         let mut menu = Menu::new(ServerList::default());
         menu.screen = screen;
         let ctx = MenuContext { layout, ..fixture.ctx() };
@@ -5272,10 +5707,15 @@ mod tests {
         // that the buttons a player presses actually get bigger --
         // measured on their area, because some screens grow sideways
         // more than downwards and either counts.
+        // Three worlds on disk, so the five buttons that act on one are
+        // in the list at all -- see `targets_on`.
+        let fixture = Fixture::with_worlds(3);
         for aspect in [16.0f32 / 9.0, PHONE] {
             for (name, screen) in golden_screens() {
-                let small = targets_on(screen.clone(), widgets::Layout::for_screen(aspect, 1.0));
-                let large = targets_on(screen, widgets::Layout::for_screen(aspect, 2.0));
+                let small =
+                    targets_on(&fixture, screen.clone(), widgets::Layout::for_screen(aspect, 1.0));
+                let large =
+                    targets_on(&fixture, screen, widgets::Layout::for_screen(aspect, 2.0));
                 assert!(!small.is_empty(), "{name} offers nothing to press");
                 // The *biggest* target rather than the total, because a
                 // list screen answers a bigger interface by showing
@@ -5301,11 +5741,16 @@ mod tests {
         // The other half: growing is only an improvement while it all
         // stays on the screen. Checked at the top of the range and on a
         // window far squarer than anything was designed for.
+        let fixture = Fixture::with_worlds(3);
         for aspect in [16.0f32 / 9.0, PHONE, 4.0 / 3.0, 1.0] {
-            for requested in [1.0f32, 1.5, 2.0, 4.0] {
+            // The whole range the setting is sanitised to (see
+            // `ClientSettings::sanitize`), not a sample of it: the size
+            // a control comes out at is a floor and a fit interacting,
+            // and both ends are where that goes wrong.
+            for requested in [0.5f32, 1.0, 1.5, 2.0, 4.0] {
                 let layout = widgets::Layout::for_screen(aspect, requested);
                 for (name, screen) in golden_screens() {
-                    for (rect, action) in targets_on(screen.clone(), layout) {
+                    for (rect, action) in targets_on(&fixture, screen.clone(), layout) {
                         assert!(
                             rect.x0 >= -aspect - 1e-3 && rect.x1 <= aspect + 1e-3,
                             "{name} at {aspect:.2}x{requested}: {action:?} is off the side at {rect:?}",
@@ -6104,7 +6549,13 @@ mod tests {
         ("paused", 1152, 13024866501460846824, 16641318740995359347),
         // Shape only: the three buttons and BACK stand on columns cut from
         // the panel (see `columns`) instead of widths of their own.
-        ("worlds", 630, 3959520323719984746, 8754961225334795139),
+        // 744 since the list grew up: RENAME and COPY fill the two
+        // columns that were empty beside BACK, every row says the day,
+        // the season, the size and the date it was played on instead of
+        // a seed and an age, the panel is as tall as the worlds in it
+        // (rule 2 in `widgets`) with the title following it down, and an
+        // unchosen world's name is written in the bright ink.
+        ("worlds", 744, 7660126314126665684, 13926778572275578147),
         // Two placeholders where there were none, and the seed row no
         // longer writing its fallback into the field as if it were a
         // value: the vertex count is the writing that is now there and
@@ -6118,7 +6569,18 @@ mod tests {
         // 1440 since the seed row rolls: a ROLL button at the end of the
         // box, which is the box a button's width shorter, and the
         // placeholder saying "random" where it said the settings' number.
-        ("world_form", 1440, 17828191189071698182, 12624195846552934867),
+        // 1680 since HOW BIG THE WORLD IS: a fifth row, its two arrows
+        // and its word. That was a constant in `Worlds::create_in` --
+        // every world the newest generator, and no way to ask for the
+        // archipelago -- and it is the one choice on this form with no
+        // better answer, so it is a row. `FormRows` closed the pitch to
+        // hold it; nothing came off the bottom of the glass.
+        ("world_form", 1680, 12592738192208125090, 12594601485374661331),
+        // The rename form: the new-world form with four rows taken out,
+        // laid out by the same `FormRows` so its box dodges a phone's
+        // keyboard the same way. New, so there is nothing for it to
+        // have moved from.
+        ("rename_world", 786, 8079040803799444616, 13161572920153024867),
         // Shape only, as the world list.
         ("servers", 726, 10814275185546909310, 5468121121085479251),
         // Shape only: SAVE and CANCEL on the panel's two halves.
@@ -6530,6 +6992,224 @@ mod tests {
         assert!(menu.servers.servers.is_empty());
         assert!(menu.selected_entry().is_none());
         build(&mut menu);
+    }
+
+
+    /// **A world's row says what happened in it, not what its file is.**
+    ///
+    /// The row used to be a seed and "3 d ago", which answers neither of
+    /// the questions this screen is opened with: which of these was I
+    /// last in, and which is the one I got through the first winter in.
+    #[test]
+    fn a_worlds_row_says_the_day_the_season_the_size_and_when_it_was_played() {
+        let world = worlds::World {
+            name: "Дом".to_string(),
+            seed: Some(4242),
+            preset: Preset::Normal,
+            zone: Zone::Temperate,
+            scale: Scale::Landforms,
+            world_time: Some(93.5),
+            bytes: 3_300_000,
+            directory: std::path::PathBuf::from("saves/dom"),
+            // Two days before the `now` below.
+            last_played: 1_735_689_600,
+        };
+        let line = world_detail(&world, 1_735_689_600 + 2 * 86_400, Language::Russian);
+        // Day 94 of a world's own calendar is not day 94 of a year:
+        // the calendar starts partway in (`season::WORLD_OPENS_ON_DAY`),
+        // which is why the season is asked for rather than counted.
+        let season = Language::Russian.text(season_name(primitive_shared::season::Season::at(93.5)));
+        for want in ["дн. назад", "01.01.2025", "день 94", season, "3.1 MB", "сид 4242"] {
+            assert!(line.contains(want), "the row does not say {want:?}: {line}");
+        }
+        // ...and the seed is last, because it is the first thing a
+        // narrow row is allowed to lose.
+        assert!(
+            line.rfind("сид").unwrap() > line.rfind("3.1 MB").unwrap(),
+            "the seed is not the last thing in the row: {line}"
+        );
+    }
+
+    #[test]
+    fn a_world_nobody_has_opened_says_so_and_stops() {
+        // Rather than "day 1, spring, 4 kB", which is four facts and no
+        // information about a folder that has never been entered.
+        let world = worlds::World {
+            name: "Fresh".to_string(),
+            seed: None,
+            preset: Preset::Normal,
+            zone: Zone::Temperate,
+            scale: Scale::Landforms,
+            world_time: None,
+            bytes: 0,
+            directory: std::path::PathBuf::new(),
+            last_played: 0,
+        };
+        assert_eq!(world_detail(&world, 9_999_999, Language::English), "never played");
+    }
+
+    /// **RENAME and COPY are pressed where they are drawn**, and the six
+    /// buttons stand in the two rows the screen already had.
+    #[test]
+    fn the_world_list_offers_six_buttons_in_the_two_rows_it_always_had() {
+        let mut menu = Menu::new(ServerList::default());
+        menu.screen = Screen::Worlds;
+        build_over_worlds(&mut menu, 2);
+        let mut rows: Vec<f32> = Vec::new();
+        for wanted in [
+            Action::PlayWorld(0),
+            Action::NewWorld,
+            Action::AskDeleteWorld(0),
+            Action::RenameWorld(0),
+            Action::CopyWorld(0),
+            Action::Back,
+        ] {
+            // **The last target, not the first.** The selected row of
+            // the list is itself a `PlayWorld` -- click to choose, click
+            // again to play -- so asking for the first one finds the row
+            // rather than the button under the panel.
+            let rect = menu
+                .hot
+                .iter()
+                .rev()
+                .find(|(_, action)| *action == wanted)
+                .map(|(rect, _)| *rect)
+                .unwrap_or_else(|| panic!("{wanted:?} is not on the worlds screen"));
+            if !rows.iter().any(|y| (y - rect.y0).abs() < 1e-4) {
+                rows.push(rect.y0);
+            }
+        }
+        assert_eq!(rows.len(), 2, "the six buttons are not in two rows: {rows:?}");
+    }
+
+    #[test]
+    fn nothing_that_acts_on_a_world_is_offered_when_there_are_none() {
+        // The screen a fresh install opens on offers exactly the one
+        // thing there is to do, and BACK.
+        let mut menu = Menu::new(ServerList::default());
+        menu.screen = Screen::Worlds;
+        build_over_worlds(&mut menu, 0);
+        for wanted in [
+            Action::PlayWorld(0),
+            Action::AskDeleteWorld(0),
+            Action::RenameWorld(0),
+            Action::CopyWorld(0),
+        ] {
+            assert!(hot_rect(&menu, &wanted).is_none(), "{wanted:?} is pressable with no worlds");
+        }
+        assert!(hot_rect(&menu, &Action::NewWorld).is_some());
+        assert!(hot_rect(&menu, &Action::Back).is_some());
+    }
+
+    #[test]
+    fn renaming_opens_a_form_that_can_be_typed_into_and_left() {
+        let mut menu = Menu::new(ServerList::default());
+        menu.screen = Screen::Worlds;
+        menu.apply(Action::RenameWorld(0));
+        assert_eq!(menu.screen, Screen::RenamingWorld(0));
+        assert!(menu.accepts_text(), "the rename form refuses letters");
+        for c in "Дом".chars() {
+            menu.type_char(c);
+        }
+        assert_eq!(menu.name_input.text(), "Дом");
+        build(&mut menu);
+        assert!(hot_rect(&menu, &Action::CommitRename(0)).is_some());
+        // Escape is the way out of every form on this menu, and it goes
+        // back to the list rather than to the main menu.
+        menu.key(Key::Escape);
+        assert_eq!(menu.screen, Screen::Worlds);
+    }
+
+    #[test]
+    fn an_empty_rename_cannot_be_pressed() {
+        // The button is dark rather than the form refusing afterwards:
+        // a control that is never right to press should not be pressable.
+        let mut menu = Menu::new(ServerList::default());
+        menu.screen = Screen::Worlds;
+        menu.apply(Action::RenameWorld(0));
+        build(&mut menu);
+        assert!(hot_rect(&menu, &Action::CommitRename(0)).is_none());
+        menu.type_char('A');
+        build(&mut menu);
+        assert!(hot_rect(&menu, &Action::CommitRename(0)).is_some());
+    }
+
+    /// **The line under the new-world form explains the row the player
+    /// is on**, including the two that are typed into.
+    ///
+    /// Before this, tapping NAME or SEED left the help explaining a
+    /// world type nobody was looking at, and the sentence saying what a
+    /// seed *is* could only be reached by stepping a different row.
+    #[test]
+    fn the_help_under_the_new_world_form_follows_the_row_being_touched() {
+        let mut menu = Menu::new(ServerList::default());
+        menu.apply(Action::NewWorld);
+        assert_eq!(menu.explaining, FormRow::Preset);
+        menu.apply(Action::Focus(Field::Seed));
+        assert_eq!(menu.explaining, FormRow::Seed);
+        menu.apply(Action::StepZone(1));
+        assert_eq!(menu.explaining, FormRow::Zone);
+        menu.apply(Action::StepScale(1));
+        assert_eq!(menu.explaining, FormRow::Scale);
+        menu.apply(Action::Focus(Field::Name));
+        assert_eq!(menu.explaining, FormRow::Name);
+    }
+
+    #[test]
+    fn the_scale_row_steps_the_way_its_arrow_points_and_comes_back() {
+        // Newest first: one press forward from the default is the
+        // generator before it, not two versions of the world back.
+        let mut menu = Menu::new(ServerList::default());
+        menu.apply(Action::NewWorld);
+        assert_eq!(menu.world_scale, Scale::default());
+        menu.apply(Action::StepScale(1));
+        assert_eq!(menu.world_scale, Scale::Earth);
+        menu.apply(Action::StepScale(1));
+        assert_eq!(menu.world_scale, Scale::Regional);
+        menu.apply(Action::StepScale(1));
+        assert_eq!(menu.world_scale, Scale::default(), "the list does not wrap");
+        menu.apply(Action::StepScale(-1));
+        assert_eq!(menu.world_scale, Scale::Regional, "back is not the inverse of forward");
+    }
+
+    #[test]
+    fn a_new_form_forgets_the_last_worlds_choices() {
+        // A player who once made an archipelago in the tropics should
+        // not make every world after it out of tropical islands without
+        // having chosen to.
+        let mut menu = Menu::new(ServerList::default());
+        menu.apply(Action::NewWorld);
+        menu.apply(Action::StepScale(1));
+        menu.apply(Action::StepZone(1));
+        menu.apply(Action::Cancel);
+        menu.apply(Action::NewWorld);
+        assert_eq!(menu.world_scale, Scale::default());
+        assert_eq!(menu.world_zone, Zone::Temperate);
+    }
+
+    #[test]
+    fn every_key_the_world_lists_help_line_names_actually_does_something() {
+        // The line under the list is the only place these are written
+        // down, so a key named there and not bound is a lie printed on
+        // the screen.
+        let mut menu = Menu::new(ServerList::default());
+        menu.screen = Screen::Worlds;
+        menu.set_world_count(2);
+        for (key, wanted) in [
+            (Key::Char('n'), Action::NewWorld),
+            (Key::Char('r'), Action::RenameWorld(0)),
+            (Key::Char('c'), Action::CopyWorld(0)),
+        ] {
+            menu.screen = Screen::Worlds;
+            menu.world_selected = 0;
+            assert_eq!(menu.key(key), Some(wanted.clone()), "{key:?} does not do {wanted:?}");
+        }
+        menu.screen = Screen::Worlds;
+        menu.world_selected = 1;
+        assert_eq!(
+            menu.key(Key::Delete { word: false }),
+            Some(Action::AskDeleteWorld(1)),
+        );
     }
 
     #[test]
