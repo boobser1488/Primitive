@@ -1662,7 +1662,7 @@ fn run(
                         );
                         match chat.tapped(graphics.aspect(), touch_controls, authored) {
                             Some(chat::Tap::Send) => {
-                                submit_chat(&mut chat, net.as_ref(), &mut journal, &mut debug_stats);
+                                submit_chat(&mut chat, net.as_ref(), &mut debug_stats);
                                 close_chat(&mut chat, &window, &mut input, paused);
                             }
                             Some(chat::Tap::Leave) => {
@@ -2105,7 +2105,7 @@ fn run(
                             }
                             match code {
                                 KeyCode::Enter | KeyCode::NumpadEnter if !repeat => {
-                                    submit_chat(&mut chat, net.as_ref(), &mut journal, &mut debug_stats);
+                                    submit_chat(&mut chat, net.as_ref(), &mut debug_stats);
                                     close_chat(&mut chat, &window, &mut input, paused);
                                 }
                                 KeyCode::Escape => {
@@ -3120,8 +3120,59 @@ fn run(
                                 }
                             }
                         }
+                        // **A map in the hand opens the map**, whatever is
+                        // in front of it: it is a sheet of hide, there is
+                        // nothing else to do with one, and a player who has
+                        // just made their first map will hold it and click.
+                        // The map key does the same thing and is the one a
+                        // player ends up using; this is the gesture they
+                        // *try*, and a thing that does nothing when you use
+                        // it reads as a thing that is broken.
+                        //
+                        // **The plain click only.** With the modifier held
+                        // a map is laid on the ground like every other
+                        // thing a hand carries (`can_be_set_down`), and a
+                        // map that could not be put on a shelf would be the
+                        // one carried item that cannot.
+                        if held.is_some_and(|held| {
+                            primitive_shared::types::block_kind(held) == primitive_shared::types::BLOCK_MAP
+                        }) && !(thumb_quick || input.action_down(&settings.keybinds, keybinds::Action::Sprint))
+                        {
+                            if journal.toggle(ui::journal::Tab::Map) {
+                                release_cursor(&window, &mut input);
+                                input.release_all();
+                            }
+                            return;
+                        }
                         let aimed = aimed_block(&chunks, &camera);
                         let mut claim = use_gesture(aimed.map(|(_, block)| block), held);
+                        // **A blaze: the modifier, a knife, a standing
+                        // tree** (`types::BLOCK_BLAZE`). Before the set-down
+                        // that the modifier otherwise means, because a knife
+                        // aimed at the *side* of a trunk has nowhere to be
+                        // laid down anyway -- the set-down wants a flat top
+                        // (`set_down_cell`) -- so what this takes over is a
+                        // gesture that could only ever answer "not there".
+                        // The plain click stays what it was: a tap for resin
+                        // or bark, which is the thing a player does twenty
+                        // times an evening.
+                        if let (true, Some((cell, block)), Some(held), Some(net)) = (
+                            thumb_quick || input.action_down(&settings.keybinds, keybinds::Action::Sprint),
+                            aimed,
+                            held,
+                            net.as_ref(),
+                        ) {
+                            if primitive_shared::types::is_knife(held) && blazeable(block) {
+                                net.send(ClientMessage::Blaze {
+                                    global_x: cell.0,
+                                    global_y: cell.1,
+                                    global_z: cell.2,
+                                });
+                                debug_stats.network_messages_out_this_second += 1;
+                                hand.strike(Some(held));
+                                return;
+                            }
+                        }
                         // **Set down, with the modifier held**: anything not
                         // built with, one at a time, on the top of a block --
                         // the jug's gesture (`UseGesture::OpenVessel`) for
@@ -4104,10 +4155,18 @@ fn run(
                     // **A cairn the server has just agreed to asks for its
                     // name**, in the chat box (see `Chat::open_naming` for
                     // why that box). Not over a screen the player has open
-                    // or a line they are typing: the heap is a mark on the
-                    // map without a name, and the survey has it already.
+                    // or a line they are typing: the heap is already a mark
+                    // on this player's map, and this only gives it a word.
+                    //
+                    // **...and only for a player carrying a map**, because
+                    // for anybody else there is no mark to name: the server
+                    // writes one down for the placer only if they had the
+                    // hide on them (`trail::Trail::mark`). A box asking
+                    // "name this cairn for your map" from somebody with no
+                    // map is a prompt whose answer goes nowhere.
                     if let Some(cell) = mining.take_piled_cairn() {
-                        if !paused
+                        if journal.carries_map()
+                            && !paused
                             && !chat.is_typing()
                             && !inventory_screen.open
                             && !chest_screen.is_open()
@@ -4257,6 +4316,18 @@ fn run(
                         &chunks,
                         Duration::from_secs_f32((chunk_ms * 0.25).clamp(0.2, 1.0) / 1000.0),
                     );
+                    // ...and a mark whose cairn is gone is told to the
+                    // server, which is where this player's marks live.
+                    // Only what a survey just looked at, so this is empty
+                    // on all but a handful of frames in a session.
+                    for at in journal.explored.take_lost_marks() {
+                        net.send(ClientMessage::ForgetMark {
+                            global_x: at.0,
+                            global_y: at.1,
+                            global_z: at.2,
+                        });
+                        debug_stats.network_messages_out_this_second += 1;
+                    }
 
                     sky.tick(dt);
                     // What a line said now will be stamped with. Once a
@@ -7293,20 +7364,30 @@ fn reconcile_the_editor(
     }
 }
 
-/// Sends the line typed in the chat box -- or, when the box was asking for
-/// a cairn's name, gives the cairn that name on this player's map and sends
-/// nothing (see `Chat::open_naming`). One function for the Enter key and the
-/// touch box's send button, so the two cannot come to disagree about where
-/// a name goes.
+/// Sends the line typed in the chat box -- as chat, or, when the box was
+/// asking for a mark's name, as that mark's name (see `Chat::open_naming`).
+/// One function for the Enter key and the touch box's send button, so the
+/// two cannot come to disagree about where a name goes.
 fn submit_chat(
     chat: &mut chat::Chat,
     net: Option<&network::NetworkHandle>,
-    journal: &mut ui::journal::Journal,
     debug_stats: &mut DebugStats,
 ) {
     let naming = chat.naming();
     match (chat.submit(), naming, net) {
-        (Some(name), Some(at), _) => journal.explored.name_mark(at, &name),
+        // **The name goes to the server**, which holds this player's
+        // marks: it is written into their profile and comes back on the
+        // next `Trail`. It used to be written straight onto a map the
+        // client owned, and that map is gone.
+        (Some(name), Some(at), Some(net)) => {
+            net.send(ClientMessage::NameMark {
+                global_x: at.0,
+                global_y: at.1,
+                global_z: at.2,
+                name,
+            });
+            debug_stats.network_messages_out_this_second += 1;
+        }
         (Some(line), None, Some(net)) => {
             net.send(ClientMessage::Chat(line));
             debug_stats.network_messages_out_this_second += 1;
@@ -8885,6 +8966,13 @@ fn drain_network(
                 };
             }
 
+            // **Where this player has walked with a map on them**, and
+            // what they wrote down. The server's answer and the only one:
+            // nothing on this side ever adds a cell. See `logic::map`.
+            ServerMessage::Trail { cells, marks, whole } => {
+                journal.explored.trail_arrived(cells, marks, whole);
+            }
+
             ServerMessage::TimeSync { time_of_day, world_days, .. } => {
                 sky.on_time_sync(time_of_day, world_days);
             }
@@ -8949,6 +9037,12 @@ fn drain_network(
                 // may have just changed what is in it.
                 inventory_screen.sync(inventory);
                 chest_screen.sync_with(inventory);
+                // ...and whether there is a map in the bag, which is the
+                // whole of whether the map page exists. Read off the
+                // server's copy of the pack, here, because this is the one
+                // message every change to it arrives by -- a hide dropped,
+                // traded, burnt or lost with a body all come through here.
+                journal.set_carries_map(primitive_shared::trail::carries_map(inventory));
             }
 
             // ---- the anvil and the potter's wheel ----
@@ -11234,6 +11328,14 @@ fn player_mark(position: Vec3, yaw: f32) -> ui::map_screen::PlayerMark {
         x: position.x,
         z: position.z,
         yaw,
+        // **Claimed here, judged by the journal.** Whether the player
+        // actually knows where they are is a question about their marks,
+        // which is the journal's to answer (`Journal::placed`); every
+        // entry point on it puts this through that answer first. Handed
+        // over as true so that a caller who does not go through the
+        // journal -- there are none today -- gets the honest position
+        // rather than a silent home point.
+        known: true,
     }
 }
 
@@ -11572,6 +11674,20 @@ fn ground_fire_claim(
         && entities.count_lying_in((cell.0, cell.1 + 1, cell.2), |block| {
             block_kind(block) == BLOCK_STICK || primitive_shared::pit::is_log(block)
         }) > 0
+}
+
+/// Is this a tree a blaze can be cut into (`types::BLOCK_BLAZE`)?
+///
+/// The server's own test (`cut_blaze`), and `tap_trunk`'s before it: a
+/// trunk that is standing and still has its bark. Asked here only so a
+/// gesture the server would ignore is not sent -- and so the modifier
+/// falls through to the set-down everywhere else, which is what it means
+/// with a knife anywhere but at a tree.
+pub(crate) fn blazeable(block: BlockId) -> bool {
+    use primitive_shared::types::{block_axis, block_kind, Axis, BLOCK_STRIPPED_LOG};
+    primitive_shared::wildfire::fuel(block) == Some(primitive_shared::wildfire::Fuel::Log)
+        && block_axis(block) == Axis::Y
+        && block_kind(block) != BLOCK_STRIPPED_LOG
 }
 
 /// Is `held` at `block` one of the gestures that work a thing where it

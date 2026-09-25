@@ -2754,12 +2754,13 @@ pub const BLOCK_BONES_4: BlockId = 690;
 /// doing exactly what it was made to do.
 /// **An instrument**: something held in the hand to be *read*, and spent on
 /// nothing -- the water compass, whose needle the HUD draws while it is
-/// held (`BLOCK_WATER_COMPASS`). Its own answer for the tests that ask every
+/// held (`BLOCK_WATER_COMPASS`), and the map, which opens its page
+/// (`BLOCK_MAP`). Its own answer for the tests that ask every
 /// made thing what it is for, as `is_workshop_tool` is: it is not a tool, a
 /// garment or food, and a list of names in each test would be two places
 /// to forget the next one.
 pub fn is_instrument(id: BlockId) -> bool {
-    block_kind(id) == BLOCK_WATER_COMPASS
+    matches!(block_kind(id), BLOCK_WATER_COMPASS | BLOCK_MAP)
 }
 
 /// **A horse's tack**: a saddle or saddlebags, spent by being put on a
@@ -3443,6 +3444,61 @@ pub const BLOCK_STEW: BlockId = 687;
 /// faster -- and a bowl a day is its size. It sours within the day: what a
 /// flock gives is eaten at home.
 pub const BLOCK_BOWL_MILK: BlockId = 694;
+/// **A map**: a tanned hide with charcoal on it, carried in the pack.
+///
+/// The land a player has walked was already kept (the client's
+/// `logic::map`), and it was kept for *free*: every world came with a
+/// picture of itself that filled in as you walked and cost nothing to
+/// own. That is the thing this block takes away. The record of the walk
+/// is the player's and lives in their profile on the server
+/// (`trail::Trail`), and it is only written **while a map is in the
+/// pack** -- so the sheet is a thing you decide to carry, weight and a
+/// slot and all, rather than a menu that was always there.
+///
+/// **An instrument** (`is_instrument`): held in the hand and read, spent
+/// on nothing, worn by nothing. Using it opens the map page, and so does
+/// the map key -- with no map in the pack that key does nothing at all
+/// (`ui::journal::Journal::reachable`), which is the whole of "there is
+/// no minimap".
+///
+/// **Not per-sheet.** The obvious alternative is for each map to carry
+/// its own drawing, so a copy given to a friend is a copy of what you
+/// knew. It was rejected because a slot in this game is an id, a count
+/// and a wear number -- a per-item blob would be a second inventory
+/// format on the wire and in every save -- and because the rule it buys
+/// is worse: the walk is what you remember, and a hide you lost with
+/// your body is the *sheet*, not the memory. Make another and the walk
+/// you made carrying one is on it again.
+pub const BLOCK_MAP: BlockId = 695;
+/// **A blaze**: a strip of bark cut off a standing trunk with a knife, to
+/// say "the path goes past here".
+///
+/// The cairn's argument (below) with the cairn's cost taken out and a
+/// different one put in: six stones are heavy and a forest has none
+/// loose, so the mark a player leaves *in a wood* was a mark they had to
+/// carry the makings of out of a scree. A blaze costs a knife's edge and
+/// the tree, which is what a wood has.
+///
+/// **It is the tree's, not the ground's.** It hangs off the trunk the way
+/// a bracket fungus does (`support_at`), so felling the tree takes the
+/// blaze with it -- "held until the tree is" is the rule, and it is the
+/// honest one: a mark on a trunk somebody burned is a mark that is not
+/// there any more.
+///
+/// **Cut with the modifier held**, because the plain click with a knife
+/// at a trunk already taps it for resin or bark (the server's
+/// `tap_trunk`), and that is the gesture a player makes twenty times an
+/// evening. Shift is this game's "not that" (see `UseGesture::OpenVessel`
+/// and the set-down); a blaze is the rarer thing, so it takes the rarer
+/// gesture.
+///
+/// **It is not named, where a cairn is.** A cairn is "this place is the
+/// ford" and is worth a word; a blaze is "the path goes past here", it is
+/// cut a dozen at a time along a road, and a chat box opening for each
+/// one would turn marking a way through a wood into typing. The map draws
+/// them as trunks with a pale stripe, which is what distinguishes them on
+/// the paper (`ui::map_screen::blaze`).
+pub const BLOCK_BLAZE: BlockId = 696;
 /// **A cairn**: a heap of six stones a player piles up to say "here".
 ///
 /// The map draws what the server streamed and nothing else (see
@@ -4904,6 +4960,8 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     (BLOCK_BOWL, "bowl"),
     (BLOCK_STEW, "stew"),
     (BLOCK_BOWL_MILK, "bowl_milk"),
+    (BLOCK_MAP, "map"),
+    (BLOCK_BLAZE, "blaze"),
     (BLOCK_CAIRN, "cairn"),
     (BLOCK_LODESTONE, "lodestone"),
     (BLOCK_WATER_COMPASS, "water_compass"),
@@ -8340,7 +8398,12 @@ pub fn support_at(id: BlockId) -> (i32, i32, i32) {
         }
         return wall_behind(id);
     }
-    if block_kind(id) != BLOCK_BRACKET_FUNGUS {
+    // **A blaze is held by the tree it was cut into**, on the bracket
+    // fungus's terms and for the reason written at `BLOCK_BLAZE`: the mark
+    // goes when the tree does. Held by the *cell behind it* rather than by
+    // a memory of which tree it was, because that is the one test that
+    // stays true through a fire, a felling and somebody's axe.
+    if !matches!(block_kind(id), BLOCK_BRACKET_FUNGUS | BLOCK_BLAZE) {
         return (0, -1, 0);
     }
     wall_behind(id)
@@ -8546,6 +8609,15 @@ pub fn can_grow_on(plant: BlockId, ground: BlockId) -> bool {
         // and asking a wall for a full *top* would refuse every trunk
         // whose neighbour above happens to be a branch.
         BLOCK_BRACKET_FUNGUS => crate::wood::is_log(ground) || crate::wood::is_planks(ground),
+        // **A blaze wants a tree and only a tree.** Not planks: a mark cut
+        // into the wall of your own shed is a mark you were standing in
+        // front of anyway, and the thing a blaze is for is the walk. The
+        // server checks the trunk is *standing* before it cuts one
+        // (`blaze_trunk`); this is the rule that keeps it there afterwards,
+        // and it is deliberately the looser of the two -- a trunk that has
+        // fallen over is still wood, and a mark that vanished because a
+        // neighbouring tree came down on it would read as a bug.
+        BLOCK_BLAZE => crate::wood::is_log(ground),
         // **A stake wants something solid, floor or wall.** Upright it is the
         // floor's full top, as a post needs; driven in it is any solid cell,
         // because a wall is what it is driven into and a wall has no "top".

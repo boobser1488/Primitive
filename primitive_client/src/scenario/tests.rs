@@ -1395,19 +1395,222 @@ fn a_cairn_piled_on_the_meadow_asks_its_name_and_is_on_the_map_over_the_grass() 
     // Drawn as tall as the box the feet stand on.
     let (lo, hi) = s.drawn_bounds(cairn, cairn).expect("the cairn is not drawn");
     assert!((hi[1] - lo[1] - 0.75).abs() < 0.05, "the cairn is drawn {} tall and stands 0.75", hi[1] - lo[1]);
-    // The map, surveyed from the chunks this client holds, has it -- over
-    // the meadow under it, not a patch of building.
+    // The map, surveyed from the chunks this client holds, draws the
+    // meadow under it rather than a patch of building -- and draws it only
+    // because the player walked there, which is the trail's rule.
     let mut map = crate::logic::map::ExploredMap::default();
     map.note_edit(cairn.0, cairn.2);
     map.catch_up(&s.chunks, std::time::Duration::from_secs(1));
-    assert_eq!(map.mark_name(cairn), Some(""), "the cairn is not on the map");
+    assert_eq!(map.at(cairn.0, cairn.2), None, "a chunk that was streamed was drawn unwalked");
+    map.pretend_walked(Vec::new());
     assert_eq!(map.at(cairn.0, cairn.2).map(|(g, _)| g), Some(crate::logic::map::Ground::Grass));
-    map.name_mark(cairn, "the ford");
-    assert_eq!(map.mark_name(cairn), Some("the ford"));
     s.shot("cairn");
     no_corrections(&s);
 }
 
+
+// ----------------------------------------------------- the road, and the map
+
+/// Walks `blocks` east, a frame at a time, and answers where the feet ended.
+fn walk_east(s: &mut Scenario, blocks: f64) -> f64 {
+    let from = s.feet().x;
+    s.face(0.0);
+    s.hold(Action::Forward);
+    let arrived = s.until(30.0, |s| s.feet().x >= from + blocks);
+    s.release_all();
+    s.seconds(0.2);
+    assert!(arrived, "the walk stopped at {:?} short of {blocks} blocks", s.feet());
+    s.feet().x
+}
+
+#[test]
+fn a_map_fills_in_only_where_it_was_carried_and_stays_blank_everywhere_else() {
+    // The whole of what the hide is worth. Three facts, in the order a
+    // player meets them: an empty pack writes nothing down, a map in the
+    // pack writes down the circle you are standing in, and the land you
+    // never walked to is still blank however many chunks the client holds.
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(1.0);
+    assert!(s.explored.surveyed() > 0, "no chunks arrived at all");
+    assert!(s.explored.trail().is_empty(), "the walk was written down with no map in the pack");
+    assert_eq!(s.explored.at(x0, z), None, "the map drew ground nobody had walked with a map");
+
+    s.give(t::BLOCK_MAP, 1);
+    assert!(s.until(3.0, |s| s.explored.trail().knows(x0, z)), "a map in the pack wrote nothing down");
+    assert_eq!(s.explored.at(x0, z).map(|(g, _)| g), Some(crate::logic::map::Ground::Grass));
+    // ...and the far side of the world is not on it, though this client
+    // was certainly sent more chunks than the circle round the player.
+    let far = primitive_shared::trail::SIGHT * 4;
+    assert_eq!(s.explored.at(x0 + far, z), None, "a streamed chunk was drawn without being walked to");
+    assert_eq!(s.explored.at(x0, z + far), None);
+    no_corrections(&s);
+}
+
+#[test]
+fn a_cairn_piled_with_a_map_in_the_pack_is_on_the_map_and_one_piled_without_is_not() {
+    // "На карте они отмечаются, если карта в рюкзаке, когда метку
+    // поставили" -- the mark follows the sheet, not the stones.
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.give(t::BLOCK_CAIRN, 2);
+    s.select(t::BLOCK_CAIRN);
+
+    // The first cairn, with nothing in the pack but the stones. The two
+    // stand either side of the player rather than in a line: a cairn in
+    // front of the next one is what the placement ray hits first, and the
+    // second heap goes on top of the first.
+    let bare = (x0 + 2, GROUND + 1, z + 2);
+    s.look_at_face((bare.0, GROUND, bare.2), (0, 1, 0));
+    s.use_aimed();
+    assert!(s.until(3.0, |s| s.block(bare).is_some_and(|b| t::block_kind(b) == t::BLOCK_CAIRN)), "no cairn");
+    s.seconds(0.5);
+    assert!(s.explored.marks().is_empty(), "a cairn was written down by a player with no map");
+
+    // ...and the second, with a map on them.
+    s.give(t::BLOCK_MAP, 1);
+    s.select(t::BLOCK_CAIRN);
+    let noted = (x0 + 2, GROUND + 1, z - 2);
+    s.look_at_face((noted.0, GROUND, noted.2), (0, 1, 0));
+    s.use_aimed();
+    assert!(s.until(3.0, |s| s.explored.marks().len() == 1), "the cairn never reached the map");
+    let mark = &s.explored.marks()[0];
+    assert_eq!(mark.at, noted, "the wrong cairn was written down");
+    assert_eq!(mark.kind, primitive_shared::trail::MarkKind::Cairn);
+
+    // The name the chat box asks for goes to the server and comes back.
+    s.send(ClientMessage::NameMark { global_x: noted.0, global_y: noted.1, global_z: noted.2, name: "the ford".into() });
+    assert!(s.until(3.0, |s| s.explored.mark_name(noted) == Some("the ford")), "the name never came back");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_blaze_cut_into_a_trunk_holds_while_the_tree_does_and_goes_with_it() {
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    // A trunk of our own, two cells of it, so the mark has a tree at a
+    // walker's eye height and there is something to fell.
+    let trunk = (x0 + 2, GROUND + 2, z);
+    s.build(&[((trunk.0, GROUND + 1, trunk.2), t::BLOCK_LOG), (trunk, t::BLOCK_LOG)]);
+    s.give(t::BLOCK_FLINT_KNIFE, 1);
+    s.select(t::BLOCK_FLINT_KNIFE);
+    s.give(t::BLOCK_MAP, 1);
+    // Through the gesture a player makes, not through the message: the
+    // modifier held, a knife in hand, a right click at the trunk. Without
+    // the modifier the same click taps the tree for resin instead.
+    s.look_at_face(trunk, (-1, 0, 0));
+    s.hold(Action::Sprint);
+    s.use_aimed();
+    s.release(Action::Sprint);
+
+    let cut = (trunk.0 - 1, trunk.1, trunk.2);
+    assert!(
+        s.until(3.0, |s| s.block(cut).is_some_and(|b| t::block_kind(b) == t::BLOCK_BLAZE)),
+        "the knife left no mark: {:?}",
+        s.block(cut).map(t::block_name)
+    );
+    assert!(s.until(3.0, |s| s.explored.marks().iter().any(|m| m.at == cut)), "the blaze never reached the map");
+    assert_eq!(s.explored.marks()[0].kind, primitive_shared::trail::MarkKind::Blaze);
+    // It is drawn against the bark rather than filling its cell: a mark
+    // you can walk through, on the tree's side.
+    let (lo, hi) = s.drawn_bounds(cut, cut).expect("the blaze is not drawn");
+    assert!(hi[0] - lo[0] < 0.2, "the blaze is {} thick and should be a shaving", hi[0] - lo[0]);
+    assert!(hi[1] - lo[1] > 0.3, "the blaze is {} tall and should be a forearm", hi[1] - lo[1]);
+
+    // The tree goes and the mark goes with it: the blaze is held by the
+    // cell beside it (`types::support_at`), so felling the trunk takes it
+    // down as it takes down a bracket fungus. Through a real break, not
+    // the stage-setting `build`, because what is being asserted is the
+    // server's collapse and `build` writes cells behind its back.
+    s.give(t::BLOCK_COPPER_AXE, 1);
+    s.select(t::BLOCK_COPPER_AXE);
+    s.send(ClientMessage::SetBlock { global_x: trunk.0, global_y: trunk.1, global_z: trunk.2, block_id: t::BLOCK_AIR });
+    assert!(
+        s.until(5.0, |s| s.block(cut).is_some_and(t::is_air)),
+        "the blaze outlived its tree: {:?}",
+        s.block(cut).map(t::block_name)
+    );
+    // ...and the client, seeing the empty cell on its next survey, tells
+    // the server to rub the mark off the paper.
+    assert!(s.until(5.0, |s| s.explored.marks().is_empty()), "the mark outlived the blaze");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_player_walks_out_leaves_a_cairn_comes_back_and_the_map_shows_the_way_they_went() {
+    // The scenario the whole feature is for: tin is three hundred blocks
+    // away and there is nowhere to write the road down. So: carry the
+    // hide out, pile a cairn at the far end, walk home, and check that
+    // what is on the paper is the corridor that was walked -- with the
+    // mark on it, and with the land either side of it still dark.
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.give(t::BLOCK_MAP, 1);
+    s.give(t::BLOCK_CAIRN, 1);
+    s.seconds(0.5);
+
+    let out = walk_east(&mut s, 40.0);
+    let far = out.floor() as i32;
+    s.select(t::BLOCK_CAIRN);
+    let cairn = (far + 2, GROUND + 1, z);
+    s.look_at_face((cairn.0, GROUND, cairn.2), (0, 1, 0));
+    s.use_aimed();
+    assert!(s.until(3.0, |s| s.explored.marks().iter().any(|m| m.at == cairn)), "the cairn is not on the map");
+
+    // Home again, the way they came.
+    s.face(std::f32::consts::PI);
+    s.hold(Action::Forward);
+    let home = s.until(30.0, |s| s.feet().x <= x0 as f64 + 1.0);
+    s.release_all();
+    s.seconds(0.5);
+    assert!(home, "the walk home stopped at {:?}", s.feet());
+
+    // **The road is on the paper, end to end.** Every eight blocks of it,
+    // because eight blocks is the record's own cell (`trail::CELL`) and a
+    // road with a hole in it is a road you cannot follow.
+    for x in (x0..=cairn.0).step_by(primitive_shared::trail::CELL as usize) {
+        assert!(s.explored.at(x, z).is_some(), "the map has a hole in the road at x={x}");
+    }
+    assert!(s.explored.marks().iter().any(|m| m.at == cairn), "the mark went missing on the way home");
+    // ...and what was never walked to is still dark, on both sides of it.
+    let aside = primitive_shared::trail::SIGHT * 3;
+    assert_eq!(s.explored.at(x0 + 20, z + aside), None, "the map filled in country nobody crossed");
+    assert_eq!(s.explored.at(x0 + 20, z - aside), None);
+    no_corrections(&s);
+}
+
+#[test]
+fn a_mark_written_down_is_still_there_when_the_player_comes_back_next_evening() {
+    // A rejoin, which is what a player actually does: the trail and the
+    // marks are in the profile (`profiles::Profile::trail`), so they come
+    // back with the player and not with the machine they played on.
+    let host = Scenario::new();
+    let (x0, z) = FIELD;
+    let cairn = (x0 + 2, GROUND + 1, z);
+    {
+        let mut walker = host.join("walker");
+        walker.stand_at(feet_on(x0, z));
+        walker.give(t::BLOCK_MAP, 1);
+        walker.give(t::BLOCK_CAIRN, 1);
+        walker.select(t::BLOCK_CAIRN);
+        walker.look_at_face((cairn.0, GROUND, cairn.2), (0, 1, 0));
+        walker.use_aimed();
+        assert!(walker.until(3.0, |s| s.explored.marks().iter().any(|m| m.at == cairn)), "no mark to keep");
+        walker.send(ClientMessage::NameMark { global_x: cairn.0, global_y: cairn.1, global_z: cairn.2, name: "camp".into() });
+        assert!(walker.until(3.0, |s| s.explored.mark_name(cairn) == Some("camp")));
+        no_corrections(&walker);
+    }
+    // ...and back the next evening, under the same name.
+    let mut again = host.join("walker");
+    assert!(again.until(5.0, |s| !s.explored.trail().is_empty()), "the walk did not come back");
+    assert_eq!(again.explored.mark_name(cairn), Some("camp"), "the mark did not survive the rejoin");
+    assert!(again.explored.trail().knows(x0, z), "the ground walked yesterday came back blank");
+    no_corrections(&again);
+}
 
 // ---------------------------------------------------------------- the stall
 

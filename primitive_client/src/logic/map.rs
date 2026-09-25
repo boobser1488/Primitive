@@ -1,16 +1,34 @@
 //! The land a player has actually seen, from above.
 //!
-//! ## What "seen" means
+//! ## Two halves, and only one of them is here
+//!
+//! A map (`types::BLOCK_MAP`) shows the land a player has **walked**,
+//! and drawing that takes two things that live in different places:
+//!
+//! * **which ground the player is allowed to have looked at** -- the
+//!   server's, kept in their profile and sent here as a set of cells
+//!   (`primitive_shared::trail`). It grows only while a map is in the
+//!   pack, it survives a new computer, and a client cannot hand itself
+//!   the world by editing a file.
+//! * **what that ground looks like** -- this file's, surveyed off the
+//!   chunks the server streamed anyway. The alternative was to send the
+//!   picture too: a second copy of the world on the wire, as colours, for
+//!   a page nobody has open.
+//!
+//! What is drawn is the intersection. That is why a map fills in as a
+//! circle around the path rather than as a square of view distance --
+//! and why a better computer no longer draws a bigger map, which is what
+//! this used to do and what made the whole thing a machine setting.
+//!
+//! ## What "seen" means, on this side of it
 //!
 //! A chunk the server streamed to this client. That is not the same as a
 //! column the player looked at -- a chunk behind a hill arrives with the
-//! ones in front of it -- and it is the right answer anyway: the view
-//! distance is the distance the player *could* see, the fog is drawn at
-//! its edge, and a map that waited for the camera to sweep every column
-//! would be a map with a stripe of holes down every valley the player
-//! walked along without turning their head. What is never on this map is
-//! land the server has not sent, which is to say land nobody here has been
-//! near.
+//! ones in front of it -- and it is the right answer anyway: a survey
+//! that waited for the camera to sweep every column would be a map with
+//! a stripe of holes down every valley the player walked along without
+//! turning their head. The trail is what stops that generosity reaching
+//! the paper.
 //!
 //! ## What is kept
 //!
@@ -40,37 +58,36 @@
 //! the chunk is already in hand and a second code path for "this column
 //! changed" is a second place for the answer to differ.
 //!
-//! ## Why it is personal in multiplayer
+//! ## Why the picture is still personal in multiplayer
 //!
-//! Each client keeps its own, filed under the server's address, the
+//! Each client keeps its survey filed under the server's address, the
 //! world's seed and the player's name. The alternative -- the server
-//! tracking what everybody has explored and sending the union -- was
-//! rejected: it turns a picture into server state that has to be stored,
-//! synchronised and bounded per player, and it turns the question "where
-//! is my friend's base" into something the game answers for you. What you
-//! know of the land is what you walked; what somebody else walked, they
-//! can tell you about.
+//! sending everyone the union of what anybody has explored -- was
+//! rejected: it turns the question "where is my friend's base" into
+//! something the game answers for you. What you know of the land is what
+//! you walked; what somebody else walked, they can tell you about.
 //!
-//! ## Marks: the cairns this player has seen
+//! ## Marks
 //!
-//! A cairn (`types::BLOCK_CAIRN`) standing on top of a column when its
-//! chunk is surveyed becomes a mark, and a mark is kept -- with the name
-//! the player gave it when they piled it (`ExploredMap::name_mark`, asked
-//! through the chat box) -- until a survey of its chunk finds the cell is
-//! no longer a cairn. So the map knows what the player saw and what they
-//! named, and nothing else: a cairn somebody else built is a nameless mark
-//! once walked past, and one under a tree is not on the map at all, which
-//! is the bird's-eye rule every column here is drawn by.
+//! A cairn piled or a blaze cut goes on the map of the player who put it
+//! there, **if they were carrying a map at the time** -- the server's
+//! rule, written in `trail`, and the same rule the ground itself follows.
+//! The marks arrive with the trail and are never invented here.
 //!
-//! **Found at the top of a column only**, in the survey's own walk down
-//! it, rather than by a scan of the whole chunk. A scan of 65 thousand
-//! cells a chunk would be the survey's cost thirty times over, for cairns
-//! built in caves -- which are not landmarks anybody sees from a hill.
-//! A mark already known is checked at its own cell instead
-//! ([`ExploredMap::catch_up`]), so a cairn that a roof has since been
-//! built over keeps its name.
+//! What this side *does* notice is a mark that is no longer there: the
+//! survey of a chunk checks the cells of any marks in it, and a cell that
+//! is neither a cairn nor a blaze any more is reported to the server
+//! (`ExploredMap::take_lost_marks`), which rubs it off the profile. The
+//! client is the one that notices because the client is the one holding
+//! the chunk; the worst a lying one can do with it is rub out its own
+//! player's mark.
+//!
+//! **Found at the marks' own cells only**, rather than by a scan of the
+//! whole chunk for heaps of stones. A scan of 65 thousand cells a chunk
+//! would be the survey's cost thirty times over, for cairns built in
+//! caves -- which are not landmarks anybody sees from a hill.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -79,10 +96,12 @@ use primitive_shared::packed::PackedChunk;
 use primitive_shared::types::{
     block_kind, is_air, BlockId, ChunkPos, BLOCK_ASH, BLOCK_BASALT, BLOCK_BOUGH, BLOCK_CLAY,
     BLOCK_COBBLESTONE, BLOCK_DIRT, BLOCK_FARMLAND, BLOCK_GRANITE, BLOCK_GRASS, BLOCK_GRAVEL,
-    BLOCK_CAIRN, BLOCK_ICE, BLOCK_LIMESTONE, BLOCK_PEAT, BLOCK_SAND, BLOCK_SANDSTONE,
+    BLOCK_BLAZE, BLOCK_CAIRN, BLOCK_ICE, BLOCK_LIMESTONE, BLOCK_PEAT, BLOCK_SAND, BLOCK_SANDSTONE,
     BLOCK_SANDY_SOIL, BLOCK_SNOW, BLOCK_STONE, BLOCK_TWIG, CHUNK_SIZE_X, CHUNK_SIZE_Y,
     CHUNK_SIZE_Z,
 };
+
+use primitive_shared::trail::{Mark, Trail};
 
 use crate::logic::chunk_manager::ChunkManager;
 
@@ -142,9 +161,11 @@ impl Ground {
     /// is what keeps a new kind of leaf from being drawn as a house.
     pub fn of(block: BlockId) -> Option<Ground> {
         let kind = block_kind(block);
-        // A cairn is seen through to the ground it stands on: it is a
-        // mark on the map (see "Marks" above), not a patch of building.
-        if is_air(kind) || kind == BLOCK_CAIRN {
+        // A cairn or a blaze is seen through to the ground it stands on:
+        // both are marks on the map (see "Marks" above), not patches of
+        // building. Without this a line of blazed trees would read as a
+        // row of huts.
+        if is_air(kind) || matches!(kind, BLOCK_CAIRN | BLOCK_BLAZE) {
             return None;
         }
         let def = definition(kind);
@@ -208,10 +229,6 @@ impl Ground {
 pub struct Tile {
     ground: [u8; COLUMNS],
     height: [u8; COLUMNS],
-    /// Cairns standing on top of a column, as (x, y, z) inside the chunk.
-    /// Handed to the map's marks by [`ExploredMap::insert`] and never kept
-    /// in the tile itself -- the file's tile record is two fixed arrays.
-    cairns: Vec<(u8, u8, u8)>,
 }
 
 impl Tile {
@@ -219,15 +236,7 @@ impl Tile {
         Self {
             ground: [0; COLUMNS],
             height: [0; COLUMNS],
-            cairns: Vec::new(),
         }
-    }
-
-    /// Puts a cairn on a column. For tests and pictures.
-    #[cfg(test)]
-    pub fn with_cairn(mut self, lx: u8, y: u8, lz: u8) -> Self {
-        self.cairns.push((lx, y, lz));
-        self
     }
 
     /// A tile with one ground everywhere, at one height. For tests and for
@@ -237,7 +246,6 @@ impl Tile {
         Self {
             ground: [ground as u8; COLUMNS],
             height: [height; COLUMNS],
-            cairns: Vec::new(),
         }
     }
 
@@ -268,12 +276,6 @@ pub fn survey(chunk: &PackedChunk) -> Tile {
         for lx in 0..SIDE {
             for y in (0..skyline).rev() {
                 let block = chunk.get(lx, y as usize, lz);
-                // A cairn on top is a mark, and the walk goes on down to
-                // the ground it stands on. See "Marks" at the top.
-                if block_kind(block) == BLOCK_CAIRN {
-                    tile.cairns.push((lx as u8, y.clamp(0, 255) as u8, lz as u8));
-                    continue;
-                }
                 if let Some(ground) = Ground::of(block) {
                     let index = lz * SIDE + lx;
                     tile.ground[index] = ground as u8;
@@ -308,25 +310,28 @@ pub struct ExploredMap {
     revision: u64,
     unsaved: bool,
     path: Option<PathBuf>,
-    /// The cairns seen, by their cell, with the name the player gave each
-    /// (empty for one they did not). See "Marks" at the top. Ordered, so
-    /// the file's bytes are the same for the same marks.
-    marks: BTreeMap<(i32, i32, i32), String>,
+    /// Where the player has walked with a map on them, and what they
+    /// marked, **as the server last said**. Nothing here ever adds to it;
+    /// see the two halves at the top of this file.
+    trail: Trail,
+    /// Marks whose cells this client has since looked at and found empty,
+    /// waiting to be told to the server. Drained by
+    /// [`ExploredMap::take_lost_marks`].
+    lost: Vec<(i32, i32, i32)>,
 }
-
-/// The longest name a mark keeps, in characters: about what fits beside
-/// a mark on a phone's map at the size it is drawn.
-pub const MARK_NAME_CHARS: usize = 24;
 
 /// The first four bytes of a map file.
 const MAGIC: &[u8; 4] = b"PMAP";
 /// Bumped on any change to what follows the magic.
 ///
-/// **2 added the marks**, after the tiles. A file of format 1 is still
-/// read -- it is the same tiles with no marks -- because a player's map is
-/// the one thing on the client that took hours to make, and a new build
-/// that blanked it would be a new build that cost them the walk.
-const FORMAT: u32 = 2;
+/// **2 added marks after the tiles, and 3 took them away again**: the
+/// marks are the server's now (`primitive_shared::trail`), and a second
+/// copy of them beside the picture would be a copy that disagrees with
+/// the profile the moment a player logs in from anywhere else. Formats 1
+/// and 2 are still read -- 2's marks are skipped -- because a player's
+/// survey is the one thing on the client that took hours to make, and a
+/// new build that blanked it would be a new build that cost them the walk.
+const FORMAT: u32 = 3;
 /// One tile on disk: its position, then the two arrays.
 const RECORD: usize = 8 + COLUMNS * 2;
 
@@ -344,57 +349,102 @@ impl ExploredMap {
     /// damaged has been handed the wrong priority. It is rebuilt as they
     /// walk.
     pub fn open(path: PathBuf) -> Self {
-        let (tiles, marks) = match std::fs::read(&path) {
+        let tiles = match std::fs::read(&path) {
             Ok(bytes) => Self::from_bytes(&bytes).unwrap_or_else(|| {
                 eprintln!("[map] {} is not a map this build can read; starting a blank one", path.display());
-                (HashMap::new(), BTreeMap::new())
+                HashMap::new()
             }),
-            Err(_) => (HashMap::new(), BTreeMap::new()),
+            Err(_) => HashMap::new(),
         };
         Self {
             revision: tiles.len() as u64,
             tiles,
-            marks,
             path: Some(path),
             ..Self::default()
         }
     }
 
-    /// The cairns seen, and their names -- empty for an unnamed one.
-    pub fn marks(&self) -> impl Iterator<Item = ((i32, i32, i32), &str)> {
-        self.marks.iter().map(|(&at, name)| (at, name.as_str()))
+    /// The marks this player has written down, and their names -- empty
+    /// for one they did not name.
+    pub fn marks(&self) -> &[Mark] {
+        self.trail.marks()
     }
 
     /// The name of the mark at a cell, if there is a mark there.
     pub fn mark_name(&self, at: (i32, i32, i32)) -> Option<&str> {
-        self.marks.get(&at).map(String::as_str)
+        self.trail.marks().iter().find(|mark| mark.at == at).map(|mark| mark.name.as_str())
     }
 
-    /// Names the cairn at `at`, making the mark if the survey has not yet.
-    ///
-    /// Made here rather than waiting for the survey, because the name is
-    /// typed the moment the cairn is confirmed and the survey of its chunk
-    /// may be a frame behind. If the cairn was not really there, that
-    /// survey takes the mark away again -- see `catch_up`.
-    pub fn name_mark(&mut self, at: (i32, i32, i32), name: &str) {
-        let name: String = name.trim().chars().take(MARK_NAME_CHARS).collect();
-        if self.marks.get(&at) == Some(&name) {
-            return;
+    /// The server said where this player has been. `whole` replaces what
+    /// is held; otherwise it is added to it. See `ServerMessage::Trail`.
+    pub fn trail_arrived(&mut self, cells: Vec<(i32, i32)>, marks: Vec<Mark>, whole: bool) {
+        if whole {
+            self.trail = Trail::default();
+            self.lost.clear();
         }
-        self.marks.insert(at, name);
+        self.trail.absorb(cells);
+        self.trail.absorb_marks(marks);
+        // The picture does not change, but what of it may be drawn does --
+        // and an open map is rebuilt off this number, so a trail that
+        // arrived while the page was up has to bump it or the page stays
+        // the size it was when it opened.
         self.revision = self.revision.wrapping_add(1);
-        self.unsaved = true;
     }
 
-    /// Forgets every mark in `pos` whose cell `standing` says is no longer
-    /// a cairn.
+    /// Everything the server has said about where this player has walked,
+    /// for the tests and for the screen's "you have been nowhere" line.
+    pub fn trail(&self) -> &Trail {
+        &self.trail
+    }
+
+    /// **For tests and for the pictures `ui::snapshot` draws**: says the
+    /// server told this player they walked every column of every chunk
+    /// surveyed so far, and wrote `marks` down.
+    ///
+    /// Its own call rather than a `Trail` built by hand at every call
+    /// site, because "which cells does a chunk cover" is arithmetic that
+    /// would then live in eight places and be wrong in one of them.
+    #[cfg(test)]
+    pub fn pretend_walked(&mut self, marks: Vec<Mark>) {
+        let per_chunk = CHUNK_SIZE_X as i32 / primitive_shared::trail::CELL;
+        let cells: Vec<(i32, i32)> = self
+            .tiles
+            .keys()
+            .flat_map(|pos| {
+                (0..per_chunk).flat_map(move |dz| {
+                    (0..per_chunk).map(move |dx| (pos.x * per_chunk + dx, pos.z * per_chunk + dz))
+                })
+            })
+            .collect();
+        self.trail_arrived(cells, marks, false);
+    }
+
+    /// Marks this client has found gone, for the caller to tell the
+    /// server about. Drained, so one lost cairn is reported once.
+    pub fn take_lost_marks(&mut self) -> Vec<(i32, i32, i32)> {
+        std::mem::take(&mut self.lost)
+    }
+
+    /// Rubs out every mark in `pos` whose cell `standing` says is no
+    /// longer a cairn or a blaze, and remembers to tell the server.
+    ///
+    /// **Both, and in that order.** The map stops drawing the mark on this
+    /// frame, because the player is standing in front of the heap that is
+    /// not there and a mark that waited for a round trip would read as a
+    /// map that lies; the server is told so that the *next* session agrees,
+    /// since the profile is where marks actually live.
     fn forget_fallen(&mut self, pos: ChunkPos, standing: impl Fn((i32, i32, i32)) -> bool) {
-        let before = self.marks.len();
-        self.marks
-            .retain(|&at, _| ChunkPos::from_global(at.0, at.2).0 != pos || standing(at));
-        if self.marks.len() != before {
+        let gone: Vec<(i32, i32, i32)> = self
+            .trail
+            .marks()
+            .iter()
+            .map(|mark| mark.at)
+            .filter(|&at| ChunkPos::from_global(at.0, at.2).0 == pos && !standing(at))
+            .collect();
+        for at in gone {
+            self.trail.forget_mark(at);
+            self.lost.push(at);
             self.revision = self.revision.wrapping_add(1);
-            self.unsaved = true;
         }
     }
 
@@ -438,12 +488,14 @@ impl ExploredMap {
             self.queued.remove(&pos);
             if let Some(chunk) = chunks.get(pos) {
                 // The marks already known here are asked about at their
-                // own cells first: a cairn that is no longer on top of its
+                // own cells: a cairn that is no longer on top of its
                 // column -- roofed over, buried in snow -- is still a
-                // cairn, and its name is still the player's.
+                // cairn, and its name is still the player's. One that is
+                // not there at all is reported and rubbed off.
                 self.forget_fallen(pos, |(x, y, z)| {
                     let (_, lx, lz) = ChunkPos::from_global(x, z);
-                    (0..CHUNK_SIZE_Y as i32).contains(&y) && block_kind(chunk.get(lx, y as usize, lz)) == BLOCK_CAIRN
+                    (0..CHUNK_SIZE_Y as i32).contains(&y)
+                        && matches!(block_kind(chunk.get(lx, y as usize, lz)), BLOCK_CAIRN | BLOCK_BLAZE)
                 });
                 self.insert(pos, survey(chunk));
                 surveyed += 1;
@@ -458,19 +510,7 @@ impl ExploredMap {
     /// Files a tile. A tile identical to the one already there changes
     /// nothing, so a chunk streamed again on the way back past it does not
     /// rebuild an open map or dirty the file.
-    pub fn insert(&mut self, pos: ChunkPos, mut tile: Tile) {
-        for (lx, y, lz) in std::mem::take(&mut tile.cairns) {
-            let at = (
-                pos.x * CHUNK_SIZE_X as i32 + i32::from(lx),
-                i32::from(y),
-                pos.z * CHUNK_SIZE_Z as i32 + i32::from(lz),
-            );
-            if let std::collections::btree_map::Entry::Vacant(mark) = self.marks.entry(at) {
-                mark.insert(String::new());
-                self.revision = self.revision.wrapping_add(1);
-                self.unsaved = true;
-            }
-        }
+    pub fn insert(&mut self, pos: ChunkPos, tile: Tile) {
         if self.tiles.get(&pos).is_some_and(|old| **old == tile) {
             return;
         }
@@ -479,8 +519,16 @@ impl ExploredMap {
         self.unsaved = true;
     }
 
-    /// What the top of a column is and how high, if it has been seen.
+    /// What the top of a column is and how high, if this player has been
+    /// to it **and** this client has surveyed it.
+    ///
+    /// The trail comes first and it is the one that decides: a column
+    /// nobody walked to is off the paper however many times its chunk was
+    /// streamed. See the two halves at the top of this file.
     pub fn at(&self, gx: i32, gz: i32) -> Option<(Ground, u8)> {
+        if !self.trail.knows(gx, gz) {
+            return None;
+        }
         let (pos, lx, lz) = ChunkPos::from_global(gx, gz);
         let (ground, height) = self.tiles.get(&pos)?.at(lx, lz);
         (ground != Ground::Unseen).then_some((ground, height))
@@ -529,18 +577,8 @@ impl ExploredMap {
             bytes.extend_from_slice(&tile.ground);
             bytes.extend_from_slice(&tile.height);
         }
-        // The marks: a count, then each cell and its name as a length and
-        // UTF-8. A name is capped at `MARK_NAME_CHARS`, so the length fits
-        // a byte with room to spare; a u16 anyway, because the cap is a
-        // drawing decision and the format should not have to change with it.
-        bytes.extend_from_slice(&(self.marks.len() as u32).to_le_bytes());
-        for (&(x, y, z), name) in &self.marks {
-            for n in [x, y, z] {
-                bytes.extend_from_slice(&n.to_le_bytes());
-            }
-            bytes.extend_from_slice(&(name.len().min(u16::MAX as usize) as u16).to_le_bytes());
-            bytes.extend_from_slice(&name.as_bytes()[..name.len().min(u16::MAX as usize)]);
-        }
+        // ...and nothing after the tiles: what this file is for is the
+        // picture. See `FORMAT` for where the marks went.
         bytes
     }
 
@@ -549,44 +587,22 @@ impl ExploredMap {
     /// A count that disagrees with the length is refused outright rather
     /// than read as far as it goes: a truncated file is a file whose last
     /// tile would be half somebody's lake and half zeros.
-    #[allow(clippy::type_complexity)] // the two halves of the file, as they are kept
-    fn from_bytes(bytes: &[u8]) -> Option<(HashMap<ChunkPos, Box<Tile>>, BTreeMap<(i32, i32, i32), String>)> {
+    fn from_bytes(bytes: &[u8]) -> Option<HashMap<ChunkPos, Box<Tile>>> {
         if bytes.len() < 12 || &bytes[..4] != MAGIC {
             return None;
         }
         let word = |at: usize| -> Option<[u8; 4]> { bytes.get(at..at + 4)?.try_into().ok() };
         let format = u32::from_le_bytes(word(4)?);
-        if format != 1 && format != FORMAT {
+        if !(1..=FORMAT).contains(&format) {
             return None;
         }
         let count = u32::from_le_bytes(word(8)?) as usize;
         let tiles_end = 12 + count.checked_mul(RECORD)?;
-        // Format 1 is the tiles and nothing else, to the byte.
-        if (format == 1 && bytes.len() != tiles_end) || bytes.len() < tiles_end {
+        // Formats 1 and 3 are the tiles and nothing else, to the byte; a
+        // 2 has its marks after them, and they are read past rather than
+        // read: they are the server's now, and it will say.
+        if (format != 2 && bytes.len() != tiles_end) || bytes.len() < tiles_end {
             return None;
-        }
-        let mut marks = BTreeMap::new();
-        if format >= 2 {
-            let mut at = tiles_end;
-            let mut take = |n: usize| -> Option<&[u8]> {
-                let piece = bytes.get(at..at + n)?;
-                at += n;
-                Some(piece)
-            };
-            let number = |piece: &[u8]| -> Option<i32> { Some(i32::from_le_bytes(piece.try_into().ok()?)) };
-            let marked = u32::from_le_bytes(take(4)?.try_into().ok()?);
-            for _ in 0..marked {
-                let cell = (number(take(4)?)?, number(take(4)?)?, number(take(4)?)?);
-                let len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
-                let name = std::str::from_utf8(take(len)?).ok()?.to_string();
-                marks.insert(cell, name);
-            }
-            // Anything after the last mark is a file this build did not
-            // write: refused for the truncated tile's reason, the other
-            // way round.
-            if at != bytes.len() {
-                return None;
-            }
         }
         let mut tiles = HashMap::with_capacity(count);
         for record in bytes[12..tiles_end].chunks_exact(RECORD) {
@@ -597,7 +613,7 @@ impl ExploredMap {
             tile.height.copy_from_slice(&record[8 + COLUMNS..]);
             tiles.insert(ChunkPos::new(x, z), Box::new(tile));
         }
-        Some((tiles, marks))
+        Some(tiles)
     }
 }
 
@@ -626,6 +642,7 @@ pub fn cache_for_server(address: &str, seed: u32, username: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use primitive_shared::trail::MarkKind;
     use primitive_shared::types::{
         Chunk, BLOCK_AIR, BLOCK_LEAVES, BLOCK_LOG, BLOCK_PLANKS, BLOCK_TALL_GRASS, BLOCK_WATER,
         CHUNK_SIZE_Y, CHUNK_VOLUME,
@@ -682,6 +699,7 @@ mod tests {
         let mut map = ExploredMap::new();
         assert_eq!(map.at(0, 0), None);
         map.insert(ChunkPos::new(0, 0), Tile::uniform(Ground::Grass, 64));
+        map.pretend_walked(Vec::new());
         assert_eq!(map.at(15, 15), Some((Ground::Grass, 64)));
         assert_eq!(map.at(16, 0), None, "the next chunk over was drawn without being seen");
         assert_eq!(map.at(-1, 0), None, "the chunk to the west was drawn without being seen");
@@ -718,7 +736,9 @@ mod tests {
         assert!(map.save().expect("save"), "a changed map was not written");
         assert!(!map.save().expect("save"), "an unchanged map was written again");
 
-        let back = ExploredMap::open(path);
+        let mut back = ExploredMap::open(path);
+        // The walk is the server's and is not in this file; the tiles are.
+        back.pretend_walked(Vec::new());
         assert_eq!(back.surveyed(), 2);
         assert_eq!(back.at(-4 * 16 + 3, 12 * 16 + 9), Some((Ground::Water, 61)));
         assert_eq!(back.at(-4 * 16, 12 * 16), Some((Ground::Forest, 70)));
@@ -728,52 +748,70 @@ mod tests {
     }
 
     #[test]
-    fn a_cairn_appears_on_the_map_with_its_name_after_a_save_round_trip() {
-        let dir = std::env::temp_dir().join(format!("primitive-marks-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("explored.map");
-
-        // Surveyed the way the frame surveys: a cairn on the grass of a
-        // real chunk, found by the walk down its column.
-        let chunk = chunk_with(60, |lx, lz| if (lx, lz) == (5, 9) { vec![BLOCK_GRASS, BLOCK_CAIRN] } else { vec![BLOCK_GRASS] });
+    fn a_cairn_stands_on_the_ground_it_is_drawn_over() {
+        // A cairn is a mark on the paper, not a patch of building: the
+        // survey walks past it to the meadow underneath, so a line of them
+        // does not read as a row of huts.
+        let chunk = chunk_with(60, |lx, lz| match (lx, lz) {
+            (5, 9) => vec![BLOCK_GRASS, BLOCK_CAIRN],
+            (6, 9) => vec![BLOCK_GRASS, BLOCK_BLAZE],
+            _ => vec![BLOCK_GRASS],
+        });
         let tile = survey(&chunk);
         assert_eq!(tile.at(5, 9), (Ground::Grass, 60), "the cairn hid the meadow it stands on");
-        let mut map = ExploredMap::open(path.clone());
-        map.insert(ChunkPos::new(-2, 3), tile);
-        let at = (-2 * 16 + 5, 61, 3 * 16 + 9);
-        assert_eq!(map.mark_name(at), Some(""), "the surveyed cairn is not a mark");
-        map.name_mark(at, "  Ручей у брода  ");
-        assert!(map.save().expect("save"));
-
-        let back = ExploredMap::open(path);
-        assert_eq!(back.marks().collect::<Vec<_>>(), vec![(at, "Ручей у брода")]);
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(tile.at(6, 9), (Ground::Grass, 60), "the blaze hid the meadow it stands on");
     }
 
     #[test]
-    fn a_map_saved_before_marks_existed_still_opens() {
+    fn a_map_file_from_before_the_marks_moved_to_the_server_still_opens() {
+        // Its tiles are what the file is for, and they are the thing that
+        // took hours to make. See `FORMAT`.
         let mut map = ExploredMap::new();
         map.insert(ChunkPos::new(1, 2), Tile::uniform(Ground::Grass, 64));
-        let mut bytes = map.to_bytes();
-        // What format 1 wrote: the same, with no marks after the tiles.
-        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 4);
-        let (tiles, marks) = ExploredMap::from_bytes(&bytes).expect("a format 1 map was refused");
-        assert_eq!(tiles.len(), 1);
-        assert!(marks.is_empty());
+        let tiles_only = map.to_bytes();
+        for (format, trailer) in [(1u32, Vec::new()), (2, 0u32.to_le_bytes().to_vec())] {
+            let mut bytes = tiles_only.clone();
+            bytes[4..8].copy_from_slice(&format.to_le_bytes());
+            bytes.extend_from_slice(&trailer);
+            let tiles = ExploredMap::from_bytes(&bytes).unwrap_or_else(|| panic!("a format {format} map was refused"));
+            assert_eq!(tiles.len(), 1);
+        }
     }
 
     #[test]
-    fn a_cairn_taken_apart_takes_its_mark_with_it_and_a_named_one_keeps_its_name() {
+    fn a_mark_whose_cairn_is_gone_is_reported_once_and_a_standing_one_is_not() {
         let mut map = ExploredMap::new();
-        map.insert(ChunkPos::new(0, 0), Tile::uniform(Ground::Grass, 64).with_cairn(1, 65, 1).with_cairn(8, 65, 8));
-        map.name_mark((8, 65, 8), "home");
+        map.insert(ChunkPos::new(0, 0), Tile::uniform(Ground::Grass, 64));
+        map.pretend_walked(vec![
+            Mark { at: (1, 65, 1), kind: MarkKind::Cairn, name: String::new() },
+            Mark { at: (8, 65, 8), kind: MarkKind::Cairn, name: "home".into() },
+            Mark { at: (40, 70, 40), kind: MarkKind::Blaze, name: "far".into() },
+        ]);
         map.forget_fallen(ChunkPos::new(0, 0), |at| at == (8, 65, 8));
-        assert_eq!(map.marks().collect::<Vec<_>>(), vec![((8, 65, 8), "home")]);
-        // A mark in another chunk is not this chunk's to forget.
-        map.name_mark((40, 70, 40), "far");
-        map.forget_fallen(ChunkPos::new(0, 0), |_| true);
-        assert_eq!(map.mark_name((40, 70, 40)), Some("far"));
+        assert_eq!(map.take_lost_marks(), vec![(1, 65, 1)], "the standing cairn was reported gone");
+        assert_eq!(map.mark_name((1, 65, 1)), None, "the map went on drawing a heap that is not there");
+        assert_eq!(map.mark_name((8, 65, 8)), Some("home"), "the standing cairn lost its name");
+        // Drained, and rubbed out: a cairn taken apart is told to the
+        // server once, not once a frame for the rest of the session.
+        map.forget_fallen(ChunkPos::new(0, 0), |at| at == (8, 65, 8));
+        assert!(map.take_lost_marks().is_empty());
+        // A mark in another chunk is not this chunk's to look at.
+        map.forget_fallen(ChunkPos::new(0, 0), |_| false);
+        assert_eq!(map.take_lost_marks(), vec![(8, 65, 8)]);
+        assert_eq!(map.mark_name((40, 70, 40)), Some("far"), "a far mark was rubbed out from here");
+    }
+
+    #[test]
+    fn the_map_draws_only_what_the_player_walked_to() {
+        // The whole of what the trail is for: a chunk this client was sent
+        // is not a chunk this player has been to.
+        let mut map = ExploredMap::new();
+        map.insert(ChunkPos::new(0, 0), Tile::uniform(Ground::Grass, 64));
+        map.insert(ChunkPos::new(4, 0), Tile::uniform(Ground::Sand, 64));
+        assert_eq!(map.at(8, 8), None, "a streamed chunk was drawn before anybody walked there");
+        map.trail_arrived(vec![primitive_shared::trail::cell_of(8, 8)], Vec::new(), true);
+        assert_eq!(map.at(8, 8), Some((Ground::Grass, 64)));
+        assert_eq!(map.at(4 * 16, 0), None, "the far chunk came with the near one");
     }
 
     #[test]

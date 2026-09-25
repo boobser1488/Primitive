@@ -4206,6 +4206,46 @@ pub const RECIPES: &[Recipe] = &[
         returns: &[],
         failure: 0.0,
     },
+    // **A map**: tanned hide sewn edge to edge and a lump of charcoal to
+    // draw with. Two rows, at the end of the table because a row's index
+    // is what the client sends.
+    //
+    // **By hand for three hides, at the currier's bench for two**, which
+    // is this game's standing shape for a workshop
+    // (`a_workshop_row_is_a_cheaper_way_or_a_piece_of_the_house`): the
+    // bench is never a gate, it is the cheaper way. The rejected version
+    // was the bench row alone, on the argument that a map is not a thing
+    // you improvise at a campfire -- and it would have been the one gate
+    // in the game standing in front of *knowing where you are*, which is
+    // the worst possible thing to lock: a player lost in the hills cannot
+    // walk home to the tannery to find out where home is.
+    //
+    // What the map costs is not really the hides anyway. It is that the
+    // sheet records nothing until it is carried (`trail::Trail`), so a map
+    // made late is a map of what you do next -- which is the reason to
+    // make one before the long walk rather than after it.
+    //
+    // Coal rather than ash: ash is a coating a field wants
+    // (`wildfire::ASH_DRESSING_FACTOR`) and it is what is left of a fire,
+    // where a lump of coal or charcoal (one id, `BLOCK_COAL`) is what a
+    // player dug for or built a pit for -- and a mark that does not wash
+    // off is charcoal's whole property.
+    Recipe {
+        name: "map",
+        inputs: &[(BLOCK_LEATHER, 3), (BLOCK_COAL, 1)],
+        output: (crate::types::BLOCK_MAP, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    Recipe {
+        name: "cut map",
+        inputs: &[(BLOCK_LEATHER, 2), (BLOCK_COAL, 1)],
+        output: (crate::types::BLOCK_MAP, 1),
+        station: Station::Leather,
+        returns: &[],
+        failure: 0.0,
+    },
 ];
 
 /// Why a craft cannot happen, or that it can.

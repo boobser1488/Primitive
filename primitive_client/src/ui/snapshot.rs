@@ -1279,6 +1279,7 @@ fn nav_snapshot() {
     use crate::ui::lang::Msg;
     use crate::ui::map_screen::PlayerMark;
     use crate::ui::widgets::{anchor, scale_about, Painter};
+    use primitive_shared::trail::{Mark, MarkKind};
     use primitive_shared::types::ChunkPos;
 
     let out = std::env::var("UI_SNAPSHOT_DIR").unwrap_or_else(|_| ".".to_string());
@@ -1346,12 +1347,22 @@ fn nav_snapshot() {
                 journal.explored.insert(ChunkPos::new(cx, cz), Tile::uniform(ground, 64));
             }
         }
-        journal.explored.insert(ChunkPos::new(1, 0), Tile::uniform(Ground::Rock, 70).with_cairn(4, 71, 4));
-        journal.explored.insert(ChunkPos::new(-2, 1), Tile::uniform(Ground::Grass, 64).with_cairn(8, 65, 8));
-        journal.explored.insert(ChunkPos::new(2, -2), Tile::uniform(Ground::Sand, 62).with_cairn(2, 63, 9));
-        journal.explored.name_mark((20, 71, 4), "Медь в холмах");
-        journal.explored.name_mark((-24, 65, 24), "A spring under the big willow by the ford");
-        let player = PlayerMark { x: 0.0, z: 0.0, yaw: -0.4 };
+        journal.explored.insert(ChunkPos::new(1, 0), Tile::uniform(Ground::Rock, 70));
+        journal.explored.insert(ChunkPos::new(-2, 1), Tile::uniform(Ground::Grass, 64));
+        journal.explored.insert(ChunkPos::new(2, -2), Tile::uniform(Ground::Sand, 62));
+        // The walk, and what was written down on it: two named cairns and
+        // a blaze, which is what the legend along the bottom names.
+        let mark = |at: (i32, i32, i32), kind: MarkKind, name: &str| Mark { at, kind, name: name.to_string() };
+        journal.explored.pretend_walked(vec![
+            mark((20, 71, 4), MarkKind::Cairn, "Медь в холмах"),
+            mark((-24, 65, 24), MarkKind::Cairn, "A spring under the big willow by the ford"),
+            mark((34, 63, -23), MarkKind::Blaze, ""),
+        ]);
+        // A map in the pack, because without one there is no map page --
+        // and the player is standing at their own cairn, which is what
+        // puts the arrow on the paper (`Journal::placed`).
+        journal.set_carries_map(true);
+        let player = PlayerMark { x: 20.0, z: 4.0, yaw: -0.4, known: true };
         journal.toggle(Tab::Map);
         let layers = FaceLayers::empty_for_test();
         for (language, lang) in [(Language::English, ""), (Language::Russian, "_ru")] {
@@ -1404,7 +1415,11 @@ fn journal_snapshot() {
             .chain([BLOCK_COPPER_INGOT, BLOCK_NATIVE_COPPER, BLOCK_VESSEL, BLOCK_MOULD]),
     );
     journal.set_discovered(knowledge.clone());
-    let player = PlayerMark { x: 30.0, z: -12.0, yaw: 0.6 };
+    // A map in the pack and a walk to go with it, or there is no map page
+    // to draw (`Journal::reachable`) and nothing on it if there were.
+    journal.set_carries_map(true);
+    journal.explored.pretend_walked(Vec::new());
+    let player = PlayerMark { x: 30.0, z: -12.0, yaw: 0.6, known: true };
 
     journal.toggle(Tab::Map);
     for (language, tag) in [(Language::English, ""), (Language::Russian, "_ru")] {

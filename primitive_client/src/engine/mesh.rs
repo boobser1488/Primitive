@@ -1752,6 +1752,8 @@ pub(crate) fn drawn_as_model(id: BlockId) -> bool {
                 | t::BLOCK_NEST_EGGS
                 // A cairn is three stones and the air between them.
                 | t::BLOCK_CAIRN
+                // ...and a blaze is a shaving off one face of a trunk.
+                | t::BLOCK_BLAZE
                 | t::BLOCK_JUG
                 | t::BLOCK_DRYING_RACK
                 | t::BLOCK_HIDE_FRAME
@@ -3597,6 +3599,20 @@ pub fn build_mesh(
                     }
 
                     // A bracket fungus is a shelf on the side of the cell,
+                    // ...and a blaze is a board against the bark, which
+                    // hangs off a trunk exactly as a bracket does.
+                    if primitive_shared::types::block_kind(id) == primitive_shared::types::BLOCK_BLAZE {
+                        blaze_block(
+                            [x as f32, y as f32, z as f32],
+                            id,
+                            textures,
+                            model_light(cache, cell, y, cover_table),
+                            vertices,
+                            indices,
+                        );
+                        continue;
+                    }
+
                     // not a cross standing in it: see `bracket_block`.
                     if primitive_shared::types::block_kind(id)
                         == primitive_shared::types::BLOCK_BRACKET_FUNGUS
@@ -5767,6 +5783,37 @@ pub(crate) fn bracket_block(
     for (from, to) in SHELF {
         push_box(at, from, to, quarters, skin, true, sky, block_light, vertices, indices);
     }
+}
+
+/// A blaze (`types::BLOCK_BLAZE`): one thin board laid against the bark,
+/// at the height a person cuts one.
+///
+/// **A board and not a painted face.** The alternative was to draw the
+/// mark onto the trunk's own quad, which is cheaper and wrong in the one
+/// way that matters: a texture on a trunk is a property of that *block*,
+/// so a mark cut into one cell of a tree would be wearing the picture of
+/// a tree that has been blazed on all four sides, and a trunk id would
+/// have to carry the mark -- which is exactly the variant bit `BLOCK_LOG`
+/// has no room for. Standing it in the cell in front instead costs six
+/// faces and buys a mark that can be taken off again by hand.
+///
+/// **Chest height, not the middle.** A blaze is cut where a walker's eye
+/// is, and one at the foot of a trunk is a mark hidden by the first fern.
+pub(crate) fn blaze_block(
+    at: [f32; 3],
+    block: BlockId,
+    textures: &crate::engine::texture::FaceLayers,
+    light: u8,
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+) {
+    let (sky, block_light) = (light & 0x0F, (light >> 4) & 0x0F);
+    let skin = textures.layer_for_face(block, 0);
+    let quarters = primitive_shared::types::block_facing(block).quarters();
+    // In sixteenths of the cell: a hand's width across, a forearm tall,
+    // and barely off the bark -- a blaze is a shaving, and one drawn a
+    // finger thick reads as a plank nailed to the tree.
+    push_box(at, [5.0, 5.0, 0.0], [11.0, 12.0, 0.7], quarters, skin, true, sky, block_light, vertices, indices);
 }
 
 /// A clay jug: a foot, a belly, a shoulder, a neck, a lip round an

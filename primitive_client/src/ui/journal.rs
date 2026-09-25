@@ -228,7 +228,28 @@ pub struct Journal {
     cursor: Option<(f32, f32)>,
     drag: Option<Drag>,
     second: Option<Second>,
+    /// Whether there is a map in the pack. The whole of whether the map
+    /// page exists -- see [`Journal::reachable`]. Set from the server's
+    /// copy of the inventory, every time it arrives.
+    carries_map: bool,
 }
+
+/// How near one of your own marks you have to be to know where you are
+/// on the paper.
+///
+/// **The same distance the paper fills in at** (`trail::SIGHT`), and that
+/// is the argument: the ground a mark wrote down is the ground you can
+/// place yourself in. Standing at your cairn, the arrow is there; a
+/// morning's walk past it, it is not, and where you are is a question you
+/// answer by looking at the shape of the land you drew.
+///
+/// **Rejected: an arrow for anybody who has ever placed a mark.** It is
+/// the simpler rule and it makes the mark a checkbox -- one cairn at the
+/// spawn on your first evening and the map is a satnav for ever after,
+/// which is a chore with a reward at the end rather than a decision. This
+/// way the cairns are a *chain*, and how far apart to put them is the
+/// decision: stones are heavy and a wood has none.
+const FIX_RANGE: f32 = primitive_shared::trail::SIGHT as f32;
 
 impl Journal {
     pub fn new() -> Self {
@@ -327,9 +348,73 @@ impl Journal {
         }
     }
 
+    /// The server sent the pack. A map in it is what opens the map page.
+    ///
+    /// **Asked of the pack rather than of the hand**, because a map is a
+    /// thing you carry and reading it is not a gesture you make with it --
+    /// the key opens the page, exactly as it did, and the hand is free for
+    /// the axe. Holding one *does* open the page too (`lib.rs`), which is
+    /// the gesture a player who has just made one will try.
+    pub fn set_carries_map(&mut self, yes: bool) {
+        self.carries_map = yes;
+        // A player who lost their map with their body is not left looking
+        // at it. The operator page's rule, for the operator page's reason:
+        // the state is somebody else's to decide and the screen follows it
+        // in both directions.
+        if !yes && self.open == Some(Tab::Map) {
+            self.open = None;
+            self.forget_the_fingers();
+        }
+    }
+
+    /// Is there a map in this player's pack, as the server last said?
+    pub fn carries_map(&self) -> bool {
+        self.carries_map
+    }
+
     /// Is this a page this player has?
+    ///
+    /// **The map page needs a map in the pack.** The key that opens it
+    /// does nothing at all without one -- not "opens and says you have no
+    /// map", which is the give page's rejected shape and reads as a broken
+    /// menu. There is no minimap and there is no map page either; what
+    /// there is, is a hide in your bag.
     fn reachable(&self, tab: Tab) -> bool {
-        tab != Tab::Give || self.operator
+        match tab {
+            Tab::Give => self.operator,
+            Tab::Map => self.carries_map,
+            Tab::Recipes => true,
+        }
+    }
+
+    /// Where the map should think the player is.
+    ///
+    /// Answers the mark as given, with `known` set, when one of this
+    /// player's own marks is within [`FIX_RANGE`]; otherwise a mark
+    /// standing at the map's *home* -- the last thing they wrote down, or
+    /// the spawn -- with `known` false, which is what stops the arrow
+    /// being drawn and what the `ME` button comes back to.
+    ///
+    /// Every public entry point on the journal puts its `player` through
+    /// this, so the drawing and the hit-testing cannot come to disagree
+    /// about where the middle of the map is -- which is the bug the
+    /// interface tests exist to catch.
+    pub fn placed(&self, player: PlayerMark) -> PlayerMark {
+        let near = self.explored.marks().iter().any(|mark| {
+            let (dx, dz) = (mark.at.0 as f32 + 0.5 - player.x, mark.at.2 as f32 + 0.5 - player.z);
+            dx * dx + dz * dz <= FIX_RANGE * FIX_RANGE
+        });
+        if near {
+            return PlayerMark { known: true, ..player };
+        }
+        let home = self
+            .explored
+            .marks()
+            .last()
+            .map(|mark| (mark.at.0 as f32 + 0.5, mark.at.2 as f32 + 0.5))
+            .or_else(|| self.landmarks.spawn.map(|at| (at.0 as f32 + 0.5, at.2 as f32 + 0.5)))
+            .unwrap_or((0.0, 0.0));
+        PlayerMark { x: home.0, z: home.1, yaw: player.yaw, known: false }
     }
 
     pub fn toggle(&mut self, tab: Tab) -> bool {
@@ -372,15 +457,25 @@ impl Journal {
     /// that turned the page and sometimes did not reach the third one
     /// would be a page a keyboard could not get to.
     pub fn switch_tab(&mut self) {
-        self.open = match self.open {
-            Some(Tab::Map) => Some(Tab::Recipes),
-            // ...and past the give page for anybody who has not got one,
-            // or Tab would land on a blank page and appear to be stuck.
-            Some(Tab::Recipes) if self.operator => Some(Tab::Give),
-            Some(Tab::Recipes) => Some(Tab::Map),
-            Some(Tab::Give) => Some(Tab::Map),
-            None => None,
+        let Some(open) = self.open else {
+            return;
         };
+        // **Round the row, stopping at the first page this player has.**
+        // Past the give page for anybody who is not an operator, past the
+        // map for anybody carrying no map -- and past whatever the next
+        // absent page turns out to be. This was a match naming every pair
+        // by hand, and it knew about exactly one page that can be missing:
+        // the day a second appeared, Tab landed on a blank screen and
+        // appeared to be stuck.
+        let order: Vec<Tab> = HEADERS.iter().map(|&Header::Tab(tab)| tab).collect();
+        let from = order.iter().position(|&tab| tab == open).unwrap_or(0);
+        for step in 1..=order.len() {
+            let next = order[(from + step) % order.len()];
+            if self.reachable(next) {
+                self.open = Some(next);
+                break;
+            }
+        }
         self.forget_the_fingers();
     }
 
@@ -433,6 +528,7 @@ impl Journal {
     /// Takes the window's shape for the same signature as every other
     /// pointer call on the journal, though a drag needs only the distance.
     pub fn set_cursor(&mut self, at: Option<(f32, f32)>, _aspect: f32, player: PlayerMark) {
+        let player = self.placed(player);
         self.cursor = at;
         let (Some(at), Some(drag)) = (at, self.drag.as_mut()) else {
             return;
@@ -449,6 +545,7 @@ impl Journal {
 
     /// The left button went down wherever the cursor is.
     pub fn press(&mut self, aspect: f32, player: PlayerMark) -> Outcome {
+        let player = self.placed(player);
         let Some(at) = self.cursor else {
             return Outcome::Nothing;
         };
@@ -483,6 +580,7 @@ impl Journal {
 
     /// The wheel: zoom on the map, scroll in the book.
     pub fn wheel(&mut self, lines: f32, aspect: f32, player: PlayerMark) {
+        let player = self.placed(player);
         let body = body_rect(aspect);
         match self.open {
             Some(Tab::Map) => {
@@ -505,6 +603,7 @@ impl Journal {
 
     /// One touch event, in interface units.
     pub fn touch(&mut self, id: TouchId, phase: TouchPhase, at: (f32, f32), aspect: f32, player: PlayerMark) -> Outcome {
+        let player = self.placed(player);
         match phase {
             TouchPhase::Started => {
                 if self.drag.is_none() {
@@ -710,6 +809,7 @@ impl Journal {
     /// less than that is not a picture worth rebuilding the interface for.
     pub fn ui_key(&self, player: PlayerMark, aspect: f32) -> u64 {
         use std::hash::{Hash, Hasher};
+        let player = self.placed(player);
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.open.hash(&mut h);
         // ...and whether the give tab is in the row, or the header would
@@ -759,6 +859,7 @@ impl Journal {
         language: Language,
         out: &mut Vec<HotbarVertex>,
     ) {
+        let player = self.placed(player);
         let Some(tab) = self.open else {
             return;
         };
@@ -853,6 +954,19 @@ const ACCENT: [f32; 4] = [0.95, 0.72, 0.30, 1.0];
 
 #[cfg(test)]
 mod tests {
+    use primitive_shared::trail::{Mark, MarkKind};
+
+    /// A journal whose player is carrying a map, which is what every test
+    /// below that opens the map page needs: without one the page does not
+    /// exist at all (`Journal::reachable`), which is
+    /// `a_player_with_no_map_has_no_map_page`'s business and nobody
+    /// else's.
+    fn a_journal_with_a_map() -> Journal {
+        let mut journal = Journal::new();
+        journal.set_carries_map(true);
+        journal
+    }
+
     use super::*;
 
     fn with_bags(bags: &[(i32, i32, i32)]) -> Landmarks {
@@ -884,7 +998,7 @@ mod tests {
     fn tab_reaches_every_page_and_comes_home() {
         // Three pages, one key: a page the keyboard could not turn to
         // would be a page only a mouse could reach.
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         // An operator, because the give page is only theirs to open --
         // see `a_player_who_is_not_an_operator_has_no_give_page`.
         journal.set_operator(true);
@@ -909,7 +1023,7 @@ mod tests {
         // `give_screen`'s module note.
         let aspect = 16.0 / 9.0;
         let player = PlayerMark::default();
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         // An operator, because the give page is only theirs to open --
         // see `a_player_who_is_not_an_operator_has_no_give_page`.
         journal.set_operator(true);
@@ -926,7 +1040,7 @@ mod tests {
     #[test]
     fn a_refusal_is_taken_out_of_the_chat_and_a_stranger_s_line_is_not() {
         let aspect = 16.0 / 9.0;
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         // An operator, because the give page is only theirs to open --
         // see `a_player_who_is_not_an_operator_has_no_give_page`.
         journal.set_operator(true);
@@ -942,7 +1056,7 @@ mod tests {
 
     #[test]
     fn the_give_page_takes_typing_and_the_map_does_not() {
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         // An operator, because the give page is only theirs to open --
         // see `a_player_who_is_not_an_operator_has_no_give_page`.
         journal.set_operator(true);
@@ -960,7 +1074,7 @@ mod tests {
 
     #[test]
     fn the_key_that_opens_a_tab_also_shuts_it() {
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         assert!(journal.toggle(Tab::Map));
         assert!(journal.toggle(Tab::Recipes), "the other tab shut the journal instead of switching");
         assert!(!journal.toggle(Tab::Recipes));
@@ -991,7 +1105,7 @@ mod tests {
         let inside = (panel.x1 - 0.3, 0.0);
         let player = PlayerMark::default();
 
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         journal.toggle(Tab::Map);
         journal.touch(1, TouchPhase::Started, inside, aspect, player);
         journal.touch(1, TouchPhase::Moved, beside, aspect, player);
@@ -1014,7 +1128,7 @@ mod tests {
         let player = PlayerMark::default();
         let body = body_rect(aspect);
         let middle = (body.centre_x(), body.centre_y());
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         journal.toggle(Tab::Map);
         let was = journal.map.scale();
 
@@ -1047,7 +1161,7 @@ mod tests {
         let body = body_rect(aspect);
         let plus = map_screen::control_rect(map_screen::Control::ZoomIn, body);
         let on_the_button = (plus.centre_x(), plus.centre_y());
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         journal.toggle(Tab::Map);
 
         journal.touch(1, TouchPhase::Started, on_the_button, aspect, player);
@@ -1076,7 +1190,7 @@ mod tests {
         let player = PlayerMark::default();
         let body = body_rect(aspect);
         let middle = (body.centre_x(), body.centre_y());
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         journal.toggle(Tab::Map);
 
         journal.touch(1, TouchPhase::Started, (middle.0 - 0.1, middle.1), aspect, player);
@@ -1100,7 +1214,7 @@ mod tests {
         let player = PlayerMark::default();
         let body = body_rect(aspect);
         let middle = (body.centre_x(), body.centre_y());
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         journal.toggle(Tab::Recipes);
         journal.touch(1, TouchPhase::Started, middle, aspect, player);
         journal.touch(2, TouchPhase::Started, (middle.0 + 0.2, middle.1), aspect, player);
@@ -1117,7 +1231,7 @@ mod tests {
         let aspect = 16.0 / 9.0;
         let panel = panel_rect(aspect);
         let player = PlayerMark::default();
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         journal.toggle(Tab::Map);
         journal.set_cursor(Some(((panel.x1 + aspect) / 2.0, 0.5)), aspect, player);
         assert_eq!(journal.press(aspect, player), Outcome::Nothing);
@@ -1139,7 +1253,7 @@ mod tests {
                 );
                 let beside = (aspect - room / 2.0, -0.4);
                 let player = PlayerMark::default();
-                let mut journal = Journal::new();
+                let mut journal = a_journal_with_a_map();
                 journal.toggle(Tab::Map);
                 journal.touch(4, TouchPhase::Started, beside, aspect, player);
                 assert_eq!(
@@ -1156,7 +1270,7 @@ mod tests {
         let aspect = 16.0 / 9.0;
         let body = body_rect(aspect);
         let player = PlayerMark::default();
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         journal.toggle(Tab::Map);
         let start = (body.centre_x() - 0.5, body.centre_y());
         journal.touch(7, TouchPhase::Started, start, aspect, player);
@@ -1169,7 +1283,7 @@ mod tests {
 
     #[test]
     fn letters_are_a_search_only_in_the_book() {
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         journal.toggle(Tab::Map);
         journal.type_char('m');
         journal.toggle(Tab::Recipes);
@@ -1191,7 +1305,7 @@ mod tests {
         use primitive_shared::types::{BLOCK_FIBER, BLOCK_FLINT_FLAKE, BLOCK_PEBBLE};
 
         let empty = Inventory::new();
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         assert!(!journal.first_minute(&empty), "prompted before the server had said anything");
         journal.set_discovered(Discovered::new());
         assert!(journal.first_minute(&empty), "a new player was told nothing");
@@ -1211,7 +1325,7 @@ mod tests {
     #[test]
     fn a_player_with_something_in_the_pack_is_never_told_about_stones() {
         use primitive_shared::discovery::Discovered;
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         journal.set_discovered(Discovered::new());
         let mut carrying = Inventory::new();
         carrying.put_in_slot(0, primitive_shared::inventory::Stack::new(primitive_shared::types::BLOCK_COBBLESTONE, 40));
@@ -1221,7 +1335,7 @@ mod tests {
 
     #[test]
     fn leaving_a_world_forgets_its_map_and_its_book() {
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         journal.discovered.note(primitive_shared::types::BLOCK_LOG);
         journal.landmarks = with_bags(&[(1, 2, 3)]);
         journal.explored.insert(
@@ -1241,14 +1355,14 @@ mod tests {
         // with the journal shut, and only while a bag was out there -- so
         // that is the case asked about: bags remembered, the journal shut,
         // and not one vertex on the screen. The bags are still the map's.
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         journal.landmarks = with_bags(&[(50, 60, 50), (-400, 64, 12)]);
         let mut out = Vec::new();
         journal.build_into(
             FontAtlas::for_test(),
             &FaceLayers::empty_for_test(),
             &Inventory::new(),
-            PlayerMark { x: 0.0, z: 0.0, yaw: 0.3 },
+            PlayerMark { x: 0.0, z: 0.0, yaw: 0.3, known: true },
             16.0 / 9.0,
             Language::Russian,
             &mut out,
@@ -1265,7 +1379,7 @@ mod tests {
     #[test]
     fn a_player_who_is_not_an_operator_has_no_give_page() {
         const ASPECT: f32 = 16.0 / 9.0;
-        let mut journal = Journal::new();
+        let mut journal = a_journal_with_a_map();
         // The key.
         journal.toggle(Tab::Give);
         assert_ne!(journal.open, Some(Tab::Give), "the give key opened a page this player may not use");
@@ -1281,9 +1395,69 @@ mod tests {
     }
 
     #[test]
-    fn the_give_page_is_there_for_an_operator_and_goes_when_the_server_takes_it_back() {
+    fn a_player_with_no_map_has_no_map_page_and_one_who_loses_it_is_not_left_looking_at_it() {
+        // "Мини-карты на экране нет и не будет -- карта открывается как
+        // вещь." The page is the hide, and a player without one has
+        // neither: the key does nothing, exactly as the give key does
+        // nothing for somebody who is not an operator.
         const ASPECT: f32 = 16.0 / 9.0;
         let mut journal = Journal::new();
+        journal.toggle(Tab::Map);
+        assert_eq!(journal.open, None, "the map key opened a map this player is not carrying");
+        // ...and the key that turns the page does not stop on it either.
+        journal.toggle(Tab::Recipes);
+        journal.switch_tab();
+        assert_eq!(journal.open, Some(Tab::Recipes), "Tab landed on a page that is not there");
+
+        // The hide arrives, and so does the page.
+        journal.set_carries_map(true);
+        journal.toggle(Tab::Map);
+        assert_eq!(journal.open, Some(Tab::Map));
+        // ...and it goes with the body: the server says the pack is empty
+        // and the screen follows, rather than leaving a map open on a map
+        // that is lying in a rucksack forty blocks back.
+        journal.set_carries_map(false);
+        assert_eq!(journal.open, None, "a player who lost their map went on reading it");
+        let _ = ASPECT;
+    }
+
+    #[test]
+    fn there_is_no_you_are_here_until_the_player_has_a_mark_of_their_own_in_sight() {
+        // The decision the marks exist to create. Nothing on the paper
+        // says where you are standing; a cairn of your own does, while you
+        // are near enough to see it. See `FIX_RANGE`.
+        let mut journal = a_journal_with_a_map();
+        let standing = PlayerMark { x: 400.0, z: -250.0, yaw: 0.5, known: true };
+
+        // No marks at all: the map does not know, and it opens on the
+        // spawn rather than on the player.
+        journal.landmarks = Landmarks { spawn: Some((8, 70, 8)), bags: Vec::new() };
+        let lost = journal.placed(standing);
+        assert!(!lost.known, "the map said where the player was with nothing written down");
+        assert_eq!((lost.x, lost.z), (8.5, 8.5), "an unplaced map did not open on the spawn");
+
+        // A cairn of their own, close by: now they know.
+        journal.explored.pretend_walked(vec![Mark {
+            at: (404, 70, -248),
+            kind: MarkKind::Cairn,
+            name: "the ford".into(),
+        }]);
+        let found = journal.placed(standing);
+        assert!(found.known, "standing at their own cairn, the player still did not know where they were");
+        assert_eq!((found.x, found.z), (standing.x, standing.z));
+
+        // ...and a morning's walk past it, they do not -- but the map now
+        // opens on the last thing they wrote down rather than on the spawn.
+        let far = PlayerMark { x: 400.0 + FIX_RANGE * 3.0, ..standing };
+        let away = journal.placed(far);
+        assert!(!away.known, "the cairn placed the player from the other side of the valley");
+        assert_eq!((away.x, away.z), (404.5, -247.5), "the map did not open on the last mark");
+    }
+
+    #[test]
+    fn the_give_page_is_there_for_an_operator_and_goes_when_the_server_takes_it_back() {
+        const ASPECT: f32 = 16.0 / 9.0;
+        let mut journal = a_journal_with_a_map();
         journal.set_operator(true);
         journal.toggle(Tab::Give);
         assert_eq!(journal.open, Some(Tab::Give), "an operator was refused their own menu");

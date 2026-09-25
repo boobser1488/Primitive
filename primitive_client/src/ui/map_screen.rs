@@ -52,16 +52,33 @@
 
 use crate::logic::map::{ExploredMap, Ground, Landmarks};
 use crate::ui::hotbar::{HotbarVertex, UNTEXTURED};
+use primitive_shared::trail::MarkKind;
+
 use crate::ui::lang::{Language, Msg};
 use crate::ui::widgets::{self, Painter, Rect};
 
-/// Where the player is and which way they face, in world units.
+/// Where the map is centred when it is following, and whether that is
+/// the player.
+///
+/// **Two meanings in one struct, on purpose.** When `known` is true this
+/// is the player: `x`, `z` and `yaw` are theirs, the `ME` button comes
+/// back to them, and the arrow is drawn. When it is false the player does
+/// not know where they are (see `Journal::placed`), and `x` and `z` are
+/// the map's *home* instead -- the last mark they made, or the spawn.
+///
+/// Doing it this way rather than passing a second point everywhere keeps
+/// one rule in one place: everything that centres, drags, zooms and
+/// hit-tests already goes through this one struct, and a map with two
+/// candidate centres threaded through six methods is a map that gets one
+/// of them wrong and stops responding where it is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PlayerMark {
     pub x: f32,
     pub z: f32,
     /// The camera's yaw: forward is `(cos yaw, sin yaw)` on the ground.
     pub yaw: f32,
+    /// Whether `x` and `z` are the player rather than the map's home.
+    pub known: bool,
 }
 
 /// Interface units per block, closest and furthest.
@@ -91,6 +108,11 @@ const BAG: [f32; 4] = [0.90, 0.22, 0.16, 1.0];
 const SPAWN: [f32; 4] = [0.96, 0.96, 0.96, 1.0];
 const OUTLINE: [f32; 4] = [0.0, 0.0, 0.0, 0.9];
 const CAIRN: [f32; 4] = [0.80, 0.78, 0.72, 1.0];
+/// A blaze: the pale wood under the bark it was cut out of, and the bark
+/// it is a stripe *on* -- the forest's own colour, a shade down, so the
+/// mark reads as a cut in a trunk rather than as a stick.
+const BLAZE: [f32; 4] = [0.85, 0.72, 0.47, 1.0];
+const FOREST_TRUNK: [f32; 4] = [0.22, 0.16, 0.10, 1.0];
 /// What a cairn's name is written on, so it reads over snow and forest
 /// alike.
 const LABEL_PLATE: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
@@ -487,6 +509,15 @@ fn cairn(p: &mut Painter, at: (f32, f32), size: f32) {
     }
 }
 
+/// A blaze: a trunk with a pale stripe cut down it, which is what one
+/// looks like from the path. Drawn tall where the cairn is drawn wide, so
+/// the two are told apart at a glance and without reading anything.
+fn blaze(p: &mut Painter, at: (f32, f32), size: f32) {
+    p.quad(Rect::centred(at.0, at.1, size * 0.62 + 0.006, size * 1.5 + 0.006), OUTLINE);
+    p.quad(Rect::centred(at.0, at.1, size * 0.62, size * 1.5), FOREST_TRUNK);
+    p.quad(Rect::centred(at.0, at.1, size * 0.28, size * 0.9), BLAZE);
+}
+
 /// Draws the map into `body`.
 #[allow(clippy::too_many_arguments)] // a view, the land, three marks, a place, a pointer, a language
 pub fn paint(
@@ -524,22 +555,28 @@ pub fn paint(
         let (at, inside) = place((bag.0 as f32 + 0.5, bag.2 as f32 + 0.5));
         marker(p, at, if inside { 0.028 } else { 0.018 }, BAG);
     }
-    // **The cairns, only where they are on the map.** A bag off the edge
+    // **The marks, only where they are on the map.** A bag off the edge
     // is drawn at the edge because it is the one place a player must get
-    // back to; cairns are many, and a frame lined with every one of them
-    // is a frame nobody can read. Named ones carry their name beside them,
-    // on a plate, clipped at the frame.
-    for (cell, name) in map.marks() {
-        let (at, inside) = place((cell.0 as f32 + 0.5, cell.2 as f32 + 0.5));
+    // back to; marks are many -- a road is blazed a dozen trees at a time
+    // -- and a frame lined with every one of them is a frame nobody can
+    // read. A cairn is drawn as its own heap of stones and a blaze as a
+    // trunk with a stripe down it, so the two are told apart without
+    // reading anything. Named ones carry their name beside them, on a
+    // plate, clipped at the frame.
+    for mark in map.marks() {
+        let (at, inside) = place((mark.at.0 as f32 + 0.5, mark.at.2 as f32 + 0.5));
         if !inside {
             continue;
         }
-        cairn(p, at, 0.03);
-        if name.is_empty() {
+        match mark.kind {
+            MarkKind::Cairn => cairn(p, at, 0.03),
+            MarkKind::Blaze => blaze(p, at, 0.022),
+        }
+        if mark.name.is_empty() {
             continue;
         }
         let left = at.0 + 0.025;
-        let text = widgets::fit(name, LABEL_SCALE, (body.x1 - inset - left).max(0.0));
+        let text = widgets::fit(&mark.name, LABEL_SCALE, (body.x1 - inset - left).max(0.0));
         if text.is_empty() {
             continue;
         }
@@ -548,10 +585,28 @@ pub fn paint(
         p.quad(Rect::new(left - 0.006, at.1 - cap / 2.0 - 0.008, left + ink + 0.006, at.1 + cap / 2.0 + 0.008), LABEL_PLATE);
         p.text(&text, left, at.1 + cap / 2.0, LABEL_SCALE, widgets::TEXT);
     }
-    let (at, _) = place((player.x, player.z));
-    arrow(p, at, heading(player.yaw), 0.034, PLAYER);
+    // **The arrow is drawn only when the player knows where they are.**
+    // What decides that is `Journal::placed`: a mark of their own within
+    // sight. A map that always said "you are here" would be a compass, a
+    // sextant and a clock in one, made of a hide and a lump of charcoal --
+    // and it would take the one thing this whole feature is for out of the
+    // game, which is looking at the land and recognising it.
+    if player.known {
+        let (at, _) = place((player.x, player.z));
+        arrow(p, at, heading(player.yaw), 0.034, PLAYER);
+    }
 
-    if map.surveyed() == 0 {
+    // **Two different empties, and they need two different sentences.**
+    // A trail with nothing in it is a hide that has not been carried
+    // anywhere yet, which is the thing a new map owner has to be told;
+    // an empty survey with a trail is a client that has not been sent the
+    // chunks back yet, which fixes itself. Telling a player "walk and it
+    // fills in" while they stand on ground they walked yesterday would be
+    // the game lying about its own rule.
+    if map.trail().is_empty() {
+        let text = widgets::fit(language.text(Msg::MapNoWalk), widgets::size::BODY, body.width() - 0.3);
+        p.text_centred(&text, body.centre_x(), body.centre_y() + 0.1, widgets::size::BODY, widgets::TEXT_DIM);
+    } else if map.surveyed() == 0 {
         let text = widgets::fit(language.text(Msg::MapUnexplored), widgets::size::BODY, body.width() - 0.3);
         p.text_centred(&text, body.centre_x(), body.centre_y() + 0.1, widgets::size::BODY, widgets::TEXT_DIM);
     }
@@ -573,7 +628,7 @@ pub fn paint(
     p.border(body, 0.005, FRAME);
 }
 
-/// The legend along the bottom of the journal: four marks and their
+/// The legend along the bottom of the journal: five marks and their
 /// names, left to right from `left`.
 pub fn legend(p: &mut Painter, left: f32, middle: f32, language: Language) {
     let scale = widgets::size::NOTE;
@@ -588,12 +643,13 @@ pub fn legend(p: &mut Painter, left: f32, middle: f32, language: Language) {
     entry(p, &|p, at| marker(p, at, 0.018, BAG), language.text(Msg::MapBag));
     entry(p, &|p, at| marker(p, at, 0.016, SPAWN), language.text(Msg::MapSpawn));
     entry(p, &|p, at| cairn(p, at, 0.024), language.text(Msg::MapCairn));
+    entry(p, &|p, at| blaze(p, at, 0.017), language.text(Msg::MapBlaze));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logic::map::Tile;
+    use crate::logic::map::{ExploredMap, Tile};
     use primitive_shared::types::ChunkPos;
 
     fn body() -> Rect {
@@ -601,7 +657,29 @@ mod tests {
     }
 
     fn standing_at(x: f32, z: f32) -> PlayerMark {
-        PlayerMark { x, z, yaw: 0.0 }
+        PlayerMark { x, z, yaw: 0.0, known: true }
+    }
+
+    /// Every colour drawn into `body` by one paint of the map.
+    fn painted(map: &ExploredMap, player: PlayerMark) -> Vec<[f32; 4]> {
+        let font = crate::engine::texture::FontAtlas::for_size(32, 1_000);
+        let mut p = Painter::onto_themed(font, Vec::new(), widgets::Theme::DARK);
+        paint(&mut p, &MapView::default(), map, player, &Landmarks::default(), body(), None, Language::English);
+        p.vertices.iter().map(|v| v.tint).collect()
+    }
+
+    #[test]
+    fn the_arrow_is_drawn_only_for_a_player_who_knows_where_they_are() {
+        // The map has north and it has the land; what it does not have is
+        // "you are here" for somebody who has written nothing down. See
+        // `Journal::placed`, which is what decides `known`.
+        let mut map = ExploredMap::new();
+        map.insert(ChunkPos::new(0, 0), Tile::uniform(Ground::Grass, 64));
+        map.pretend_walked(Vec::new());
+        let yellow = |tints: &[[f32; 4]]| tints.contains(&PLAYER);
+        assert!(yellow(&painted(&map, standing_at(8.0, 8.0))), "a player who knows where they are has no arrow");
+        let lost = PlayerMark { known: false, ..standing_at(8.0, 8.0) };
+        assert!(!yellow(&painted(&map, lost)), "the map said you are here to somebody who could not know");
     }
 
     #[test]
@@ -645,6 +723,7 @@ mod tests {
         // (0, 0), and one to the east.
         map.insert(ChunkPos::new(0, -1), Tile::uniform(Ground::Water, 60));
         map.insert(ChunkPos::new(1, 0), Tile::uniform(Ground::Snow, 90));
+        map.pretend_walked(Vec::new());
         let player = standing_at(8.0, 8.0);
         let quads = land_quads(&MapView::default(), &map, player, body());
         let water = Ground::Water.colour();

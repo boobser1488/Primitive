@@ -97,6 +97,7 @@ pub mod stall;
 pub mod showcase;
 pub mod snare;
 pub mod tools;
+pub mod trail;
 pub mod types;
 pub mod vermin;
 pub mod weather;
