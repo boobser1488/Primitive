@@ -811,6 +811,9 @@ fn run(
     // Whether the arrangement has been moved since it was last written
     // down. See where it is applied, in the menu branch of the frame.
     let mut arrangement_unsaved = false;
+    // Whether the controls have been measured in dp yet. Once a run,
+    // on the first real window -- see the `Resized` arm.
+    let mut touch_sizes_reported = false;
     let mut touch = platform::touch::Touch::default();
     // The bar reads its own finger; see `hotbar::Gestures`.
     let mut bar_gestures = ui::hotbar::Gestures::default();
@@ -1612,6 +1615,31 @@ fn run(
             platform::Event::Resized(new_size) => {
                 graphics.resize(new_size);
                 camera.aspect = graphics.aspect();
+                // **What the controls come to in millimetres, once, on
+                // the platform where a thumb is the only pointer.**
+                //
+                // Here rather than at startup because on Android there
+                // is no window when the game starts: the activity hands
+                // a surface over later, and the size before that is a
+                // placeholder. The first real `Resized` is the first
+                // moment this can be true.
+                //
+                // Printed rather than enforced -- see
+                // `touch::dp_report` for why a fraction of a screen is
+                // not a size, and why turning the layout onto dp is a
+                // decision rather than a fix.
+                if window.is_touch_primary() && !touch_sizes_reported {
+                    touch_sizes_reported = true;
+                    let placed = platform::touch::Layout::for_size(
+                        graphics.size,
+                        settings.touch_layout,
+                        graphics.ui_scale(),
+                        false,
+                    );
+                    for line in platform::touch::dp_report(&placed, window.scale_factor()) {
+                        println!("{line}");
+                    }
+                }
             }
 
             platform::Event::CursorMoved { x, y } => {
@@ -3337,6 +3365,13 @@ fn run(
                 input.release_all();
                 touch.release_all();
                 pointer.release();
+                // ...and the speaker, which nothing else stops. The
+                // frame loop blocks here and the audio callback does
+                // not: Android goes on asking the mixer for buffers
+                // while the game is off the screen, and the mixer goes
+                // on answering with the music that was playing. See
+                // `Audio::set_suspended`.
+                audio.set_suspended(true);
                 graphics.surface_lost();
             }
 
@@ -3355,6 +3390,7 @@ fn run(
             // so glancing at a notification costs a frame rather than a
             // reload of the world.
             platform::Event::Resumed => {
+                audio.set_suspended(false);
                 if let Err(e) = graphics.recreate_surface(window.raw(), window.size()) {
                     crash::report_fatal("the display could not be reattached", &e);
                     quit!();

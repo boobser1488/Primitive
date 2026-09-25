@@ -383,6 +383,100 @@ fn crowds(one: &Placed, two: &Placed, short: f32) -> bool {
         && (one.centre.1 - two.centre.1).abs() < one_y + two_y + air
 }
 
+/// Where a control being dragged may be put, so that it is never drawn
+/// through another one.
+///
+/// ## Why the editor needs a rule at all
+///
+/// Because two controls in one place is a control that cannot be
+/// pressed. [`Layout::button_at`] answers with the button whose *drawn*
+/// box the thumb is inside, and when two of those boxes are the same
+/// box the lower slot wins every touch -- so a player who drops PACK
+/// squarely on JUMP has not made an awkward arrangement, they have made
+/// a button that does nothing, with no way of telling which one it was.
+///
+/// ## Why it pushes rather than refuses
+///
+/// A drag that stops dead when it meets a neighbour is a drag the
+/// player has to undo by feel. Pushed out to the nearest side of
+/// whatever it met, the control slides around it and carries on
+/// following the thumb -- which is what a hand does with two counters
+/// on a table.
+///
+/// ## Why all four sides are tried, and not the shallowest
+///
+/// **Because of the edge of the glass**, which the first cut of this
+/// forgot. Pushed out along the axis it was least deep in, a button
+/// dropped on the one beside the right-hand edge was sent off the
+/// screen, and `keep_inside` -- the rule that no control may leave the
+/// glass -- put it straight back on top of the button it was pushed
+/// off: measured, JUMP came to rest 73 px from PACK, which is a third
+/// of one of them. So every side is worked out, clamped to the glass
+/// first, and the nearest one that is *actually* clear afterwards wins.
+///
+/// Four passes, because clearing one neighbour can walk into the next,
+/// and then it gives up and returns what it has: an arrangement a
+/// little tight is the player's to fix, and a control that has been
+/// flung across the glass is not.
+pub fn clear_of_the_others(
+    wanted: (f32, f32),
+    moving: &Placed,
+    others: &[Placed],
+    size: Size,
+) -> (f32, f32) {
+    let size = size.non_zero();
+    let (w, h) = (size.width as f32, size.height as f32);
+    let air = size.shorter() as f32 * CLEARANCE;
+    let (mine_x, mine_y) = drawn_half(moving);
+    let clear_of = |at: (f32, f32), other: &Placed| {
+        let (their_x, their_y) = drawn_half(other);
+        (at.0 - other.centre.0).abs() >= mine_x + their_x + air - 0.5
+            || (at.1 - other.centre.1).abs() >= mine_y + their_y + air - 0.5
+    };
+    let mut at = wanted;
+    for _ in 0..4 {
+        let mut pushed = false;
+        for other in others.iter().filter(|other| other.shown) {
+            if clear_of(at, other) {
+                continue;
+            }
+            let (their_x, their_y) = drawn_half(other);
+            let (need_x, need_y) = (mine_x + their_x + air, mine_y + their_y + air);
+            let sides = [
+                (other.centre.0 - need_x, at.1),
+                (other.centre.0 + need_x, at.1),
+                (at.0, other.centre.1 - need_y),
+                (at.0, other.centre.1 + need_y),
+            ];
+            let landed = sides
+                .into_iter()
+                .map(|(x, y)| {
+                    (
+                        keep_inside(x, w, moving.half.0),
+                        keep_inside(y, h, moving.half.1),
+                    )
+                })
+                .filter(|side| clear_of(*side, other))
+                .min_by(|a, b| {
+                    let far = |p: &(f32, f32)| (p.0 - at.0).hypot(p.1 - at.1);
+                    far(a).total_cmp(&far(b))
+                });
+            // Nowhere to go -- a control wider than the room beside its
+            // neighbour -- leaves it where it is. Better a tight
+            // arrangement than one that jumps somewhere the thumb is
+            // not.
+            if let Some(side) = landed {
+                at = side;
+                pushed = true;
+            }
+        }
+        if !pushed {
+            return at;
+        }
+    }
+    at
+}
+
 /// Air between the wheel's hub and the ring of members around it, as a
 /// fraction of the screen's shorter side.
 ///
@@ -600,7 +694,8 @@ impl Layout {
         ui_scale: f32,
         wheel_open: bool,
     ) -> Self {
-        let size = size.non_zero();
+
+
         let (w, h) = (size.width as f32, size.height as f32);
         let short = w.min(h);
 
@@ -637,6 +732,43 @@ impl Layout {
         }
     }
 
+    /// The same controls, laid out for the screen that *arranges* them.
+    ///
+    /// **The wheel is shut here, and that one word is the whole of it.**
+    /// The editor used to hold it open, on the reasonable-sounding
+    /// ground that a control nobody can see is a control nobody can
+    /// move -- and it bought three controls that cannot be moved
+    /// anyway at the price of two that can.
+    ///
+    /// A wheel member has no place of its own: the ring works its
+    /// position out from the hub every time the layout is built (see
+    /// [`arrange_the_wheel`]), so dragging one wrote a number nothing
+    /// reads. Measured on the 2712x1220 phone at INTERFACE SIZE 1.5,
+    /// MENU dragged from (2164, 183) to (678, 366) was drawn back at
+    /// (2164, 183) -- it simply would not move, which is what the
+    /// player reported.
+    ///
+    /// And an open wheel takes off the glass whatever it stands on
+    /// ([`yield_to_the_wheel`]), which is right in play -- the player
+    /// has opened a menu and the button under it is not what they are
+    /// aiming at -- and ruinous here: PACK and MAP were both drawn
+    /// nowhere on the screen that exists to move them, at every
+    /// interface size, so the two buttons the wheel covers were the two
+    /// that could not be arranged out from under it.
+    ///
+    /// Shut, the editor draws exactly the controls the game draws while
+    /// nobody is holding the wheel open, every one of them is where the
+    /// game will put it, and every one of them can be dragged. The
+    /// three inside the wheel travel with the `...` that holds them,
+    /// which is the only place they have ever been.
+    pub fn for_arranging(
+        size: Size,
+        arrangement: crate::settings::TouchLayout,
+        ui_scale: f32,
+    ) -> Self {
+        Self::for_size(size, arrangement, ui_scale, false)
+    }
+
     /// Which slot opens the wheel, if the player has one.
     fn hub(&self) -> Option<Slot> {
         (0..self.buttons.len()).find(|slot| {
@@ -657,6 +789,25 @@ impl Layout {
             .get(slot)
             .is_some_and(|placement| placement.in_wheel)
             && self.hub().is_some()
+    }
+
+    /// The controls a dragged one has to stay clear of.
+    ///
+    /// Everything on the glass except the one in the hand. A control
+    /// that is not shown is not an obstacle: it is not drawn, so
+    /// nothing can be drawn through it.
+    pub fn others_than(&self, moving: Slot) -> Vec<Placed> {
+        (0..self.buttons.len())
+            .filter(|slot| *slot != moving && self.buttons[*slot].shown)
+            .map(|slot| self.buttons[slot])
+            .chain(std::iter::once(self.stick).filter(|stick| stick.shown))
+            .collect()
+    }
+
+    /// The same list for the stick, which is in no wheel and is nobody's
+    /// hub.
+    pub fn others_than_the_stick(&self) -> Vec<Placed> {
+        self.buttons.iter().copied().filter(|b| b.shown).collect()
     }
 
     /// Which button is under a point, if any.
@@ -690,7 +841,7 @@ impl Layout {
     /// to the button's *edge* rather than to its centre, because the
     /// controls are not all one size -- a wide button's centre is far
     /// away even when the thumb is resting on its border.
-    fn button_at(&self, x: f32, y: f32) -> Option<Slot> {
+    pub fn button_at(&self, x: f32, y: f32) -> Option<Slot> {
         // Drawn-size first, with no slack at all: what a player can see
         // they are touching outranks what a neighbour can reach for.
         if let Some(slot) = (0..self.buttons.len())
@@ -729,6 +880,83 @@ impl Layout {
             x < middle
         }
     }
+}
+
+/// The smallest touch target every platform's own guidance agrees on,
+/// in density-independent pixels.
+///
+/// Android, iOS and the web all name a number between 44 and 48 dp;
+/// this is the smallest of them, so a control that clears it clears all
+/// three. It is about seven millimetres, which is the width of the pad
+/// of a thumb rather than of the whole thumb -- the part that actually
+/// decides where a press lands.
+pub const MIN_TARGET_DP: f32 = 44.0;
+
+/// What the controls on this screen come to in dp, and which of them
+/// are too small.
+///
+/// ## Why this is a report and not a rule
+///
+/// **Because the layout is written in fractions of the screen and a
+/// fraction is not a size.** A thumb control is `0.09` of the shorter
+/// side, `widgets::FINGER` is `0.075` of it, and both travel unchanged
+/// from a 1220-pixel phone to a tablet -- which is exactly the property
+/// that makes them say nothing about millimetres. On the phone this
+/// game is tested on they come out at 73 dp and 30 dp; the second of
+/// those is under every platform's floor, and nobody knew, because the
+/// game had no way of saying what a dp was.
+///
+/// Turning the layout itself onto dp is a bigger change than it looks:
+/// it re-spaces every menu in the game, and on a screen where a finger
+/// is a larger share of the glass it means fewer rows rather than
+/// smaller ones. That is a decision about how the game looks, not a
+/// bug fix, so what lands here is the measurement -- printed once at
+/// startup on the platform where it matters, with anything under the
+/// floor named. A number from the device beats an argument about
+/// whether the number matters.
+pub fn dp_report(layout: &Layout, scale_factor: f32) -> Vec<String> {
+    let per_dp = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let size = layout.size.non_zero();
+    let short = size.shorter() as f32;
+    let mut lines = vec![format!(
+        "[touch] {}x{} px at {per_dp:.2} px/dp = {:.0}x{:.0} dp; smallest honest target {MIN_TARGET_DP:.0} dp",
+        size.width,
+        size.height,
+        size.width as f32 / per_dp,
+        size.height as f32 / per_dp,
+    )];
+    let mut say = |name: String, side_px: f32| {
+        let dp = side_px / per_dp;
+        lines.push(format!(
+            "[touch] {name}: {side_px:.0} px = {dp:.0} dp{}",
+            if dp + 0.5 < MIN_TARGET_DP {
+                " -- UNDER THE FLOOR"
+            } else {
+                ""
+            },
+        ));
+    };
+    for button in layout.buttons.iter().filter(|button| button.shown) {
+        say(
+            format!("{:?}", button.emits),
+            button.radius() * 2.0,
+        );
+    }
+    if layout.stick.shown {
+        say("stick".to_string(), layout.stick.radius() * 2.0);
+    }
+    // ...and the menus, which are laid out in their own space against
+    // the same kind of fraction and are where this is already known to
+    // bite: a settings row is one `FINGER` tall.
+    say(
+        "a menu row (widgets::FINGER)".to_string(),
+        crate::ui::widgets::FINGER * short,
+    );
+    lines
 }
 
 /// What the hand in the look area asked for.
@@ -1542,6 +1770,49 @@ impl Touch {
 
 #[cfg(test)]
 mod tests {
+    /// The report says what a control is in dp, and names one that is
+    /// too small.
+    ///
+    /// The whole value of the line is the two numbers it carries off a
+    /// device: how many pixels there are to a dp, and which of the
+    /// things a thumb aims at are under the floor every platform
+    /// agrees on. A report that quietly passed a 20 dp button would be
+    /// worse than none, because it would look like an answer.
+    #[test]
+    fn the_dp_report_names_a_control_that_is_under_the_floor() {
+        let size = Size::new(2712, 1220);
+        let mut arrangement = crate::settings::TouchLayout::default();
+        // A button a fiftieth of the shorter side: 24 px, 8 dp at the
+        // density of the phone this game is tested on.
+        arrangement.buttons[0].width = 0.02;
+        arrangement.buttons[0].height = 0.02;
+        let layout = Layout::for_size(size, arrangement, 1.0, false);
+        let lines = dp_report(&layout, 3.0);
+        assert!(
+            lines[0].contains("3.00 px/dp") && lines[0].contains("904x407 dp"),
+            "the first line has to carry the density and the screen: {:?}",
+            lines[0],
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("UNDER THE FLOOR")),
+            "a button of 8 dp went unnamed: {lines:#?}",
+        );
+        // ...and the shipped controls do not trip it, or the line is
+        // noise nobody reads.
+        let shipped = Layout::for_size(size, crate::settings::TouchLayout::default(), 1.0, false);
+        let clean = dp_report(&shipped, 3.0);
+        let named: Vec<&String> = clean
+            .iter()
+            .filter(|line| line.contains("UNDER THE FLOOR"))
+            .collect();
+        assert_eq!(
+            named.len(),
+            1,
+            "only the menu row is known to be under the floor: {named:#?}",
+        );
+        assert!(named[0].contains("menu row"), "{named:#?}");
+    }
+
     /// The phone this was cut for, held sideways.
     fn phone() -> Size {
         Size { width: 2712, height: 1220 }

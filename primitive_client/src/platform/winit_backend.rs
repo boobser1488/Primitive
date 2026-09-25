@@ -61,6 +61,14 @@ impl super::Window for Window {
         Size::new(size.width, size.height)
     }
 
+    /// winit's own scale factor, which on Android is the display's
+    /// `density` divided by 160 -- 3.0 on the 480-dpi phone this game
+    /// is tested on. On a desktop it is whatever the window manager
+    /// says about the monitor it is on.
+    fn scale_factor(&self) -> f32 {
+        self.window.scale_factor() as f32
+    }
+
     fn request_redraw(&self) {
         self.window.request_redraw();
     }

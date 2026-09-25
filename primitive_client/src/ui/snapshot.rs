@@ -693,6 +693,28 @@ fn ui_snapshot() {
             write(&format!("{out}/{name}{tag}.png"), &vertices, font);
         }
 
+        // **The screen that arranges the thumb controls, which nobody
+        // had looked at either.** It is a phone screen, so it is drawn
+        // at whatever `UI_SNAPSHOT_SIZE` says and is worth nothing at
+        // 1280x720 -- and it is exactly the screen where a rule meant
+        // for play (an open wheel taking the button under it off the
+        // glass) deleted PACK and MAP from the editor. A picture of it
+        // says that in one look; the code does not.
+        menu.set_screen_size(width(), height());
+        menu.begin_arranging(crate::settings::TouchLayout::default());
+        menu.screen = crate::ui::menu::Screen::TouchControls;
+        let context = crate::ui::menu::MenuContext {
+            version: "1.5.0",
+            font,
+            settings: &settings,
+            worlds: &worlds,
+            background: backdrop(),
+            layout: snapshot_layout(),
+        };
+        let mut vertices = Vec::new();
+        menu.build_into(&context, &mut vertices);
+        write(&format!("{out}/menu_touch_controls{tag}.png"), &vertices, font);
+
         // **The extensions screen with nothing on it, which is the one
         // an Android player gets and the one nobody had looked at.**
         // The phone build asks for no native loader and no scripting

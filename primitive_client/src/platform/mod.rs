@@ -481,6 +481,36 @@ pub trait Window {
     /// The framebuffer size, in physical pixels.
     fn size(&self) -> Size;
 
+    /// How many physical pixels there are to one density-independent
+    /// pixel -- Android's `density`, and the same number every other
+    /// platform calls the scale factor.
+    ///
+    /// ## Why the game needs it at all
+    ///
+    /// **Because a fraction of a screen is not a size.** Everything a
+    /// thumb aims at in this game is laid out as a fraction of the
+    /// screen's shorter side (see `touch::Layout` and
+    /// `widgets::FINGER`), which travels between phones of different
+    /// pixel counts and says nothing whatever about millimetres: the
+    /// same 0.075 is 30 dp on the phone this was cut for and would be
+    /// something else again on a cheaper screen or a tablet. Every
+    /// platform's own guidance puts the smallest honest touch target at
+    /// 44 dp, and a game that cannot say what a dp is cannot check
+    /// itself against that number.
+    ///
+    /// This is the number that makes the check possible. It is not yet
+    /// what the layout is *built* from -- moving the layout onto dp
+    /// re-spaces every menu in the game and is the player's call, not a
+    /// silent change -- so for now the measurement is printed at
+    /// startup (`[touch]`) with anything under 44 dp named, which is
+    /// the difference between a known number and a guess.
+    ///
+    /// One everywhere it cannot be asked, which is the value that makes
+    /// "pixels" and "dp" the same word.
+    fn scale_factor(&self) -> f32 {
+        1.0
+    }
+
     /// Sets the window's title.
     ///
     /// A no-op where there is no title bar to put it in -- an Android

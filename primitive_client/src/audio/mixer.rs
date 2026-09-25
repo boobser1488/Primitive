@@ -104,6 +104,23 @@ pub struct Shared {
     /// right.
     listener_at: [AtomicU64; 3],
     listener: [AtomicU32; 3],
+    /// Whether the game is off the screen, and therefore whether the
+    /// speaker should be saying anything.
+    ///
+    /// **Android does not stop an app's audio when it stops the app.**
+    /// The activity is suspended, the frame loop blocks -- deliberately,
+    /// so the phone does not burn a core in a pocket -- and the audio
+    /// callback goes on being called by the system at its own rate,
+    /// playing the last thing it was told to: the music carries on over
+    /// the phone call the player just answered, and the rain of the
+    /// world they left goes on raining behind their messages.
+    ///
+    /// Read by the mixer rather than acted on by stopping the stream
+    /// alone, and both are done (see `Audio::set_suspended`). Pausing a
+    /// `cpal` stream is the part that saves the battery; this flag is
+    /// the part that cannot fail -- a backend whose `pause` is a
+    /// no-op still goes quiet.
+    suspended: AtomicBool,
     /// How many sounds were thrown away because the queue was full.
     /// Shown in the debug overlay; if it is ever non-zero, audio has
     /// stopped rather than got busy.
@@ -128,6 +145,7 @@ impl Shared {
             sfx: AtomicU32::new(1.0f32.to_bits()),
             music: AtomicU32::new(1.0f32.to_bits()),
             submerged: AtomicBool::new(false),
+            suspended: AtomicBool::new(false),
             mood: AtomicU8::new(mood_index(Mood::Menu)),
             queue: Mutex::new(Vec::with_capacity(MAX_QUEUED)),
             picks: AtomicU64::new(1),
@@ -135,6 +153,11 @@ impl Shared {
             listener: Default::default(),
             dropped: AtomicU32::new(0),
         }
+    }
+
+    /// Tells the sound whether there is anybody to hear it.
+    pub fn set_suspended(&self, suspended: bool) {
+        self.suspended.store(suspended, Ordering::Relaxed);
     }
 
     pub fn set_volumes(&self, master: f32, sfx: f32, music: f32) {
@@ -312,6 +335,19 @@ impl Mixer {
     /// which is wrong for a 5.1 setup and right for the far more common
     /// case of a device that reports four channels and uses two.
     pub fn fill(&mut self, out: &mut [f32], channels: usize) {
+        // **Silence while the game is not on the screen**, and silence
+        // written out rather than merely not added: the buffer handed
+        // to a callback is whatever was last in that memory, so a
+        // mixer that returned without touching it would hand the
+        // speaker a repeating fragment of the last frame of music --
+        // which is worse than the music it was meant to stop.
+        //
+        // Nothing is advanced, so what was playing is still exactly
+        // where it was when the player took the call.
+        if self.shared.suspended.load(Ordering::Relaxed) {
+            out.fill(0.0);
+            return;
+        }
         self.drain_queue();
 
         let master = load_f32(&self.shared.master);
@@ -518,6 +554,53 @@ mod tests {
         let mut after = vec![0.0f32; 256];
         mixer.fill(&mut after, 2);
         assert!(after.iter().all(|s| s.abs() < 1e-6), "the voice never ended");
+    }
+
+    /// A game that is off the screen makes no sound.
+    ///
+    /// **Android does not do this for us.** The activity is suspended,
+    /// the frame loop blocks, and the audio callback goes on being
+    /// called by the system: whatever was playing when the player
+    /// answered the phone goes on playing over the call. This is the
+    /// half of the fix that cannot fail -- the stream is paused as
+    /// well, but a `pause` that a backend quietly ignores would leave
+    /// the music on, and the mixer is our own code.
+    ///
+    /// The buffer is *written* silent rather than left alone: what a
+    /// callback hands over is whatever was last in that memory, so a
+    /// mixer that returned early without touching it would hand the
+    /// speaker a repeating fragment of the last music it made.
+    #[test]
+    fn a_game_that_is_off_the_screen_makes_no_sound() {
+        let rate = 22_050;
+        let shared = test_shared(rate);
+        shared.set_volumes(1.0, 1.0, 0.0);
+        let clip = test_clip(rate);
+        let frames = clip.len();
+        shared.push(Start { clip, gain: 1.0, pan: 0.0, pitch: 1.0 });
+        let mut mixer = Mixer::new(shared.clone(), rate as f32, 1);
+
+        let mut heard = vec![0.0f32; 64];
+        mixer.fill(&mut heard, 2);
+        assert!(heard.iter().any(|s| s.abs() > 0.01), "nothing was heard to begin with");
+
+        shared.set_suspended(true);
+        let mut pocket = vec![7.0f32; 64];
+        mixer.fill(&mut pocket, 2);
+        assert!(
+            pocket.iter().all(|s| *s == 0.0),
+            "the game went on playing while it was off the screen",
+        );
+
+        // ...and it is all still there when the player comes back: the
+        // voice was held, not dropped.
+        shared.set_suspended(false);
+        let mut back = vec![0.0f32; frames * 2];
+        mixer.fill(&mut back, 2);
+        assert!(
+            back.iter().any(|s| s.abs() > 0.01),
+            "the sound never came back after the call",
+        );
     }
 
     /// Panning hard left must leave the right channel empty, or
