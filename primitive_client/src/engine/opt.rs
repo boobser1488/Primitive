@@ -44,6 +44,7 @@
 //! | `PRIMITIVE_OPT_NO_LIGHT=1` | the light assembly, ablated |
 //! | `PRIMITIVE_OPT_NO_FOG=1` | the fog and the aerial perspective, ablated |
 //! | `PRIMITIVE_OPT_DEPTH16=1` | a 16-bit depth buffer instead of a 32-bit float one |
+//! | `PRIMITIVE_OPT_CHEAP_LIGHT=1` | the light's arithmetic, ablated; its varyings still read |
 //!
 //! The last three change nothing about how the game draws -- they are the
 //! three settings the frame is most sensitive to, made reachable without a
@@ -126,13 +127,52 @@
 //! the tint, the greenness and the interpolation of ten varyings, none of
 //! which can be switched off without changing what is drawn.
 //!
-//! **What to expect.** `mottled_shade` already carries a phone measurement
-//! in shader.wgsl: two hashes a fragment cost that device three
-//! milliseconds where a desktop paid 0.07. It is one hash now, and it is
-//! the first place to look. The fetch is the second -- one
-//! `textureSample` from an 804-layer array with trilinear minification,
-//! and a tile-based GPU pays for every miss in bandwidth it shares with
-//! the processor.
+//! **And what they came back as.** Same world, same seat, 45 s a mode:
+//!
+//! ```text
+//! mode                 solid    against stock
+//! stock                14.104
+//! OPT_NO_MOTTLE=1      12.236   -1.87
+//! OPT_NO_TEXTURE=1     11.921   -2.18
+//! OPT_NO_LIGHT=1       11.474   -2.63
+//! OPT_NO_FOG=1         13.045   -1.06
+//! OPT_DEPTH16=1        13.798   -0.31
+//! SPECKS=1              5.796   -8.31
+//! SPECKS + RES=50       6.340
+//! ```
+//!
+//! Three things fell out of that, and they set what happens next.
+//!
+//! **The parts add up.** 1.87 + 2.18 + 2.63 + 1.06 is 7.74 of the 8.31 the
+//! speck hunt takes away. Nothing large is hiding, the work is spread, and
+//! there is no single change that wins the pass back -- it comes off a
+//! piece at a time.
+//!
+//! **There is no overdraw to speak of.** With the fragment shader reduced
+//! to a flat colour, a quarter of the pixels cost 6.34 ms against the full
+//! frame's 5.80 -- which is to say the difference is noise and the 5.8 ms
+//! is geometry, not fill. So the near-to-far order and the facing rule are
+//! doing their job and nothing is to be won by sorting harder.
+//!
+//! **`shader f16: not offered by this adapter`**, so half precision is not
+//! a lever on this device at all. Closed.
+//!
+//! ## What is being done about it
+//!
+//! The blocks' own shade is now a setting (`block_shade`), off by default
+//! on Android and on everywhere else -- 1.87 ms for a five per cent wobble
+//! in a block's colour is worth it on a desktop that pays 0.07 for it and
+//! not on a phone that pays 13% of its solid pass.
+//!
+//! The rest waits on one more reading, because `SKIP_LIGHT` measures two
+//! things at once: it takes away the light's arithmetic *and* stops four
+//! of the shader's ten varyings being interpolated. `PRIMITIVE_OPT_CHEAP_LIGHT`
+//! reads all four and computes almost nothing, so the pair separates them
+//! -- and the cures are opposite. Near `SKIP_LIGHT` means fold the
+//! arithmetic; near stock means the cost is interpolation, and then the
+//! answer is to pack ten `@location`s into six, which is a repacking that
+//! cannot change a pixel and is the same lever for the light, the fog and
+//! the mottle at once.
 //!
 //! And one did not do its job: `PRIMITIVE_OPT_LOD=4` took 10% of the
 //! triangles away where a coarse chunk sheds 56% of its own
@@ -268,13 +308,14 @@ pub fn mip_bias() -> f32 {
 /// does nothing: one list means one test
 /// (`the_shader_still_carries_every_line_a_switch_replaces`) covers all of
 /// them.
-const SWITCH_LINES: [&str; 6] = [
+const SWITCH_LINES: [&str; 7] = [
     "const MIP_BIAS: f32 = 0.0;",
     "const SKIP_TEXTURE: bool = false;",
     "const SKIP_MOTTLE: bool = false;",
     "const SKIP_LIGHT: bool = false;",
     "const SKIP_FOG: bool = false;",
     "const DECAL_SCALE: f32 = 1.0;",
+    "const CHEAP_LIGHT: bool = false;",
 ];
 
 /// The line in `shader.wgsl` the bias replaces.
@@ -296,9 +337,15 @@ pub fn specialise(source: std::borrow::Cow<'_, str>) -> std::borrow::Cow<'_, str
     }
     for (on, line, replacement) in [
         (no_texture(), SWITCH_LINES[1], "const SKIP_TEXTURE: bool = true;"),
-        (no_mottle(), SWITCH_LINES[2], "const SKIP_MOTTLE: bool = true;"),
         (no_light(), SWITCH_LINES[3], "const SKIP_LIGHT: bool = true;"),
         (no_fog(), SWITCH_LINES[4], "const SKIP_FOG: bool = true;"),
+        (cheap_light(), SWITCH_LINES[6], "const CHEAP_LIGHT: bool = true;"),
+        // **The player's own setting, in the same list as the
+        // instruments.** It is the one line here that a settings file
+        // decides rather than an environment variable, and it is
+        // substituted the same way because the answer has to be a constant
+        // in the shader either way. See `block_shade`.
+        (!block_shade(), SWITCH_LINES[2], "const SKIP_MOTTLE: bool = true;"),
     ] {
         if on {
             out = rewrite(out, line, replacement);
@@ -483,6 +530,53 @@ pub fn no_fog() -> bool {
     *ON.get_or_init(|| flag_or("PRIMITIVE_OPT_NO_FOG", false))
 }
 
+/// **The light's arithmetic taken away while its varyings stay.** See
+/// `CHEAP_LIGHT` in shader.wgsl for what the pair of readings separates.
+pub fn cheap_light() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| flag_or("PRIMITIVE_OPT_CHEAP_LIGHT", false))
+}
+
+/// **Whether blocks wear their own shade** -- the one thing in this module
+/// the player owns rather than a person taking a measurement.
+///
+/// It is here, beside the instruments, because it has to be a constant in
+/// the shader and this is where shader constants are decided. What makes
+/// it different is that it is written as well as read: `ClientSettings`
+/// hands it over at startup and again whenever the row moves, and
+/// `GraphicsState::set_block_shade` rebuilds the pipelines around it the
+/// way the lighting step does.
+///
+/// **Off by default on Android, on everywhere else**, and the number is
+/// why: an Adreno 710 drew the solid pass in 12.24 ms without the shade
+/// and 14.10 with it -- 1.87 ms, 13% of the pass, for a five per cent
+/// wobble in the colour of a block. A desktop measured the same feature at
+/// 0.07 ms. It is the clearest case in this repository of a thing that is
+/// worth its price on one machine and not on another, which is the
+/// definition of a quality setting.
+///
+/// `PRIMITIVE_OPT_NO_MOTTLE=1` still forces it off, so the ablation stays
+/// available on a machine whose settings say otherwise.
+pub fn block_shade() -> bool {
+    !no_mottle() && BLOCK_SHADE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What the settings say, until they say otherwise.
+///
+/// **An atomic rather than a `OnceLock`**, because unlike every other
+/// value in this module it can change while the game runs -- and a plain
+/// `static mut` would be the same thing with none of the guarantees. The
+/// ordering is `Relaxed` because the only reader is the pipeline build
+/// that the same thread has just asked for.
+static BLOCK_SHADE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(!cfg!(target_os = "android"));
+
+/// Hands the setting over. Returns whether it changed, so the caller knows
+/// whether the pipelines have to be built again.
+pub fn set_block_shade(on: bool) -> bool {
+    BLOCK_SHADE.swap(on, std::sync::atomic::Ordering::Relaxed) != on
+}
+
 /// **A 16-bit depth buffer in place of the 32-bit float one.**
 ///
 /// Colour and depth are 8 bytes a pixel of tile memory on a tile-based
@@ -506,6 +600,14 @@ pub fn no_fog() -> bool {
 /// `Depth24Plus` is not offered as a middle step because it is not one:
 /// every implementation this runs on stores it in four bytes, so it saves
 /// exactly nothing of what this is trying to save.
+///
+/// **Measured, and left off.** An Adreno 710 drew the solid pass in 13.80
+/// ms against 14.10, so the third of the tile memory bought 0.31 ms --
+/// two per cent of the pass, for a decal that stands off its surface and a
+/// shadow map that loses half its bits. The switch stays because the
+/// number is worth re-taking on a device with less tile memory, where the
+/// same third is a larger share; the default stays as it was because on
+/// this one it does not pay for what it costs.
 pub fn depth16() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| flag_or("PRIMITIVE_OPT_DEPTH16", false))
@@ -560,8 +662,13 @@ pub fn announce() {
         (no_texture(), "no-texture"),
         (no_mottle(), "no-mottle"),
         (no_light(), "no-light"),
+        (cheap_light(), "cheap-light"),
         (no_fog(), "no-fog"),
         (depth16(), "depth16"),
+        // Said when it is *off*, which on a desktop is the unusual state
+        // and on a phone is the ordinary one -- and either way it is what
+        // a reader of a measurement needs to know.
+        (!block_shade(), "block-shade off"),
     ] {
         if set {
             on.push(name.into());

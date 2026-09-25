@@ -969,6 +969,24 @@ const SKIP_MOTTLE: bool = false;
 const SKIP_LIGHT: bool = false;
 const SKIP_FOG: bool = false;
 
+// **The one that reads everything and computes almost nothing.**
+//
+// `SKIP_LIGHT` takes the light's arithmetic away *and* the varyings it
+// read: four of the ten this shader carries stop being interpolated, and
+// the driver drops the vertex work that fed them. So its 2.63 ms on an
+// Adreno 710 is two costs in a trench coat, and nothing so far can tell
+// them apart -- which matters, because the cures are opposite. If the
+// arithmetic is the cost, fold it; if the interpolation is, the answer is
+// to pack ten locations into six and no amount of folding will help.
+//
+// This reads every value the real light reads -- the sky level, the block
+// level, the occlusion, the face's share of the beam -- and spends about a
+// tenth of the operations on them. Set beside `SKIP_LIGHT`:
+//
+// * near `SKIP_LIGHT`, and the cost is arithmetic;
+// * near a stock frame, and the cost is the varyings.
+const CHEAP_LIGHT: bool = false;
+
 // What a fragment wears when `SKIP_TEXTURE` takes its picture away.
 //
 // Mid grey and fully opaque: the cut-out's `discard` reads this alpha, so
@@ -2253,6 +2271,14 @@ fn shade_lit_sky(in: VertexOutput, sampled: vec4<f32>, lambert: f32, sun_sky: f3
     // can drop the lot as dead. See `SKIP_LIGHT`.
     if (SKIP_LIGHT) {
         light = vec3<f32>(1.0);
+    }
+    // ...and the same throw-away, except that the four varyings the light
+    // reads are read here, so the interpolation stays and only the
+    // arithmetic goes. See `CHEAP_LIGHT` for what the pair of them
+    // separates.
+    if (CHEAP_LIGHT) {
+        let carried = sky_level + block_level + ao + lambert;
+        light = vec3<f32>(carried * 0.25);
     }
 
     // Tinted in proportion to how green the texel already is.

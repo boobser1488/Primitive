@@ -11572,6 +11572,10 @@ fn apply_settings(
     // already on, and a map being switched on at the same moment is then
     // built once, for the new step, rather than twice.
     graphics.set_lighting(settings.lighting);
+    // Beside the lighting row and before the shadows, for the same reason
+    // the comment above gives: both rebuild the terrain pipelines, and two
+    // changes applied in one pass should cost one rebuild rather than two.
+    graphics.set_block_shade(settings.block_shade);
     graphics.set_shadows(settings.shadows);
     graphics.set_shadow_distance(settings.shadow_distance);
     graphics.set_plant_shadows(settings.plant_shadows);

@@ -206,7 +206,13 @@ PRIMITIVE_OPT_NO_FOG=1            the fog ramp and the aerial perspective,
 PRIMITIVE_OPT_DEPTH16=1           a 16-bit depth buffer instead of a 32-bit
                                   float one — a third less tile memory a
                                   pixel, at the price of a decal standing
-                                  further off its surface
+                                  further off its surface. Measured at
+                                  0.31 ms and left off: it does not pay for
+                                  what it costs on this device
+PRIMITIVE_OPT_CHEAP_LIGHT=1       the light's arithmetic, ablated, while
+                                  the four varyings it reads are still read
+                                  — set beside NO_LIGHT it says whether the
+                                  cost is arithmetic or interpolation
 ```
 
 The four `NO_` switches make the picture wrong on purpose: they are
@@ -235,13 +241,19 @@ and a stock one is what the shading costs, and everything left is geometry.
 for; neither touches the solid stage's time.)
 
 **Where the frame goes, on an Adreno 710.** Shading, not geometry: the speck
-hunt takes the solid pass from 14.08 ms to 5.87 at the same 255 thousand
-triangles, while halving the triangles buys 0.9 ms. So about 5.9 ms is
-geometry and about 8.2 is per-fragment work — and the first three rounds of
-switches were all pulling on the smaller half. What a fragment still computes
-that a vertex could have is close to nothing: the one term that was moved out
-to the vertex had to be moved back, and `shade_lit_sky` carries the test that
-caught it.
+hunt takes the solid pass from 14.10 ms to 5.80 at the same 255 thousand
+triangles, while halving the triangles buys 0.9 ms. So about 5.8 ms is
+geometry and about 8.3 is per-fragment work — and the first three rounds of
+switches were all pulling on the smaller half. The four ablations price the
+larger one at 1.87 (the blocks' own shade), 2.18 (the atlas fetch), 2.63 (the
+light) and 1.06 (the fog), which adds to 7.74 of the 8.31: **the work is
+spread, and no one change wins it back.** There is no overdraw to blame
+either — with a flat fragment shader, a quarter of the pixels cost the same
+as all of them.
+
+What a fragment still computes that a vertex could have is close to nothing:
+the one term that was moved out to the vertex had to be moved back, and
+`shade_lit_sky` carries the test that caught it.
 
 **What the Adreno 710 has already answered** (the `bench` world, the player
 standing, 55 s a mode, restarted between them). Two of these switches are
