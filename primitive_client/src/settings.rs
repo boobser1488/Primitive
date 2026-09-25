@@ -2052,6 +2052,8 @@ mod tests {
             preset: primitive_shared::worldgen::Preset::Normal,
             zone: primitive_shared::worldgen::Zone::Temperate,
             scale: primitive_shared::worldgen::Scale::Earth,
+            world_time: None,
+            bytes: 0,
             directory: std::path::PathBuf::from("saves/test"),
             last_played: 0,
         }

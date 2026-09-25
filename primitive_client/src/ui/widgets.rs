@@ -551,6 +551,28 @@ impl Piece {
     }
 }
 
+/// The room inside a cell: the rectangle its picture leaves once the lip
+/// is taken off.
+///
+/// **What everything drawn *in* a slot has to be held to, and what
+/// nothing was.** A cell is drawn stretched (see [`Painter::cell`]), so
+/// its lip is a share of the rectangle rather than a fixed distance:
+/// four of the picture's thirty-two texels each side, whatever size the
+/// cell is drawn at. The screens were insetting by [`BEVEL`] instead --
+/// the thickness of the flat bevel a cell had *before* it was a picture
+/// -- which is a third less than the lip, and so every stack count in
+/// the game was drawn with its last digit sitting on the raised edge of
+/// its own slot. That is the "text climbing onto the strips" the player
+/// reported, in the place it is hardest to miss: a pack full of numbers.
+///
+/// Derived from the picture rather than typed, so a redrawn `slot.png`
+/// with a deeper lip moves the numbers with it.
+pub fn cell_inner(rect: Rect) -> Rect {
+    let share = Piece::Slot.border_texels() / SKIN_RESOLUTION;
+    let (x, y) = (rect.width().abs() * share, rect.height().abs() * share);
+    Rect::new(rect.x0 + x, rect.y0 + y, rect.x1 - x, rect.y1 - y)
+}
+
 /// How big one texel of the skin is on the screen.
 ///
 /// One font pixel: the stitching, the lip and the letters are then all
@@ -1964,6 +1986,68 @@ pub fn while_recording_text<T>(body: impl FnOnce() -> T) -> (T, Vec<Written>) {
     (answer, lines)
 }
 
+/// A piece of furniture a painter put down, and what kind it is.
+///
+/// **The other half of [`Written`], and it arrived for the same
+/// reason.** Recording the lines of text found captions written across
+/// each other; it could not find a line of text written across a *thing*
+/// -- a count sitting on the lip of its own slot, a reading laid over
+/// the gauge it describes -- because the vertex list has no idea which
+/// quads are a slot and which are a letter. Recording the call does.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Furniture {
+    /// One square of a grid: a slot in the pack, a chest or the belt.
+    /// Text may sit in the room [`cell_inner`] leaves and nowhere else.
+    Cell,
+    /// The groove a meter runs in, and the well a reading is printed in.
+    /// A figure belongs in its own well; a figure lying across the
+    /// *gauge* is a figure hiding the thing it is about.
+    Track,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placed {
+    pub rect: Rect,
+    pub what: Furniture,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PLACED: std::cell::RefCell<Option<Vec<Placed>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `body` and answers every cell and groove drawn inside it.
+///
+/// A thread-local for [`while_recording_text`]'s reasons, and nestable
+/// with it so one pass answers both -- which is what a test comparing
+/// the two needs.
+#[cfg(test)]
+pub fn while_recording_furniture<T>(body: impl FnOnce() -> T) -> (T, Vec<Placed>) {
+    struct Restore(Option<Vec<Placed>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PLACED.with(|cell| *cell.borrow_mut() = self.0.take());
+        }
+    }
+    let restore = Restore(PLACED.with(|cell| cell.borrow_mut().replace(Vec::new())));
+    let answer = body();
+    let placed = PLACED.with(|cell| cell.borrow().clone().unwrap_or_default());
+    drop(restore);
+    (answer, placed)
+}
+
+#[cfg(test)]
+fn record_furniture(rect: Rect, what: Furniture) {
+    PLACED.with(|cell| {
+        if let Some(list) = cell.borrow_mut().as_mut() {
+            list.push(Placed { rect, what });
+        }
+    });
+}
+
 impl Default for Painter {
     fn default() -> Self {
         Self::new(crate::engine::texture::FontAtlas::for_test())
@@ -2419,9 +2503,23 @@ impl Painter {
     /// square and always about one size. `well` is what a hollow that
     /// can be any shape goes through.
     pub fn cell(&mut self, rect: Rect, face: [f32; 4]) {
-        if !self.stretched(rect, Piece::Slot, face) {
+        if !self.cell_picture(rect, face) {
             self.bevelled(rect, face, false);
         }
+    }
+
+    /// The picture alone, answering whether it drew one.
+    ///
+    /// For the belt, which has a fallback of its own -- a gradient,
+    /// older than the skin and older than `bevelled` -- and which still
+    /// has to be *counted* as a cell either way, because the test that
+    /// keeps a stack count off the lip of its slot reads the cells a
+    /// painter put down. See `Furniture`.
+    #[must_use]
+    pub fn cell_picture(&mut self, rect: Rect, face: [f32; 4]) -> bool {
+        #[cfg(test)]
+        record_furniture(rect, Furniture::Cell);
+        self.stretched(rect, Piece::Slot, face)
     }
 
     /// The groove a meter runs in.
@@ -2438,6 +2536,8 @@ impl Painter {
     /// hairline and the mark are still drawn over it by the caller --
     /// this replaces the floor and nothing else.
     pub fn track(&mut self, rect: Rect, colour: [f32; 4]) {
+        #[cfg(test)]
+        record_furniture(rect, Furniture::Track);
         if !self.nine(rect, Piece::Track, colour, None) {
             self.quad(rect, colour);
         }

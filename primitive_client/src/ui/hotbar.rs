@@ -104,6 +104,13 @@ const CELL_SELECTED_TOP: [f32; 4] = [0.14, 0.13, 0.07, 0.88];
 const CELL_SELECTED_BOTTOM: [f32; 4] = [0.24, 0.22, 0.11, 0.88];
 const FRAME: [f32; 4] = [0.75, 0.78, 0.83, 0.9];
 const FRAME_SELECTED: [f32; 4] = [1.0, 0.95, 0.55, 1.0];
+
+/// The ring the skin draws round the square in hand.
+///
+/// The pack's own `HIGHLIGHT_SOURCE_RING`, at full alpha because the
+/// picture carries its own: one mark for one thing, and "this is the one
+/// I am holding" is the same thing on the belt as it is in the pack.
+const SELECTED_RING: [f32; 4] = [1.0, 0.85, 0.35, 1.0];
 const ICON_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const ICON_TINT_DIM: [f32; 4] = [0.72, 0.72, 0.72, 1.0];
 
@@ -264,35 +271,62 @@ pub fn build_into(
         let y1 = BOTTOM + SLOT;
         let is_selected = index == selected;
 
+        let cell = Rect::new(x0, y0, x1, y1);
         // The recess, under everything else in the slot: the pack's own
         // cell picture, or the gradient it was before there was one.
-        let (top, bottom) = if is_selected {
-            (CELL_SELECTED_TOP, CELL_SELECTED_BOTTOM)
-        } else {
-            (CELL_TOP, CELL_BOTTOM)
-        };
-        // The mean of the two ends of the gradient, because the picture
-        // carries its own light now and the tint carries only the
-        // colour. Keeping the brighter end would have made every slot on
-        // the belt a shade paler than the same slot in the pack.
-        let face = [
-            (top[0] + bottom[0]) / 2.0,
-            (top[1] + bottom[1]) / 2.0,
-            (top[2] + bottom[2]) / 2.0,
-            (top[3] + bottom[3]) / 2.0,
-        ];
-        if !p.stretched(Rect::new(x0, y0, x1, y1), Piece::Slot, face) {
+        //
+        // **The pack's own colour too, which it was not.** The belt kept
+        // a near-black blue of its own (`CELL_TOP`/`CELL_BOTTOM`, the
+        // gradient's two ends) and multiplied the skin's picture by it,
+        // so the lip and the floor came out within a few bytes of each
+        // other: on a phone the belt was ten flat dark squares with a
+        // thin white outline round each, beside a pack made of cells
+        // with depth in them. Photographed and reported as "the skin has
+        // not been applied on the touch layer at all". `widgets::WELL`
+        // is what the pack's forty squares are tinted with, and the
+        // belt's ten are the same ten squares.
+        //
+        // **Through `Painter::cell_picture`, not through `stretched`**,
+        // and that is not tidiness either: that call is what says "this
+        // rectangle is a square of a grid", and the test that keeps text
+        // off the lip of a slot reads exactly those. Drawn as a bare
+        // picture, the belt's ten slots were invisible to it -- which is
+        // how the counts on the belt came to be sitting on their own
+        // edges while the same test watched the pack.
+        let skinned = p.cell_picture(cell, crate::ui::widgets::WELL);
+        if !skinned {
+            let (top, bottom) = if is_selected {
+                (CELL_SELECTED_TOP, CELL_SELECTED_BOTTOM)
+            } else {
+                (CELL_TOP, CELL_BOTTOM)
+            };
             push_gradient(&mut p.vertices, x0, y0, x1, y1, top, bottom);
         }
 
-        // Frame: four thin quads rather than a filled rect behind the
-        // icon, so the selection reads as an outline at any size.
-        let frame_colour = if is_selected { FRAME_SELECTED } else { FRAME };
-        let t = if is_selected { 0.008 } else { 0.004 };
-        push_quad(&mut p.vertices, x0 - t, y0 - t, x1 + t, y0, UNTEXTURED, frame_colour);
-        push_quad(&mut p.vertices, x0 - t, y1, x1 + t, y1 + t, UNTEXTURED, frame_colour);
-        push_quad(&mut p.vertices, x0 - t, y0, x0, y1, UNTEXTURED, frame_colour);
-        push_quad(&mut p.vertices, x1, y0, x1 + t, y1, UNTEXTURED, frame_colour);
+        // Which one is in hand: the pack's own mark for a chosen square,
+        // a ring of amber thread drawn *inside* the cell.
+        //
+        // **Not four quads around it any more.** The outline was drawn
+        // round every slot, selected or not, in a pale blue-grey a
+        // shade off white -- ten bright rectangles over the world, which
+        // is the one thing on the HUD that had no equivalent anywhere
+        // else in the interface. A ring inside the cell is what the pack
+        // marks a square with, so the belt now says "this one" the same
+        // way the pack does. The quads stay as the fallback where there
+        // is no skin, because there the cell has no lip of its own and
+        // an unframed one would not read as a square at all.
+        if skinned {
+            if is_selected {
+                let _ = p.cell_mark(cell, Piece::SlotSelected, SELECTED_RING);
+            }
+        } else {
+            let frame_colour = if is_selected { FRAME_SELECTED } else { FRAME };
+            let t = if is_selected { 0.008 } else { 0.004 };
+            push_quad(&mut p.vertices, x0 - t, y0 - t, x1 + t, y0, UNTEXTURED, frame_colour);
+            push_quad(&mut p.vertices, x0 - t, y1, x1 + t, y1 + t, UNTEXTURED, frame_colour);
+            push_quad(&mut p.vertices, x0 - t, y0, x0, y1, UNTEXTURED, frame_colour);
+            push_quad(&mut p.vertices, x1, y0, x1 + t, y1, UNTEXTURED, frame_colour);
+        }
 
         // An empty slot draws its frame and nothing else. Drawing a
         // greyed-out block instead would suggest the player has one.

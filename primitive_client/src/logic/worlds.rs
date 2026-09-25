@@ -21,12 +21,37 @@
 //! `world.toml`. A path traversal or a stale entry should fail loudly
 //! rather than recursively deleting whatever it happens to point at. The
 //! UI asks for confirmation on top of that.
+//!
+//! ## Copying
+//!
+//! `copy` is the answer to "I am about to dig under my own house". It is
+//! a plain file-by-file duplicate of the directory with a new name and a
+//! new folder, and it is **not** a link, a snapshot or a diff: a save is
+//! a handful of files a few megabytes at most, and anything cleverer
+//! would be a second on-disk format to keep working. The copy keeps the
+//! seed, the preset, the zone and the scale -- it has to, or it would be
+//! a different world wearing the same name -- and it keeps the clock, so
+//! the backup opens on the day it was taken rather than at dawn of day
+//! one.
+//!
+//! ## What the list says about a world
+//!
+//! The row a player reads is four facts, and three of them are not in
+//! `world.toml`: how far the world's own calendar has got, which season
+//! that is, and how much disk it takes. The first two come from
+//! `clock.txt`, which the *server* writes beside the save (see
+//! `primitive_server`'s `save_time_of_day`); the third is a walk of the
+//! directory. Both are read at `load` and refreshed by `refresh_facts`
+//! rather than measured while the screen is being drawn -- a `build`
+//! that touches the filesystem is a frame that stutters when a disk is
+//! busy, and this one runs sixty times a second.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use primitive_shared::season::{self, Season};
 use primitive_shared::worldgen::{Preset, Scale, Zone};
 
 use crate::ui::lang::{Language, Msg};
@@ -89,7 +114,10 @@ impl Default for WorldMeta {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// **`Eq` went when the clock arrived**, and nothing missed it: the
+/// world's age is a `f32`, and a float has no total equality. Two worlds
+/// are told apart by their directory everywhere it matters.
+#[derive(Debug, Clone, PartialEq)]
 pub struct World {
     pub name: String,
     /// `None` for a world from before seeds were recorded; the caller
@@ -105,6 +133,119 @@ pub struct World {
     pub scale: Scale,
     pub directory: PathBuf,
     pub last_played: u64,
+    /// How far the world's own calendar has got: its age in days, with
+    /// the hour in the fraction. `None` for a world that has never been
+    /// entered, or one saved before the server wrote a clock down.
+    ///
+    /// **Read off the server's `clock.txt`, and deliberately not stored
+    /// in `world.toml`.** The clock belongs to the running world and is
+    /// rewritten on every autosave; a second copy in the client's own
+    /// metadata would be a number that is right on the frame it is
+    /// written and stale for ever after.
+    pub world_time: Option<f32>,
+    /// What the save takes on disk, in bytes. Zero for a world whose
+    /// directory could not be read, which reads as "nothing to say"
+    /// rather than as "empty".
+    pub bytes: u64,
+}
+
+impl World {
+    /// Which day of the world the player left on, counting from one --
+    /// what the list calls the time they have lived there.
+    ///
+    /// `None` rather than "day 1" for a world nobody has opened: a world
+    /// with no history should say so, and saying "day 1" about a folder
+    /// that has never been entered is a small lie the player has no way
+    /// to check.
+    pub fn day(&self) -> Option<u32> {
+        self.world_time.map(season::day_number)
+    }
+
+    /// The season it was left in. See `season::Season`.
+    pub fn season(&self) -> Option<Season> {
+        self.world_time.map(Season::at)
+    }
+
+    /// The calendar date it was last played on, as `dd.mm.yyyy`, or
+    /// `None` for a world nobody has opened.
+    ///
+    /// **A date as well as "3 days ago", because the two answer
+    /// different questions.** The age answers "which of these was I last
+    /// in", which is why it is what the row leads with; the date answers
+    /// "is the backup I took the one from before the flood", which is the
+    /// question somebody asks once and needs an exact answer to. A list
+    /// of five worlds all saying "2 d ago" is a list that cannot answer
+    /// the second one at all.
+    ///
+    /// UTC, and it is worth saying why rather than leaving it to be
+    /// discovered: a local time needs the platform's timezone database,
+    /// which on Android means JNI and on a desktop means a crate, for a
+    /// line that is read to tell two saves apart. The date can be a day
+    /// out for somebody who played near midnight; the ordering it is
+    /// read for cannot.
+    pub fn played_on(&self) -> Option<String> {
+        (self.last_played != 0).then(|| {
+            let (year, month, day) = civil_from_unix(self.last_played);
+            format!("{day:02}.{month:02}.{year:04}")
+        })
+    }
+}
+
+/// Year, month and day from Unix seconds, in UTC.
+///
+/// Howard Hinnant's `civil_from_days`, which is the short exact one: no
+/// table of month lengths and no loop over years, and correct across the
+/// leap rules because it counts from a March-based era. Written out here
+/// rather than pulled in, because a date crate is a dependency tree for
+/// one line of one screen.
+fn civil_from_unix(seconds: u64) -> (u64, u64, u64) {
+    let days = seconds / 86_400 + 719_468;
+    let era = days / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    // The era starts in March, so months 0..=9 are March..December and
+    // 10, 11 are the January and February of the *next* year.
+    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+/// What a save takes on disk, as a person would say it.
+///
+/// Two digits of precision and no more: the question is "is this the big
+/// one" rather than "how many bytes", and `3.1 MB` answers it where
+/// `3 284 129 B` does not. Bytes only under a kilobyte, which is a world
+/// nobody has walked in yet.
+///
+/// The unit is not translated, and that is deliberate: `MB` is what the
+/// same number is labelled in every file manager a player has, in all
+/// four of these languages, and a translated unit would be the one place
+/// in the interface where a familiar number came out in unfamiliar
+/// letters.
+pub fn size_description(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let bytes = bytes as f64;
+    if bytes < KB {
+        return format!("{bytes:.0} B");
+    }
+    for (limit, unit) in [(KB * KB, "kB"), (KB * KB * KB, "MB")] {
+        if bytes < limit {
+            let value = bytes / (limit / KB);
+            // One decimal under ten, none above: `9.4 MB` and `132 MB`
+            // are both three characters of information, and `132.4 MB`
+            // is one of them padded out.
+            return if value < 10.0 {
+                format!("{value:.1} {unit}")
+            } else {
+                format!("{value:.0} {unit}")
+            };
+        }
+    }
+    format!("{:.1} GB", bytes / (KB * KB * KB))
 }
 
 impl World {
@@ -165,6 +306,8 @@ impl Worlds {
                         preset: meta.preset,
                         zone: meta.zone,
                         scale: meta.scale,
+                        world_time: read_clock(&directory),
+                        bytes: directory_bytes(&directory),
                         directory,
                         last_played: meta.last_played,
                     }),
@@ -215,7 +358,32 @@ impl Worlds {
     /// Creates a world laid in a zone, and returns its index. What the
     /// new-world form calls; `create` is this in the temperate zone, which
     /// is every world the tests make.
+    ///
+    /// Every new world is drawn by the newest generator -- the Earth's
+    /// scale with its landforms; a world that already has edits on older
+    /// ground stays on the generator that drew it (`Scale`).
     pub fn create_in(&mut self, name: &str, seed: u32, preset: Preset, zone: Zone) -> Result<usize, String> {
+        self.create_at(name, seed, preset, zone, Scale::default())
+    }
+
+    /// The whole of what a new world is: a name, a seed, a generator, a
+    /// place on the planet and the scale its country is drawn at.
+    ///
+    /// **The scale is on the form now**, and it is the one choice here
+    /// that cannot be described as better or worse: the landforms are the
+    /// planet at the Earth's size, and the regional world is an
+    /// archipelago whose next island is a walk rather than a voyage.
+    /// Which of those a player wants is a question about the game they
+    /// mean to play, which is exactly what this form is for. The default
+    /// is `Scale::default` -- the newest -- so nobody has to answer it.
+    pub fn create_at(
+        &mut self,
+        name: &str,
+        seed: u32,
+        preset: Preset,
+        zone: Zone,
+        scale: Scale,
+    ) -> Result<usize, String> {
         let seed = Some(seed);
         let name = name.trim();
         if name.is_empty() {
@@ -226,10 +394,6 @@ impl Worlds {
         std::fs::create_dir_all(&directory)
             .map_err(|e| format!("could not create {}: {e}", directory.display()))?;
 
-        // Every new world is drawn by the newest generator -- the Earth's
-        // scale with its landforms; a world that already has edits on older
-        // ground stays on the generator that drew it (`Scale`).
-        let scale = Scale::Landforms;
         let meta = WorldMeta {
             name: name.to_string(),
             seed,
@@ -248,11 +412,107 @@ impl Worlds {
                 preset,
                 zone,
                 scale,
+                world_time: None,
+                bytes: directory_bytes(&directory),
                 directory,
                 last_played: 0,
             },
         );
         Ok(0)
+    }
+
+    /// Gives a world a new name, and returns the name it now has.
+    ///
+    /// **The folder does not move.** A world's name and its folder were
+    /// separated on purpose (see the module note), and renaming is the
+    /// moment that pays: the save stays exactly where the running server
+    /// left it, so a rename cannot be the thing that loses a world. What
+    /// it costs is a folder called `my-world` holding a world called
+    /// `Дом`, which nobody but the person reading the saves folder ever
+    /// sees.
+    pub fn rename(&mut self, index: usize, name: &str) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a name is required".to_string());
+        }
+        let world = self.worlds.get_mut(index).ok_or_else(|| "no such world".to_string())?;
+        world.name = name.to_string();
+        let meta = WorldMeta {
+            name: world.name.clone(),
+            seed: world.seed,
+            preset: world.preset,
+            zone: world.zone,
+            scale: world.scale,
+            last_played: world.last_played,
+        };
+        write_meta(&world.directory, &meta)?;
+        Ok(name.to_string())
+    }
+
+    /// Duplicates a world into a folder of its own, and returns the index
+    /// of the copy.
+    ///
+    /// The insurance a player takes out before flooding their own mine.
+    /// See the module note for why it is a plain file copy.
+    ///
+    /// The copy is *not* marked as played, so it sorts under the original
+    /// rather than above it: a backup that jumped to the top of the list
+    /// would be the row a thumb lands on next time, which is the one way
+    /// this feature could lose somebody their world.
+    pub fn copy(&mut self, index: usize, name: &str) -> Result<usize, String> {
+        let source = self
+            .worlds
+            .get(index)
+            .ok_or_else(|| "no such world".to_string())?
+            .clone();
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a name is required".to_string());
+        }
+        let directory = self.root.join(self.unique_folder(name));
+        copy_tree(&source.directory, &directory)?;
+
+        let meta = WorldMeta {
+            name: name.to_string(),
+            seed: source.seed,
+            preset: source.preset,
+            zone: source.zone,
+            scale: source.scale,
+            last_played: source.last_played,
+        };
+        write_meta(&directory, &meta)?;
+
+        let copy = World {
+            name: name.to_string(),
+            seed: source.seed,
+            preset: source.preset,
+            zone: source.zone,
+            scale: source.scale,
+            world_time: read_clock(&directory),
+            bytes: directory_bytes(&directory),
+            directory,
+            last_played: source.last_played,
+        };
+        // Straight after the world it was taken from, which is where the
+        // eye is already looking.
+        let at = (index + 1).min(self.worlds.len());
+        self.worlds.insert(at, copy);
+        Ok(at)
+    }
+
+    /// Re-reads the two facts that change while a world is being played:
+    /// its calendar and its size on disk.
+    ///
+    /// **In place, and that is the point.** Reloading the list would be
+    /// simpler and would re-sort it -- and the menu addresses worlds by
+    /// index, so a list that re-sorted under a highlighted row would aim
+    /// DELETE at a different world than the one the player is looking at.
+    /// Nothing here adds, removes or reorders anything.
+    pub fn refresh_facts(&mut self) {
+        for world in &mut self.worlds {
+            world.world_time = read_clock(&world.directory);
+            world.bytes = directory_bytes(&world.directory);
+        }
     }
 
     /// Records that a world was just opened, so it sorts to the top next
@@ -346,6 +606,35 @@ fn slug(name: &str) -> String {
     }
 }
 
+/// Copies a directory's files and subdirectories into a new one.
+///
+/// **Files only, and no links followed.** `std::fs::copy` on a symbolic
+/// link copies what it points at, so a save folder with a link in it
+/// would otherwise pull the whole of whatever that is into the copy --
+/// and a link pointing at its own parent would not stop. What a world is
+/// made of is plain files, so anything that is not one is skipped rather
+/// than chased.
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| format!("could not create {}: {e}", to.display()))?;
+    let entries = std::fs::read_dir(from)
+        .map_err(|e| format!("could not read {}: {e}", from.display()))?;
+    for entry in entries.flatten() {
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        // `file_type` does not follow a link; `is_dir`/`is_file` do,
+        // which is the difference this is relying on.
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => copy_tree(&source, &target)?,
+            Ok(kind) if kind.is_file() => {
+                std::fs::copy(&source, &target)
+                    .map_err(|e| format!("could not copy {}: {e}", source.display()))?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn read_meta(directory: &Path) -> Option<WorldMeta> {
     let text = std::fs::read_to_string(directory.join(META)).ok()?;
     toml::from_str(&text).ok()
@@ -382,9 +671,56 @@ fn adopt(directory: &Path) -> Option<World> {
         zone: Zone::Temperate,
         // ...and drawn at the only scale there was.
         scale: Scale::unrecorded(),
+        world_time: read_clock(directory),
+        bytes: directory_bytes(directory),
         directory: directory.to_path_buf(),
         last_played: 0,
     })
+}
+
+/// What the server left its clock at, in days. See the module note.
+///
+/// Anything unreadable, missing or nonsensical is `None` rather than a
+/// number: the list would rather say nothing about the calendar than say
+/// "day 1" about a world that is on day two hundred. The same tolerance
+/// the server's own reader has -- a bad clock must never be the reason a
+/// save cannot be looked at.
+fn read_clock(directory: &Path) -> Option<f32> {
+    let text = std::fs::read_to_string(directory.join("clock.txt")).ok()?;
+    let days: f32 = text.trim().parse().ok()?;
+    (days.is_finite() && days >= 0.0).then_some(days)
+}
+
+/// How much disk a save takes, following the directories inside it.
+///
+/// **Bounded, and that is the whole of the care this needs.** It runs
+/// over a folder a player owns, and a player can put anything in a
+/// folder -- a symbolic link back to its own parent among them. A walk
+/// with no ceiling on it is then a menu that never opens. Ten thousand
+/// entries is far past any real save and far short of a hang.
+fn directory_bytes(directory: &Path) -> u64 {
+    let mut total = 0;
+    let mut seen = 0usize;
+    let mut stack = vec![directory.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > 10_000 {
+                return total;
+            }
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => stack.push(entry.path()),
+                Ok(kind) if kind.is_file() => {
+                    total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                }
+                _ => {}
+            }
+        }
+    }
+    total
 }
 
 pub fn unix_now() -> u64 {
@@ -643,6 +979,8 @@ seed = 3
             preset: Preset::Normal,
             zone: Zone::Temperate,
             scale: Scale::Earth,
+            world_time: None,
+            bytes: 0,
             directory: stray.clone(),
             last_played: 0,
         });
@@ -664,6 +1002,8 @@ seed = 3
             preset: Preset::Normal,
             zone: Zone::Temperate,
             scale: Scale::Earth,
+            world_time: None,
+            bytes: 0,
             directory: elsewhere.path().to_path_buf(),
             last_played: 0,
         });
@@ -768,6 +1108,8 @@ seed = 3
             preset: Preset::Normal,
             zone: Zone::Temperate,
             scale: Scale::Earth,
+            world_time: None,
+            bytes: 0,
             directory: PathBuf::new(),
             last_played: 1_000_000,
         };
@@ -801,11 +1143,188 @@ seed = 3
             preset: Preset::Normal,
             zone: Zone::Temperate,
             scale: Scale::Earth,
+            world_time: None,
+            bytes: 0,
             directory: PathBuf::new(),
             last_played: 5_000,
         };
         // `saturating_sub` keeps this at "just now" rather than
         // underflowing into several hundred billion years ago.
         assert_eq!(world.played_description(1_000, Language::English), "just now");
+    }
+
+    #[test]
+    fn the_list_reads_the_day_and_the_season_off_the_clock_the_server_left() {
+        // The calendar is the one thing a player remembers a world by
+        // -- "the one where I had just got through the first winter" --
+        // and it is in the server's file, not in the client's metadata.
+        let dir = TempDir::new("clock");
+        let mut worlds = Worlds::load(dir.path());
+        worlds.create("Farm", 1, Preset::Normal).unwrap();
+        let path = worlds.list()[0].directory.clone();
+        // Day 94 with the hour in the fraction: past the first winter
+        // and into the second spring, which is what the row should say.
+        std::fs::write(path.join("clock.txt"), "93.5\n").unwrap();
+
+        let reloaded = Worlds::load(dir.path());
+        assert_eq!(reloaded.list()[0].day(), Some(94));
+        assert_eq!(reloaded.list()[0].season(), Some(Season::at(93.5)));
+    }
+
+    #[test]
+    fn a_world_nobody_has_opened_says_nothing_about_a_calendar() {
+        // Rather than "day 1", which is a claim about a world that has
+        // not been entered -- see `World::day`.
+        let dir = TempDir::new("no-clock");
+        let mut worlds = Worlds::load(dir.path());
+        worlds.create("Fresh", 1, Preset::Normal).unwrap();
+        let reloaded = Worlds::load(dir.path());
+        assert_eq!(reloaded.list()[0].day(), None);
+        assert_eq!(reloaded.list()[0].season(), None);
+        assert_eq!(reloaded.list()[0].played_on(), None);
+    }
+
+    #[test]
+    fn a_nonsense_clock_is_no_calendar_rather_than_a_refusal_to_list_the_world() {
+        // The server's own reader is this forgiving, and for the same
+        // reason: a bad clock must never be why a save cannot be seen.
+        let dir = TempDir::new("bad-clock");
+        let mut worlds = Worlds::load(dir.path());
+        worlds.create("Odd", 1, Preset::Normal).unwrap();
+        let path = worlds.list()[0].directory.clone();
+        std::fs::write(path.join("clock.txt"), "полдень\n").unwrap();
+        let reloaded = Worlds::load(dir.path());
+        assert_eq!(reloaded.list().len(), 1);
+        assert_eq!(reloaded.list()[0].day(), None);
+    }
+
+    #[test]
+    fn the_size_of_a_save_is_what_is_actually_in_its_folder() {
+        let dir = TempDir::new("size");
+        let mut worlds = Worlds::load(dir.path());
+        worlds.create("Heavy", 1, Preset::Normal).unwrap();
+        let path = worlds.list()[0].directory.clone();
+        std::fs::write(path.join("edits.bin"), vec![0u8; 4096]).unwrap();
+        std::fs::create_dir_all(path.join("chunks")).unwrap();
+        std::fs::write(path.join("chunks/a.bin"), vec![0u8; 2048]).unwrap();
+
+        let reloaded = Worlds::load(dir.path());
+        // The metadata file is in there too, so this is a floor rather
+        // than an equality -- what matters is that the subdirectory was
+        // followed and that nothing was counted twice.
+        let bytes = reloaded.list()[0].bytes;
+        assert!(bytes >= 6144, "the walk missed a file: {bytes}");
+        assert!(bytes < 6144 + 1024, "the walk counted something twice: {bytes}");
+    }
+
+    #[test]
+    fn a_size_reads_as_a_person_would_say_it() {
+        assert_eq!(size_description(0), "0 B");
+        assert_eq!(size_description(900), "900 B");
+        assert_eq!(size_description(4096), "4.0 kB");
+        assert_eq!(size_description(3_300_000), "3.1 MB");
+        assert_eq!(size_description(140_000_000), "134 MB");
+    }
+
+    #[test]
+    fn a_date_is_the_day_it_actually_was() {
+        // Three dates chosen to catch the two things a hand-written
+        // calendar gets wrong: the leap day, and the January that
+        // belongs to the year after the March the era counts from.
+        assert_eq!(civil_from_unix(0), (1970, 1, 1));
+        assert_eq!(civil_from_unix(951_782_400), (2000, 2, 29));
+        assert_eq!(civil_from_unix(1_735_689_600), (2025, 1, 1));
+    }
+
+    #[test]
+    fn renaming_keeps_the_world_where_the_server_left_it() {
+        // The folder is what a running server has open. A rename that
+        // moved it would be the one edit to a save that could lose one.
+        let dir = TempDir::new("rename");
+        let mut worlds = Worlds::load(dir.path());
+        worlds.create("Before", 7, Preset::Normal).unwrap();
+        let path = worlds.list()[0].directory.clone();
+
+        worlds.rename(0, "  После  ").unwrap();
+        assert_eq!(worlds.list()[0].name, "После");
+        assert_eq!(worlds.list()[0].directory, path);
+
+        let reloaded = Worlds::load(dir.path());
+        assert_eq!(reloaded.list()[0].name, "После");
+        assert_eq!(reloaded.list()[0].seed, Some(7), "the rename rewrote the seed");
+    }
+
+    #[test]
+    fn an_empty_rename_is_refused_and_changes_nothing() {
+        let dir = TempDir::new("rename-empty");
+        let mut worlds = Worlds::load(dir.path());
+        worlds.create("Keep", 1, Preset::Normal).unwrap();
+        assert!(worlds.rename(0, "   ").is_err());
+        assert_eq!(worlds.list()[0].name, "Keep");
+    }
+
+    #[test]
+    fn a_copy_is_the_same_world_in_a_folder_of_its_own() {
+        // The insurance: everything about the world has to survive, or
+        // the backup is a different world with the same name in it.
+        let dir = TempDir::new("copy");
+        let mut worlds = Worlds::load(dir.path());
+        worlds.create_at("Mine", 4242, Preset::Test, Zone::Tropics, Scale::Earth).unwrap();
+        let source = worlds.list()[0].directory.clone();
+        std::fs::write(source.join("edits.bin"), vec![9u8; 64]).unwrap();
+        std::fs::write(source.join("clock.txt"), "40.25\n").unwrap();
+
+        let at = worlds.copy(0, "Mine (backup)").unwrap();
+        let copy = worlds.list()[at].clone();
+        assert_ne!(copy.directory, source, "the copy shares the original's folder");
+        assert_eq!(copy.seed, Some(4242));
+        assert_eq!(copy.preset, Preset::Test);
+        assert_eq!(copy.zone, Zone::Tropics);
+        assert_eq!(copy.scale, Scale::Earth, "the copy moved to a different generator");
+        assert_eq!(copy.day(), Some(41), "the backup opened at dawn of day one");
+        assert_eq!(std::fs::read(copy.directory.join("edits.bin")).unwrap(), vec![9u8; 64]);
+
+        // ...and it is still there on the next launch, under its own name.
+        let reloaded = Worlds::load(dir.path());
+        assert_eq!(reloaded.list().len(), 2);
+        assert!(reloaded.list().iter().any(|w| w.name == "Mine (backup)"));
+        assert!(reloaded.list().iter().any(|w| w.name == "Mine"));
+    }
+
+    #[test]
+    fn a_copy_does_not_jump_above_the_world_it_was_taken_from() {
+        // A backup that sorted to the top of the list would be the row a
+        // thumb lands on next time, which is how this feature could lose
+        // somebody the world it was meant to protect.
+        let dir = TempDir::new("copy-order");
+        let mut worlds = Worlds::load(dir.path());
+        worlds.create("Home", 1, Preset::Normal).unwrap();
+        worlds.mark_played(0);
+        let at = worlds.copy(0, "Home 2").unwrap();
+        assert_eq!(at, 1);
+        assert_eq!(worlds.list()[0].name, "Home");
+    }
+
+    #[test]
+    fn refreshing_the_facts_moves_no_row() {
+        // The menu addresses worlds by index. A refresh that re-sorted
+        // would aim DELETE at a world the player is not looking at.
+        let dir = TempDir::new("refresh");
+        let mut worlds = Worlds::load(dir.path());
+        worlds.create("First", 1, Preset::Normal).unwrap();
+        worlds.create("Second", 2, Preset::Normal).unwrap();
+        let order: Vec<String> = worlds.list().iter().map(|w| w.name.clone()).collect();
+
+        let path = worlds.list()[1].directory.clone();
+        std::fs::write(path.join("clock.txt"), "12.0\n").unwrap();
+        worlds.mark_played(0);
+        worlds.refresh_facts();
+
+        assert_eq!(
+            worlds.list().iter().map(|w| w.name.clone()).collect::<Vec<_>>(),
+            order,
+            "a refresh reordered the list under the selection"
+        );
+        assert_eq!(worlds.list()[1].day(), Some(13));
     }
 }

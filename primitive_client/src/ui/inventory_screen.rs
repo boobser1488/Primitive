@@ -1737,8 +1737,40 @@ const HIGHLIGHT_HOVER_GLOW: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const HIGHLIGHT_SOURCE_RING: [f32; 4] = [1.0, 0.85, 0.35, 1.0];
 const HIGHLIGHT_INGREDIENT_RING: [f32; 4] = [0.55, 0.85, 1.0, 1.0];
 
+/// Where the number in the corner of a slot is written from: the pen's
+/// starting point for the *bright* copy, with the dark one offset from
+/// it.
+///
+/// **One function, because the test and the drawing have to agree.** The
+/// rule the count has to keep is that everything it puts on the screen
+/// -- both copies -- lies inside [`widgets::cell_inner`], the floor the
+/// cell's picture leaves. That was a margin written out here and a
+/// different margin written out in the test, and the two drifted: the
+/// test was measuring against the old flat bevel and passing while the
+/// player was looking at a digit on the lip.
+///
+/// The pad carries the shadow's own offset, at both ends, because the
+/// shadow is drawn down and to the right: a number placed flush against
+/// the floor of the well puts its *shadow* through the lip, which is
+/// what the clipped-looking digits along the bottom of every slot were.
+fn count_origin(cell: Rect, label: &str) -> (f32, f32) {
+    let inner = widgets::cell_inner(cell);
+    let scale = widgets::size::COUNT;
+    let pad = COUNT_SHADOW + widgets::PIXEL * scale;
+    (
+        (inner.x1 - pad - widgets::ink_width(label, scale)).max(inner.x0),
+        (inner.y0 + pad + widgets::cell_height(scale)).min(inner.y1),
+    )
+}
+
 /// One bevel in from a cell: where a wash goes, so it does not paint
 /// over the well's own edge.
+///
+/// **The flat bevel's depth, and only for the flat bevel's washes.**
+/// Anything drawn over a cell's *picture* asks [`widgets::cell_inner`]
+/// instead, which is deeper: these four washes are what a cell is
+/// highlighted with where there is no skin, so they are the one thing
+/// still measured against the shape they were drawn for.
 fn inset(cell: Rect) -> Rect {
     Rect::new(
         cell.x0 + widgets::BEVEL,
@@ -2120,21 +2152,19 @@ fn draw_slot_full(
     // digits fit and no fallback is needed; the test that holds it there
     // is `a_three_digit_count_fits_a_slot_without_being_shrunk`.
     let label = count.to_string();
-    let inner = inset(cell);
+    // **`widgets::cell_inner`, not `inset`, and that one word is the
+    // whole of the "text climbing onto the strips" report.** A cell has
+    // been a *picture* since the skin arrived, and the lip in that
+    // picture is four of its thirty-two texels -- half again as deep as
+    // the flat `BEVEL` a cell used to have and this line used to inset
+    // by. So every count in the game was drawn three thousandths of a
+    // screen too far right and one too far down: the last digit sat on
+    // the raised edge of its own slot, and on a phone, where the icon
+    // fills more of the square, it read as a number spilling out of it.
+    // `nothing_written_on_the_pack_sits_on_the_edge_of_a_slot` is what
+    // now says so.
     let scale = widgets::size::COUNT;
-    let width = widgets::ink_width(&label, scale);
-    let x0 = (inner.x1 - width - 0.007).max(inner.x0 + 0.002);
-    // Lifted by the shadow's own offset as well: the shadow is drawn
-    // down and to the right, so a number sitting exactly on the well's
-    // floor puts its shadow *through* the bevel -- which is what the
-    // clipped-looking digits along the bottom of every slot were.
-    let floor = inner.y0 + 0.003 + COUNT_SHADOW;
-    let plate = Rect::new(
-        x0,
-        floor,
-        (x0 + width + 0.006).min(inner.x1),
-        floor + widgets::cell_height(scale),
-    );
+    let (x, y) = count_origin(cell, &label);
     // **A shadow rather than a plate.** The count used to sit on a dark
     // rectangle, which is a second thing in the slot; what every
     // interface of this kind does instead is draw the number twice, once
@@ -2142,7 +2172,6 @@ fn draw_slot_full(
     // pale sand icon and a black coal one alike, and it adds nothing to
     // the slot but the number.
     let colour = if full { COUNT_FULL } else { COUNT_TEXT };
-    let (x, y) = (plate.x0 + 0.003, plate.y1);
     p.text(&label, x + COUNT_SHADOW, y - COUNT_SHADOW, scale, COUNT_DARK);
     p.text(&label, x, y, scale, colour);
 }
@@ -4681,6 +4710,132 @@ mod tests {
         }
     }
 
+    /// **Nothing written on this screen straddles the edge of a slot.**
+    ///
+    /// The watchdog for the complaint that started this pass: "the text
+    /// climbs onto the strips". A stack count belongs in the floor of
+    /// its own cell; a caption belongs beside the grid. What neither may
+    /// be is *half on the lip* -- a number with its last digit over the
+    /// raised edge of the square it is counting, which is what every
+    /// count in the game was doing since the cells became pictures and
+    /// the screens went on insetting by the old flat `BEVEL`.
+    ///
+    /// The rule is deliberately about straddling rather than about
+    /// touching: a line inside [`widgets::cell_inner`] is where a count
+    /// is supposed to be, and a line entirely outside the cell is a
+    /// caption minding its own business. Anything else is the bug.
+    ///
+    /// Checked in every language and on every tab, because the words
+    /// that overflow are never the English ones.
+    #[test]
+    fn nothing_written_on_the_pack_sits_on_the_edge_of_a_slot() {
+        for (tab, language, lines, furniture) in every_page_with_its_furniture() {
+            let cells = furniture
+                .iter()
+                .filter(|p| p.what == crate::ui::widgets::Furniture::Cell);
+            for cell in cells {
+                let inner = widgets::cell_inner(cell.rect);
+                for line in &lines {
+                    let touches = line.rect.x0 < cell.rect.x1
+                        && line.rect.x1 > cell.rect.x0
+                        && line.rect.y0 < cell.rect.y1
+                        && line.rect.y1 > cell.rect.y0;
+                    if !touches {
+                        continue;
+                    }
+                    // A tenth of a font pixel of slack, which is the
+                    // rounding two different ways of adding the same
+                    // margins come to -- not enough to hide a digit.
+                    // **Slack down the page is the descender rows, and
+                    // sideways it is a rounding.** A line's box hangs
+                    // the whole nine-row cell below the top it was
+                    // given, and the bottom two of those rows are
+                    // descender space a count never puts ink in. Across
+                    // is where the overflows were, and across it stays
+                    // tight. The same pair the HUD's watchdog uses.
+                    let down = widgets::PIXEL
+                        * line.scale
+                        * (crate::engine::font::GLYPH_HEIGHT - crate::engine::font::CAP_HEIGHT)
+                            as f32;
+                    let across = widgets::PIXEL * 0.1;
+                    let inside = line.rect.x0 >= inner.x0 - across
+                        && line.rect.x1 <= inner.x1 + across
+                        && line.rect.y0 >= inner.y0 - down
+                        && line.rect.y1 <= inner.y1 + across;
+                    assert!(
+                        inside,
+                        "{tab:?}/{language:?}: {:?} at {:?} is on the edge of the slot {:?} \
+                         (its floor is {inner:?})",
+                        line.text, line.rect, cell.rect,
+                    );
+                }
+            }
+        }
+    }
+
+    /// The pages again, with the furniture the painter put down beside
+    /// the lines it wrote.
+    ///
+    /// Its own function rather than a second argument on
+    /// `every_page_as_drawn`, because that one is read by three tests
+    /// that have no interest in the cells and would all have grown a
+    /// `_` for it.
+    #[allow(clippy::type_complexity)]
+    fn every_page_with_its_furniture() -> Vec<(
+        Tab,
+        Language,
+        Vec<crate::ui::widgets::Written>,
+        Vec<crate::ui::widgets::Placed>,
+    )> {
+        let (pack, worn) = with_a_rucksack();
+        let vitals = Vitals {
+            health: 0.34,
+            nourishment: 0.22,
+            stamina: 0.61,
+            body: crate::ui::hud::BodyGauges::default(),
+        };
+        let mut pages = Vec::new();
+        for &language in Language::ALL {
+            for tab in ALL_TABS {
+                let mut screen = InventoryScreen::new();
+                screen.open = true;
+                screen.sync(&pack);
+                screen.set_tab(tab);
+                // **With the skin on**, because the lip is the picture's
+                // and a screen drawn without one has no lip to climb.
+                let ((_, lines), furniture) =
+                    crate::ui::widgets::while_recording_furniture(|| {
+                        crate::ui::widgets::while_recording_text(|| {
+                            crate::ui::widgets::with_skin(1, || {
+                                let mut out = Vec::new();
+                                screen.build_into(
+                                    FontAtlas::for_test(),
+                                    &FaceLayers::empty_for_test(),
+                                    &pack,
+                                    &worn,
+                                    &Injuries::default(),
+                                    &vitals,
+                                    crate::ui::ladder_screen::Learning::nothing_yet(),
+                                    language,
+                                    &mut out,
+                                );
+                            })
+                        })
+                    });
+                pages.push((tab, language, lines, furniture));
+            }
+        }
+        // A recorder that answered nothing would make every check over
+        // this silently vacuous -- the failure mode a watchdog must not
+        // have. Across the pages, not on each: only the grids have
+        // cells.
+        assert!(
+            pages.iter().any(|(_, _, _, furniture)| !furniture.is_empty()),
+            "the recorder saw no cells on any page of the pack",
+        );
+        pages
+    }
+
     /// **Three digits fit a slot at `size::COUNT`, with room for the
     /// shadow.**
     ///
@@ -4692,14 +4847,34 @@ mod tests {
     /// stack limit needs four, this is what will say so.
     #[test]
     fn a_three_digit_count_fits_a_slot_without_being_shrunk() {
-        let inner = inset(Rect::new(0.0, 0.0, CELL, CELL));
+        // **Against the picture's own floor and through the placement
+        // the drawing uses**, neither of which this used to do: it
+        // measured a margin of its own against the flat bevel, so it
+        // went on passing while the player was looking at a digit
+        // sitting on the lip of the slot.
+        let cell = Rect::new(0.0, 0.0, CELL, CELL);
+        let inner = widgets::cell_inner(cell);
         // The widest three digits this font has, rather than "128":
         // every digit in it is the same width, but saying so out loud is
         // what makes the assertion mean what it says.
         let widest = "888";
+        let scale = widgets::size::COUNT;
+        let (x, y) = count_origin(cell, widest);
+        // Both copies: the dark one is drawn down and to the right of
+        // the bright one, so it is the one that reaches the lip first.
+        let ink = widgets::ink_width(widest, scale);
+        let cell_h = widgets::cell_height(scale);
         assert!(
-            widgets::ink_width(widest, widgets::size::COUNT) + COUNT_SHADOW + 0.009 <= inner.width(),
-            "a three-digit count no longer fits a slot at size::COUNT",
+            x >= inner.x0 && x + COUNT_SHADOW + ink <= inner.x1,
+            "a three-digit count no longer fits the floor of a slot at size::COUNT: \
+             {x}..{} against {}..{}",
+            x + COUNT_SHADOW + ink,
+            inner.x0,
+            inner.x1,
+        );
+        assert!(
+            y - COUNT_SHADOW - cell_h >= inner.y0 && y <= inner.y1,
+            "a three-digit count no longer stands on the floor of a slot",
         );
         // A relation between two constants, so it is checked where
         // constants are: at compile time. As a runtime `assert!` clippy

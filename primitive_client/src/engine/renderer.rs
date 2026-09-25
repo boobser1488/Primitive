@@ -4606,7 +4606,12 @@ impl GraphicsState {
     }
 }
 
-const HOTBAR_ATTRS: [wgpu::VertexAttribute; 4] =
+/// The interface vertex, as the card reads it.
+///
+/// `pub(crate)` for one reason: `ui::snapshot`'s colour check builds the
+/// same pipeline to hold the harness to the card, and a second copy of
+/// this array is a second thing that can quietly drift from the shader.
+pub(crate) const HOTBAR_ATTRS: [wgpu::VertexAttribute; 4] =
     wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4];
 
 const OVERLAY_ATTRS: [wgpu::VertexAttribute; 2] =
