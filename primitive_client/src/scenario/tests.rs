@@ -4435,3 +4435,166 @@ fn a_night_asleep_in_the_open_without_a_fire_is_woken_by_wolves_that_come_in() {
     assert!(bitten, "the pack that woke a sleeper in the open never came in: nearest {closest:.1}");
     no_corrections(&s);
 }
+
+/// **A player who walks to the brink of a bank sees the clay in its face.**
+/// The whole point of making the clay a bed instead of a patch
+/// (`worldgen::clay_bed`): a layer is either read in a wall or it is a
+/// statistic. So this walks a body over real generated ground to the edge
+/// of a real generated bank and asserts what is in the wall of it -- turf,
+/// a layer of earth, an unbroken stripe of clay, rock -- and that the
+/// stripe is out in the open air and can be aimed at and dug.
+///
+/// **The place is named rather than searched for.** Clay country is flat --
+/// that is what makes it clay country -- so a bank in it is at water, and a
+/// bank at water within walking distance of a scenario's spawn is not
+/// something a sweep of the loaded chunks would find. It is seed 1337's,
+/// and `worldgen::clay_tests::probe_clay_banks` is what prints this one and
+/// what will print the next if the ground moves under it.
+#[test]
+fn a_player_who_walks_to_the_brink_of_a_bank_sees_the_clay_in_its_face() {
+    let mut s = landforms_world();
+    // The brink: flat clay country to the east of it, a bank falling away
+    // west into the water that cut it.
+    const BRINK: (i32, i32) = (-195, -551);
+    // Set down four columns back from the edge, on ground the probe says is
+    // level to within a block, so the walk in is a walk and not a fall.
+    s.stand_at((BRINK.0 as f64 + 4.5, 69.0, BRINK.1 as f64 + 0.5));
+    let top = |s: &Scenario, x: i32, z: i32| {
+        (0..t::CHUNK_SIZE_Y as i32).rev().find(|&y| s.block((x, y, z)).is_some_and(t::is_collidable))
+    };
+    let brink_top = top(&s, BRINK.0, BRINK.1).expect("the brink column is loaded");
+
+    // Walk west to the edge, forward held and the jump never pressed.
+    s.face(std::f32::consts::PI);
+    s.hold(Action::Forward);
+    let arrived = s.until(8.0, |s| s.feet().x < BRINK.0 as f64 + 1.0);
+    s.release_all();
+    s.seconds(0.3);
+    assert!(arrived, "the walk to the brink stopped at {:?}", s.feet());
+    let at = s.feet();
+    assert!(
+        (at.y - (brink_top + 1) as f64).abs() < 1.2,
+        "the player is at {at:?} and the brink stands at {brink_top}: this is not the top of the bank"
+    );
+
+    // The face of the bank, read down from the ground the player is
+    // standing on: the soil, then the clay, then the rock.
+    let column: Vec<t::BlockId> =
+        (0..6).map(|k| s.block((BRINK.0, brink_top - k, BRINK.1)).map(t::block_kind).unwrap_or(t::BLOCK_AIR)).collect();
+    let first = column.iter().position(|&id| id == t::BLOCK_CLAY).unwrap_or_else(|| {
+        panic!("no clay in the bank at {BRINK:?}: {:?}", column.iter().map(|&b| t::block_name(b)).collect::<Vec<_>>())
+    });
+    let run = column[first..].iter().take_while(|&&id| id == t::BLOCK_CLAY).count();
+    assert!(run >= 2, "the band in the bank is {run} layer(s): that is a seam, not a stripe");
+    // **Within reach of a spade**, which is what `CLAY_BED_SOIL` is for: the
+    // clay starts under the turf and one layer of earth, not under five.
+    assert!(first <= 2, "the clay is {first} blocks down: nobody digs that far to find out it is there");
+    // Earth over it and rock under it -- what makes it read as a band is
+    // that it is between two other things.
+    assert!(
+        primitive_shared::ground::is_soil(column[first - 1]) || column[first - 1] == t::BLOCK_DIRT,
+        "the clay in the bank has {} over it rather than soil",
+        t::block_name(column[first - 1])
+    );
+    assert!(
+        !primitive_shared::ground::is_soil(column[first + run]) && column[first + run] != t::BLOCK_CLAY,
+        "the band runs on into {}",
+        t::block_name(column[first + run])
+    );
+
+    // **And it is out in the open**, which is the difference between a band
+    // a player sees and a band in a save file: the cells west of the clay
+    // are air or water, not more ground.
+    let clay_y = brink_top - first as i32;
+    for k in 0..run as i32 {
+        let beside = s.block((BRINK.0 - 1, clay_y - k, BRINK.1)).map(t::block_kind);
+        assert!(
+            matches!(beside, Some(t::BLOCK_AIR) | Some(t::BLOCK_WATER)),
+            "the clay at {} is walled in by {:?}: nothing to see",
+            clay_y - k,
+            beside.map(t::block_name)
+        );
+    }
+
+    // **Down to the water and look back at the bank**, which is the only
+    // place the face can be seen from and the place a player would be: a
+    // ray from the brink to the cells under it goes *through* the bank's
+    // own blocks -- that was this scenario's first version, and what it
+    // proved is that nobody sees a bank by standing on it.
+    let cell = (BRINK.0, clay_y, BRINK.1);
+    s.hold(Action::Forward);
+    let off = s.until(6.0, |s| s.feet().x < BRINK.0 as f64 - 0.4);
+    s.release_all();
+    s.seconds(1.0);
+    assert!(off, "the player never got off the brink and down to the water: {:?}", s.feet());
+
+    // The crosshair finding the clay is the strongest thing a scenario can
+    // say about "sees it": the ray the game itself casts from the eye lands
+    // on the band rather than on the turf over it or the rock under it.
+    s.look_at_face(cell, (-1, 0, 0));
+    s.frames(2);
+    let aimed = s.aimed();
+    assert_eq!(
+        aimed.map(|(_, b)| t::block_kind(b)),
+        Some(t::BLOCK_CLAY),
+        "the crosshair over the bank finds {:?} rather than the clay at {cell:?}",
+        aimed.map(|(c, b)| (c, t::block_name(b)))
+    );
+    s.shot("clay/bank");
+
+    // **Back on the bank, three spadefuls down.** The other half of the
+    // mechanic and the one a player meets first: the clay is not only in
+    // the face of a bank, it is under the meadow behind it, a spade's
+    // depth down.
+    //
+    // **Dug from dry land and not from the water**, which is where this
+    // scenario tried it first: a swimmer is spending everything they have
+    // on staying up (`stamina`), and twenty seconds of the button held in
+    // the river took nothing at all out of the wall.
+    s.stand_at((BRINK.0 as f64 + 2.5, (brink_top + 1) as f64, BRINK.1 as f64 + 0.5));
+    // **Handfuls, because that is what a dug soil has always given**: a
+    // clay cell comes away in four slices and every slice is a lump
+    // (`build::handfuls_left`), which is what the potter's recipes take.
+    // The bed is a new place to find clay, not a new way of getting it.
+    let before = s.inventory.count(t::BLOCK_HANDFUL_CLAY);
+    let mut taken: Vec<&'static str> = Vec::new();
+    for _ in 0..6 {
+        // Straight down at the block under the feet. Not quite a right
+        // angle: a look direction of exactly (0, -1, 0) has no yaw.
+        s.camera.pitch = -1.5;
+        s.frames(2);
+        let Some((cell, id)) = s.aimed() else {
+            panic!("the crosshair found nothing under the player's feet at {:?}", s.feet())
+        };
+        // The tuft of grass standing on the turf is taken first and is not
+        // a spadeful: it comes off in one swing and the ground under it has
+        // not been touched. Counting it would have made the clay the fourth
+        // block down in a scenario about it being the third.
+        let name = t::block_name(t::block_kind(id));
+        if t::is_collidable(id) {
+            taken.push(name);
+        }
+        s.input.breaking = true;
+        let gone = s.until(25.0, |s| s.block(cell) == Some(t::BLOCK_AIR));
+        s.input.breaking = false;
+        assert!(gone, "the {name} under the player's feet never came out");
+        // Down into the hole they just made, and settled there.
+        s.seconds(0.6);
+        if t::block_kind(id) == t::BLOCK_CLAY {
+            break;
+        }
+    }
+    assert!(
+        taken.last() == Some(&"clay"),
+        "digging down from the meadow behind the bank went through {taken:?} and never reached clay"
+    );
+    assert!(taken.len() <= 3, "the clay was {} spadefuls down: {taken:?}", taken.len());
+    // The lump has to be walked over before it is in the pack, and the
+    // player is standing in the hole it came out of: give it the moment
+    // that takes.
+    assert!(
+        s.until(5.0, |s| s.inventory.count(t::BLOCK_HANDFUL_CLAY) > before),
+        "the clay came out of the ground and never reached the pack"
+    );
+    no_corrections(&s);
+}

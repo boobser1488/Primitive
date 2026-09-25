@@ -239,6 +239,15 @@ fn an_old_worlds_new_chunks_are_the_old_generators_to_the_block() {
 /// moves an older world's: the Regional and Earth prints above are the same
 /// numbers they were, which is what says so.
 ///
+/// **Three of the eight taken again when the clay became a bed** -- the
+/// alluvial sheet under a floodplain's soil and the parting on top of the
+/// sandstone (`WorldGen::clay_bed`, `Beds::at`). The five that did not move
+/// are chunks with neither in them, and that is the other half of the
+/// assertion: both are *somewhere*, not everywhere -- the deep field turns
+/// over in about a hundred and fifty blocks, which is nine chunks, so a
+/// chunk is wholly in a lens district or wholly out of one. The Regional
+/// and Earth prints above did not move at all.
+///
 /// **Six of the eight taken again when the ground started telling a newcomer
 /// where to go** (`landforms`, "What the ground tells a newcomer"): shingle
 /// and flint on the banks of fresh water, bare paths worn to a pond, talus
@@ -250,11 +259,11 @@ fn an_old_worlds_new_chunks_are_the_old_generators_to_the_block() {
 fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
     let held: [((i32, i32), u64); 8] = [
         ((0, 0), 0xcdc1_48db_f291_184b),
-        ((5, -3), 0x9747_dbca_d0c9_496b),
+        ((5, -3), 0x9faf_666e_2823_b1eb),
         ((-40, 90), 0x844e_9b4e_9783_f206),
-        ((313, -77), 0xebf1_8edf_53aa_d500),
+        ((313, -77), 0xdffd_008f_e7cf_d068),
         ((-1875, -1875), 0x42b3_115c_25ea_d3e8),
-        ((-1868, -1872), 0x5da3_7ada_5c77_630d),
+        ((-1868, -1872), 0xa84e_8dee_614a_b222),
         ((-1864, -1864), 0xba6b_a426_448c_80a1),
         ((-1873, -1866), 0x5257_7fdd_6bfb_50a1),
     ];
@@ -275,6 +284,10 @@ fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
 /// evicted and made again, or made by another thread, or made after its
 /// neighbours rather than before, has the same slopes.
 ///
+/// Two of the four were taken again when the clay became a bed: a lip is
+/// the top block of a column and the clay is three below it, so what moved
+/// there is the ground the lip was cut from and not the lip.
+///
 /// Three of the prints were taken again when the lips were let under the
 /// trees, the boulders, the bushes and the stones lying on the slopes
 /// (`lips`, "What stands on a lip"): that is the change they hold, and
@@ -292,9 +305,9 @@ fn the_landforms_lay_the_same_lips_every_time() {
         // fresh water, bare paths to a pond, talus round a cave mouth and
         // copper in a hillside all write into cells a lip then reads.
         ((0, 0), 0x0fe5_0f0f_2c10_d0db),
-        ((5, -3), 0xa806_653a_f684_7c5b),
+        ((5, -3), 0xfe4f_9277_6a8d_ecdb),
         ((-1875, -1875), 0xd3ef_f6d9_0e79_0cc5),
-        ((-1868, -1872), 0x9860_50f9_01eb_4359),
+        ((-1868, -1872), 0xe5b7_6067_47dc_6ff2),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     for ((x, z), print) in held {
@@ -604,13 +617,17 @@ fn what_the_landforms_cost_a_chunk() {
     // with every feature on a slope keeping its whole block
     // (`lips::FEATURES_KEEP_THEIR_STEP`), which is what letting the lips
     // under them costs.
-    let mut spent = [[0f64; 2]; 4];
+    // ...and once more with the clay's two rules off (`worldgen::CLAY_OFF`),
+    // which is what the alluvial bed and the deep parting cost, measured in
+    // the same binary as the ground with them in it.
+    let mut spent = [[0f64; 2]; 5];
     for _round in 0..5 {
-        for (index, (scale, lips, stepped)) in [
-            (Scale::Earth, true, false),
-            (Scale::Landforms, true, false),
-            (Scale::Landforms, false, false),
-            (Scale::Landforms, true, true),
+        for (index, (scale, lips, stepped, clay)) in [
+            (Scale::Earth, true, false, true),
+            (Scale::Landforms, true, false, true),
+            (Scale::Landforms, false, false, true),
+            (Scale::Landforms, true, true, true),
+            (Scale::Landforms, true, false, false),
         ]
         .into_iter()
         .enumerate()
@@ -619,6 +636,7 @@ fn what_the_landforms_cost_a_chunk() {
                 let elapsed = std::thread::spawn(move || {
                     super::lips::LIPS_OFF.with(|off| off.set(!lips));
                     super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(stepped));
+                    super::CLAY_OFF.with(|off| off.set(!clay));
                     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, scale);
                     let clock = Instant::now();
                     for dz in 0..12 {
@@ -634,7 +652,7 @@ fn what_the_landforms_cost_a_chunk() {
             }
         }
     }
-    for (index, name) in ["earth", "landforms", "no lips", "stepped"].iter().enumerate() {
+    for (index, name) in ["earth", "landforms", "no lips", "stepped", "no clay"].iter().enumerate() {
         println!(
             "{name:>9}: {:.2} ms a chunk round the origin, {:.2} ms in hill country",
             spent[index][0] * 1000.0 / (5.0 * 144.0),
