@@ -18973,6 +18973,90 @@ mod shadow_tools {
     }
 
     fn build_world(device: &wgpu::Device, queue: &wgpu::Queue) -> World {
+        build_scene(device, queue, None, 4)
+    }
+
+    /// **The scene the wedges were photographed in**: a levelled stone
+    /// plain with a stepped quarry cut into it. A working is where a
+    /// player meets wide stone faces with drops at their edges, which is
+    /// the one place in the game where a face is both big enough to hold a
+    /// wedge and surrounded by casters that can throw one across it.
+    fn build_quarry(device: &wgpu::Device, queue: &wgpu::Queue) -> World {
+        use primitive_shared::types::{BLOCK_AIR, BLOCK_SAND, BLOCK_STONE};
+        // **A bare stone plain with a quarry cut into it, and nothing
+        // else in the frame.** The player's picture is exactly that: wide
+        // top faces of stone looked down along, a bench or two of steps,
+        // and sand at the bottom of the cut. Grass, flowers and trees are
+        // what the savanna scene is for; here they would only stand
+        // between the camera and the thing being photographed.
+        //
+        // Levelled by hand rather than found: the picture then does not
+        // depend on the generator agreeing with the seed it had when this
+        // was written.
+        // **Sixteen, which is what the report's machine runs**, not the
+        // game's default four: a filtered fetch and a point-sampled one
+        // take different mip levels on a face seen along, and a picture
+        // taken at the wrong setting cannot say whether a seam is the
+        // light or the sampler.
+        build_scene(
+            device,
+            queue,
+            Some(&|sx, sz, size, _ground, set| {
+                let middle = size / 2;
+                for y in (QUARRY_TOP - 10)..=(QUARRY_TOP + 24) {
+                    set(y, if y < QUARRY_TOP { BLOCK_STONE } else { BLOCK_AIR });
+                }
+                // The workings: benches stepping down toward the middle,
+                // three blocks of tread to a block of riser -- the shape
+                // in the report's picture, where every bench is a wide
+                // stone face with a drop at either edge and the next
+                // bench's corner light is not its own.
+                let (dx, dz) = ((sx - middle).abs(), (sz - middle).abs());
+                let out = dx.max(dz);
+                let cut = (8 - out / 3).clamp(0, 8);
+                for y in (QUARRY_TOP - cut)..QUARRY_TOP {
+                    set(y, BLOCK_AIR);
+                }
+                // Sand on the deepest floor, because the report has sand
+                // at the bottom of the cut and says the wedges are hardly
+                // there on it.
+                if cut == 8 {
+                    set(QUARRY_TOP - cut - 1, BLOCK_SAND);
+                }
+                // **One straight wall standing on the open plain**, so the
+                // shadow it throws crosses a wide unbroken stone face at
+                // whatever angle the hour gives -- the one thing in the
+                // scene whose edge can be measured across, in pixels,
+                // against what the setting promises.
+                if (sx - middle - 24).abs() < 1 && (sz - middle).abs() < 16 {
+                    for y in QUARRY_TOP..(QUARRY_TOP + 5) {
+                        set(y, BLOCK_STONE);
+                    }
+                }
+            }),
+            16,
+        )
+    }
+
+    /// Where the quarry's unbroken plain stands: the first cell of air is
+    /// this one, and the stone under it goes down ten courses.
+    const QUARRY_TOP: i32 = 72;
+
+    /// A column of the scene and what to write into it, cell by cell, in
+    /// the order the carve wants them. See `build_quarry`.
+    type Carve<'a> =
+        &'a dyn Fn(i32, i32, i32, i32, &mut dyn FnMut(i32, primitive_shared::types::BlockId));
+
+    /// `build_world`'s body, with a hook for digging. Sharing it is what
+    /// keeps the quarry's lighting, meshing and upload the same code the
+    /// savanna's went through -- a second copy would be a second thing to
+    /// doubt when the two pictures differ.
+    fn build_scene(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        carve: Option<Carve>,
+        anisotropy: u16,
+    ) -> World {
         use crate::logic::chunk_manager::ChunkManager;
         use primitive_shared::lighting::LightMap;
         use primitive_shared::types::{block_kind, BLOCK_LOG, CHUNK_SIZE_Y};
@@ -18980,13 +19064,20 @@ mod shadow_tools {
 
         let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
         // Four, the game's default anisotropy, so the terrain takes the
-        // same sampling path the game's does.
-        let textures = TextureManager::load(device, queue, assets, 4).expect("textures load");
+        // same sampling path the game's does -- and whatever the caller
+        // asks for where a report came off a machine set otherwise.
+        let textures =
+            TextureManager::load(device, queue, assets, anisotropy).expect("textures load");
         let generator = WorldGen::new(1337);
 
         // Open, flat and dotted with lone trees: the place a shadow is
-        // easiest to judge, and the savanna tool's own search.
-        let savanna = |x: i32, z: i32| generator.biome_at(x, z) == Biome::Savanna;
+        // easiest to judge, and the savanna tool's own search. A carve
+        // takes any dry land, because a pit's walls are its own subject
+        // and there is no savanna on every seed the generator has had.
+        let savanna = |x: i32, z: i32| {
+            (carve.is_some() || generator.biome_at(x, z) == Biome::Savanna)
+                && generator.height_at(x, z) > primitive_shared::worldgen::SEA_LEVEL + 3
+        };
         let mut best: Option<((usize, i32), (i32, i32))> = None;
         for gz in (-3000..3000).step_by(64) {
             for gx in (-3000..3000).step_by(64) {
@@ -19007,7 +19098,7 @@ mod shadow_tools {
                 }
             }
         }
-        let (_, at) = best.expect("no savanna within three kilometres of spawn on seed 1337");
+        let (_, at) = best.expect("no open flat ground within three kilometres of spawn on seed 1337");
 
         let span = 15i32;
         let first = (
@@ -19021,11 +19112,38 @@ mod shadow_tools {
         let mut trunks = Vec::new();
         for dz in 0..span {
             for dx in 0..span {
-                let chunk = generator.generate_chunk(ChunkPos::new(first.0 + dx, first.1 + dz));
+                let mut chunk = generator.generate_chunk(ChunkPos::new(first.0 + dx, first.1 + dz));
+                if let Some(carve) = carve {
+                    let mut writes = Vec::new();
+                    for lz in 0..CHUNK_SIZE_Z as i32 {
+                        for lx in 0..CHUNK_SIZE_X as i32 {
+                            let (sx, sz) =
+                                (dx * CHUNK_SIZE_X as i32 + lx, dz * CHUNK_SIZE_Z as i32 + lz);
+                            let ground = generator.height_at(corner.0 + sx, corner.1 + sz);
+                            writes.clear();
+                            carve(sx, sz, size, ground, &mut |y, id| writes.push((y, id)));
+                            for &(y, id) in &writes {
+                                if y > 0 && (y as usize) < CHUNK_SIZE_Y {
+                                    chunk.set(lx as usize, y as usize, lz as usize, id);
+                                }
+                            }
+                        }
+                    }
+                }
                 for lz in 0..CHUNK_SIZE_Z as i32 {
                     for lx in 0..CHUNK_SIZE_X as i32 {
                         let (sx, sz) = (dx * CHUNK_SIZE_X as i32 + lx, dz * CHUNK_SIZE_Z as i32 + lz);
-                        let h = generator.height_at(corner.0 + sx, corner.1 + sz);
+                        // The generator's height, and then the dug floor
+                        // where a carve has taken the ground away: a seat
+                        // put at `World::ground` has to stand on the pit's
+                        // floor, not in the air where the field used to be.
+                        let mut h = generator.height_at(corner.0 + sx, corner.1 + sz);
+                        while h > 0
+                            && chunk.get(lx as usize, h as usize, lz as usize)
+                                == primitive_shared::types::BLOCK_AIR
+                        {
+                            h -= 1;
+                        }
                         heights[(sz * size + sx) as usize] = h;
                         if h + 1 < CHUNK_SIZE_Y as i32
                             && block_kind(chunk.get(lx as usize, (h + 1) as usize, lz as usize)) == BLOCK_LOG
@@ -19099,6 +19217,9 @@ mod shadow_tools {
         Off,
         /// The setting on: the shadow pass and the shadowed pipelines.
         On,
+        /// The same, at the Hard step: one texel read and compared, with
+        /// nothing blended (`shadow_bias.w`). See `sunlit_share`.
+        Sharp,
     }
 
     /// Everything one camera frame needs, built once and drawn many times.
@@ -19116,6 +19237,14 @@ mod shadow_tools {
         plain: (wgpu::RenderPipeline, wgpu::RenderPipeline),
         before: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
         map: ShadowMap,
+        /// **How far the shadows reach, from the settings and not from the
+        /// constant.** `ClientSettings::shadow_distance` goes to 192 and
+        /// the default is 96: at 192 one texel of the map is 0.19 of a
+        /// block instead of 0.09, which is the whole difference between a
+        /// shadow that lands on its caster's own edge and one that does
+        /// not. A tool pinned to the constant cannot photograph a report
+        /// from a machine set otherwise.
+        radius: f32,
         target: wgpu::Texture,
         target_view: wgpu::TextureView,
         sample_view: Option<wgpu::TextureView>,
@@ -19125,6 +19254,7 @@ mod shadow_tools {
     const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
     impl<'a> Rig<'a> {
+        #[allow(clippy::too_many_arguments)] // a camera, a target and two settings
         fn new(
             device: &'a wgpu::Device,
             queue: &'a wgpu::Queue,
@@ -19132,6 +19262,15 @@ mod shadow_tools {
             width: u32,
             height: u32,
             samples: u32,
+            // How far the shadows reach, in blocks. See `Rig::radius`.
+            radius: f32,
+            // **Which lighting step to compile**, because it is a
+            // different shader and not a different uniform: `LIGHTING`
+            // decides whether the beam is split into a warm key and a cool
+            // fill at all, and whether the shadow lookup takes a second
+            // ring of taps. A tool pinned to Simple cannot photograph what
+            // a player running High reports.
+            quality: crate::engine::lighting::Quality,
         ) -> Self {
             use wgpu::util::DeviceExt;
             let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -19245,7 +19384,7 @@ mod shadow_tools {
                 };
                 (make("fs_solid", Some(wgpu::Face::Back)), make("fs_cutout", None))
             };
-            let plain = pair(include_str!("shader.wgsl"));
+            let plain = pair(&quality.specialise(include_str!("shader.wgsl")));
             let before = std::env::var("SHADOW_BEFORE_WGSL")
                 .ok()
                 .map(|path| std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")))
@@ -19260,7 +19399,7 @@ mod shadow_tools {
                 crate::engine::shadow::RESOLUTION,
                 (MAX_CHUNK_DRAWS * std::mem::size_of::<[f32; 4]>()) as u64,
                 (MAX_CHUNK_DRAWS * Ranges::MAX * std::mem::size_of::<IndirectDraw>()) as u64,
-                crate::engine::lighting::Quality::Simple,
+                quality,
                 crate::engine::texture::AtlasSplit::ONE,
             );
             let zero_offset = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -19314,6 +19453,7 @@ mod shadow_tools {
                 plain,
                 before,
                 map,
+                radius,
                 target,
                 target_view,
                 sample_view,
@@ -19360,7 +19500,7 @@ mod shadow_tools {
             globals.fill_color = [fill.x, fill.y, fill.z, 0.0];
 
             // The frame's own decision, as `render` makes it.
-            let light = (mode == Mode::On)
+            let light = matches!(mode, Mode::On | Mode::Sharp)
                 .then(|| crate::engine::shadow::strength(sun, 0.0))
                 .filter(|strength| *strength > 0.0)
                 .map(|strength| {
@@ -19368,7 +19508,7 @@ mod shadow_tools {
                         sun,
                         eye + origin,
                         origin,
-                        crate::engine::shadow::RADIUS,
+                        self.radius,
                         self.map.resolution,
                         strength,
                     )
@@ -19376,6 +19516,7 @@ mod shadow_tools {
             if let Some(light) = &light {
                 (globals.shadow_view_proj, globals.shadow_params, globals.shadow_bias) =
                     light.globals(self.map.resolution);
+                globals.shadow_bias[3] = f32::from(mode == Mode::Sharp);
             }
             self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
 
@@ -19456,7 +19597,9 @@ mod shadow_tools {
                     occlusion_query_set: None,
                 });
                 let (solid, cutout, group) = match (mode, &light) {
-                    (Mode::On, Some(_)) => (&self.map.solid, &self.map.cutout, Some(&self.map.bind_group)),
+                    (Mode::On | Mode::Sharp, Some(_)) => {
+                        (&self.map.solid, &self.map.cutout, Some(&self.map.bind_group))
+                    }
                     (Mode::Before, _) => {
                         let before = self.before.as_ref().expect("SHADOW_BEFORE_WGSL names the old shader");
                         (&before.0, &before.1, None)
@@ -19587,7 +19730,7 @@ mod shadow_tools {
         let out = std::env::var("GPU_REPRO_DIR").unwrap_or_else(|_| ".".to_string());
         std::fs::create_dir_all(&out).expect("output directory");
         let world = build_world(device, queue);
-        let rig = Rig::new(device, queue, &world, 1280, 720, 4);
+        let rig = Rig::new(device, queue, &world, 1280, 720, 4, crate::engine::shadow::RADIUS, crate::engine::lighting::Quality::Simple);
         // Sunrise (the sun five degrees up, shadows fading in and very
         // long), morning, noon, evening -- each drawn twice, with the
         // setting off and on, and what the shadow took written beside
@@ -19634,6 +19777,122 @@ mod shadow_tools {
         assert!(brightened.is_empty(), "a shadow made pixels lighter: {brightened:?}");
     }
 
+    /// **A quarry at the settings the report came from**, photographed
+    /// with the shadows off, at the Soft step and at the Hard one.
+    ///
+    /// ```text
+    /// GPU_REPRO_DIR=C:/Users/Admin/Downloads/flatcraft/shots/quarry \
+    ///     cargo test -p primitive_client --lib \
+    ///     what_a_quarry_wall_looks_like -- --ignored --nocapture
+    /// ```
+    ///
+    /// The report was "что с тенями": big stone faces cut corner to corner
+    /// by a hard line, one half of the face about a sixth brighter than
+    /// the other in the frame and a third brighter in light, and a saw of
+    /// little triangles down the column of faces beside it.
+    ///
+    /// **Three seats and four hours at the reporter's own settings**, and
+    /// the settings are the point of this tool: High lighting, anisotropy
+    /// sixteen, and a shadow radius of 192 rather than the constant's 96.
+    /// The lighting step is a different *shader* (`LIGHTING`), and the
+    /// radius decides how big a texel of the shadow map is -- 0.19 of a
+    /// block at 192 against 0.09 at 96 -- which is the whole difference
+    /// between a shadow edge that reads as a line and one that reads as a
+    /// staircase. `what_the_shadows_look_like` stays at the defaults
+    /// because its measurements were taken there.
+    ///
+    /// **Off, Soft and Hard, because the three tell each other apart.**
+    /// Anything the shadowless frame has is not the shadows. What Soft and
+    /// Hard disagree about is only the edge: Hard reads one texel and
+    /// compares it itself, so its edges are razor and stepped along the
+    /// map's grid, while Soft spreads them over a texel or two
+    /// (`sunlit_share`). A report whose edges cross in one pixel is a
+    /// report about Hard, whatever the settings file says today.
+    ///
+    /// **What this ruled out.** The first three guesses about the wedges
+    /// were the merge, the triangulation and the blocks' own shade, and
+    /// none of them survives: see `mesh::one_face_one_word` for the two
+    /// that are now tests, and the block shade is present with the same
+    /// amplitude on both sides of the line (a few levels of 255 against a
+    /// step of eighteen), so `PRIMITIVE_OPT_BLOCK_SHADE=0` takes the
+    /// chequer away and leaves the wedge exactly where it was.
+    #[test]
+    #[ignore = "a tool: needs a GPU; photographs a quarry wall to GPU_REPRO_DIR"]
+    fn what_a_quarry_wall_looks_like() {
+        let Some((device, queue)) = crate::engine::test_gpu() else {
+            println!("no GPU adapter on this machine; skipping");
+            return;
+        };
+        let out = std::env::var("GPU_REPRO_DIR").unwrap_or_else(|_| ".".to_string());
+        std::fs::create_dir_all(&out).expect("output directory");
+        let world = build_quarry(device, queue);
+        // High, and sixteen samples of anisotropy above: the report's own
+        // settings file. See `build_quarry`.
+        let rig =
+            Rig::new(device, queue, &world, 1280, 720, 4, 192.0, crate::engine::lighting::Quality::High);
+        let middle = world.size / 2;
+        let floor = world.ground(middle, middle);
+        println!("quarry floor at y {floor}, plain at {}", world.ground(middle, 4));
+        let at = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
+        let m = middle as f32;
+        let top = QUARRY_TOP as f32;
+        // Standing on a bench looking along it into the cut, which is the
+        // report's own seat: a wide stone face filling the lower half of
+        // the frame, seen *along* rather than square on, with the benches
+        // beyond it. Then the same working from above, and from the floor.
+        let seats = [
+            ("bench", at(m + 13.5, top - 4.0 + 1.62, m + 13.5), at(m - 2.0, top - 7.0, m - 2.0)),
+            ("along", at(m + 19.5, top - 2.0 + 1.62, m + 1.5), at(m - 6.0, top - 6.0, m + 4.0)),
+            ("floor", at(m + 2.5, top - 8.0 + 1.62, m + 2.5), at(m + 16.0, top - 2.0, m + 16.0)),
+            // Standing on the plain a dozen blocks down-sun of the wall,
+            // looking along its shadow. See the wall in `build_quarry`.
+            ("wall", at(m + 24.5, top + 16.0, m + 34.5), at(m + 24.0, top + 1.0, m + 4.0)),
+        ];
+        for (name, eye, look) in seats {
+            for (when, t) in
+                [("2_morning", 0.36f32), ("3_midmorning", 0.41), ("4_noon", 0.5), ("5_afternoon", 0.60)]
+            {
+                rig.frame(Mode::Off, eye, look, t);
+                let off = rig.read();
+                rig.frame(Mode::On, eye, look, t);
+                let on = rig.read();
+                rig.frame(Mode::Sharp, eye, look, t);
+                let sharp = rig.read();
+                off.save(format!("{out}/quarry_{name}_{when}_off.png")).expect("write png");
+                on.save(format!("{out}/quarry_{name}_{when}_soft.png")).expect("write png");
+                sharp.save(format!("{out}/quarry_{name}_{when}_hard.png")).expect("write png");
+                println!(
+                    "{name} {when}: hard steps off {} soft {} hard {}",
+                    hard_steps(&off),
+                    hard_steps(&on),
+                    hard_steps(&sharp)
+                );
+            }
+        }
+    }
+
+    /// How many pixels of a frame are the bright side of a hard step: a
+    /// jump of more than a tenth against the pixel to the left and the
+    /// same jump again against the one above. A block's own mottle is a
+    /// few per cent and a texture's own pixels step along one axis at a
+    /// time, so what this counts is a corner of something, or a line that
+    /// crosses the pixel grid at an angle -- which is what a wedge is.
+    fn hard_steps(picture: &image::RgbaImage) -> usize {
+        let luma =
+            |p: &image::Rgba<u8>| (u32::from(p[0]) * 3 + u32::from(p[1]) * 6 + u32::from(p[2])) / 10;
+        let mut count = 0;
+        for y in 1..picture.height() {
+            for x in 1..picture.width() {
+                let here = luma(picture.get_pixel(x, y)) as i32;
+                let left = luma(picture.get_pixel(x - 1, y)) as i32;
+                let up = luma(picture.get_pixel(x, y - 1)) as i32;
+                let step = |other: i32| (here - other).abs() * 10 > here.max(other);
+                count += usize::from(step(left) && step(up));
+            }
+        }
+        count
+    }
+
     /// **What the setting costs, measured rather than argued.**
     ///
     /// The same scene and the same camera through three frames: the shader
@@ -19655,7 +19914,7 @@ mod shadow_tools {
             return;
         };
         let world = build_world(device, queue);
-        let rig = Rig::new(device, queue, &world, 1920, 1080, 4);
+        let rig = Rig::new(device, queue, &world, 1920, 1080, 4, crate::engine::shadow::RADIUS, crate::engine::lighting::Quality::Simple);
         let mut modes = vec![Mode::Off, Mode::On];
         if rig.before.is_some() {
             modes.insert(0, Mode::Before);

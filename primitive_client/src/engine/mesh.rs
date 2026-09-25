@@ -16856,3 +16856,153 @@ mod leaf_ice_rack_tests {
         }
     }
 }
+
+
+/// **What a face's two triangles are allowed to disagree about**, which is
+/// the question a report of diagonal wedges asks.
+///
+/// The report was "что с тенями": big stone faces in a quarry cut corner to
+/// corner by a hard line, one half of the face a sixth brighter than the
+/// other, and a saw of little triangles down the column of faces beside it.
+/// A quad is two triangles meeting along a diagonal, so "the diagonal did
+/// it" is the first thing anyone says -- and there are exactly two ways a
+/// diagonal *can* show, and both are ruled out here rather than argued
+/// about:
+///
+/// * **A flat interpolant taken from the provoking vertex.** `lambert`, the
+///   texture layer, the tint and the two flags are `@interpolate(flat)` in
+///   `shader.wgsl`, and a triangle takes them from its own first vertex.
+///   Two triangles of one quad have different first vertices
+///   (`triangulate_edged_rect` emits `(a, b, d)` and `(b, c, d)`), so if
+///   ever a face's corners disagreed about any of them, its two halves
+///   would come out painted differently with a razor edge between. They
+///   never do, and `every_triangle_of_a_terrain_face_carries_one_flat_word`
+///   is what says so.
+/// * **A merged rectangle's corner light stretched over its whole length.**
+///   The greedy merge only ever joins cells whose four corners agree
+///   *exactly* -- the `uniform` test in `build_mesh` -- so a rectangle
+///   thirty-one cells long carries one sky, one block level and one
+///   occlusion at every one of its corners, and nothing is interpolated
+///   across it at all.
+///   `a_face_merged_across_cells_carries_one_light_at_every_corner` holds
+///   that, because the day somebody relaxes `uniform` to merge "nearly
+///   equal" faces is the day a corner's shadow really is smeared over
+///   several metres.
+///
+/// Everything else a terrain fragment reads is either a smooth interpolant
+/// -- continuous across the diagonal by construction, two triangles agreeing
+/// along the edge they share -- or a screen derivative of `uv`, and `uv` is
+/// an affine function of the world position on a planar face, which
+/// perspective-correct interpolation reproduces exactly and identically in
+/// both triangles. So a *hard* line down a face's diagonal cannot come from
+/// the shading at all; it is a shadow's edge, or two surfaces meeting.
+#[cfg(test)]
+mod one_face_one_word {
+    use super::*;
+    use crate::engine::texture::FaceLayers;
+    use crate::logic::chunk_manager::ChunkManager;
+    use primitive_shared::lighting::LightMap;
+    use primitive_shared::types::{BLOCK_AIR, CHUNK_SIZE_Y};
+    use primitive_shared::worldgen::WorldGen;
+
+    /// Everything `shader.wgsl` reads out of `packed` with `flat` on it:
+    /// the face index, the layer's two low halves, the tint byte and the
+    /// translucent and mottled bits. See `Vertex::packed`.
+    const FLAT: u32 = 0b111 << 10 | TRANSLUCENT_BIT | MOTTLED_BIT | 1 << 15 | 0xFFFF_0000;
+
+    /// A quarry dug into the generated world: benches stepping down toward
+    /// the middle, which is the shape the report's picture has and the one
+    /// that gives a chunk faces of every size, every occlusion and every
+    /// sky level at once.
+    fn quarried_chunk() -> MeshBuffers {
+        let generator = WorldGen::new(1337);
+        let mut chunks = ChunkManager::new(64);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let mut chunk = generator.generate_chunk(ChunkPos::new(dx, dz));
+                for lz in 0..CHUNK_SIZE_Z {
+                    for lx in 0..CHUNK_SIZE_X {
+                        let wx = dx * CHUNK_SIZE_X as i32 + lx as i32;
+                        let wz = dz * CHUNK_SIZE_Z as i32 + lz as i32;
+                        let cut = (8 - wx.abs().max(wz.abs()) / 3).clamp(0, 8);
+                        let top = generator.height_at(wx, wz);
+                        for y in (top - cut + 1)..=(top + 4) {
+                            if y > 0 && (y as usize) < CHUNK_SIZE_Y {
+                                chunk.set(lx, y as usize, lz, BLOCK_AIR);
+                            }
+                        }
+                    }
+                }
+                chunks.insert(chunk);
+            }
+        }
+        let mut light = LightMap::new();
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                light.load_chunk(&chunks, ChunkPos::new(dx, dz));
+            }
+        }
+        let mut cache = Neighbourhood::default();
+        cache.fill(ChunkPos::new(0, 0), &chunks, &light);
+        let mut out = MeshBuffers::default();
+        build_mesh(
+            ChunkPos::new(0, 0),
+            &cache,
+            &FaceLayers::empty_for_test(),
+            &generator,
+            &mut out,
+        );
+        out
+    }
+
+    #[test]
+    fn every_triangle_of_a_terrain_face_carries_one_flat_word() {
+        let mesh = quarried_chunk();
+        assert!(mesh.indices.len() > 3000, "the quarry meshed to nothing");
+        for tri in mesh.indices.chunks_exact(3) {
+            let word = |i: usize| mesh.vertices[tri[i] as usize].packed & FLAT;
+            assert!(
+                word(0) == word(1) && word(1) == word(2),
+                "a triangle's corners disagree about a flat interpolant: \
+                 {:08x} {:08x} {:08x}",
+                word(0),
+                word(1),
+                word(2)
+            );
+        }
+    }
+
+    #[test]
+    fn a_face_merged_across_cells_carries_one_light_at_every_corner() {
+        let mesh = quarried_chunk();
+        let mut merged = 0usize;
+        for tri in mesh.indices.chunks_exact(3) {
+            let at = |i: usize| mesh.vertices[tri[i] as usize].position;
+            let light = |i: usize| mesh.vertices[tri[i] as usize].packed & LIGHT_MASK;
+            // A triangle whose corners stand more than one cell apart on
+            // some axis belongs to a rectangle the merge made; a lone
+            // face's corners are a block apart at the most.
+            let span = (0..3)
+                .flat_map(|a| (0..3).map(move |b| (a, b)))
+                .map(|(a, b)| {
+                    let (p, q) = (at(a), at(b));
+                    (p[0] - q[0]).abs().max((p[1] - q[1]).abs()).max((p[2] - q[2]).abs())
+                })
+                .fold(0.0f32, f32::max);
+            if span <= 1.001 {
+                continue;
+            }
+            merged += 1;
+            assert!(
+                light(0) == light(1) && light(1) == light(2),
+                "a rectangle {span} cells across carries different light at its \
+                 corners: {:04x} {:04x} {:04x} -- the merge is smearing one \
+                 corner's shade over the whole of it",
+                light(0),
+                light(1),
+                light(2)
+            );
+        }
+        assert!(merged > 100, "the scene has no merged rectangles to check ({merged})");
+    }
+}
