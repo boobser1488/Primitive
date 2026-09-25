@@ -65,4 +65,8 @@
 pub mod body;
 pub mod effects;
 pub mod events;
+pub mod hands;
+pub mod interface;
+pub mod scene;
+pub mod sound;
 pub mod streaming;

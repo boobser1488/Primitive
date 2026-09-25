@@ -70,9 +70,9 @@ mod scenario;
 // block itself is the map: anything used unqualified in this file is on
 // one of these five lines.
 use audio::{Audio, Soundscape};
-use engine::{fog, mesh, mesher, texture};
+use engine::{fog, mesher, texture};
 use logic::{entities, hand, menu_scene, mining, physics, shake, stamina, worlds};
-use net::{network, remote_players};
+use net::network;
 use ui::{
     chat, chest_screen, death, hotbar, hud, ime, input, inventory_screen, keybinds, menu,
     station_screen, widgets,
@@ -759,32 +759,13 @@ fn run(
     // looked, and whether it was looking. See the scan below.
     let mut last_heat = primitive_shared::crafting::Heat::NONE;
     let mut heat_was_open = false;
-    let mut entity_mesh = graphics.new_dynamic_mesh();
-    let mut particle_mesh = graphics.new_dynamic_mesh();
-    // How many of `particle_mesh`'s indices go before the water. Kept with
-    // the mesh, because the mesh is not rebuilt every frame and the two have
-    // to describe the same buffer. See `Particles::behind_water_first`.
-    let mut particles_behind_water: u32 = 0;
-    let mut actor_mesh = graphics.new_dynamic_mesh();
-    // The cracks on the block being mined. Its own mesh because it is
-    // textured and blended, where the outline around the same block is
-    // flat geometry on the actor pipeline.
-    let mut break_mesh = graphics.new_dynamic_mesh();
-    let mut break_vertices: Vec<mesh::Vertex> = Vec::new();
-    let mut break_indices: Vec<u32> = Vec::new();
-    let mut entity_vertices: Vec<mesh::Vertex> = Vec::new();
-    let mut particle_vertices: Vec<engine::particles::ParticleVertex> = Vec::new();
-    let mut particle_indices: Vec<u32> = Vec::new();
-    let mut entity_indices: Vec<u32> = Vec::new();
-    // Dropped items are sprites with a thickness rather than cubes, so
-    // they have their own vertex format and their own buffer. See
-    // `engine::item_model`.
-    let mut item_mesh = graphics.new_dynamic_mesh();
-    let mut item_vertices: Vec<engine::item_model::ItemVertex> = Vec::new();
-    let mut item_indices: Vec<u32> = Vec::new();
+    // Every buffer the moving geometry is rebuilt into, on the CPU and
+    // on the card. One type rather than nineteen locals -- see
+    // `frame::scene::Dynamic`, which also says why the rebuild is on a
+    // clock rather than on every frame.
+    let mut dynamic = frame::scene::Dynamic::new(&graphics);
     // The player's own arm. Its vertices are in view space rather than
-    // in the world -- see `logic::hand` -- which is why it is a buffer of
-    // its own rather than more geometry in the item one.
+    // in the world -- see `logic::hand`.
     let mut hand = hand::Hand::new();
     // A mouthful under way, and when the last one went to the server. See
     // `Meal`.
@@ -793,11 +774,6 @@ fn run(
     // `Cut`.
     let mut cut: Option<Cut> = None;
     let mut meal_sent: Option<Instant> = None;
-    let mut hand_mesh = graphics.new_dynamic_mesh();
-    let mut hand_vertices: Vec<hand::HandVertex> = Vec::new();
-    let mut hand_indices: Vec<u32> = Vec::new();
-    let mut actor_vertices: Vec<remote_players::ActorVertex> = Vec::new();
-    let mut actor_indices: Vec<u32> = Vec::new();
     // Where the other players are, for the collision pass. See the
     // note where it is filled.
     let mut other_positions: Vec<glam::DVec3> = Vec::new();
@@ -3100,373 +3076,61 @@ fn run(
 
                     // --- mining, and hitting people ---
                     //
-                    // Breaking takes time, so it advances here rather
-                    // than on the click. A dead or paused player is not
-                    // swinging at anything.
-                    // ...and a hand on the sheets is not a hand on a pick.
-                    // The same button does both, so the one the player is
-                    // actually using has to take it: without this, bracing
-                    // the yard from the stern would also be swinging at the
-                    // planks under the rower, and five of those break the
-                    // raft (`raft::HITS_TO_BREAK`).
-                    // ...and a body on the ground has hands for itself and
-                    // nothing else: no pick, no blow (the server refuses
-                    // both anyway -- `barred_while_downed` -- and a crack
-                    // that grew on a block nobody could break would be a lie).
-                    let can_mine = world_ready
-                        && !paused
-                        && !death.is_open()
-                        && body.downed.is_none()
-                        && input.mouse_grabbed
-                        && trimming.is_none();
-
-                    // Someone under the crosshair takes the swing before
-                    // the world behind them does. Nearer than whatever
-                    // block is there, or a punch through a wall would
-                    // land -- the server checks the distance, but it has
-                    // no idea what is between the two of them.
-                    // ...and an animal takes it before the world does,
-                    // for the same reason and one rung down: a person in
-                    // front of a deer takes the blow, and a deer in
-                    // front of a wall stops the wall coming apart.
-                    //
-                    // Looked for when a blow could start *or land*: a
-                    // thrust lands when its point is out
-                    // (`hand::impact_seconds`), which can be after the
-                    // button was let go, so the button is not the only
-                    // reason to cast the ray any more.
-                    let held_now = inventory.block_in(input.hotbar_slot);
-                    let under_crosshair = if can_mine && (input.breaking || strikes.due(now)) {
-                        player_under_crosshair(&remote_players, &chunks, &camera, held_now)
-                            .map(Aimed::Player)
-                            .or_else(|| {
-                                animal_under_crosshair(&entities, &chunks, &camera, held_now)
-                                    .map(Aimed::Animal)
-                            })
-                    } else {
-                        None
-                    };
-                    // Someone is being swung at, which keeps mining out of
-                    // the way: the wall behind them must not come apart in
-                    // the gaps between blows.
-                    let struck = input.breaking && under_crosshair.is_some();
-                    // ...and whether a blow starts or lands this frame.
-                    // The message leaves on the landing, aimed at whoever
-                    // is under the crosshair *then*: a deer that stepped
-                    // off the line while the spear was drawn is a miss,
-                    // and a miss sends nothing.
-                    let beat = strikes.frame(now, struck, held_now);
-                    if beat.lands {
-                        if let Some(target) = under_crosshair {
-                            send_blow(target, net, &mut debug_stats);
-                            soundscape.on_strike(&audio, true);
-                        }
-                    }
-
-                    // Anything a bare hand cannot get through is not
-                    // aimed at for the purpose of mining: the progress
-                    // bar never starts and the cracks never appear,
-                    // rather than filling up and achieving nothing.
-                    //
-                    // Nor is anything behind a player being hit: one
-                    // button, one thing at a time, or a fight in front
-                    // of a wall quietly digs it out.
-                    //
-                    // What "a bare hand" means now depends on what is in
-                    // the selected slot: the same rock that ignores
-                    // fingers gives way to a pick. The client predicts
-                    // this so the bar and the cracks agree with what the
-                    // server will allow -- both sides read the same
-                    // `break_seconds_with`, which is the whole reason it
-                    // lives in `primitive_shared`.
-                    let held_tool = inventory.block_in(input.hotbar_slot);
-                    // ...and how well that tool was made, which is a small
-                    // divisor on the time (`quality::speed_scale`) and the
-                    // stamina both. Off the stack and not the id: a fine
-                    // pick and a poor one are the same block.
-                    let tool_quality = inventory
-                        .slots()
-                        .get(input.hotbar_slot)
-                        .copied()
-                        .flatten()
-                        .map_or(primitive_shared::quality::Quality::PLAIN, |s| s.quality());
-                    //
-                    // **And the ray this one casts is blind to water**, which
-                    // the right click's is not: see `aimed_block_to_mine` for
-                    // the player report that was, and for why one ray cannot
-                    // answer both gestures.
-                    let aim = if can_mine && !struck {
-                        aimed_block_to_mine(&chunks, &camera).filter(|(_, block)| {
-                            primitive_shared::types::is_breakable_with(*block, held_tool)
-                        })
-                    } else {
-                        None
-                    };
-                    // Digging is work, and it comes out of the same tank
-                    // running and jumping do. An exhausted player digs
-                    // slower rather than not at all -- see
-                    // `stamina::EXHAUSTED_DIG_RATE` -- so the progress
-                    // the swing makes is scaled here and the bill is
-                    // paid on the swing that finished.
-                    // ...and a broken arm digs at half, on the same terms:
-                    // the swing is slower, the block is not softer. See
-                    // `injury::BROKEN_ARM_STRENGTH`.
-                    let dug = mining.update(
-                        aim,
-                        can_mine && input.breaking,
-                        dt * stamina.dig_rate() * body.injuries.strength_factor(),
-                        held_tool,
-                        tool_quality,
-                    );
-                    // The outline and the cracks go where the target is in
-                    // the world -- a leaning palm where it leans. See
-                    // `Mining::fit_outline`.
-                    mining.fit_outline(|cell, block| {
-                        primitive_shared::geometry::block_box_for_aim_near(block, cell.0, cell.1, cell.2, false, |dx, dy, dz| {
-                            chunks
-                                .block_at(cell.0 + dx, cell.1 + dy, cell.2 + dz)
-                                .unwrap_or(primitive_shared::types::BLOCK_AIR)
-                        })
-                    });
-                    if let Some(cell) = dug {
-                        // Billed for the work the swing actually was: a
-                        // pick makes a block cheaper in seconds, and the
-                        // tank is measured in seconds, so a better tool
-                        // is less tiring as well as faster.
-                        // ...and for the work the *swing* was: a block that
-                        // comes away in quarters is four swings of a
-                        // quarter of the bill, which adds up to the bill it
-                        // always was. See `dig::swing_seconds`.
-                        if let Some(seconds) = aim.and_then(|(_, block)| {
-                            primitive_shared::dig::swing_seconds_made(block, held_tool, tool_quality)
-                        }) {
-                            stamina.spend_dig(seconds);
-                        }
-                        // **A slice or a break, and the block decides
-                        // which.** Everything that happens when a block
-                        // finally goes -- the drop, the tool's wear, the
-                        // collapse -- is the break path, so the last slice
-                        // is the break message it always was and only the
-                        // ones before it are `Dig`. See `dig::next_bite`.
-                        let face = aimed_face_to_mine(&chunks, &camera);
-                        let sliced = match (aim, face) {
-                            (Some((_, block)), Some(face)) => {
-                                primitive_shared::dig::Side::from_normal((
-                                    i32::from(face.0),
-                                    i32::from(face.1),
-                                    i32::from(face.2),
-                                ))
-                                .and_then(|side| primitive_shared::dig::next_bite(block, side))
-                                .is_some()
-                            }
-                            _ => false,
-                        };
-                        if sliced {
-                            request_dig(&chunks, cell, face.unwrap_or((0, 1, 0)), net, &mut debug_stats);
-                        } else {
-                            request_break(&chunks, cell, net, &mut debug_stats);
-                        }
-                    }
-                    // The arm follows from all of that rather than
-                    // deciding any of it: a blow lands on a player, or a
-                    // block is coming apart, and the hand is what that
-                    // looks like. Advanced every frame even though the
-                    // geometry is only rebuilt at `DYNAMIC_REBUILD_HZ` --
-                    // the state is a few floats, and letting it skip
-                    // frames would make the swing's length depend on the
-                    // frame rate.
-                    //
-                    // **One blow on screen per blow struck.** The arm used
-                    // to be started on every frame someone was under the
-                    // crosshair, so a fist fight swung twice for each punch
-                    // the cooldown let through and a spear jabbed three
-                    // times for each thrust. It starts when `Strikes` says
-                    // a blow does, and lasts as long as the blow is refused
-                    // for (`hand::blow_seconds`).
-                    if beat.starts {
-                        hand.strike(held_now);
-                    }
-                    // Not "the button is down": swinging at thin air or at
-                    // bedrock is a click, not a rhythm. `aim` is what the
-                    // client believes is actually coming apart under the
-                    // crosshair.
-                    let digging_now = can_mine && input.breaking && aim.is_some();
-                    // A block set down, a mouthful or a drink the server let
-                    // through, acted out by the player's own hand. See
-                    // `Hand::gesture`.
-                    if let Some(action) = remote_players.take_own_gesture() {
-                        // A mouthful this hand already lifted for (`Meal`)
-                        // is not lifted a second time when the server says
-                        // it went down.
-                        let echoed = matches!(action, protocol_action::Eat | protocol_action::Drink)
-                            && meal_sent.is_some_and(|at| at.elapsed().as_secs_f32() < 1.5);
-                        if !echoed {
-                            hand.gesture(action);
-                        }
-                    }
-                    // ...and the cut under way, sent when the knife is through.
-                    if let Some(cutting) = cut {
-                        let aimed_now = aimed_block(&chunks, &camera);
-                        match cutting.due(aimed_now, input.hotbar_slot, Instant::now()) {
-                            CutStep::Cutting => {
-                                // The knife keeps working: a stroke whenever
-                                // the last one has finished.
-                                hand.strike(inventory.block_in(input.hotbar_slot));
-                            }
-                            CutStep::Abandoned => cut = None,
-                            CutStep::Through => {
-                                cut = None;
-                                net.send(ClientMessage::UseBlock {
-                                    global_x: cutting.cell.0,
-                                    global_y: cutting.cell.1,
-                                    global_z: cutting.cell.2,
-                                });
-                                debug_stats.network_messages_out_this_second += 1;
-                            }
-                        }
-                    }
-                    // ...and the mouthful under way, sent when it is chewed.
-                    if let Some(taking) = meal {
-                        match taking.due(&inventory, Instant::now()) {
-                            MealStep::Chewing => {}
-                            MealStep::Abandoned => meal = None,
-                            MealStep::Swallow => {
-                                meal = None;
-                                // The crunch or the swallow, when it goes down.
-                                audio.play(if taking.drinking { audio::Sfx::Drink } else { audio::Sfx::Eat });
-                                net.send(ClientMessage::Eat { slot: taking.slot as u8 });
-                                debug_stats.network_messages_out_this_second += 1;
-                                meal_sent = Some(Instant::now());
-                            }
-                        }
-                    }
-                    hand.update(
+                    // The whole of it, and what it decided, in
+                    // `frame::hands`: the ear below reads the answer
+                    // rather than working it out again from the keys.
+                    let worked = frame::hands::step(
                         dt,
-                        digging_now,
-                        player.velocity.with_y(0.0).length(),
-                        player.grounded,
-                        held_now,
-                    );
-                    // **The recoil is played where the blow lands, not
-                    // where it is clicked.** A blow is most of a third of
-                    // a second long and the head is down a fraction of
-                    // the way through it; a kick on the click would be
-                    // the view flinching before the tool arrived, and the
-                    // heavier the tool the further ahead of itself it
-                    // would flinch. `Hand` is the only thing that knows
-                    // when the arm is actually down. See `Shake::on_blow`.
-                    //
-                    // The view for *this* frame was settled further up,
-                    // so a push lands on the next one. Sixteen
-                    // milliseconds against a recoil that lasts a hundred
-                    // and seventy: not worth reordering the frame for,
-                    // and the alternative -- advancing the arm before
-                    // physics has told it how fast the player is going --
-                    // would cost a frame somewhere that shows.
-                    if let Some(heft) = hand.take_landed() {
-                        shake.on_blow(heft);
-                    }
-                    // ...and the same swing, for everybody else's picture
-                    // of this player. See `DigSignal`.
-                    // The rod drawn back follows the wind-up. See `hand::Rod`.
-                    hand.wind_rod(rod_hold.charge(), dt);
-                    // **A rod being wound up is said the way a swing is.**
-                    // `Gesture::digging` is "working what is in the hand" to
-                    // everybody watching, and with a rod in it that work is
-                    // drawing the rod back (`RemotePlayer::arm`). A second
-                    // flag would be a byte a player a tick and a message of
-                    // its own for a thing that is never true at the same
-                    // time as the first.
-                    let working = digging_now || rod_hold.charge().is_some();
-                    if let Some(digging) = dig_signal.frame(Instant::now(), working) {
-                        net.send(ClientMessage::Digging { digging });
-                        debug_stats.network_messages_out_this_second += 1;
-                    }
-                    // ...and then, if somebody is photographing the
-                    // blow, held at the phase they asked for. After
-                    // `update` rather than instead of it, so the bob
-                    // and everything else still run. See
-                    // `photographed_swing`.
-                    if let Some(phase) = photographed_swing() {
-                        hand.freeze(phase);
-                    }
-
-                    // What the world sounds like this frame: footsteps,
-                    // the rhythm of a swing that is still going,
-                    // weather, anything burning nearby, and which of the
-                    // six moods the composer should be in.
-                    //
-                    // Here rather than earlier because it reads the
-                    // results of everything above it -- where physics
-                    // put the player, and what the mining code decided
-                    // was under the crosshair.
-                    audio.set_volumes(settings.master_volume, settings.music_volume);
-                    soundscape.update(
+                        now,
+                        world_ready,
+                        paused,
+                        trimming,
+                        &death,
+                        &body,
+                        &input,
+                        &inventory,
+                        &player,
+                        &mut remote_players,
+                        &chunks,
+                        &camera,
+                        &entities,
+                        &rod_hold,
+                        net,
                         &audio,
-                        &audio::soundscape::Frame {
-                            dt,
-                            player: &player,
-                            camera: &camera,
-                            chunks: &chunks,
-                            sky: &sky,
-                            weather,
-                            health_fraction: if max_health > 0.0 {
-                                health / max_health
-                            } else {
-                                1.0
-                            },
-                            // Not "is there a connection": a player
-                            // falling through a world whose floor has
-                            // not arrived yet is not walking on
-                            // anything.
-                            in_world: world_ready,
-                            digging: (can_mine && input.breaking)
-                                .then_some(aim)
-                                .flatten()
-                                .map(|(cell, _)| cell),
-                            // Swinging at nothing. The same button, and
-                            // deliberately a different sound: a swing
-                            // that misses should be audible as a miss.
-                            swinging: can_mine
-                                && input.breaking
-                                && aim.is_none()
-                                && !struck,
-                            // What the blow is struck *with*: its
-                            // rhythm and half its noise. See
-                            // `Frame::held`.
-                            held: held_now,
-                        },
+                        &mut soundscape,
+                        &mut mining,
+                        &mut stamina,
+                        &mut strikes,
+                        &mut hand,
+                        &mut shake,
+                        &mut dig_signal,
+                        &mut cut,
+                        &mut meal,
+                        &mut meal_sent,
+                        &mut debug_stats,
                     );
-                    // The floor arriving, jolted into the view. The
-                    // soundscape owns what counts as a hard landing --
-                    // one threshold, one event, a thump and a jolt
-                    // together rather than two effects that each decided
-                    // for themselves. See `Soundscape::take_landing`.
-                    if let Some(hardness) = soundscape.take_landing() {
-                        shake.on_landing(hardness);
-                    }
-                    // ...and what lives near the player: gulls, a bird going
-                    // up, the frogs. A call of its own for the reason
-                    // `Soundscape::wildlife` gives.
-                    if world_ready {
-                        soundscape.wildlife(
-                            &audio,
-                            dt,
-                            &chunks,
-                            &entities.heard(),
-                            &critters.croaking(),
-                            &critters.buzzing(),
-                            &critters.flapping(),
-                            critters.air_here(),
-                        );
-                    }
-                    // ...and whatever let go this frame. Drained here
-                    // rather than where the snapshot is applied for the
-                    // reason the blood is: several snapshots can land in
-                    // one frame, and one collapse is one sound.
-                    for (at, block) in entities.take_gave_way() {
-                        soundscape.on_gave_way(&audio, at, block);
-                    }
+
+                    // What the world sounds like this frame, read off
+                    // everything above it. See `frame::sound`.
+                    frame::sound::update(
+                        dt,
+                        &settings,
+                        world_ready,
+                        health,
+                        max_health,
+                        weather,
+                        &worked,
+                        &input,
+                        &player,
+                        &camera,
+                        &chunks,
+                        &sky,
+                        &critters,
+                        &mut entities,
+                        &audio,
+                        &mut soundscape,
+                        &mut shake,
+                    );
 
                     input.end_frame();
 
@@ -3770,796 +3434,93 @@ fn run(
 
                     // --- UI ---
                     //
-                    // One vertex list for the whole overlay: hotbar,
-                    // then the F3 panel, then the pause screen on top.
-                    // They share a pipeline and a buffer, so the order
-                    // they are appended in is the order they stack.
-                    // The hotbar is hidden behind the loading screen --
-                    // there is nothing to place yet, and it would sit on
-                    // top of the dim.
-                    //
-                    // Rebuilt when its inputs changed, not on a clock:
-                    // see `UiKey`. The clock survives only as the pace
-                    // for the elements that animate on time alone.
-
-                    // Whatever the server last refused, until it has
-                    // been on screen long enough to read.
-                    let notice_drawn = notice.as_ref().and_then(|(text, at)| {
-                        let age = now.duration_since(*at).as_secs_f32();
-                        let left = hud::NOTICE_SECONDS - age;
-                        (left > 0.0)
-                            .then(|| (text.as_str(), (left / hud::NOTICE_FADE_SECONDS).min(1.0)))
-                    });
-                    let debug_panel_shown =
-                        info.is_some() && debug_stats.console_enabled && debug_panel_allowed;
-                    let key = UiKey {
-                        in_game: true,
-                        aspect: graphics.aspect().to_bits(),
-                        loading: loading.is_some(),
-                        hotbar_slot: input.hotbar_slot,
-                        inventory: inventory_fingerprint(&inventory),
-                        health: health.to_bits(),
-                        max_health: max_health.to_bits(),
-                        recent_health: recent_health.to_bits(),
-                        // The horse's wind while riding, as the strip draws it.
-                        stamina: entities.horseback.as_ref().map_or(stamina.fraction(), |h| h.wind_fraction()).to_bits(),
-                        exhausted: entities.horseback.as_ref().map_or(stamina.is_exhausted(), |h| h.body.wind <= 0.0),
-                        breath: breath.to_bits(),
-                        nourishment: nourishment.to_bits(),
-                        heat,
-                        notice: notice_drawn
-                            .map(|(text, fade)| (text_fingerprint(text), fade >= 1.0)),
-                        chat: chat.ui_key(now),
-                        inventory_screen: inventory_screen.ui_key(),
-                        wounds: wounds_fingerprint(&body.injuries),
-                        chest_screen: chest_screen.ui_key(),
-                        station_screen: station_screen.ui_key(),
-                        death: death.ui_key(),
-                        sleep: sleep.ui_key(),
-                        journal: journal.ui_key(
-                            player_mark(player.position.as_vec3(), camera.yaw),
-                            graphics.aspect(),
-                        ),
-                        debug_panel: debug_panel_shown,
+                    // Laid out only when something on it changed, and it
+                    // says whether it did -- which is what tells the
+                    // renderer to re-upload. See `frame::interface`.
+                    let ui_rebuilt = frame::interface::build(
+                        now,
+                        &settings,
+                        &worlds,
+                        &graphics,
+                        rebuild_due,
+                        loading,
+                        paused,
                         hud_hidden,
-                        menu: paused.then(|| {
-                            menu.ui_key(&menu_context(&settings, &worlds, &graphics, None))
-                        }),
-                        language: settings.language,
-                    };
-                    // The parts that change with no event behind them,
-                    // for which time is the only trigger there is.
-                    let ui_animating = chat.is_fading(now)
-                        || matches!(notice_drawn, Some((_, fade)) if fade < 1.0)
-                        || death.is_animating()
-                        || debug_panel_shown
-                        // A meter that is killing the player flashes.
-                        || hud::alarming(nourishment, breath, body)
-                        // ...and so does the red of a body on the ground,
-                        // whose clock is counting down on it.
-                        || body.downed.is_some();
-                    // **A running bar every frame, not at the animation
-                    // rate.** The marker is what a blow is timed against,
-                    // and one drawn a thirtieth of a second stale is a
-                    // blow aimed at where it was.
-                    let ui_rebuilt = ui_key.as_ref() != Some(&key)
-                        || (ui_animating && rebuild_due)
-                        || station_screen.is_running();
-                    if ui_rebuilt {
-                    ui_key = Some(key);
-                    ui_vertices.clear();
-                    // How much bigger than it was drawn, and where each
-                    // piece grows from. See `widgets::scale_about`: the
-                    // origin is the decision, not the factor.
-                    //
-                    // The factor is now **per screen**, not one number
-                    // for the whole interface: the hotbar is pinned to
-                    // the bottom edge with a screen of room above it and
-                    // takes the size asked for, while a centred screen
-                    // takes whatever its own extent leaves. One cap for
-                    // all of them is what made INTERFACE SIZE do
-                    // nothing -- see `widgets::Layout`.
-                    let ui_aspect = graphics.aspect();
-                    let ui_scale = graphics.ui_scale();
-                    let layout = widgets::Layout::for_screen(ui_aspect, ui_scale);
-                    if loading.is_none() {
-                        // The dark a sleeper's screen goes, first, so the
-                        // hotbar, the gauges and the thumb controls are all
-                        // drawn over it -- see `ui::sleep` for why a phone
-                        // needs them there.
-                        ui::sleep::build_into(
-                            graphics.textures.font,
-                            &sleep,
-                            settings.language,
-                            ui_aspect,
-                            ui_scale,
-                            &mut ui_vertices,
-                        );
-                        // ...and the red at the edges of a body on the
-                        // ground, under the gauges for the sleep's reason:
-                        // the health bar and the pack's belt are what the
-                        // player is reaching for. See `ui::downed`.
-                        ui::downed::build_into(
-                            graphics.textures.font,
-                            body.downed,
-                            settings.language,
-                            ui_aspect,
-                            ui_scale,
-                            now,
-                            &mut ui_vertices,
-                        );
-                        let hud_from = ui_vertices.len();
-                        let bar_from = ui_vertices.len();
-                        hotbar::build_into(
-                            &graphics.textures,
-                            &inventory,
-                            input.hotbar_slot,
-                            &mut ui_vertices,
-                        );
-                        // Stack counts and the health bar sit on top of
-                        // the bar, so they are appended after it.
-                        hud::build_into(
-                            graphics.textures.font,
-                            health,
-                            max_health,
-                            recent_health,
-                            // **On a horse the strip is the horse's wind**:
-                            // the rider is not spending their own, and the
-                            // number that decides whether the next stretch
-                            // can be a gallop is the horse's.
-                            entities.horseback.as_ref().map_or(stamina.fraction(), |h| h.wind_fraction()),
-                            entities.horseback.as_ref().map_or(stamina.is_exhausted(), |h| h.body.wind <= 0.0),
-                            breath,
-                            nourishment,
-                            body,
-                            &inventory,
-                            notice_drawn,
-                            &mut hud_attention,
-                            now,
-                            &mut ui_vertices,
-                        );
-                        // **The first minute**: one line over the belt,
-                        // for a player who has held nothing and is
-                        // carrying nothing, and gone for good the moment
-                        // they pick anything up. Driven by the same
-                        // knowledge the recipe book and the path page are
-                        // (`Journal::first_minute`), so it cannot disagree
-                        // with either, and it costs nothing at all for
-                        // anybody who has ever held a flake.
-                        if journal.first_minute(&inventory) {
-                            let mut painter = widgets::Painter::onto(
-                                graphics.textures.font,
-                                std::mem::take(&mut ui_vertices),
-                            );
-                            hud::first_minute_line(
-                                &mut painter,
-                                settings.language.text(ui::lang::Msg::StepStone),
-                            );
-                            ui_vertices = painter.into_vertices();
-                        }
-                        // The bar and its gauges are one thing pinned to
-                        // the bottom of the screen, so they grow as one
-                        // and upward -- the HUD is laid out against
-                        // `hotbar::BOTTOM` and would come apart from it
-                        // otherwise.
-                        widgets::scale_about(
-                            &mut ui_vertices[bar_from..],
-                            widgets::anchor::BOTTOM(ui_aspect),
-                            ui_scale,
-                        );
+                        touch_controls,
+                        debug_panel_allowed,
+                        health,
+                        max_health,
+                        recent_health,
+                        breath,
+                        nourishment,
+                        heat,
+                        weather,
+                        trimming,
+                        &face_layers,
+                        info.as_ref(),
+                        &notice,
+                        &player,
+                        &camera,
+                        &light,
+                        &sky,
+                        &inventory,
+                        &equipment,
+                        body,
+                        &input,
+                        &entities,
+                        &riding,
+                        &stamina,
+                        &sleep,
+                        &rod_hold,
+                        fishing_float,
+                        &touch,
+                        &journal,
+                        &chat,
+                        &death,
+                        &chest_screen,
+                        &station_screen,
+                        &inventory_screen,
+                        &mut menu,
+                        &debug_stats,
+                        &mut hud_attention,
+                        &mut ui_key,
+                        &mut ui_vertices,
+                    );
 
-                        // **The line**: the rod being wound back, or the
-                        // strain on a fish. Pinned to the crosshair with the
-                        // sail's dial rather than stacked with the gauges of
-                        // the body, and for the sail's reason: it is being
-                        // read exactly when nothing is wrong, so it must not
-                        // fade with them. See `hud::line_gauge`.
-                        if rod_hold.charge().is_some()
-                            || fishing_float.is_some_and(|float| float.phase == logic::fishing::Phase::Fighting)
-                        {
-                            let from = ui_vertices.len();
-                            let mut painter = widgets::Painter::onto(
-                                graphics.textures.font,
-                                std::mem::take(&mut ui_vertices),
-                            );
-                            hud::line_gauge(
-                                &mut painter,
-                                rod_hold.charge(),
-                                fishing_float
-                                    .filter(|float| float.phase == logic::fishing::Phase::Fighting)
-                                    .map(|float| float.strain),
-                            );
-                            ui_vertices = painter.into_vertices();
-                            widgets::scale_about(
-                                &mut ui_vertices[from..],
-                                widgets::anchor::CENTRE(ui_aspect),
-                                ui_scale,
-                            );
-                        }
-
-                        // Aboard a raft with its sail up, the dial
-                        // that says what the trim is doing against the wind.
-                        //
-                        // Not part of the stack above: it is pinned to the
-                        // top of the screen, it is not a gauge of the body,
-                        // and it must not fade out when the player is well --
-                        // a sail is being read exactly when nothing is wrong.
-                        if let Some((raft, body)) = riding.aboard_raft().filter(|(_, body)| body.sail) {
-                            let from = ui_vertices.len();
-                            let mut painter = widgets::Painter::onto(
-                                graphics.textures.font,
-                                std::mem::take(&mut ui_vertices),
-                            );
-                            let wind = primitive_shared::raft::wind(sky.world_days(), weather);
-                            hud::sail_gauge(
-                                &mut painter,
-                                wind.toward - body.yaw,
-                                body.sail_angle,
-                                wind.strength,
-                                trimming == Some(raft),
-                            );
-                            ui_vertices = painter.into_vertices();
-                            widgets::scale_about(
-                                &mut ui_vertices[from..],
-                                widgets::anchor::TOP(ui_aspect),
-                                ui_scale,
-                            );
-                        }
-
-                        // **Which way is north**: a needle while a water
-                        // compass is in the hand, and a line off the sky
-                        // while the player is looking at it. Pinned to the
-                        // top with the sail's dial and never faded, for the
-                        // sail's reason. See `logic::bearing` for why the
-                        // sky's reading is a look and not an instrument.
-                        {
-                            let from = ui_vertices.len();
-                            let mut painter = widgets::Painter::onto(
-                                graphics.textures.font,
-                                std::mem::take(&mut ui_vertices),
-                            );
-                            let held_compass = inventory
-                                .block_in(input.hotbar_slot)
-                                .is_some_and(|held| primitive_shared::types::block_kind(held) == primitive_shared::types::BLOCK_WATER_COMPASS);
-                            if held_compass {
-                                let sailing = riding.aboard_raft().is_some_and(|(_, body)| body.sail);
-                                hud::compass_dial(
-                                    &mut painter,
-                                    logic::bearing::needle(camera.yaw),
-                                    if sailing { hud::COMPASS_BESIDE_SAIL } else { 0.0 },
-                                );
-                            }
-                            let eye = camera.position.floor();
-                            let reading = logic::bearing::read_sky(&logic::bearing::SkyView {
-                                look: camera.forward(),
-                                to_sun: -sky.sun_direction(),
-                                to_moon: -sky.moon_direction(),
-                                moon_lit: primitive_shared::moon::illumination(sky.world_days()),
-                                overcast: sky.overcast(),
-                                open_sky: light.sky(eye.x as i32, eye.y as i32, eye.z as i32)
-                                    >= primitive_shared::types::MAX_LIGHT,
-                            });
-                            if let Some(reading) = reading {
-                                use logic::bearing::{Guide, Side};
-                                use ui::lang::Msg;
-                                let by = settings.language.text(match reading.guide {
-                                    Guide::Sun => Msg::SkyBySun,
-                                    Guide::Moon => Msg::SkyByMoon,
-                                    Guide::Stars => Msg::SkyByStars,
-                                });
-                                let north = settings.language.text(match reading.north {
-                                    Side::Ahead => Msg::NorthAhead,
-                                    Side::Right => Msg::NorthRight,
-                                    Side::Behind => Msg::NorthBehind,
-                                    Side::Left => Msg::NorthLeft,
-                                });
-                                hud::sky_hint(&mut painter, &format!("{by}: {north}"));
-                            }
-                            ui_vertices = painter.into_vertices();
-                            widgets::scale_about(
-                                &mut ui_vertices[from..],
-                                widgets::anchor::TOP(ui_aspect),
-                                ui_scale,
-                            );
-                        }
-
-                        // The thumb controls, over the HUD and under
-                        // everything that can be opened: a player with
-                        // their pack open is not steering. Never drawn
-                        // on a desktop -- see `is_touch_primary`. (The
-                        // compass to a bag that stood here is gone; the way
-                        // back is the map's -- see `ui::journal`.)
-                        if touch_controls
-                            && !paused
-                            && !inventory_screen.open
-                            && !chest_screen.is_open()
-                            && !station_screen.is_open()
-                            && !journal.is_open()
-                            && !death.is_open()
-                        {
-                            let mut painter = widgets::Painter::onto(
-                                graphics.textures.font,
-                                std::mem::take(&mut ui_vertices),
-                            );
-                            hud::touch_controls(&mut painter, touch.layout(), |control| {
-                                touch.is_held(control)
-                            }, settings.language);
-                            ui_vertices = painter.into_vertices();
-                        }
-
-                        // Hidden with Tab: everything since the sleeper's
-                        // dark goes -- hotbar, gauges, notices, thumbs -- and
-                        // chat, the screens and the menus drawn after this
-                        // still come. A phone keeps its thumb controls,
-                        // which are how it would ever press the key again.
-                        if hud_hidden && !touch_controls {
-                            ui_vertices.truncate(hud_from);
-                        }
-
-                        // Chat sits over the HUD and under the
-                        // inventory: it is readable while playing, and
-                        // it is not what a player opening their pack is
-                        // looking at.
-                        if chat.has_anything_to_draw(now) {
-                            let from = ui_vertices.len();
-                            chat.build_into(
-                                graphics.textures.font,
-                                graphics.aspect(),
-                                // The box carries its own send and
-                                // leave buttons where there is no
-                                // keyboard to press Enter and Escape
-                                // on. See `chat::input_row`.
-                                touch_controls,
-                                settings.language,
-                                now,
-                                &mut ui_vertices,
-                            );
-                            // Pinned to the bottom-left: the box is
-                            // typed there and the log fills upward
-                            // from it.
-                            let grown = layout.fit_from_corner(chat::EXTENT);
-                            widgets::scale_about(
-                                &mut ui_vertices[from..],
-                                widgets::anchor::BOTTOM_LEFT(ui_aspect),
-                                grown,
-                            );
-                            // ...and then up, clear of the on-screen
-                            // keyboard, which the corner it is pinned to
-                            // knows nothing about. See
-                            // `chat::keyboard_lift`: the hit-test below
-                            // subtracts the same number, and it is the
-                            // same call so the two cannot drift.
-                            widgets::lift(
-                                &mut ui_vertices[from..],
-                                chat::keyboard_lift(touch_controls, chat.is_typing(), grown),
-                            );
-                        }
-
-                        // The inventory sits over the HUD, and the pause
-                        // screen (appended below) over both. Guarded
-                        // rather than left to `build_into`'s early
-                        // return, because assembling the argument clones
-                        // the texture table -- an allocation a frame for
-                        // a screen that is almost always shut.
-                        if inventory_screen.open {
-                            // The face table is the one built at startup,
-                            // not a fresh copy: `face_layers()` clones
-                            // the whole lookup, and doing that once a
-                            // frame for a screen that is open for
-                            // seconds at a time is an allocation nobody
-                            // asked for.
-                            let from = ui_vertices.len();
-                            inventory_screen.build_into(
-                                graphics.textures.font,
-                                &face_layers,
-                                &inventory,
-                                &equipment,
-                                &body.injuries,
-                                // The health page's readings, gathered
-                                // here because this is the one place
-                                // that has all four: health and
-                                // nourishment come in their own
-                                // messages, stamina is predicted on the
-                                // client, and the rest ride `body`.
-                                &ui::inventory_screen::Vitals {
-                                    health: if max_health > 0.0 {
-                                        (health / max_health).clamp(0.0, 1.0)
-                                    } else {
-                                        0.0
-                                    },
-                                    nourishment,
-                                    stamina: stamina.fraction(),
-                                    body,
-                                },
-                                // What the path tab is drawn from:
-                                // what this player has held, and what
-                                // their keys are bound to. See
-                                // `ui::ladder_screen::Learning`.
-                                ui::ladder_screen::Learning {
-                                    discovered: journal.discovered(),
-                                    keys: &settings.keybinds,
-                                },
-                                settings.language,
-                                &mut ui_vertices,
-                            );
-                            // A screen the player opens grows outward
-                            // from the middle, which is also the point
-                            // `cursor_to_ui` inverts -- so a
-                            // click still lands on the slot under it.
-                            widgets::scale_about(
-                                &mut ui_vertices[from..],
-                                widgets::anchor::CENTRE(ui_aspect),
-                                inventory_screen::grow_by(layout),
-                            );
-                        }
-
-                        // The chest sits where the inventory does,
-                        // and the two are never open at once -- opening
-                        // either closes the other.
-                        if chest_screen.is_open() {
-                            let from = ui_vertices.len();
-                            chest_screen.build_into(
-                                graphics.textures.font,
-                                &face_layers,
-                                &inventory,
-                                settings.language,
-                                &mut ui_vertices,
-                            );
-                            widgets::scale_about(
-                                &mut ui_vertices[from..],
-                                widgets::anchor::CENTRE(ui_aspect),
-                                chest_screen.grow_by(layout),
-                            );
-                        }
-
-                        if station_screen.is_open() {
-                            let from = ui_vertices.len();
-                            station_screen.build_into(
-                                graphics.textures.font,
-                                &face_layers,
-                                settings.language,
-                                &mut ui_vertices,
-                            );
-                            widgets::scale_about(
-                                &mut ui_vertices[from..],
-                                widgets::anchor::CENTRE(ui_aspect),
-                                station_screen.grow_by(layout),
-                            );
-                        }
-
-                        // The death screen goes over all of it. The
-                        // pause menu is drawn after this whole block and
-                        // therefore still sits on top, which is right:
-                        // it is the only screen that can leave the
-                        // world, and a dead player is exactly who wants
-                        // to.
-                        // The journal is laid out against the window, like
-                        // the menu, rather than grown about the middle:
-                        // it fills the glass and has nowhere to grow to.
-                        if journal.is_open() && !death.is_open() {
-                            journal.build_into(
-                                graphics.textures.font,
-                                &face_layers,
-                                &inventory,
-                                player_mark(player.position.as_vec3(), camera.yaw),
-                                ui_aspect,
-                                settings.language,
-                                &mut ui_vertices,
-                            );
-                        }
-
-                        if death.is_open() {
-                            let from = ui_vertices.len();
-                            death.build_into(graphics.textures.font, settings.language, &mut ui_vertices);
-                            widgets::scale_about(
-                                &mut ui_vertices[from..],
-                                widgets::anchor::CENTRE(ui_aspect),
-                                death::grow_by(layout),
-                            );
-                        }
-                    }
-                    if let Some(info) = info
-                        .as_ref()
-                        .filter(|_| debug_stats.console_enabled && debug_panel_allowed)
-                    {
-                        // **Deliberately not scaled.** It is a readout,
-                        // not a screen: the player asking for a bigger
-                        // interface is asking about the things they
-                        // press, and thirty lines of diagnostics grown
-                        // half again covered two thirds of a phone. It
-                        // fits itself to the window instead -- see
-                        // `debug::panel_into`.
-                        ui::debug::panel_into(
-                            &debug_stats.overlay_lines(info),
-                            ui_aspect,
-                            graphics.textures.font,
-                            &mut ui_vertices,
-                        );
-                    }
-                    if paused {
-                        // Laid out rather than scaled -- see the menu
-                        // built for the title screen above.
-                        menu.build_into(
-                            &menu_context(&settings, &worlds, &graphics, None),
-                            &mut ui_vertices,
-                        );
-                    }
-                    } // ui_rebuilt
-
-                    // Entities are drawn with the terrain pipeline, so
-                    // they get the same textures, lighting and fog as
-                    // the blocks they came from.
-                    // Written into buffers that persist between frames
-                    // rather than freshly allocated ones -- both on the
-                    // CPU and on the GPU. See `write_dynamic_mesh`.
-                    if rebuild_due {
-                    entity_vertices.clear();
-                    entity_indices.clear();
-                    item_vertices.clear();
-                    item_indices.clear();
-                    if !entities.is_empty() {
-                        entities.build_meshes_into(
-                            render_origin,
-                            &face_layers,
-                            &light,
-                            Some(&graphics.textures),
-                            &mut entity_vertices,
-                            &mut entity_indices,
-                            &mut item_vertices,
-                            &mut item_indices,
-                        );
-                    }
-                    // ...and what other players are carrying, into the
-                    // same two buffers. A pick in somebody's hand is
-                    // the same sprite as a pick on the ground and wants
-                    // the same pass; the actor pipeline the *body* is
-                    // drawn with samples the player skin and cannot
-                    // reach the block atlas at all. See
-                    // `remote_players::build_held_items_into`.
-                    // ...and every thing set down by hand, lying where it
-                    // was put. Asked of the chunks rather than the entities:
-                    // it is a cell in the world, not a stack the server moves.
-                    entities::build_set_down_into(
-                        chunks.set_down_laid(),
+                    // The moving geometry, on the rebuild clock, and the
+                    // lamp volume that lights it. See `frame::scene`.
+                    frame::scene::build(
+                        rebuild_due,
+                        since_rebuild,
                         render_origin,
+                        world_ready,
+                        loading,
+                        paused,
                         &face_layers,
                         &light,
-                        Some(&graphics.textures),
-                        &mut entity_vertices,
-                        &mut entity_indices,
-                        &mut item_vertices,
-                        &mut item_indices,
-                    );
-                    remote_players::build_held_items_into(
+                        &camera,
+                        &sky,
+                        &inventory,
+                        &input,
+                        &entities,
                         &remote_players,
-                        render_origin,
-                        &face_layers,
-                        &light,
-                        Some(&graphics.textures),
-                        &mut entity_vertices,
-                        &mut entity_indices,
-                        &mut item_vertices,
-                        &mut item_indices,
+                        &particles,
+                        &critters,
+                        &breeze,
+                        &mining,
+                        &hand,
+                        &death,
+                        &inventory_screen,
+                        &chest_screen,
+                        &station_screen,
+                        &journal,
+                        &mut chunks,
+                        &mut graphics,
+                        &mut urgent,
+                        &mut dirty_set,
+                        &mut chunk_versions,
+                        &mut dynamic,
                     );
-                    // ...and the lid of every chest somebody has open, which
-                    // is here for the set-down items' reason and one more:
-                    // it *moves*. A lid swings for a third of a second
-                    // (`mesh::LID_SWING_SECONDS`), and a chunk meshed again
-                    // on every frame of that is forty rebuilds of sixteen
-                    // thousand cells to turn four boxes. It is drawn on this
-                    // clock, so it is stepped on this clock: the angle drawn
-                    // is the angle the swing has reached.
-                    for cell in chunks.advance_lids(since_rebuild) {
-                        // Rested shut: the mesh takes the lid back. Until
-                        // that mesh lands the frame goes on drawing it,
-                        // shut (`note_meshed_lids`); urgent all the same,
-                        // because it is a chest somebody is standing at.
-                        let pos = ChunkPos::from_world(cell.0, cell.2);
-                        bump_version(&mut chunk_versions, pos);
-                        mark_urgent(&mut urgent, &mut dirty_set, pos);
-                    }
-                    for (cell, block, swing) in chunks.open_lids() {
-                        let corner = glam::DVec3::new(f64::from(cell.0), f64::from(cell.1), f64::from(cell.2));
-                        let (sky, block_light) = entities::sampled_light(corner, &light);
-                        let at = (corner - render_origin.as_dvec3()).as_vec3();
-                        engine::mesh::chest_lid_block(
-                            [at.x, at.y, at.z],
-                            block,
-                            swing,
-                            &face_layers,
-                            sky | (block_light << 4),
-                            &mut entity_vertices,
-                            &mut entity_indices,
-                        );
-                    }
-                    graphics.write_dynamic_mesh(
-                        &mut entity_mesh,
-                        &entity_vertices,
-                        &entity_indices,
-                    );
-
-                    // ...and every particle in the world, into a buffer
-                    // and a pass of its own.
-                    //
-                    // Not the entity buffer any more: a particle wears
-                    // one *texel* of a block rather than the whole
-                    // picture of it, and the terrain vertex has two bits
-                    // of texture coordinate. See `engine::particles`.
-                    //
-                    // Measured from the render origin like everything
-                    // else in the world. It used to be uploaded in world
-                    // coordinates, "because the shader uses `view_proj`
-                    // directly" -- and `view_proj` is built around the
-                    // origin, so every particle was drawn the player's
-                    // own position further on: blood seventy blocks up
-                    // in the sky. See `Particles::build_into`.
-                    particle_vertices.clear();
-                    particle_indices.clear();
-                    let (billboard_right, billboard_up) =
-                        engine::particles::billboard_axes(&camera);
-                    particles.build_into(
-                        render_origin,
-                        billboard_right,
-                        billboard_up,
-                        &face_layers,
-                        &light,
-                        &mut particle_vertices,
-                        &mut particle_indices,
-                    );
-                    // Those with a water surface between them and the eye
-                    // go first and are drawn before the water. See
-                    // `Particles::behind_water_first`.
-                    particles_behind_water =
-                        particles.behind_water_first(&chunks, camera.position.as_vec3(), &mut particle_indices);
-                    // The small life rides the same buffer and the same
-                    // pass: a wing is a soft quad like a flake of snow.
-                    critters.build_into(
-                        render_origin,
-                        camera.right_horizontal(),
-                        glam::Vec3::Y,
-                        &face_layers,
-                        &light,
-                        &mut particle_vertices,
-                        &mut particle_indices,
-                    );
-                    // ...and so does the wind, laid out along the particles'
-                    // own axes: a streak seen from above must not be a hairline.
-                    breeze.build_into(
-                        render_origin,
-                        billboard_right,
-                        billboard_up,
-                        &face_layers,
-                        &light,
-                        &mut particle_vertices,
-                        &mut particle_indices,
-                    );
-                    graphics.write_dynamic_mesh(
-                        &mut particle_mesh,
-                        &particle_vertices,
-                        &particle_indices,
-                    );
-                    graphics.write_dynamic_mesh(&mut item_mesh, &item_vertices, &item_indices);
-
-                    // The player's own hand, and what is in it. Hidden
-                    // behind anything that has taken over the screen:
-                    // a menu, a container, the death screen, or the
-                    // loading bar with no world behind it yet. An arm
-                    // waving over the inventory is worse than no arm.
-                    hand_vertices.clear();
-                    hand_indices.clear();
-                    let shown_in_hand = shown_in_hand(inventory.block_in(input.hotbar_slot));
-                    hand.build_into(
-                        world_ready
-                            && loading.is_none()
-                            && !paused
-                            && !death.is_open()
-                            && !inventory_screen.open
-                            && !chest_screen.is_open()
-                            && !station_screen.is_open()
-                            && !journal.is_open(),
-                        shown_in_hand,
-                        &face_layers,
-                        Some(&graphics.textures),
-                        // Lit by the cell the player's own head is in,
-                        // the same way a dropped item is lit by the cell
-                        // it lies in.
-                        entities::sampled_light(camera.position, &light),
-                        // **The same clock the campfire runs on**, so a
-                        // torch in the hand and a fire in the ring are
-                        // in step. Read from the sky's own elapsed
-                        // seconds, which is what the shader animates the
-                        // hearth by -- a second clock here would drift
-                        // against it, and two fires flickering out of
-                        // step is exactly the sort of thing a player
-                        // sees without being able to say what is wrong.
-                        //
-                        // The *pictures* are the torch's own, and that
-                        // is not a change of mind about sharing: a
-                        // hearth's fire is drawn to fill a cell and a
-                        // torch's has to sit on four texels of fibre.
-                        // See `Textures::torch_flame_layer`.
-                        shown_in_hand
-                            .filter(|&block| primitive_shared::types::is_lit_torch(block))
-                            .map(|_| {
-                                let frames = crate::engine::texture::FLAME_FRAMES;
-                                let step = (sky.elapsed() * crate::engine::texture::FLAME_FPS)
-                                    as u32
-                                    % frames;
-                                graphics.textures.torch_flame_layer() + step
-                            }),
-                        &mut hand_vertices,
-                        &mut hand_indices,
-                    );
-                    graphics.write_dynamic_mesh(&mut hand_mesh, &hand_vertices, &hand_indices);
-                    } // rebuild_due
-
-                    // Other players on every frame they are drawn, off the
-                    // clock above: see `figures_rebuild_due`.
-                    if figures_rebuild_due(rebuild_due, !remote_players.is_empty()) {
-                    actor_vertices.clear();
-                    actor_indices.clear();
-                    remote_players::build_actor_mesh_into(
-                        &remote_players,
-                        // Every dead player's body in the loaded world is
-                        // drawn here too, in their own skin: see
-                        // `player_model::append_lying`.
-                        Some(&chunks),
-                        render_origin,
-                        &light,
-                        &mut actor_vertices,
-                        &mut actor_indices,
-                    );
-                    // The block outline and its cracks are untextured
-                    // lit triangles, which is exactly what the actor
-                    // pipeline already draws -- so they ride along in
-                    // the same buffer rather than needing a pass of
-                    // their own.
-                    mining.build_overlay_into(render_origin, &mut actor_vertices, &mut actor_indices);
-                    graphics.write_dynamic_mesh(&mut actor_mesh, &actor_vertices, &actor_indices);
-
-                    break_vertices.clear();
-                    break_indices.clear();
-                    if let Some(stage) = mining.break_stage() {
-                        // The lid as the frame is drawing it, so the cracks
-                        // go on the lid where it is. See `mining::model_faces`.
-                        let lid = mining.target().and_then(|cell| {
-                            chunks.open_lids().find(|&(at, _, _)| at == cell).map(|(_, _, swing)| swing)
-                        });
-                        mining.build_break_mesh_into(
-                            render_origin,
-                            graphics.textures.break_layer(stage),
-                            &face_layers,
-                            lid,
-                            &mut break_vertices,
-                            &mut break_indices,
-                        );
-                    }
-                    graphics.write_dynamic_mesh(
-                        &mut break_mesh,
-                        &break_vertices,
-                        &break_indices,
-                    );
-                    } // figures_rebuild_due
-
-                    // The fires' shadows walk the blocks round the player,
-                    // read again only when the eye has walked out of the
-                    // middle of the last lot or a chunk under it has a new
-                    // mesh. See `engine::lamp_shadow`.
-                    if let Some(min) = graphics.lamp_volume_wanted(camera.position) {
-                        // The plants as the player asked for their shadows,
-                        // so the walk and the map agree about a crown.
-                        let volume = engine::lamp_shadow::Volume::gather_for(min, graphics.plant_shadows(), |gx, gz, y0, out| {
-                            match chunks.column(gx, gz) {
-                                Some(column) => {
-                                    for (dy, slot) in out.iter_mut().enumerate() {
-                                        *slot = column.block(y0 + dy as i32);
-                                    }
-                                }
-                                None => out.fill(primitive_shared::types::BLOCK_AIR),
-                            }
-                        });
-                        graphics.set_lamp_volume(volume);
-                    }
 
                     // Everything above was this frame's own work; what
                     // follows is the renderer's. See
@@ -4570,13 +3531,13 @@ fn run(
                         &camera,
                         &params,
                         &Scene {
-                            actor_mesh: Some(&actor_mesh),
-                            entity_mesh: Some(&entity_mesh),
-                            item_mesh: Some(&item_mesh),
-                            break_mesh: Some(&break_mesh),
-                            particle_mesh: Some(&particle_mesh),
-                            particles_behind_water,
-                            hand_mesh: Some(&hand_mesh),
+                            actor_mesh: Some(&dynamic.actor_mesh),
+                            entity_mesh: Some(&dynamic.entity_mesh),
+                            item_mesh: Some(&dynamic.item_mesh),
+                            break_mesh: Some(&dynamic.break_mesh),
+                            particle_mesh: Some(&dynamic.particle_mesh),
+                            particles_behind_water: dynamic.particles_behind_water,
+                            hand_mesh: Some(&dynamic.hand_mesh),
                             loading,
                             hotbar: &ui_vertices,
                             ui_changed: ui_rebuilt,
