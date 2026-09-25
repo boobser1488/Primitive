@@ -1001,24 +1001,40 @@ pub fn stack_counts(painter: &mut Painter, inventory: &Inventory) {
         if held == 0 {
             continue;
         }
-        let centre = slot_centre(index, count);
-        let rect = Rect::new(
-            centre - SLOT / 2.0,
-            BOTTOM,
-            centre + SLOT / 2.0,
-            BOTTOM + SLOT,
-        );
-
         let label = held.to_string();
-        let width = widgets::ink_width(&label, COUNT_SCALE);
-        let left = rect.x1 - width - 0.006;
-        let top = rect.y0 + widgets::cell_height(COUNT_SCALE) + 0.002;
+        // **Inside the floor the slot's picture leaves**, which is not
+        // where this used to put it: a fixed six thousandths in from the
+        // slot's own right edge, chosen when a belt slot was a flat
+        // gradient with no lip at all. A cell is a picture now and its
+        // lip is four of that picture's thirty-two texels, so `41` on
+        // the belt was drawn with its last digit standing on the raised
+        // edge of the square -- the same fault the pack's counts had,
+        // and the one a player photographed on a phone. See
+        // `widgets::cell_inner` and
+        // `a_stack_count_on_the_belt_stands_in_the_floor_of_its_slot`.
+        let inner = widgets::cell_inner(belt_slot(index, count));
         // A one-pixel drop shadow, because the count sits on top of a
-        // block texture that may be any colour.
+        // block texture that may be any colour -- and it is drawn down
+        // and to the right, so it is the copy that reaches the lip
+        // first and the pad has to hold *it*.
         let shadow = widgets::PIXEL * COUNT_SCALE;
+        let pad = shadow * 2.0;
+        let left = (inner.x1 - pad - widgets::ink_width(&label, COUNT_SCALE)).max(inner.x0);
+        let top = (inner.y0 + pad + widgets::cell_height(COUNT_SCALE)).min(inner.y1);
         painter.text(&label, left + shadow, top - shadow, COUNT_SCALE, COUNT_SHADOW);
         painter.text(&label, left, top, COUNT_SCALE, COUNT_TEXT);
     }
+}
+
+/// Where one square of the belt is drawn.
+///
+/// **The same rectangle `hotbar::build_into` draws the slot on**, and it
+/// is here because this module writes the number into it: two places
+/// spelling out "centre, minus half a slot" are two places that can stop
+/// agreeing, and when they do the count is in the next square along.
+fn belt_slot(index: usize, count: usize) -> Rect {
+    let centre = slot_centre(index, count);
+    Rect::new(centre - SLOT / 2.0, BOTTOM, centre + SLOT / 2.0, BOTTOM + SLOT)
 }
 
 /// Everything the HUD draws, in one call.
@@ -1742,6 +1758,18 @@ const EDGE_IDLE: [f32; 4] = [0.52, 0.52, 0.50, 0.92];
 /// ...and under a thumb: the bright tier.
 const EDGE_PRESSED: [f32; 4] = [0.97, 0.96, 0.90, 1.0];
 
+/// The face of a thumb control, and of the ring a thumb lands in.
+///
+/// A grey rather than the stone's warm brown, because these sit on the
+/// world rather than on a panel and a brown wash over grass reads as
+/// dirt on the glass. The alpha is the point: about a third, so the
+/// picture gives the control a face and a grain while the ground stays
+/// visible through it -- see the note in `touch_controls`.
+const CONTROL_FACE: [f32; 4] = [0.30, 0.30, 0.32, 0.36];
+/// ...and while it is held: brighter, and a good deal less see-through,
+/// because a held control is one a finger is already covering.
+const CONTROL_FACE_DOWN: [f32; 4] = [0.60, 0.59, 0.55, 0.58];
+
 /// The controls a thumb uses, drawn over the world.
 ///
 /// Only on a platform that has no keyboard -- see `platform::Window`'s
@@ -1884,6 +1912,9 @@ pub fn touch_controls(
 
     if layout.stick.shown {
         let ring = box_of(&layout.stick, to_ui, to_len);
+        // The recess a thumb is meant to land in, out of the same
+        // pictures the pack's wells are cut from. See `CONTROL_FACE`.
+        let _ = painter.nine(ring, crate::ui::widgets::Piece::Well, CONTROL_FACE, None);
         painter.hairline_frame(
             ring,
             to_len(layout.stick.radius()) * 0.05,
@@ -1901,8 +1932,36 @@ pub fn touch_controls(
         }
         let rect = box_of(&placed, to_ui, to_len);
         let down = held(slot);
-        // No fill: the frame is the button. See the note above the
-        // tones for why one line would not be enough.
+        // The board a thumb presses, out of the interface's own
+        // pictures -- and the *pressed* board while it is held.
+        //
+        // **This was nothing at all**, and a photograph of the game on a
+        // phone is what said so: SHIFT, JUMP, PACK and MAP were four
+        // empty rectangles with a hairline round them, beside a belt and
+        // a pack made of tanned hide and cut cells. The reply to "the
+        // skin has not been applied to the touch layer" is not a second
+        // set of pictures; it is these controls going through the same
+        // ones as everything else.
+        //
+        // **Faint, and that is the argument above kept rather than
+        // abandoned**: every pixel of a control is a pixel of the world
+        // a player cannot see past. The picture is drawn at about a
+        // third, so the button has a face and a grain and still shows
+        // the ground through it -- and the held one is both a different
+        // picture and a stronger one, because the only feedback a finger
+        // gets is from the part of the button it is not covering.
+        let _ = painter.nine(
+            rect,
+            if down {
+                crate::ui::widgets::Piece::ButtonDown
+            } else {
+                crate::ui::widgets::Piece::Button
+            },
+            if down { CONTROL_FACE_DOWN } else { CONTROL_FACE },
+            None,
+        );
+        // The hairline over it: it is what a control is found by at a
+        // glance, and it is the whole of one where there is no skin.
         painter.hairline_frame(
             rect,
             to_len(placed.radius()) * FRAME_THICKNESS,
@@ -3084,6 +3143,172 @@ mod tests {
             &mut vertices,
         );
         vertices
+    }
+
+
+    /// **Nothing the HUD writes lies across the edge of a groove or a
+    /// slot.**
+    ///
+    /// The second half of the watchdog the pack got, on the surface the
+    /// player never closes. Two things are drawn *in* something here --
+    /// the reading in its well, the stack count in its square -- and both
+    /// are only legible while they are wholly inside it. A figure half on
+    /// the gauge is the complaint that started this pass, photographed on
+    /// a phone: `20/20` with the green of the bar showing through it.
+    ///
+    /// The rule is about straddling rather than touching, for the pack's
+    /// reason: a reading is *supposed* to be inside its well, and the
+    /// well is itself inside the bar's groove, so "inside everything it
+    /// overlaps" is the property, not "overlaps nothing".
+    ///
+    /// The belt is checked at every stack width the game can produce --
+    /// one digit, two, three -- because the number that overflows is
+    /// never the short one.
+    #[test]
+    fn nothing_the_hud_writes_sits_on_the_edge_of_a_groove_or_a_slot() {
+        use crate::ui::widgets::Furniture;
+        // One digit, two and three: the number that overflows a slot is
+        // never the short one. `add` fills the belt from the first slot,
+        // and a stone stacks to more than a hundred.
+        let mut belt = Inventory::new();
+        belt.add(primitive_shared::types::BLOCK_STONE, 128);
+        belt.add(primitive_shared::types::BLOCK_FLINT, 42);
+        belt.add(primitive_shared::types::BLOCK_STICK, 9);
+        belt.add(primitive_shared::types::BLOCK_CLAY, 1);
+        // Part-full gauges and a wounded body, so every strip, mark and
+        // reading the HUD has is on the screen at once.
+        let body = BodyGauges {
+            hydration: 0.4,
+            fatigue: 0.7,
+            ..all_well()
+        };
+        let mut attention = Attention::default();
+        let ((_, lines), placed) = crate::ui::widgets::while_recording_furniture(|| {
+            crate::ui::widgets::while_recording_text(|| {
+                crate::ui::widgets::with_skin(1, || {
+                    let mut out = Vec::new();
+                    build_into(
+                        FontAtlas::for_test(),
+                        13.0,
+                        20.0,
+                        16.0,
+                        0.55,
+                        false,
+                        0.8,
+                        0.45,
+                        body,
+                        &belt,
+                        None,
+                        &mut attention,
+                        moment(0),
+                        &mut out,
+                    );
+                })
+            })
+        });
+
+        assert!(!lines.is_empty(), "the HUD wrote nothing, so this checked nothing");
+        assert!(
+            placed.iter().any(|p| p.what == Furniture::Track),
+            "the gauges drew no grooves, so the readings were not checked",
+        );
+        // **The belt's squares are not in this list**, and that is not an
+        // oversight: they are drawn by `hotbar::build_into`, which needs
+        // a texture manager and therefore a graphics card. The counts on
+        // them are drawn from here, so they are checked from here too --
+        // see `a_stack_count_on_the_belt_stands_in_the_floor_of_its_slot`.
+
+        for piece in &placed {
+            // A cell's floor is the room its picture leaves; a groove is
+            // its own rectangle, because its lip is a texel and a
+            // reading is meant to sit against it.
+            let inner = match piece.what {
+                Furniture::Cell => crate::ui::widgets::cell_inner(piece.rect),
+                Furniture::Track => piece.rect,
+            };
+            for line in &lines {
+                let touches = line.rect.x0 < piece.rect.x1
+                    && line.rect.x1 > piece.rect.x0
+                    && line.rect.y0 < piece.rect.y1
+                    && line.rect.y1 > piece.rect.y0;
+                if !touches {
+                    continue;
+                }
+                // **Slack down the page is the descender rows, and
+                // sideways it is a rounding.** A line's box hangs the
+                // whole nine-row cell below the top it was given, and
+                // the bottom two of those rows are descender space that
+                // a figure or a count never puts ink in -- so a reading
+                // sitting squarely in the middle of its well still
+                // reports a box two rows past the bottom of it. Across
+                // is where the overflows were, and across it stays
+                // tight.
+                let down = crate::ui::widgets::PIXEL
+                    * line.scale
+                    * (crate::engine::font::GLYPH_HEIGHT - crate::engine::font::CAP_HEIGHT) as f32;
+                let across = crate::ui::widgets::PIXEL * 0.1;
+                let inside = line.rect.x0 >= inner.x0 - across
+                    && line.rect.x1 <= inner.x1 + across
+                    && line.rect.y0 >= inner.y0 - down
+                    && line.rect.y1 <= inner.y1 + across;
+                assert!(
+                    inside,
+                    "{:?} at {:?} lies across the edge of a {:?} at {:?} (its floor is {inner:?})",
+                    line.text, line.rect, piece.what, piece.rect,
+                );
+            }
+        }
+    }
+
+
+    /// **A stack count on the belt stands in the floor of its own
+    /// square, not on the lip.**
+    ///
+    /// The belt's half of the pack's watchdog. It is written out rather
+    /// than folded into
+    /// `nothing_the_hud_writes_sits_on_the_edge_of_a_groove_or_a_slot`
+    /// because the squares themselves are drawn on the other side of a
+    /// graphics card (`hotbar::build_into` takes a texture manager) --
+    /// so the rectangle is taken from `belt_slot`, which is the very
+    /// function that draws them.
+    ///
+    /// One digit, two and three, because the number that overflows is
+    /// never the short one: `128` used to hang its `8` over the edge.
+    #[test]
+    fn a_stack_count_on_the_belt_stands_in_the_floor_of_its_slot() {
+        let mut belt = Inventory::new();
+        belt.add(primitive_shared::types::BLOCK_STONE, 128);
+        belt.add(primitive_shared::types::BLOCK_FLINT, 42);
+        belt.add(primitive_shared::types::BLOCK_STICK, 9);
+        let (_, lines) = crate::ui::widgets::while_recording_text(|| {
+            let mut painter = Painter::new(FontAtlas::for_test());
+            stack_counts(&mut painter, &belt);
+        });
+        assert_eq!(lines.len(), 6, "three counts, each drawn twice for its shadow");
+
+        let floors: Vec<Rect> = (0..crate::ui::hotbar::MAX_SLOTS)
+            .map(|index| {
+                crate::ui::widgets::cell_inner(belt_slot(index, crate::ui::hotbar::MAX_SLOTS))
+            })
+            .collect();
+        for line in &lines {
+            let home = floors.iter().find(|floor| {
+                line.rect.x0 >= floor.x0 - 1e-5 && line.rect.x1 <= floor.x1 + 1e-5
+            });
+            assert!(
+                home.is_some(),
+                "{:?} at {:?} is not inside the floor of any belt square",
+                line.text,
+                line.rect,
+            );
+            let floor = home.unwrap();
+            assert!(
+                line.rect.y0 >= floor.y0 - 1e-5 && line.rect.y1 <= floor.y1 + 1e-5,
+                "{:?} at {:?} stands on the lip of its square, whose floor is {floor:?}",
+                line.text,
+                line.rect,
+            );
+        }
     }
 
     /// Everything as it is when nothing is wrong.

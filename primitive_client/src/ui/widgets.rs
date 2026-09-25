@@ -496,8 +496,11 @@ pub enum Piece {
 impl Piece {
     /// Every piece, in the order the array holds them.
     ///
-    /// Test-only: the game reaches a piece by name, and only the
-    /// harnesses that turn vertices back into pixels walk the list.
+    /// **Test-only, and it is not an accident.** Nothing in the game
+    /// walks this list: a widget names the one piece it draws. What
+    /// needs the whole run is the check that holds it against
+    /// `texture::EXTRA_TEXTURES`, and the harness that turns a vertex
+    /// list back into pixels without a card.
     #[cfg(test)]
     pub const ALL: [Piece; 15] = [
         Piece::Panel,
@@ -518,6 +521,9 @@ impl Piece {
     ];
 
     /// The file it is drawn in, under `assets/textures/`.
+    ///
+    /// Test-only, like [`Piece::ALL`]: the game reaches its pictures by
+    /// layer, and the name is what a check and a snapshot need.
     #[cfg(test)]
     pub fn file(self) -> &'static str {
         crate::engine::texture::EXTRA_TEXTURES[crate::engine::texture::EXTRA_UI_SKIN + self as usize]
@@ -554,6 +560,28 @@ impl Piece {
             other => other.border_texels() * SKIN_TEXEL,
         }
     }
+}
+
+/// The room inside a cell: the rectangle its picture leaves once the lip
+/// is taken off.
+///
+/// **What everything drawn *in* a slot has to be held to, and what
+/// nothing was.** A cell is drawn stretched (see [`Painter::cell`]), so
+/// its lip is a share of the rectangle rather than a fixed distance:
+/// four of the picture's thirty-two texels each side, whatever size the
+/// cell is drawn at. The screens were insetting by [`BEVEL`] instead --
+/// the thickness of the flat bevel a cell had *before* it was a picture
+/// -- which is a third less than the lip, and so every stack count in
+/// the game was drawn with its last digit sitting on the raised edge of
+/// its own slot. That is the "text climbing onto the strips" the player
+/// reported, in the place it is hardest to miss: a pack full of numbers.
+///
+/// Derived from the picture rather than typed, so a redrawn `slot.png`
+/// with a deeper lip moves the numbers with it.
+pub fn cell_inner(rect: Rect) -> Rect {
+    let share = Piece::Slot.border_texels() / SKIN_RESOLUTION;
+    let (x, y) = (rect.width().abs() * share, rect.height().abs() * share);
+    Rect::new(rect.x0 + x, rect.y0 + y, rect.x1 - x, rect.y1 - y)
 }
 
 /// How big one texel of the skin is on the screen.
@@ -854,6 +882,37 @@ pub const TEXT_BAD: [f32; 4] = [1.00, 0.74, 0.64, 1.0];
 pub const TEXT_GOOD: [f32; 4] = [0.58, 0.88, 0.52, 1.0];
 
 pub const SCRIM: [f32; 4] = [0.03, 0.03, 0.04, 0.62];
+
+// ---- the note beside the pointer ----
+//
+// See [`Painter::note`]. These were `inventory_screen`'s, and the
+// reasoning on each of them is its own.
+
+/// The plate a note is written on: the deepest recess the stone has.
+///
+/// **It was a blue-black** -- `[0.04, 0.05, 0.07]`, with a blue-grey
+/// hairline round it -- and it was the one cold thing on a warm screen:
+/// a chest is stone and wood and amber, and the note naming what was in
+/// it was a scrap of the menu pasted over the top. The same darkness, a
+/// shade under in fact, so every ink measured against it still clears;
+/// the stone's cast and the stone's lit edge, so it reads as part of the
+/// slab it is lying on.
+pub const NOTE_BACK: [f32; 4] = [0.050, 0.043, 0.036, 0.97];
+pub const NOTE_FRAME: [f32; 4] = Theme::STONE.light;
+/// The hairline round a note.
+pub const NOTE_EDGE: f32 = 0.002;
+/// **A note is dark, so it is written in the dark skin's ink.**
+///
+/// A panel is pale stone and everything printed on it is near-black -- a
+/// note that inherited the panel's ink was black text on a black box: a
+/// line that was *there*, and unreadable, which is the worst of both.
+pub const NOTE_INK: [f32; 4] = Theme::DARK.ink;
+pub const NOTE_DIM: [f32; 4] = Theme::DARK.ink_dim;
+pub const NOTE_GOOD: [f32; 4] = [0.52, 0.88, 0.55, 1.0];
+pub const NOTE_BAD: [f32; 4] = [1.00, 0.48, 0.42, 1.0];
+/// A note is a second line about something else on the screen, so it is
+/// written at the size every second line is. See [`size`].
+pub const NOTE_SCALE: f32 = size::NOTE;
 
 /// **Every size any of the world's screens writes at, and there are
 /// five.**
@@ -1969,6 +2028,68 @@ pub fn while_recording_text<T>(body: impl FnOnce() -> T) -> (T, Vec<Written>) {
     (answer, lines)
 }
 
+/// A piece of furniture a painter put down, and what kind it is.
+///
+/// **The other half of [`Written`], and it arrived for the same
+/// reason.** Recording the lines of text found captions written across
+/// each other; it could not find a line of text written across a *thing*
+/// -- a count sitting on the lip of its own slot, a reading laid over
+/// the gauge it describes -- because the vertex list has no idea which
+/// quads are a slot and which are a letter. Recording the call does.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Furniture {
+    /// One square of a grid: a slot in the pack, a chest or the belt.
+    /// Text may sit in the room [`cell_inner`] leaves and nowhere else.
+    Cell,
+    /// The groove a meter runs in, and the well a reading is printed in.
+    /// A figure belongs in its own well; a figure lying across the
+    /// *gauge* is a figure hiding the thing it is about.
+    Track,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placed {
+    pub rect: Rect,
+    pub what: Furniture,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PLACED: std::cell::RefCell<Option<Vec<Placed>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `body` and answers every cell and groove drawn inside it.
+///
+/// A thread-local for [`while_recording_text`]'s reasons, and nestable
+/// with it so one pass answers both -- which is what a test comparing
+/// the two needs.
+#[cfg(test)]
+pub fn while_recording_furniture<T>(body: impl FnOnce() -> T) -> (T, Vec<Placed>) {
+    struct Restore(Option<Vec<Placed>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PLACED.with(|cell| *cell.borrow_mut() = self.0.take());
+        }
+    }
+    let restore = Restore(PLACED.with(|cell| cell.borrow_mut().replace(Vec::new())));
+    let answer = body();
+    let placed = PLACED.with(|cell| cell.borrow().clone().unwrap_or_default());
+    drop(restore);
+    (answer, placed)
+}
+
+#[cfg(test)]
+fn record_furniture(rect: Rect, what: Furniture) {
+    PLACED.with(|cell| {
+        if let Some(list) = cell.borrow_mut().as_mut() {
+            list.push(Placed { rect, what });
+        }
+    });
+}
+
 impl Default for Painter {
     fn default() -> Self {
         Self::new(crate::engine::texture::FontAtlas::for_test())
@@ -2346,6 +2467,72 @@ impl Painter {
         self.slab(rect, self.theme.panel);
     }
 
+    /// A note beside the pointer: a few lines in a dark box, kept inside
+    /// `bounds`.
+    ///
+    /// **One tooltip for the whole game, and it is here because there
+    /// was one and it was not.** The box, its colours, its padding and
+    /// the arithmetic that keeps it on screen lived in
+    /// `inventory_screen`, where the chest and the hearth reached into
+    /// it by name; anything outside that file -- a menu row, a map mark
+    /// -- had the choice of a second copy or no note at all, and a
+    /// second copy of a tooltip is a second tooltip that looks slightly
+    /// wrong.
+    ///
+    /// ## The rules it keeps
+    ///
+    /// * **Up and to the right of the pointer**, then pulled back inside
+    ///   `bounds` at *both* ends. A note wider than the room to the
+    ///   right used to slide left with nothing stopping it sliding past
+    ///   the panel's own edge.
+    /// * **`bounds` is the band a note is allowed, not the whole
+    ///   panel.** The caller decides: on the pack it is the content
+    ///   band, because a note taken from the top row of the recipe grid
+    ///   was drawn over the tab strip and hid the word RUCKSACK
+    ///   completely. A tooltip explains a control; covering a different
+    ///   control to do it is the one thing it may not do.
+    /// * **The hairline comes out of the room rather than being added to
+    ///   the box**, because `border` draws *outside* the rectangle it is
+    ///   given: a note flush against the edge would hang its own outline
+    ///   two thousandths past it.
+    ///
+    /// Written in the dark skin's ink whichever theme the painter is
+    /// carrying: the plate is dark, and a note that inherited a stone
+    /// panel's ink was black text on a black box.
+    pub fn note(&mut self, cursor: (f32, f32), lines: &[(String, [f32; 4])], bounds: Rect) {
+        if lines.is_empty() {
+            return;
+        }
+        let scale = NOTE_SCALE;
+        let width = lines
+            .iter()
+            .map(|(text, _)| ink_width(text, scale))
+            .fold(0.0, f32::max)
+            + 0.020;
+        let line_height = cell_height(scale) + 0.006;
+        // Padding at both ends, and enough of it: the last line's
+        // descenders were sitting on the bottom edge of the box.
+        let height = line_height * lines.len() as f32 + 0.020;
+        let x0 = (cursor.0 + 0.014)
+            .min(bounds.x1 - width - NOTE_EDGE)
+            .max(bounds.x0 + NOTE_EDGE);
+        let y0 = (cursor.1 + 0.012)
+            .min(bounds.y1 - height - NOTE_EDGE)
+            .max(bounds.y0 + NOTE_EDGE);
+        let rect = Rect::new(x0, y0, x0 + width, y0 + height);
+        self.quad(rect, NOTE_BACK);
+        self.border(rect, NOTE_EDGE, NOTE_FRAME);
+        for (n, (text, colour)) in lines.iter().enumerate() {
+            self.text(
+                text,
+                rect.x0 + 0.010,
+                rect.y1 - 0.010 - n as f32 * line_height,
+                scale,
+                *colour,
+            );
+        }
+    }
+
     /// A raised slab of stone: the fill, then a bevel.
     ///
     /// **Four quads and two colours.** Light along the top and the left,
@@ -2424,9 +2611,23 @@ impl Painter {
     /// square and always about one size. `well` is what a hollow that
     /// can be any shape goes through.
     pub fn cell(&mut self, rect: Rect, face: [f32; 4]) {
-        if !self.stretched(rect, Piece::Slot, face) {
+        if !self.cell_picture(rect, face) {
             self.bevelled(rect, face, false);
         }
+    }
+
+    /// The picture alone, answering whether it drew one.
+    ///
+    /// For the belt, which has a fallback of its own -- a gradient,
+    /// older than the skin and older than `bevelled` -- and which still
+    /// has to be *counted* as a cell either way, because the test that
+    /// keeps a stack count off the lip of its slot reads the cells a
+    /// painter put down. See `Furniture`.
+    #[must_use]
+    pub fn cell_picture(&mut self, rect: Rect, face: [f32; 4]) -> bool {
+        #[cfg(test)]
+        record_furniture(rect, Furniture::Cell);
+        self.stretched(rect, Piece::Slot, face)
     }
 
     /// The groove a meter runs in.
@@ -2443,6 +2644,8 @@ impl Painter {
     /// hairline and the mark are still drawn over it by the caller --
     /// this replaces the floor and nothing else.
     pub fn track(&mut self, rect: Rect, colour: [f32; 4]) {
+        #[cfg(test)]
+        record_furniture(rect, Furniture::Track);
         if !self.nine(rect, Piece::Track, colour, None) {
             self.quad(rect, colour);
         }

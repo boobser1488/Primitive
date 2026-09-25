@@ -304,45 +304,7 @@ fn ui_snapshot() {
     // it -- and for that the bar's own outline is the whole of what
     // matters. See `hotbar::TOP`, which is the line they must clear.
     {
-        use crate::ui::hotbar::{BOTTOM, PAD, SLOT, UNTEXTURED};
-        let mut vertices = Vec::new();
-        let mut box_quad = |x0: f32, y0: f32, x1: f32, y1: f32, tint: [f32; 4]| {
-            for (x, y) in [
-                (x0, y0),
-                (x1, y0),
-                (x1, y1),
-                (x0, y0),
-                (x1, y1),
-                (x0, y1),
-            ] {
-                vertices.push(HotbarVertex {
-                    position: [x, y],
-                    uv: [0.0, 0.0],
-                    tex_layer: UNTEXTURED,
-                    tint,
-                });
-            }
-        };
-        // The backdrop, then the ten slots inside it.
-        let pitch = SLOT + 0.012;
-        let total = pitch * 10.0 - 0.012;
-        box_quad(
-            -total / 2.0 - PAD,
-            BOTTOM - PAD,
-            total / 2.0 + PAD,
-            BOTTOM + SLOT + PAD,
-            [0.12, 0.12, 0.14, 0.92],
-        );
-        for slot in 0..10 {
-            let centre = crate::ui::hotbar::slot_centre(slot, 10);
-            box_quad(
-                centre - SLOT / 2.0,
-                BOTTOM,
-                centre + SLOT / 2.0,
-                BOTTOM + SLOT,
-                [0.30, 0.31, 0.34, 1.0],
-            );
-        }
+        let mut vertices = belt_stand_in(font, 0);
         let mut belt = Inventory::new();
         belt.put_in_slot(0, Stack::new(BLOCK_COBBLESTONE, 41));
         belt.put_in_slot(3, Stack::new(BLOCK_COAL, 7));
@@ -481,22 +443,7 @@ fn ui_snapshot() {
         // whether a slot is reachable. Drawn as outlines rather than
         // slots -- what is being looked at is the clearance.
         {
-            use crate::ui::hotbar::{BOTTOM, PAD, SLOT, UNTEXTURED};
-            let mut bar = Vec::new();
-            let mut box_quad = |x0: f32, y0: f32, x1: f32, y1: f32, tint: [f32; 4]| {
-                for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)] {
-                    bar.push(HotbarVertex { position: [x, y], uv: [0.0, 0.0], tex_layer: UNTEXTURED, tint });
-                }
-            };
-            let pitch = SLOT + 0.012;
-            let total = pitch * 10.0 - 0.012;
-            box_quad(-total / 2.0 - PAD, BOTTOM - PAD, total / 2.0 + PAD, BOTTOM + SLOT + PAD,
-                     [0.12, 0.12, 0.14, 0.92]);
-            for slot in 0..10 {
-                let centre = crate::ui::hotbar::slot_centre(slot, 10);
-                box_quad(centre - SLOT / 2.0, BOTTOM, centre + SLOT / 2.0, BOTTOM + SLOT,
-                         [0.30, 0.31, 0.34, 1.0]);
-            }
+            let mut bar = belt_stand_in(font, 0);
             crate::ui::widgets::scale_about(
                 &mut bar,
                 crate::ui::widgets::anchor::BOTTOM(width() as f32 / height() as f32),
@@ -691,7 +638,13 @@ fn ui_snapshot() {
     // layout has only ever been checked against the shortest words it
     // will ever hold.
     let mut settings = crate::settings::ClientSettings::default();
-    let worlds = crate::logic::worlds::Worlds::load(std::path::Path::new("saves"));
+    // **Worlds made for the picture, not whatever is in `saves/`.** This
+    // read the developer's own folder, so the picture of the screen
+    // everybody touches was empty on a fresh checkout and different on
+    // every machine -- and the row is now four facts wide (a date, a
+    // day, a season, a size), none of which can be looked at in a list
+    // that has nothing in it.
+    let (saves, worlds) = a_few_worlds();
     let mut menu = crate::ui::menu::Menu::new(crate::ui::menu::ServerList::default());
     // The extensions screen is empty on a client that has not asked a
     // server anything, and empty is exactly the state that needs no
@@ -713,6 +666,7 @@ fn ui_snapshot() {
             (crate::ui::menu::Screen::Worlds, "menu_worlds"),
             (crate::ui::menu::Screen::Settings, "menu_settings"),
             (crate::ui::menu::Screen::CreatingWorld, "menu_new_world"),
+            (crate::ui::menu::Screen::RenamingWorld(0), "menu_rename_world"),
             (crate::ui::menu::Screen::Servers, "menu_servers"),
             (crate::ui::menu::Screen::Paused, "menu_paused"),
             (crate::ui::menu::Screen::Editing(None), "menu_server_form"),
@@ -766,7 +720,56 @@ fn ui_snapshot() {
         menu.set_extensions(a_servers_extensions());
     }
 
+    let _ = std::fs::remove_dir_all(&saves);
     println!("wrote the screens to {out}");
+}
+
+/// A saves folder with a handful of worlds in it, for the pictures of
+/// the screen that lists them.
+///
+/// Every row is a different *kind* of row, because the only thing a
+/// picture of a list can answer is whether the rows read: one played
+/// minutes ago, one a season in, one left in the middle of a winter, one
+/// never opened at all, and a name long enough to be truncated. The
+/// caller removes the folder.
+fn a_few_worlds() -> (std::path::PathBuf, crate::logic::worlds::Worlds) {
+    use crate::logic::worlds::{unix_now, Worlds};
+    use primitive_shared::worldgen::{Preset, Zone};
+    let root = std::env::temp_dir().join(format!("primitive-snapshot-worlds-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a saves folder");
+    let mut worlds = Worlds::load(&root);
+    // (name, seed, days of world time, minutes since it was played, bytes)
+    let made = [
+        ("Дом у реки", 1_209_552_189u32, Some(93.4f32), Some(3u64), 3_300_000usize),
+        ("Highland camp", 77, Some(14.2), Some(2 * 24 * 60), 840_000),
+        ("A very long name for one world", 42, Some(212.7), Some(9 * 24 * 60), 21_000_000),
+        ("Fresh start", 5, None, None, 0),
+    ];
+    for (name, seed, days, ago, bytes) in made {
+        let index = worlds
+            .create_in(name, seed, Preset::Normal, Zone::Temperate)
+            .expect("a world");
+        let directory = worlds.list()[index].directory.clone();
+        if let Some(days) = days {
+            std::fs::write(directory.join("clock.txt"), format!("{days}\n")).expect("a clock");
+        }
+        if bytes > 0 {
+            std::fs::write(directory.join("edits.bin"), vec![0u8; bytes]).expect("some edits");
+        }
+        if let Some(ago) = ago {
+            // Straight into the metadata, because `mark_played` can only
+            // say "now" and what a row is read for is the difference
+            // between "just now" and "nine days ago".
+            let meta = directory.join("world.toml");
+            let text = std::fs::read_to_string(&meta).expect("the metadata");
+            let when = unix_now().saturating_sub(ago * 60);
+            let text = text.replace("last_played = 0", &format!("last_played = {when}"));
+            std::fs::write(&meta, text).expect("the metadata");
+        }
+    }
+    let worlds = Worlds::load(&root);
+    (root, worlds)
 }
 
 /// What a small server with a few things installed would answer.
@@ -1025,6 +1028,38 @@ fn backdrop() -> crate::ui::menu::Backdrop {
     }
 }
 
+/// One pixel of the canvas: **linear light**, not a colour byte.
+///
+/// See [`ground`] for why. The fourth channel is carried so the buffer
+/// is shaped like the image it becomes; nothing reads it.
+type Pixel = [f32; 4];
+
+/// The transfer curve the card undoes on the way out of a texture and
+/// redoes on the way into the surface. Byte in, linear light out.
+///
+/// The exact sRGB piecewise curve rather than a plain 2.2 power, because
+/// that is what `Rgba8UnormSrgb` and `Bgra8UnormSrgb` are defined as and
+/// a gamma that is nearly right is a picture that is nearly the game.
+fn from_srgb(byte: u8) -> f32 {
+    let c = byte as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Linear light back to the byte a PNG holds.
+fn to_srgb(value: f32) -> u8 {
+    let c = value.clamp(0.0, 1.0);
+    let encoded = if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
 /// The pixels a screen starts from: a rendered world if one was named,
 /// and otherwise the flat grey this harness has always used.
 ///
@@ -1033,16 +1068,37 @@ fn backdrop() -> crate::ui::menu::Backdrop {
 /// for another -- a phone's, for instance, which is the shape the
 /// layout arguments are usually about.
 ///
-/// One honest caveat, and it errs the safe way: `fill` blends in sRGB
-/// bytes, while the card blends the real veil in linear light. So the
-/// backdrop reads *darker* here than it does on a screen. A menu that
-/// is legible in this picture is legible in the game; a backdrop that
-/// looks lost in it may not be. The numbers that decide the veil come
-/// from the GPU tool, not from here -- see `menu::SCENE_HIGHLIGHT_OUTDOORS`.
-fn ground() -> Vec<[u8; 4]> {
+/// ## Why the canvas is linear light
+///
+/// **This harness used to lie about every colour on every screen, and
+/// the lie was one missing line.** The interface is drawn into an sRGB
+/// surface, so the numbers a `Theme` holds are already linear light --
+/// `widgets::contrast` says so, and it is right. The card takes
+/// `Theme::STONE.panel`'s 0.144, blends in linear, and the surface
+/// *encodes* on the way out: the pixel a player sees is 106. This tool
+/// wrote `0.144 * 255` and saved 37. Every panel, button, well and
+/// letter in every picture came out roughly half as bright as the game
+/// draws it -- so the pictures the layout is argued from showed a
+/// different game, and "the colour is not what the snapshot draws" is
+/// exactly the report that followed.
+///
+/// So the canvas holds linear light from end to end, blends in it the
+/// way the card blends into an sRGB target, and encodes once in
+/// [`save_png`]. A backdrop loaded from a PNG is a *shown* picture and
+/// is decoded on the way in; the flat grey is written as the byte a
+/// person would name and decoded the same way. See
+/// `the_snapshot_paints_what_the_real_pipeline_paints`.
+fn ground() -> Vec<Pixel> {
     // A mid-grey ground, so a panel that is nearly the same colour as
-    // the background shows up as the problem it is.
-    let flat = || vec![[70u8, 78, 92, 255]; (width() * height()) as usize];
+    // the background shows up as the problem it is. Named in bytes,
+    // because that is the grey somebody picked by looking at it.
+    let flat = || {
+        let grey = [70u8, 78, 92, 255];
+        vec![
+            [from_srgb(grey[0]), from_srgb(grey[1]), from_srgb(grey[2]), 1.0];
+            (width() * height()) as usize
+        ]
+    };
     let Ok(path) = std::env::var("UI_SNAPSHOT_WORLD") else {
         return flat();
     };
@@ -1060,7 +1116,10 @@ fn ground() -> Vec<[u8; 4]> {
                 (sx, sy)
             })
         })
-        .map(|(sx, sy)| image.get_pixel(sx, sy).0)
+        .map(|(sx, sy)| {
+            let p = image.get_pixel(sx, sy).0;
+            [from_srgb(p[0]), from_srgb(p[1]), from_srgb(p[2]), 1.0]
+        })
         .collect()
 }
 
@@ -1093,12 +1152,54 @@ fn write_grown(path: &str, vertices: &[HotbarVertex], font: FontAtlas, scale: f3
     write(path, &grown, font);
 }
 
+/// The belt, without the block icons that need a graphics card.
+///
+/// **The real backdrop and the real cells**, out of the same pictures
+/// `hotbar::build_into` draws them from, and the chosen square marked
+/// the way it marks it. Three pictures in this file drew a stand-in of
+/// their own for the bar -- a flat plate and ten flat squares -- and all
+/// three therefore showed a belt the game has not drawn since the skin
+/// arrived. A stand-in for the *icons* is honest, because a block's
+/// texture lives on the card; a stand-in for the furniture is a picture
+/// of a different program.
+fn belt_stand_in(font: FontAtlas, selected: usize) -> Vec<HotbarVertex> {
+    use crate::ui::hotbar::{BACKDROP, BOTTOM, GAP, MAX_SLOTS, PAD, SELECTED_RING, SLOT, TOP};
+    use crate::ui::widgets::{Painter, Piece, Rect, FIELD_TILE, WELL};
+    let mut p = Painter::onto(font, Vec::new());
+    let total = (SLOT + GAP) * MAX_SLOTS as f32 - GAP;
+    let backdrop = Rect::new(-total / 2.0 - PAD, BOTTOM - PAD, total / 2.0 + PAD, TOP);
+    if !p.nine(backdrop, Piece::Panel, BACKDROP, Some(FIELD_TILE)) {
+        p.quad(backdrop, BACKDROP);
+    }
+    for slot in 0..MAX_SLOTS {
+        let centre = crate::ui::hotbar::slot_centre(slot, MAX_SLOTS);
+        let cell = Rect::new(centre - SLOT / 2.0, BOTTOM, centre + SLOT / 2.0, BOTTOM + SLOT);
+        p.cell(cell, WELL);
+        if slot == selected {
+            let _ = p.cell_mark(cell, Piece::SlotSelected, SELECTED_RING);
+        }
+    }
+    p.into_vertices()
+}
+
 /// Turns the quads into pixels.
 ///
 /// Two triangles a quad, and every quad in these screens is
 /// axis-aligned, so this fills rectangles rather than rasterising
 /// triangles: the corners of each six-vertex run are its bounds.
 fn write(path: &str, vertices: &[HotbarVertex], font: FontAtlas) {
+    save_png(path, &paint(vertices, font));
+}
+
+/// The rasteriser itself, without the file.
+///
+/// Its own function so the pictures can be *checked* rather than only
+/// looked at: `the_snapshot_paints_what_the_real_pipeline_paints` draws
+/// one screen through this and the same screen through the real hotbar
+/// pipeline on a real card, and holds the two to each other. A harness
+/// whose only output is a PNG on disk is a harness whose agreement with
+/// the game is a matter of somebody's memory.
+fn paint(vertices: &[HotbarVertex], font: FontAtlas) -> Vec<Pixel> {
     let mut pixels = ground();
     let glyphs = glyph_lookup(font);
     let skin = crate::ui::widgets::skin();
@@ -1201,7 +1302,7 @@ fn write(path: &str, vertices: &[HotbarVertex], font: FontAtlas) {
         }
     }
 
-    save_png(path, &pixels);
+    pixels
 }
 
 /// Whether six vertices are the corners of the box they span.
@@ -1212,7 +1313,7 @@ fn is_a_box(quad: &[HotbarVertex], (x0, y0, x1, y1): (f32, f32, f32, f32)) -> bo
 
 /// Fills one flat triangle in interface coordinates, blended by its
 /// alpha, whichever way it is wound.
-fn fill_flat_triangle(pixels: &mut [[u8; 4]], points: [(f32, f32); 3], tint: [f32; 4]) {
+fn fill_flat_triangle(pixels: &mut [Pixel], points: [(f32, f32); 3], tint: [f32; 4]) {
     let aspect = width() as f32 / height() as f32;
     let to_pixel = |(x, y): (f32, f32)| {
         (
@@ -1242,8 +1343,9 @@ fn fill_flat_triangle(pixels: &mut [[u8; 4]], points: [(f32, f32); 3], tint: [f3
             let index = (y * width() + x) as usize;
             let under = pixels[index];
             for channel in 0..3 {
-                let over = tint[channel].clamp(0.0, 1.0) * 255.0;
-                pixels[index][channel] = (under[channel] as f32 * (1.0 - alpha) + over * alpha).round() as u8;
+                // The tint is already linear light -- see `ground`.
+                let over = tint[channel].clamp(0.0, 1.0);
+                pixels[index][channel] = under[channel] * (1.0 - alpha) + over * alpha;
             }
         }
     }
@@ -1614,7 +1716,7 @@ fn key(v: f32) -> i32 {
 }
 
 fn draw_glyph(
-    pixels: &mut [[u8; 4]],
+    pixels: &mut [Pixel],
     c: char,
     x0: f32,
     y0: f32,
@@ -1645,7 +1747,7 @@ fn draw_glyph(
 }
 
 /// Fills one rectangle in UI coordinates, blended by its alpha.
-fn fill(pixels: &mut [[u8; 4]], x0: f32, y0: f32, x1: f32, y1: f32, tint: [f32; 4], scale: f32) {
+fn fill(pixels: &mut [Pixel], x0: f32, y0: f32, x1: f32, y1: f32, tint: [f32; 4], scale: f32) {
     let aspect = width() as f32 / height() as f32;
     let to_x = |x: f32| ((x / aspect * scale + 1.0) * 0.5 * width() as f32).round() as i32;
     // Y is up in UI coordinates and down in an image.
@@ -1658,9 +1760,10 @@ fn fill(pixels: &mut [[u8; 4]], x0: f32, y0: f32, x1: f32, y1: f32, tint: [f32; 
             let at = (y as u32 * width() + x as u32) as usize;
             let under = pixels[at];
             for channel in 0..3 {
-                let over = tint[channel].clamp(0.0, 1.0) * 255.0;
-                pixels[at][channel] =
-                    (under[channel] as f32 * (1.0 - alpha) + over * alpha).round() as u8;
+                // Linear in, linear stored: the same blend the card does
+                // into an sRGB target, which decodes, mixes and re-encodes.
+                let over = tint[channel].clamp(0.0, 1.0);
+                pixels[at][channel] = under[channel] * (1.0 - alpha) + over * alpha;
             }
         }
     }
@@ -1702,12 +1805,13 @@ fn skin_picture(piece: crate::ui::widgets::Piece) -> &'static image::RgbaImage {
 /// grey rectangle where the panel goes. Without this, the whole of the
 /// skin would be invisible to the one tool built to look at it.
 ///
-/// Nearest, because `texture::build_ui_sampler` is nearest. sRGB out of
-/// the byte and back in at the end, because the array is
-/// `Rgba8UnormSrgb` and the multiply happens in between; the tint
-/// arrives already lifted by `widgets::SKIN_GAIN`.
+/// Nearest, because `texture::build_ui_sampler` is nearest. The texel is
+/// decoded out of sRGB because the array is `Rgba8UnormSrgb` and the card
+/// hands the shader linear light; the tint is linear already and arrives
+/// lifted by `widgets::SKIN_GAIN`; and the product stays linear, because
+/// the canvas is (see `ground`). The encode happens once, in `save_png`.
 fn fill_picture(
-    pixels: &mut [[u8; 4]],
+    pixels: &mut [Pixel],
     picture: &image::RgbaImage,
     (x0, y0, x1, y1): (f32, f32, f32, f32),
     (u0, v0, u1, v1): (f32, f32, f32, f32),
@@ -1725,14 +1829,6 @@ fn fill_picture(
     }
     let (w, h) = (picture.width().max(1), picture.height().max(1));
     let (across, down) = (((right - left) as f32).max(1.0), ((bottom - top) as f32).max(1.0));
-    let to_linear = |byte: u8| {
-        let c = byte as f32 / 255.0;
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    };
     for y in py0..py1 {
         // Where in the quad this row falls, and therefore where in the
         // picture. Measured at the pixel's middle, which is what stops
@@ -1750,18 +1846,26 @@ fn fill_picture(
             let at = (y as u32 * width() + x as u32) as usize;
             let under = pixels[at];
             for channel in 0..3 {
-                let over = (to_linear(texel[channel]) * tint[channel]).clamp(0.0, 1.0) * 255.0;
-                pixels[at][channel] =
-                    (under[channel] as f32 * (1.0 - alpha) + over * alpha).round() as u8;
+                // Exactly `hotbar.wgsl`: `sampled.rgb * tint.rgb`, with
+                // `sampled` the linear value the card decodes for it.
+                let over = (from_srgb(texel[channel]) * tint[channel]).clamp(0.0, 1.0);
+                pixels[at][channel] = under[channel] * (1.0 - alpha) + over * alpha;
             }
         }
     }
 }
 
-fn save_png(path: &str, pixels: &[[u8; 4]]) {
+/// The one place linear light becomes a colour byte -- the surface's own
+/// job in the real frame. See `ground`.
+fn save_png(path: &str, pixels: &[Pixel]) {
     let mut flat = Vec::with_capacity(pixels.len() * 4);
     for pixel in pixels {
-        flat.extend_from_slice(pixel);
+        flat.extend_from_slice(&[
+            to_srgb(pixel[0]),
+            to_srgb(pixel[1]),
+            to_srgb(pixel[2]),
+            255,
+        ]);
     }
     let image: image::RgbaImage =
         image::ImageBuffer::from_raw(width(), height(), flat).expect("the buffer is the right size");
@@ -2020,7 +2124,8 @@ fn draw_block_model_from(
     at: glam::Vec3,
     fov_degrees: f32,
 ) {
-    let mut pixels = vec![[58u8, 62, 70, 255]; (width() * height()) as usize];
+    let mut pixels: Vec<Pixel> =
+        vec![[from_srgb(58), from_srgb(62), from_srgb(70), 1.0]; (width() * height()) as usize];
 
     let view = glam::Mat4::look_at_rh(eye, at, glam::Vec3::Y);
     let projection = glam::Mat4::perspective_rh(
@@ -2177,10 +2282,12 @@ fn draw_held(path: &str, texture: &str, block_name: &str) {
     // The world behind the hand, so the pose is judged against
     // something: a horizon and the crosshair the tool is meant to be
     // pointing past.
-    let mut pixels = vec![[104u8, 138, 176, 255]; (width() * height()) as usize];
+    let mut pixels: Vec<Pixel> =
+        vec![[from_srgb(104), from_srgb(138), from_srgb(176), 1.0]; (width() * height()) as usize];
     for y in height() / 2..height() {
         for x in 0..width() {
-            pixels[(y * width() + x) as usize] = [92, 116, 78, 255];
+            pixels[(y * width() + x) as usize] =
+                [from_srgb(92), from_srgb(116), from_srgb(78), 1.0];
         }
     }
 
@@ -2247,7 +2354,8 @@ fn draw_held(path: &str, texture: &str, block_name: &str) {
             (width() as i32 / 2 + offset, height() as i32 / 2),
             (width() as i32 / 2, height() as i32 / 2 + offset),
         ] {
-            pixels[(y as u32 * width() + x as u32) as usize] = [250, 250, 250, 255];
+            pixels[(y as u32 * width() + x as u32) as usize] =
+                [from_srgb(250), from_srgb(250), from_srgb(250), 1.0];
         }
     }
     save_png(path, &pixels);
@@ -2255,7 +2363,7 @@ fn draw_held(path: &str, texture: &str, block_name: &str) {
 
 /// One textured triangle, nearest-sampled, with alpha as a cutout.
 fn fill_triangle(
-    pixels: &mut [[u8; 4]],
+    pixels: &mut [Pixel],
     points: [(f32, f32); 3],
     uvs: [(f32, f32); 3],
     sprite: &image::RgbaImage,
@@ -2293,7 +2401,15 @@ fn fill_triangle(
             }
             let at = (y * width() + x) as usize;
             for channel in 0..3 {
-                pixels[at][channel] = (texel[channel] as f32 * lit).clamp(0.0, 255.0) as u8;
+                // **Shaded on the byte and then decoded**, which keeps
+                // these model pictures exactly what they were: `lit` was
+                // chosen by looking at them, and moving the shading into
+                // linear light would darken every one of them by the
+                // amount that argument was settled with. The UI's colours
+                // are the thing this pass was about; a block model
+                // preview is not drawn by `hotbar.wgsl` at all.
+                pixels[at][channel] =
+                    from_srgb((texel[channel] as f32 * lit).clamp(0.0, 255.0) as u8);
             }
         }
     }
@@ -2560,20 +2676,8 @@ fn ui_audit_snapshot() {
         // on a phone -- the thumbs. Nobody plays with all of it up, and that
         // is the point: anything that can collide does so here.
         {
-            use crate::ui::hotbar::{BOTTOM, PAD, SLOT};
             use crate::ui::widgets::{anchor, scale_about, Painter};
-            let mut v = Vec::new();
-            let box_quad = |v: &mut Vec<HotbarVertex>, x0: f32, y0: f32, x1: f32, y1: f32, tint: [f32; 4]| {
-                for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)] {
-                    v.push(HotbarVertex { position: [x, y], uv: [0.0, 0.0], tex_layer: UNTEXTURED, tint });
-                }
-            };
-            let total = (SLOT + 0.012) * 10.0 - 0.012;
-            box_quad(&mut v, -total / 2.0 - PAD, BOTTOM - PAD, total / 2.0 + PAD, BOTTOM + SLOT + PAD, [0.12, 0.12, 0.14, 0.92]);
-            for slot in 0..10 {
-                let centre = crate::ui::hotbar::slot_centre(slot, 10);
-                box_quad(&mut v, centre - SLOT / 2.0, BOTTOM, centre + SLOT / 2.0, BOTTOM + SLOT, [0.30, 0.31, 0.34, 1.0]);
-            }
+            let mut v = belt_stand_in(font, 0);
             let refusal = match language {
                 Language::Russian => "возвращён: слишком далеко от мира",
                 _ => "moved back: too far from the world",
@@ -2611,4 +2715,391 @@ fn ui_audit_snapshot() {
         }
     }
     println!("wrote the audit to {out}");
+}
+
+// ---- is this harness telling the truth about colour ----
+
+/// The same screen, drawn by this harness and by the card, must be the
+/// same colour.
+///
+/// ## Why this test exists
+///
+/// Because the harness was wrong for its whole life and nothing said so.
+/// The interface is drawn into an sRGB surface, so a `Theme`'s numbers
+/// are linear light and the surface encodes them on the way out: a panel
+/// of 0.144 reaches the glass as the byte 106. This tool multiplied by
+/// 255 and wrote 37. Every picture the layout has ever been argued from
+/// showed panels, buttons, wells and letters at roughly half the
+/// brightness the game draws them, and the report that finally caught it
+/// was "the colour in the game is not what `ui/snapshot.rs` draws".
+///
+/// A comment saying "the canvas is linear now" would be worth nothing --
+/// the old one *also* claimed to convert ("sRGB out of the byte and back
+/// in at the end") while doing only half of it. So the two are put side
+/// by side: the real `hotbar.wgsl`, the real blend state and vertex
+/// layout, a real sRGB target on a real card, against `paint`.
+///
+/// ## What is compared, and what is not
+///
+/// Panels, trays, wells, cells and flat quads -- the surfaces the skin is
+/// drawn on and the colours the theme names. **Not** text and **not**
+/// block icons: those are deliberately stand-ins here (a glyph is drawn
+/// from the font's own bitmap rather than sampled, an icon is a plate
+/// standing for a picture that lives on the card), so holding them to the
+/// card would be holding a stand-in to the thing it stands in for.
+///
+/// Skipped where there is no GPU, which is a CI runner -- see
+/// `engine::test_gpu`.
+#[test]
+fn the_snapshot_paints_what_the_real_pipeline_paints() {
+    use crate::ui::widgets::{Painter, Piece, Rect, Theme};
+
+    let Some((device, queue)) = crate::engine::test_gpu() else {
+        println!("no graphics card: the snapshot's colours were not checked against one");
+        return;
+    };
+
+    // The skin at a base of its own, so `Skin::piece_of` and the array
+    // layers below agree by construction rather than by luck.
+    const BASE: u32 = 1;
+    crate::ui::widgets::use_skin(BASE);
+
+    // Every kind of surface the interface is made of, and one of each at
+    // a size big enough that a wrong gamma cannot hide in a lip.
+    let mut p = Painter::onto(FontAtlas::for_test(), Vec::new());
+    p.panel(Rect::new(-1.1, -0.5, 0.0, 0.7));
+    p.well(Rect::new(-1.0, -0.3, -0.3, 0.2), Theme::STONE.well);
+    p.well(Rect::new(-1.0, 0.25, -0.3, 0.6), Theme::STONE.tray);
+    p.cell(Rect::new(-0.25, 0.0, -0.05, 0.2), Theme::STONE.well);
+    p.quad(Rect::new(0.1, -0.5, 0.6, 0.0), Theme::STONE.accent);
+    // ...including one that is see-through, because the blend is half
+    // the question: the card mixes in linear light and this harness had
+    // better do the same.
+    p.quad(Rect::new(0.2, 0.1, 1.1, 0.6), Theme::DARK.panel);
+    let drew = p.nine(Rect::new(0.65, -0.45, 1.05, -0.05), Piece::Button, Theme::DARK.button, None);
+    assert!(drew, "the skin was not on, so this checked nothing");
+    let vertices = p.into_vertices();
+
+    let mine = paint(&vertices, FontAtlas::for_test());
+    let theirs = through_the_card(device, queue, &vertices, BASE);
+
+    // ## How the two are held to each other
+    //
+    // Pixel for pixel, with two bytes of slack a channel -- but matched
+    // against the card's *neighbourhood* rather than against the one
+    // pixel underneath. The reason is not gamma and not a fudge: this
+    // harness fills a rectangle by rounding its corners to whole pixels,
+    // and a card rasterises by pixel-centre coverage, so an edge or a
+    // tiling seam can land one column to the left here and one to the
+    // right there. That is a one-pixel disagreement about *where* a seam
+    // is, and it is the kind of difference a layout tool is allowed to
+    // have; a missing transfer curve is a seventy-byte disagreement about
+    // what colour everything is, over the whole screen, and no
+    // neighbourhood hides that.
+    //
+    // So: every pixel has to be the colour of *something the card drew
+    // within one pixel of it*, and the count that cannot manage even
+    // that has to be zero.
+    let at = |x: u32, y: u32| (y * width() + x) as usize;
+    let mut worst = 0i32;
+    let mut worst_at = (0u32, 0u32);
+    for y in 0..height() {
+        for x in 0..width() {
+            let here = mine[at(x, y)];
+            let mut best = i32::MAX;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                    if nx < 0 || ny < 0 || nx >= width() as i32 || ny >= height() as i32 {
+                        continue;
+                    }
+                    let there = theirs[at(nx as u32, ny as u32)];
+                    let gap = (0..3)
+                        .map(|c| (to_srgb(here[c]) as i32 - there[c] as i32).abs())
+                        .max()
+                        .unwrap_or(0);
+                    best = best.min(gap);
+                }
+            }
+            if best > worst {
+                worst = best;
+                worst_at = (x, y);
+            }
+        }
+    }
+    assert!(
+        worst <= 2,
+        "the snapshot and the card disagree by {worst}/255 at {worst_at:?} --          the harness is drawing a screen the game does not draw"
+    );
+}
+
+/// Draws interface vertices through the real interface pipeline and
+/// reads the pixels back.
+///
+/// The shader is `hotbar.wgsl` itself, by `include_str!`, so a change to
+/// the fragment maths breaks the test above rather than quietly making
+/// the pictures wrong again. The blend state and the vertex layout are
+/// the renderer's own (`HOTBAR_ATTRS`).
+///
+/// **No depth attachment**, unlike the real pipeline, and that is the one
+/// deliberate difference: the interface pass compares `Always` and writes
+/// nothing, so the depth buffer cannot change a single pixel of colour --
+/// and a test that had to build one would be a test with a second thing
+/// in it to get wrong.
+#[cfg(test)]
+fn through_the_card(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    vertices: &[HotbarVertex],
+    base: u32,
+) -> Vec<[u8; 4]> {
+    use wgpu::util::DeviceExt;
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let (w, h) = (width(), height());
+
+    // The skin's own pictures in an array laid out the way the atlas
+    // lays them: `base + piece as u32`. Layer 0 is a spare, so the base
+    // is not zero and an off-by-one would show.
+    let pieces = crate::ui::widgets::Piece::ALL;
+    let side = 32u32;
+    let layers = base + pieces.len() as u32;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("the skin, for the colour check"),
+        size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: layers },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        // The same format the atlas is, which is the whole point: the
+        // card decodes the transfer curve on every fetch.
+        format: FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for (index, piece) in pieces.iter().enumerate() {
+        let picture = skin_picture(*piece);
+        assert_eq!(picture.width(), side, "{piece:?} is not the skin's resolution");
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: base + index as u32 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            picture.as_raw(),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(side * 4),
+                rows_per_image: Some(side),
+            },
+            wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+        );
+    }
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let sampler = crate::engine::texture::build_ui_sampler(device);
+
+    // `Globals`, of which this shader reads one number: the aspect, in
+    // `fog_params.w`. A mat4 and four vec4s ahead of it, and the aspect
+    // is the last float of that fifth vec4.
+    let mut globals = [0f32; 4 * 4 + 4 * 5];
+    globals[4 * 4 + 4 * 4 - 1] = w as f32 / h as f32;
+    let globals = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("globals"),
+        contents: bytemuck::cast_slice(&globals),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+
+    let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let globals_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &globals_layout,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() }],
+    });
+    let texture_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &texture_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("hotbar shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../engine/hotbar.wgsl").into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[&globals_layout, &texture_layout],
+        push_constant_ranges: &[],
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("hotbar pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<HotbarVertex>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &crate::engine::renderer::HOTBAR_ATTRS,
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: FORMAT,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    });
+
+    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("the screen"),
+        contents: bytemuck::cast_slice(vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("the glass"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let target_view = target.create_view(&Default::default());
+
+    // The clear is the harness's own ground, and a clear value for an
+    // sRGB target is linear light -- which is what `ground` holds.
+    let sky = ground()[0];
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("the interface"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: sky[0] as f64,
+                        g: sky[1] as f64,
+                        b: sky[2] as f64,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &globals_group, &[]);
+        pass.set_bind_group(1, &texture_group, &[]);
+        pass.set_vertex_buffer(0, buffer.slice(..));
+        pass.draw(0..vertices.len() as u32, 0..1);
+    }
+
+    // Read back. A copy out of a texture wants its rows padded to 256
+    // bytes, so the readback is unpacked rather than used flat.
+    let row = w * 4;
+    let padded = row.div_ceil(256) * 256;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: (padded * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::ImageCopyTexture {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::ImageCopyBuffer {
+            buffer: &readback,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    queue.submit([encoder.finish()]);
+
+    let slice = readback.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    device.poll(wgpu::Maintain::Wait);
+    receiver.recv().expect("the map").expect("the readback");
+    let data = slice.get_mapped_range();
+    let mut out = vec![[0u8; 4]; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let from = (y * padded + x * 4) as usize;
+            out[(y * w + x) as usize] =
+                [data[from], data[from + 1], data[from + 2], data[from + 3]];
+        }
+    }
+    drop(data);
+    readback.unmap();
+    out
 }
