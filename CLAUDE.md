@@ -213,6 +213,10 @@ PRIMITIVE_OPT_CHEAP_LIGHT=1       the light's arithmetic, ablated, while
                                   the four varyings it reads are still read
                                   — set beside NO_LIGHT it says whether the
                                   cost is arithmetic or interpolation
+PRIMITIVE_OPT_BLOCK_SHADE=1       the blocks' own shade on whatever the
+                                  settings say (`=0` off) — the way to see
+                                  on a phone the picture its default takes
+                                  away
 ```
 
 The four `NO_` switches make the picture wrong on purpose: they are
@@ -250,6 +254,11 @@ light) and 1.06 (the fog), which adds to 7.74 of the 8.31: **the work is
 spread, and no one change wins it back.** There is no overdraw to blame
 either — with a flat fragment shader, a quarter of the pixels cost the same
 as all of them.
+
+Where it ended: the solid pass 14.10 ms to 12.19, the frame 18.7 to 16.7, 53
+fps to 60 — most of it from making the blocks' own shade a setting, which
+took the screen-space derivative that faded it along too and left the whole
+of the light costing 0.54 ms where it had cost 2.63.
 
 What a fragment still computes that a vertex could have is close to nothing:
 the one term that was moved out to the vertex had to be moved back, and

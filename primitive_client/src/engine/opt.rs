@@ -45,6 +45,7 @@
 //! | `PRIMITIVE_OPT_NO_FOG=1` | the fog and the aerial perspective, ablated |
 //! | `PRIMITIVE_OPT_DEPTH16=1` | a 16-bit depth buffer instead of a 32-bit float one |
 //! | `PRIMITIVE_OPT_CHEAP_LIGHT=1` | the light's arithmetic, ablated; its varyings still read |
+//! | `PRIMITIVE_OPT_BLOCK_SHADE=1` | the blocks' own shade on (or `=0` off) whatever the settings say |
 //!
 //! The last three change nothing about how the game draws -- they are the
 //! three settings the frame is most sensitive to, made reachable without a
@@ -164,15 +165,41 @@
 //! in a block's colour is worth it on a desktop that pays 0.07 for it and
 //! not on a phone that pays 13% of its solid pass.
 //!
-//! The rest waits on one more reading, because `SKIP_LIGHT` measures two
-//! things at once: it takes away the light's arithmetic *and* stops four
-//! of the shader's ten varyings being interpolated. `PRIMITIVE_OPT_CHEAP_LIGHT`
-//! reads all four and computes almost nothing, so the pair separates them
-//! -- and the cures are opposite. Near `SKIP_LIGHT` means fold the
-//! arithmetic; near stock means the cost is interpolation, and then the
-//! answer is to pack ten `@location`s into six, which is a repacking that
-//! cannot change a pixel and is the same lever for the light, the fog and
-//! the mottle at once.
+//! ## Where it stopped, and why
+//!
+//! With the shade off by default, the device's stock build:
+//!
+//! ```text
+//! mode                 fps  gpu      solid
+//! stock                 60  12.731   12.191
+//! OPT_CHEAP_LIGHT=1     62  12.370   11.815
+//! OPT_NO_LIGHT=1        63  12.190   11.654
+//! OPT_TRILINEAR=0       60  12.749   12.207
+//! ```
+//!
+//! Over the whole of this work the solid pass went 14.10 to 12.19 ms and
+//! the frame 18.7 to 16.7, which is 53 fps to 60.
+//!
+//! **Cheap light is within noise of no light** (11.82 against 11.65), so
+//! what the light costs is arithmetic and not the interpolation of the
+//! values it reads. That was the question `CHEAP_LIGHT` was built to
+//! answer, and the answer closes the file on packing ten `@location`s into
+//! six: it would be 104 edits in the shader for a ceiling that is now
+//! fractions of a millisecond.
+//!
+//! **And the light is no longer worth folding either.** The whole of it is
+//! 0.54 ms now where it was 2.63 -- because `SKIP_LIGHT` used to be
+//! measured with the blocks' shade *on*, and what it was really taking
+//! away was the screen-space derivative that fed the shade's fade. Turn
+//! the shade off, as a phone now does, and the light is a rounding error.
+//! One setting collected most of what four ablations had been pointing at.
+//!
+//! **Trilinear filtering is free**, finally and for the third time: 12.207
+//! against 12.191.
+//!
+//! So the fragment shader is done. What is left of the pass is the atlas
+//! fetch and about 5.8 ms of geometry, and the geometry is the next
+//! subject rather than this one.
 //!
 //! And one did not do its job: `PRIMITIVE_OPT_LOD=4` took 10% of the
 //! triangles away where a coarse chunk sheds 56% of its own
@@ -556,9 +583,41 @@ pub fn cheap_light() -> bool {
 /// definition of a quality setting.
 ///
 /// `PRIMITIVE_OPT_NO_MOTTLE=1` still forces it off, so the ablation stays
-/// available on a machine whose settings say otherwise.
+/// available on a machine whose settings say otherwise, and
+/// `PRIMITIVE_OPT_BLOCK_SHADE=1` forces it on, which is how a phone is
+/// shown the picture its default takes away.
 pub fn block_shade() -> bool {
-    !no_mottle() && BLOCK_SHADE.load(std::sync::atomic::Ordering::Relaxed)
+    if no_mottle() {
+        return false;
+    }
+    match *BLOCK_SHADE_OVERRIDE.get_or_init(|| tristate("PRIMITIVE_OPT_BLOCK_SHADE")) {
+        Some(forced) => forced,
+        None => BLOCK_SHADE.load(std::sync::atomic::Ordering::Relaxed),
+    }
+}
+
+/// What `PRIMITIVE_OPT_BLOCK_SHADE` says, if it says anything.
+///
+/// **A switch that only turned something off was half a switch.** The
+/// setting is off by default on a phone, so `PRIMITIVE_OPT_NO_MOTTLE`
+/// there asks for what was already happening -- and there was no way at
+/// all to ask for the other side, which is the comparison a device needs
+/// to make. `=1` puts the shade back on a phone, `=0` takes it off a
+/// desktop, and unset leaves the settings file in charge.
+static BLOCK_SHADE_OVERRIDE: OnceLock<Option<bool>> = OnceLock::new();
+
+/// A switch with three answers: on, off, and "nobody said".
+///
+/// `flag_or` cannot express the third, because it takes the default *for*
+/// the caller and so an unset variable and a variable set to the default
+/// are the same thing to it. Here they are not: one means the settings
+/// file decides and the other means it does not.
+fn tristate(name: &str) -> Option<bool> {
+    let value = std::env::var(name).ok()?;
+    Some(!matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "off" | "no"
+    ))
 }
 
 /// What the settings say, until they say otherwise.
@@ -571,10 +630,19 @@ pub fn block_shade() -> bool {
 static BLOCK_SHADE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(!cfg!(target_os = "android"));
 
-/// Hands the setting over. Returns whether it changed, so the caller knows
-/// whether the pipelines have to be built again.
+/// Hands the setting over. Returns whether the shader would come out
+/// different, so the caller knows whether the pipelines have to be built
+/// again.
+///
+/// **What changed, and not what was stored.** With
+/// `PRIMITIVE_OPT_BLOCK_SHADE` or `PRIMITIVE_OPT_NO_MOTTLE` set, the
+/// settings file is overruled -- so a player opening the settings screen
+/// during a measurement would otherwise rebuild nine pipelines to produce
+/// exactly the shader that was already running.
 pub fn set_block_shade(on: bool) -> bool {
-    BLOCK_SHADE.swap(on, std::sync::atomic::Ordering::Relaxed) != on
+    let before = block_shade();
+    BLOCK_SHADE.store(on, std::sync::atomic::Ordering::Relaxed);
+    block_shade() != before
 }
 
 /// **A 16-bit depth buffer in place of the 32-bit float one.**
@@ -665,10 +733,11 @@ pub fn announce() {
         (cheap_light(), "cheap-light"),
         (no_fog(), "no-fog"),
         (depth16(), "depth16"),
-        // Said when it is *off*, which on a desktop is the unusual state
-        // and on a phone is the ordinary one -- and either way it is what
-        // a reader of a measurement needs to know.
+        // Said either way, because on a desktop "off" is the unusual
+        // state and on a phone "on" is -- and a reader of a measurement
+        // needs whichever of the two this run was.
         (!block_shade(), "block-shade off"),
+        (block_shade() && cfg!(target_os = "android"), "block-shade on"),
     ] {
         if set {
             on.push(name.into());
@@ -756,6 +825,39 @@ mod tests {
                 .validate(&module)
                 .unwrap_or_else(|e| panic!("a biased shader in {arrays} array(s) failed validation: {e:?}"));
         }
+    }
+
+    /// **Nothing here changes what a desktop draws.**
+    ///
+    /// Every switch in this module is off, or at its default, unless
+    /// somebody says otherwise -- and on a machine that is not a phone the
+    /// blocks' shade is on, which is what the game did before any of this
+    /// existed. So `specialise` must hand the source straight back,
+    /// borrowed and unrewritten. A `Cow::Owned` here means some switch has
+    /// acquired a default that rewrites the shader, and the first anybody
+    /// would know of it is a screenshot that no longer matches.
+    #[test]
+    fn a_machine_nobody_is_measuring_compiles_the_shader_as_written() {
+        if cfg!(target_os = "android") {
+            return; // there the shade is off by default, and on purpose
+        }
+        let source = include_str!("shader.wgsl");
+        let out = specialise(std::borrow::Cow::Borrowed(source));
+        // Which line moved, rather than "they differ": the shader is
+        // three thousand lines and the answer is one of seven.
+        let moved: Vec<&str> = SWITCH_LINES
+            .iter()
+            .copied()
+            .filter(|line| !out.contains(line))
+            .collect();
+        assert!(
+            moved.is_empty(),
+            "a switch now rewrites the shader by default: {moved:?}"
+        );
+        assert!(
+            matches!(out, std::borrow::Cow::Borrowed(_)),
+            "the shader was copied without being changed"
+        );
     }
 
     /// `{:?}` is what makes `-0.5` come out as `-0.5` and `-1` as `-1.0`;
