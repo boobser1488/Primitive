@@ -609,6 +609,47 @@ pub const SKIN_TEXEL: f32 = PIXEL;
 /// letter takes at any interface size that is not exactly 1.0.
 pub const PANEL_BORDER: f32 = 0.030;
 
+/// The size a panel's title is written at.
+///
+/// Named because two other numbers are derived from it -- the band it
+/// needs ([`TITLE_BAND`]) and the room the rule under it may not take --
+/// and a title drawn at a size only [`Painter::panel_header`] knew was
+/// a title whose band had to be re-measured by hand every time it moved.
+pub const TITLE_SCALE: f32 = 1.05;
+
+/// How thick the rule under a title is.
+///
+/// [`Painter::rule`] draws two skin texels either side of the line it is
+/// given, so a rule occupies four of them and a band that did not count
+/// them is a band whose rule is drawn through its own title. That is
+/// exactly what every screen in the game was doing: see [`TITLE_BAND`].
+pub const RULE_THICKNESS: f32 = 4.0 * SKIN_TEXEL;
+
+/// Air between the foot of a title and the rule under it.
+///
+/// Two texels -- a stitch. Nothing: the point of it is that the rule is
+/// visibly a separate thing from the word, rather than an underscore.
+const TITLE_AIR: f32 = 2.0 * SKIN_TEXEL;
+
+/// The shallowest header band that can hold a title.
+///
+/// **This is the number that was missing, and every panel in the game
+/// was under it.** A header band runs from the panel's top edge down,
+/// [`Painter::panel_header`] starts it one [`PANEL_BORDER`] in and
+/// scores a rule along its floor, and the title was centred in *the
+/// whole band, rule included* -- so on a band of 0.088 (the pack) the
+/// rule was drawn through the bottom fifth of `ИНВЕНТАРЬ`, and on one of
+/// 0.082 (a chest) through the bottom of `CHEST`. The player's words for
+/// it were "текст inventory не правильно лежит".
+///
+/// Two halves to the fix and this is the second one: `panel_header`
+/// centres the title in the room *above* its rule, and a band shallower
+/// than this has no such room to give. Derived rather than typed,
+/// because three of its four terms are numbers that have each moved
+/// once already.
+pub const TITLE_BAND: f32 =
+    PANEL_BORDER + cell_height(TITLE_SCALE) + TITLE_AIR + RULE_THICKNESS;
+
 /// What a skin quad's tint is multiplied by.
 ///
 /// Two and a half. A texel byte cannot go above 1.0, so a plain
@@ -2046,6 +2087,16 @@ pub enum Furniture {
     /// A figure belongs in its own well; a figure lying across the
     /// *gauge* is a figure hiding the thing it is about.
     Track,
+    /// A scored line: the rule under a panel's title, and any other
+    /// boundary drawn with [`Painter::rule`].
+    ///
+    /// **The third kind, and the one that found the bug the player
+    /// reported.** A rule is drawn by `panel_header` itself, so no test
+    /// could ask a layout function where it was; and because it is four
+    /// texels of dark stone rather than a letter, no test that compared
+    /// lines of text to each other could see it either. It was being
+    /// drawn straight through the bottom of every title in the game.
+    Rule,
 }
 
 #[cfg(test)]
@@ -2079,6 +2130,45 @@ pub fn while_recording_furniture<T>(body: impl FnOnce() -> T) -> (T, Vec<Placed>
     let placed = PLACED.with(|cell| cell.borrow().clone().unwrap_or_default());
     drop(restore);
     (answer, placed)
+}
+
+/// Whether two drawn things are on top of each other.
+///
+/// `slack` is how much they may share before it counts, and it is never
+/// zero in a caller: a glyph cell carries two rows of descender space
+/// most lines leave empty, and two widgets that are exactly edge to edge
+/// come out a last-bit apart. One function so the eight guards that ask
+/// this question ask it the same way -- they were eight copies of the
+/// same four comparisons, and two of the copies had a `<=` where the
+/// others had a `<`.
+#[cfg(test)]
+pub fn crossing(a: Rect, b: Rect, slack: f32) -> bool {
+    a.x0 < b.x1 - slack && a.x1 > b.x0 + slack && a.y0 < b.y1 - slack && a.y1 > b.y0 + slack
+}
+
+/// Whether `inner` is wholly inside `outer`, give or take `slack`.
+///
+/// The other half of [`crossing`]: a label on a button is *supposed* to
+/// be over it, and what tells the two cases apart is this.
+#[cfg(test)]
+pub fn holds(outer: Rect, inner: Rect, slack: f32) -> bool {
+    inner.x0 >= outer.x0 - slack
+        && inner.x1 <= outer.x1 + slack
+        && inner.y0 >= outer.y0 - slack
+        && inner.y1 <= outer.y1 + slack
+}
+
+/// How far below a line's own box its ink actually stops.
+///
+/// A [`Written`] box is the whole glyph cell, descenders included, and a
+/// heading in capitals puts no ink in the bottom two rows of it. A guard
+/// that measured the box against the thing under it would fail on every
+/// caption in the game for two rows of nothing; one that ignored the
+/// rows would miss a `y` hanging into a slot. This is the allowance, and
+/// it is the pair `hud` and the pack's slot watchdog already used.
+#[cfg(test)]
+pub fn descender_slack(scale: f32) -> f32 {
+    PIXEL * scale * (crate::engine::font::GLYPH_HEIGHT - crate::engine::font::CAP_HEIGHT) as f32
 }
 
 #[cfg(test)]
@@ -2330,8 +2420,10 @@ impl Painter {
     /// across a panel cannot smear anything -- which is why this is one
     /// quad rather than a nine-slice.
     pub fn rule(&mut self, x0: f32, x1: f32, y: f32, colour: [f32; 4]) {
-        let half = 2.0 * SKIN_TEXEL;
+        let half = RULE_THICKNESS / 2.0;
         let rect = Rect::new(x0, y - half, x1, y + half);
+        #[cfg(test)]
+        record_furniture(rect, Furniture::Rule);
         match self.skin.layer(Piece::Rule) {
             Some(layer) => {
                 let (top, bottom) = (14.0 / SKIN_RESOLUTION, 18.0 / SKIN_RESOLUTION);
@@ -2744,12 +2836,34 @@ impl Painter {
             panel.x1 - PANEL_BORDER,
             (panel.y1 - PANEL_BORDER).max(panel.y1 - height),
         );
-        let cap = PIXEL * 1.05 * CAP_HEIGHT as f32;
+        // Where the rule goes, worked out before the title rather than
+        // after it, because the title is centred in what the rule leaves.
+        let rule_y = band.y0 + RULE_THICKNESS / 2.0;
+        // **The room above the rule, not the whole band.** Centring the
+        // title in the band counted the rule's own four texels as room
+        // for letters, and on every panel in the game the band was
+        // shallow enough that the line came out through the bottom of
+        // the word: `CHEST` and `KILN` sat *on* their rules, and the
+        // pack's `ИНВЕНТАРЬ` was cut by a fifth of its cap height. It is
+        // the kind of mistake that is invisible in the arithmetic --
+        // both numbers are "inside the band" -- and immediately obvious
+        // in a PNG, which is how it was found and what `ui/snapshot.rs`
+        // is for.
+        //
+        // The `min` is for a caller whose band is shallower than
+        // [`TITLE_BAND`], where the rule's own top would be above the
+        // band's ceiling: the room for words is then nothing rather than
+        // a rectangle turned inside out, and the title comes out at the
+        // top of the band instead of at the wrong end of the panel.
+        // There is a test on each screen saying no caller is in that
+        // position.
+        let words = Rect::new(band.x0, (rule_y + RULE_THICKNESS / 2.0).min(band.y1), band.x1, band.y1);
+        let cap = PIXEL * TITLE_SCALE * CAP_HEIGHT as f32;
         self.text(
             title,
             band.x0 + 0.008 + indent,
-            band.centre_y() + cap / 2.0,
-            1.05,
+            words.centre_y() + cap / 2.0,
+            TITLE_SCALE,
             // **The accent, not the ink**, which is what the accent is
             // for: "the one colour that is not grey -- a heading, a
             // chosen row, a full stack". Written in ink, the title of a
@@ -2768,7 +2882,7 @@ impl Painter {
         // answers is where the content starts, and a rule centred on
         // that line would take its lower half out of the content's first
         // row -- which on the hearth is the word over the fuel slot.
-        self.rule(band.x0, band.x1, band.y0 + 2.0 * SKIN_TEXEL, self.theme.dark);
+        self.rule(band.x0, band.x1, rule_y, self.theme.dark);
         band.y0
     }
 

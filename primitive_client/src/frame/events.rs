@@ -1559,7 +1559,6 @@ pub fn on_mouse_button(
                     Intent::QuickMove(slot) => {
                         ClientMessage::QuickMoveSlot { slot: slot as u8 }
                     }
-                    Intent::Sort => ClientMessage::SortInventory,
                     Intent::Equip(slot) => {
                         ClientMessage::Equip { slot: slot as u8 }
                     }

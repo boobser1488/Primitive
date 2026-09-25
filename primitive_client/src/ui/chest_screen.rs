@@ -95,15 +95,15 @@ const HALF_GAP: f32 = 0.060;
 /// tall, so a label never touches either the row under it or whatever
 /// is over it.
 const LABEL_HEIGHT: f32 = 0.058;
-/// The side of the way out, before the touch floor is applied.
-const CLOSE_SIDE: f32 = 0.066;
-
 /// Room for the title, above the top label.
 ///
-/// The title is drawn at 1.05 scale -- about 0.049 tall -- and a band
-/// of 0.058 left four thousandths of clearance, so CHEST and STORED
-/// read as one smudged line. Room for the text plus half its height
-/// again.
+/// **[`widgets::TITLE_BAND`], which is the smallest band that holds a
+/// title, and this used to be under it.** It was 0.082 -- the way out
+/// plus air -- and 0.082 leaves 0.031 above the rule for a line of text
+/// 0.049 tall, so the scored line was drawn through the bottom of
+/// `CHEST` and `KILN`. The word and the rule under it read as one
+/// smudge, which is what the player saw on the pack and reported there.
+/// See the note on `panel_header`, which is the other half of it.
 ///
 /// **It used to have to hold the way out as well**, floored to a
 /// finger, which on a phone made the band nearly twice as tall as the
@@ -111,8 +111,8 @@ const CLOSE_SIDE: f32 = 0.066;
 /// so the band is back to being what it is called: room for a line of
 /// text. Every hundredth that buys comes back as a bigger slot, which
 /// is the arithmetic spelled out on [`FOOTER_HEIGHT`].
-fn header_height() -> f32 {
-    widgets::tappable_when(CLOSE_SIDE, false) + 0.016
+const fn header_height() -> f32 {
+    widgets::TITLE_BAND
 }
 
 /// Room under the lower grid for the readout and one line of hint.
@@ -1814,7 +1814,22 @@ impl ChestScreen {
         // The same size the pack writes its own summary at: two
         // screens saying "this is what you are carrying" in two sizes
         // was the drift this scale exists to stop.
-        p.text(&summary, grid_left(), panel.y0 + 0.108, widgets::size::BODY, widgets::INK);
+        //
+        // **Fitted, like the hint under it, and it was not.** The line
+        // grows with the numbers in it and with the language: a full
+        // chest in Russian is `40/40 ячеек   5120 предметов   12288 кг`,
+        // which is 1.09 across against a grid 1.06 wide, so the weight
+        // was printed past the right-hand edge of the panel and onto the
+        // world behind it. A fixed size for a line whose length is the
+        // player's business is a line that overflows the first time
+        // somebody fills the chest.
+        p.text(
+            &summary,
+            grid_left(),
+            panel.y0 + 0.108,
+            widgets::fitted_scale(&summary, widgets::size::BODY, grid_width(), 0.7),
+            widgets::INK,
+        );
         // The stall's own line: the owner is pricing and the buyer is
         // trading, and the chest's shift-click hint is neither.
         let hint = match (layout, self.stall()) {
@@ -2808,14 +2823,25 @@ fn page_band() -> f32 {
 }
 
 /// Where a body's tab is drawn: the body's own forty on the left, the
-/// rucksack on the right, together as wide as the tray under them.
+/// rucksack on the right, together as wide as the grid under them.
+///
+/// **The grid, not the tray it stands in, and that is a fix.** The tray
+/// stands `TRAY_PAD` proud of the slots on each side, and the panel's
+/// stitched frame is [`widgets::PANEL_BORDER`] deep -- which is
+/// [`PANEL_PAD`] exactly, so the frame's inner line falls on
+/// `grid_left()`. A strip as wide as the tray therefore had twelve
+/// thousandths of each tab printed *on the stitching*, which is the
+/// thing that reads as a control glued half over the edge of the screen
+/// and is what the pack's tidy button was moved down a whole
+/// `PANEL_BORDER` to stop doing. A tray may sit against the frame -- it
+/// is a recess in the stone and it has no edge of its own to lose -- and
+/// a button may not.
 ///
 /// **The exact inverse of [`page_tab_at`].**
 pub fn page_tab_rect(rucksack: bool) -> Rect {
-    let tray = chest_tray();
-    let width = (tray.width() - PAGE_GAP) / 2.0;
-    let x0 = tray.x0 + if rucksack { width + PAGE_GAP } else { 0.0 };
-    let y0 = tray.y1 + PAGE_MARGIN;
+    let width = (grid_width() - PAGE_GAP) / 2.0;
+    let x0 = grid_left() + if rucksack { width + PAGE_GAP } else { 0.0 };
+    let y0 = chest_tray().y1 + PAGE_MARGIN;
     Rect::new(x0, y0, x0 + width, y0 + page_tab_height())
 }
 
@@ -4677,5 +4703,441 @@ mod stall_tests {
         let before = screen.ui_key();
         screen.show_stall(StallView { at: AT, owner: "ada".into(), yours: false, offers: vec![Some(Offer { take_count: 2, ..FLINT_FOR_HIDE }), None, None] });
         assert_ne!(screen.ui_key(), before, "a new price would not be drawn until something else changed");
+    }
+}
+
+/// **Nothing on a container screen is drawn over anything else, and
+/// nothing on it is drawn off the panel.**
+///
+/// The pack screen's guards, over the family of screens that is built
+/// out of the same code: a chest, a hearth, a drying rack, a jug, a
+/// stall, a horse's bags and a dead player's body. They are the same
+/// panel, the same header, the same cells and the same captions, so a
+/// mistake in any of those is a mistake on seven screens at once -- and
+/// the one this pass found was exactly that: the rule under a title was
+/// drawn through the title, on every one of them.
+///
+/// Every language and both pointers, because the words that overflow are
+/// never the English ones and the layouts that collide are usually the
+/// phone's.
+#[cfg(test)]
+mod layout_guards {
+    use super::*;
+    use crate::ui::lang::Language;
+    use crate::ui::widgets::{crossing, descender_slack, holds, Furniture, Placed, Written};
+    use primitive_shared::inventory::Stack;
+    use primitive_shared::protocol::{ContainerKind, HearthState, RackState};
+    use primitive_shared::types::{
+        BLOCK_CHEST, BLOCK_CORPSE, BLOCK_DRYING_RACK, BLOCK_GRAIN, BLOCK_KILN_LIT,
+        BLOCK_SADDLEBAGS, BLOCK_STALL, BLOCK_STONE,
+    };
+
+    const AT: (i32, i32, i32) = (3, 40, 5);
+
+    /// One container screen, drawn, with everything a guard needs to ask
+    /// about it.
+    struct Screen {
+        what: &'static str,
+        language: Language,
+        touch: bool,
+        panel: Rect,
+        controls: Vec<(&'static str, Rect)>,
+        lines: Vec<Written>,
+        furniture: Vec<Placed>,
+    }
+
+    impl Screen {
+        fn where_(&self) -> String {
+            format!(
+                "{}/{:?}/{}",
+                self.what,
+                self.language,
+                if self.touch { "phone" } else { "desktop" }
+            )
+        }
+
+        fn of(&self, kind: Furniture) -> impl Iterator<Item = Rect> + '_ {
+            self.furniture.iter().filter(move |p| p.what == kind).map(|p| p.rect)
+        }
+    }
+
+    /// A pack with something in every kind of slot, so the counts, the
+    /// captions and the readout all have something to say.
+    fn a_pack() -> Inventory {
+        let mut pack = Inventory::new();
+        for slot in 0..primitive_shared::inventory::SLOTS {
+            pack.put_in_slot(slot, Stack::new(BLOCK_STONE, 128));
+        }
+        pack
+    }
+
+    /// Every container screen there is, in every language, on both kinds
+    /// of pointer.
+    ///
+    /// **The list is written out rather than derived from
+    /// `ContainerKind`**, because two of the layouts are not kinds at all
+    /// -- a body is a chest whose contents are sixty long, and a jug is
+    /// opened out of the pack with no server in it -- and those two are
+    /// precisely the ones a loop over the enum would have missed.
+    fn every_container_drawn() -> Vec<Screen> {
+        let pack = a_pack();
+        let mut out = Vec::new();
+        for touch in [false, true] {
+            crate::ui::widgets::with_touch(touch, || {
+                for &language in Language::ALL {
+                    for (what, screen) in every_container() {
+                        let layout = screen.layout();
+                        let ((_, lines), furniture) =
+                            crate::ui::widgets::while_recording_furniture(|| {
+                                crate::ui::widgets::while_recording_text(|| {
+                                    // **With the skin on**, because the
+                                    // lip a count has to stay off is the
+                                    // picture's.
+                                    crate::ui::widgets::with_skin(1, || {
+                                        let mut v = Vec::new();
+                                        screen.build_into(
+                                            FontAtlas::for_test(),
+                                            &FaceLayers::empty_for_test(),
+                                            &pack,
+                                            language,
+                                            &mut v,
+                                        );
+                                    })
+                                })
+                            });
+                        assert!(!lines.is_empty(), "{what}/{language:?} wrote nothing at all");
+                        out.push(Screen {
+                            what,
+                            language,
+                            touch,
+                            panel: panel_rect(layout),
+                            controls: controls_of(layout, screen.stall().is_some_and(|v| v.yours)),
+                            lines,
+                            furniture,
+                        });
+                    }
+                }
+            });
+        }
+        out
+    }
+
+    /// Every control on a container screen of this shape.
+    fn controls_of(layout: Layout, yours: bool) -> Vec<(&'static str, Rect)> {
+        let mut controls: Vec<(&'static str, Rect)> = Vec::new();
+        if layout.grid() {
+            controls.push(("take all", bulk_button_rect(false)));
+            controls.push(("tidy pile", sort_button_rect()));
+            controls.push(("store all", bulk_button_rect(true)));
+        }
+        if matches!(layout, Layout::Body { .. }) {
+            controls.push(("body tab", page_tab_rect(false)));
+            controls.push(("rucksack tab", page_tab_rect(true)));
+        }
+        if layout == Layout::Stall {
+            for control in stall_controls(yours) {
+                controls.push(("stall control", stall_control_rect(control)));
+            }
+        }
+        controls
+    }
+
+    /// The seven screens, each in the state worth looking at.
+    fn every_container() -> Vec<(&'static str, ChestScreen)> {
+        let mut screens: Vec<(&'static str, ChestScreen)> = Vec::new();
+
+        let mut chest = ChestScreen::new();
+        let mut store = Inventory::chest();
+        for slot in 0..primitive_shared::inventory::CHEST_SLOTS {
+            store.put_in_slot(slot, Stack::new(BLOCK_STONE, 128));
+        }
+        chest.show(AT, store.clone(), Some(BLOCK_CHEST), ContainerKind::Chest, None, None);
+        screens.push(("chest", chest));
+
+        let mut bags = ChestScreen::new();
+        bags.show(AT, store, Some(BLOCK_SADDLEBAGS), ContainerKind::Saddlebags, None, None);
+        screens.push(("bags", bags));
+
+        let mut hearth = ChestScreen::new();
+        let mut fired = Inventory::chest();
+        for slot in 0..primitive_shared::hearth::USED_SLOTS.min(fired.slots().len()) {
+            fired.put_in_slot(slot, Stack::new(BLOCK_STONE, 9));
+        }
+        hearth.show(
+            AT,
+            fired,
+            Some(BLOCK_KILN_LIT),
+            ContainerKind::Hearth(primitive_shared::hearth::Kind::Kiln),
+            // Climbing towards the heat a pour needs, so the gauge, its
+            // line and the colour word are all on the screen at once --
+            // three pieces of text within a hundredth of each other, and
+            // the place a longer language runs out of room.
+            Some(HearthState {
+                fuel_left: 74.0,
+                progress: 0.42,
+                degrees: 1180.0,
+                needs: primitive_shared::hearth::COPPER_MELTS_C,
+                wet: false,
+            }),
+            None,
+        );
+        screens.push(("hearth", hearth));
+
+        // **The rack stopped by weather**, which is the longest line any
+        // of these screens carries in any language.
+        let mut rack = ChestScreen::new();
+        let mut frames = Inventory::chest();
+        frames.put_in_slot(primitive_shared::rack::HIDE_SLOT, Stack::new(BLOCK_STONE, 1));
+        rack.show(
+            AT,
+            frames,
+            Some(BLOCK_DRYING_RACK),
+            ContainerKind::Rack,
+            None,
+            Some(RackState { progress: 0.38, rate: 0.0, wet: true, near_fire: false }),
+        );
+        screens.push(("rack", rack));
+
+        // A jug looked into in the hand: no server in it at all.
+        let mut jugged = a_pack();
+        jugged.take_slot(9);
+        jugged.put_in_slot(9, primitive_shared::inventory::filled_jug(BLOCK_GRAIN, 11));
+        let mut jug = ChestScreen::new();
+        jug.show_held_vessel(9, &jugged);
+        screens.push(("jug", jug));
+
+        // A dead player's body, on each of its two pages.
+        for (name, rucksack) in [("body", false), ("body rucksack", true)] {
+            let mut contents = Inventory::body(true);
+            for slot in 0..primitive_shared::inventory::CHEST_SLOTS {
+                contents.put_in_slot(slot, Stack::new(BLOCK_STONE, 128));
+            }
+            for offset in [0, 3, 11, 19] {
+                contents.put_in_slot(
+                    primitive_shared::inventory::CORPSE_COMPARTMENT.start + offset,
+                    Stack::new(BLOCK_STONE, 20 + offset as u32),
+                );
+            }
+            let mut body = ChestScreen::new();
+            body.show(AT, contents, Some(BLOCK_CORPSE), ContainerKind::Chest, None, None);
+            if rucksack {
+                let tab = page_tab_rect(true);
+                body.set_cursor(Some((tab.centre_x(), tab.centre_y())));
+                let _ = body.click(&a_pack(), Button::Left, false, false);
+            }
+            screens.push((name, body));
+        }
+
+        // A stall, seen by its owner -- who gets the price steppers, so
+        // this is the crowded one -- and by a buyer.
+        for (name, yours) in [("stall (owner)", true), ("stall (buyer)", false)] {
+            let mut stall = ChestScreen::new();
+            stall.show_stall(StallView {
+                at: AT,
+                owner: "wwwwwwwwwwwwwwwwwwwwwwww".to_string(),
+                yours,
+                offers: vec![
+                    Some(Offer {
+                        give: primitive_shared::types::BLOCK_FLINT,
+                        give_count: 4,
+                        take: primitive_shared::types::BLOCK_HIDE,
+                        take_count: 1,
+                    }),
+                    None,
+                    None,
+                ],
+            });
+            let mut counter = Inventory::chest();
+            counter.add_within(primitive_shared::stall::STOCK, primitive_shared::types::BLOCK_FLINT, 12);
+            counter.add_within(primitive_shared::stall::TAKINGS, primitive_shared::types::BLOCK_HIDE, 2);
+            stall.show(AT, counter, Some(BLOCK_STALL), ContainerKind::Stall, None, None);
+            screens.push((name, stall));
+        }
+
+        screens
+    }
+
+    /// **No line of text on a container screen is drawn over the rule
+    /// under its own title.**
+    ///
+    /// The watchdog for the bug the player reported on the pack, which
+    /// was never the pack's: `panel_header` centred a title in a band
+    /// whose floor is a scored line four texels thick, and every one of
+    /// these screens had a band too shallow to leave the line anywhere
+    /// else to be. `CHEST` and `KILN` sat on their rules. See
+    /// `widgets::TITLE_BAND`.
+    #[test]
+    fn no_container_writes_a_line_over_a_scored_rule() {
+        let mut seen = 0;
+        for screen in every_container_drawn() {
+            for rule in screen.of(Furniture::Rule) {
+                seen += 1;
+                for line in &screen.lines {
+                    let ink = Rect::new(
+                        line.rect.x0,
+                        line.rect.y0 + descender_slack(line.scale),
+                        line.rect.x1,
+                        line.rect.y1,
+                    );
+                    assert!(
+                        !crossing(ink, rule, widgets::PIXEL * 0.25),
+                        "{}: the rule at {rule:?} is drawn through {:?} at {:?}",
+                        screen.where_(),
+                        line.text,
+                        line.rect,
+                    );
+                }
+            }
+        }
+        assert!(seen > 0, "the recorder saw no rule on any container screen");
+    }
+
+    /// **Nothing on a container screen is drawn outside its panel.**
+    #[test]
+    fn nothing_on_a_container_is_drawn_outside_the_panel() {
+        for screen in every_container_drawn() {
+            let panel = screen.panel;
+            let inside = Rect::new(
+                panel.x0 + widgets::PANEL_BORDER,
+                panel.y0 + widgets::PANEL_BORDER,
+                panel.x1 - widgets::PANEL_BORDER,
+                panel.y1 - widgets::PANEL_BORDER,
+            );
+            for line in &screen.lines {
+                let ink = Rect::new(
+                    line.rect.x0,
+                    line.rect.y0 + descender_slack(line.scale),
+                    line.rect.x1,
+                    line.rect.y1,
+                );
+                assert!(
+                    holds(inside, ink, widgets::PIXEL * 0.5),
+                    "{}: {:?} at {:?} is drawn outside the panel {inside:?}",
+                    screen.where_(),
+                    line.text,
+                    line.rect,
+                );
+            }
+            for (name, control) in &screen.controls {
+                assert!(
+                    holds(inside, *control, 1e-4),
+                    "{}: {name} at {control:?} is drawn outside the panel {inside:?}",
+                    screen.where_(),
+                );
+            }
+            for cell in screen.of(Furniture::Cell) {
+                assert!(
+                    holds(inside, cell, 1e-4),
+                    "{}: a cell at {cell:?} is drawn outside the panel {inside:?}",
+                    screen.where_(),
+                );
+            }
+        }
+    }
+
+    /// **No two controls on a container screen stand on each other, on a
+    /// cell, or on a scored rule.**
+    #[test]
+    fn no_control_on_a_container_is_drawn_over_anything_else() {
+        for screen in every_container_drawn() {
+            for (i, (name, a)) in screen.controls.iter().enumerate() {
+                for (other, b) in &screen.controls[i + 1..] {
+                    assert!(
+                        !crossing(*a, *b, 1e-4),
+                        "{}: {name} at {a:?} is drawn over {other} at {b:?}",
+                        screen.where_(),
+                    );
+                }
+                for cell in screen.of(Furniture::Cell) {
+                    // **A square that *is* the control is not a control
+                    // over a square.** A stall's price is a picture of
+                    // the thing being asked for and you press the
+                    // picture (`StallControl::Give`/`Take`), so its
+                    // rectangle is the cell's rectangle exactly. What
+                    // this guard is about is a *button* laid over a
+                    // square somebody is meant to be able to click.
+                    if holds(cell, *a, 1e-4) && holds(*a, cell, 1e-4) {
+                        continue;
+                    }
+                    assert!(
+                        !crossing(*a, cell, 1e-4),
+                        "{}: {name} at {a:?} covers the cell at {cell:?}",
+                        screen.where_(),
+                    );
+                }
+                for rule in screen.of(Furniture::Rule) {
+                    assert!(
+                        !crossing(*a, rule, 1e-4),
+                        "{}: {name} at {a:?} stands on the rule at {rule:?}",
+                        screen.where_(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// **No two lines of text on a container screen are drawn over each
+    /// other**, and no line straddles the lip of a cell.
+    ///
+    /// The pack's two guards, said once for the other seven screens. The
+    /// shadow exception is the pack's: a line drawn twice at the same
+    /// place is one line as far as a reader is concerned.
+    #[test]
+    fn no_container_writes_two_lines_over_each_other_or_onto_a_lip() {
+        for screen in every_container_drawn() {
+            for (i, a) in screen.lines.iter().enumerate() {
+                for b in &screen.lines[i + 1..] {
+                    if a.text == b.text {
+                        continue;
+                    }
+                    assert!(
+                        !crossing(a.rect, b.rect, widgets::PIXEL * 1.5),
+                        "{}: {:?} is drawn over {:?}",
+                        screen.where_(),
+                        a.text,
+                        b.text,
+                    );
+                }
+            }
+            for cell in screen.of(Furniture::Cell) {
+                let inner = widgets::cell_inner(cell);
+                for line in &screen.lines {
+                    if !crossing(line.rect, cell, 0.0) {
+                        continue;
+                    }
+                    let down = descender_slack(line.scale);
+                    let across = widgets::PIXEL * 0.1;
+                    let inside = line.rect.x0 >= inner.x0 - across
+                        && line.rect.x1 <= inner.x1 + across
+                        && line.rect.y0 >= inner.y0 - down
+                        && line.rect.y1 <= inner.y1 + across;
+                    assert!(
+                        inside,
+                        "{}: {:?} at {:?} is on the edge of the cell {cell:?} \
+                         (its floor is {inner:?})",
+                        screen.where_(),
+                        line.text,
+                        line.rect,
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Every header band on a container screen holds its title.**
+    ///
+    /// The arithmetic behind the two guards above, asserted where it can
+    /// be read: a band shallower than [`widgets::TITLE_BAND`] has no
+    /// room above its rule for a line of text, and `panel_header` will
+    /// then put the title as high as it can and let the rule come up
+    /// through it.
+    #[test]
+    fn a_header_band_is_deep_enough_for_the_title_in_it() {
+        assert!(
+            header_height() >= widgets::TITLE_BAND - 1e-6,
+            "a container's header band is {} deep against a title that needs {}",
+            header_height(),
+            widgets::TITLE_BAND,
+        );
     }
 }

@@ -1013,3 +1013,109 @@ mod tests {
         assert!(drawn(&screen).len() > 6);
     }
 }
+
+/// **Nothing a station screen writes is drawn over anything else, and
+/// nothing it draws leaves its panel.**
+///
+/// The pack's and the containers' guards, over the screens a player
+/// works at: the anvil, the wheel, the whetstone and the sawhorse. They
+/// are not built out of `panel_header` and they have no cells, so the
+/// bug that was found on the other screens could not be here -- but the
+/// property is the same property and the words are the same words, and a
+/// screen checked only in English is a screen checked once. `Bejte mysza
+/// lub spacja po metce` is half again as long as its English.
+#[cfg(test)]
+mod layout_guards {
+    use super::*;
+    use crate::ui::widgets::{crossing, descender_slack, holds};
+
+    /// Every state of every station worth looking at: the list of jobs,
+    /// and a run under way -- which is a different screen inside the
+    /// same frame.
+    fn every_station_drawn() -> Vec<(String, Rect, Vec<crate::ui::widgets::Written>)> {
+        let mut out = Vec::new();
+        for touch in [false, true] {
+            crate::ui::widgets::with_touch(touch, || {
+                for game in [Game::Anvil, Game::Wheel, Game::Whet, Game::Saw] {
+                    for &language in Language::ALL {
+                        let listing = {
+                            let mut screen = StationScreen::new();
+                            screen.asked_to_open();
+                            screen.show(game, minigame::tolerance(None));
+                            screen
+                        };
+                        // Mid-run at a moment picked so the marker is
+                        // not sitting at either end of the bar: a marker
+                        // at zero is a picture of a screen that has not
+                        // started.
+                        let job = jobs_of(game)[0];
+                        let running = StationScreen::mid_run(
+                            game,
+                            minigame::tolerance(None),
+                            job,
+                            0x5EED,
+                            900,
+                        );
+                        for (state, screen) in [("jobs", listing), ("running", running)] {
+                            let (_, lines) = crate::ui::widgets::while_recording_text(|| {
+                                crate::ui::widgets::with_skin(1, || {
+                                    let mut v = Vec::new();
+                                    screen.build_into(
+                                        FontAtlas::for_test(),
+                                        &FaceLayers::empty_for_test(),
+                                        language,
+                                        &mut v,
+                                    );
+                                })
+                            });
+                            assert!(
+                                !lines.is_empty(),
+                                "{game:?}/{state}/{language:?} wrote nothing at all"
+                            );
+                            out.push((
+                                format!(
+                                    "{game:?}/{state}/{language:?}/{}",
+                                    if touch { "phone" } else { "desktop" }
+                                ),
+                                Panel::for_game(game).frame,
+                                lines,
+                            ));
+                        }
+                    }
+                }
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn nothing_a_station_writes_is_drawn_over_anything_else_or_off_its_panel() {
+        for (where_, frame, lines) in every_station_drawn() {
+            for (i, a) in lines.iter().enumerate() {
+                for b in &lines[i + 1..] {
+                    if a.text == b.text {
+                        continue;
+                    }
+                    assert!(
+                        !crossing(a.rect, b.rect, widgets::PIXEL * 1.5),
+                        "{where_}: {:?} is drawn over {:?}",
+                        a.text,
+                        b.text,
+                    );
+                }
+                let ink = Rect::new(
+                    a.rect.x0,
+                    a.rect.y0 + descender_slack(a.scale),
+                    a.rect.x1,
+                    a.rect.y1,
+                );
+                assert!(
+                    holds(frame, ink, widgets::PIXEL * 0.5),
+                    "{where_}: {:?} at {:?} is drawn outside the panel {frame:?}",
+                    a.text,
+                    a.rect,
+                );
+            }
+        }
+    }
+}
