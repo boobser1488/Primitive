@@ -217,6 +217,7 @@ async fn run_connection(
         state.equipment_dirty = true;
         state.discovered = restored.discovered.clone();
         state.bags = restored.bags.clone();
+        state.trail = restored.trail.clone();
     }
     let handle = Arc::new(player);
     // One session per identity, decided under the registry's own lock.
@@ -330,6 +331,9 @@ async fn run_connection(
     // already added to.
     crate::send_discovered(&handle);
     crate::send_landmarks(&ctx, &handle);
+    // ...and the walk this player has made with a map on them, whole:
+    // everything after this is a handful of cells at a time as they move.
+    crate::send_trail(&handle, true);
 
     if ctx.options.logging {
         println!(
@@ -1247,6 +1251,14 @@ async fn read_loop(
                         subscriber.send(ServerMessage::BlockUpdate(fallen));
                     }
                 }
+
+                // **A cairn goes on the placer's own map**, if they were
+                // carrying one when they piled it. Here, at the end of the
+                // successful path, rather than where the placement is
+                // decided: everything above can still refuse, and a mark
+                // written for an edit that was put back would be a mark on
+                // a cairn that is not there. See `crate::note_mark`.
+                crate::note_mark(&handle, (global_x, global_y, global_z), written);
             }
 
             ClientMessage::UpdateTransform {
@@ -1912,6 +1924,18 @@ async fn read_loop(
                 crate::help_up(&ctx, &handle, target);
             }
 
+            ClientMessage::Blaze { global_x, global_y, global_z } => {
+                crate::cut_blaze(&ctx, &handle, (global_x, global_y, global_z));
+            }
+
+            ClientMessage::NameMark { global_x, global_y, global_z, name } => {
+                crate::name_mark(&handle, (global_x, global_y, global_z), &name);
+            }
+
+            ClientMessage::ForgetMark { global_x, global_y, global_z } => {
+                crate::forget_mark(&handle, (global_x, global_y, global_z));
+            }
+
             ClientMessage::Disconnect => return Ok(()),
         }
     }
@@ -1964,6 +1988,13 @@ fn barred_while_downed(msg: &ClientMessage) -> bool {
         // A river to drink from, a spark for the hearth beside them. Beds
         // and seats are refused in `use_block` itself.
         | ClientMessage::UseBlock { .. }
+        // **Writing on your own map**, which a body on the ground may do:
+        // neither of these touches the world -- one names a mark that is
+        // already there, the other rubs out one that is not -- and a player
+        // spending their last half minute labelling the place they went
+        // down is doing the most reasonable thing in the game.
+        | ClientMessage::NameMark { .. }
+        | ClientMessage::ForgetMark { .. }
         // Letting go.
         | ClientMessage::Respawn => false,
         ClientMessage::SetBlock { .. }
@@ -1994,6 +2025,8 @@ fn barred_while_downed(msg: &ClientMessage) -> bool {
         | ClientMessage::TendAnimal { .. }
         | ClientMessage::StallOffer { .. }
         | ClientMessage::StallBuy { .. }
+        // ...and nobody knifes a tree from the floor.
+        | ClientMessage::Blaze { .. }
         // Nobody on the ground lifts anybody else off it.
         | ClientMessage::HelpUp { .. } => true,
     }

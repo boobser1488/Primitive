@@ -922,6 +922,14 @@ pub enum Msg {
     MapCairn,
     /// What the chat box says while it is asking for a cairn's name.
     CairnNamePrompt,
+    /// A blaze on the map's legend. See `types::BLOCK_BLAZE`.
+    MapBlaze,
+    /// What an open map says when the player has walked nowhere with it
+    /// yet -- which is a different sentence from `MapUnexplored`, and the
+    /// difference is the whole mechanic: the paper is blank because it
+    /// has not been carried anywhere, not because the world has not
+    /// loaded.
+    MapNoWalk,
     /// The sky read for a bearing (`logic::bearing`): which body it was
     /// read off, then where north is from where the player looks. Two
     /// halves rather than twelve sentences, because each half is a whole
@@ -1778,6 +1786,9 @@ pub const STRINGS: &[Line] = &[
     // (`names::death_cause`); see `said` for why Simple English borrows the
     // plain English one here.
     Line { msg: Msg::Notice(Notice::PlayerDied), en: "{who} {cause}", simple: "{who} died: {cause}", ru: "{who} {cause}", pl: "{who} {cause}" },
+    // ---- the road (`primitive_shared::trail`) ----
+    Line { msg: Msg::MapBlaze,     en: "blaze",          simple: "cut on a tree", ru: "зарубка", pl: "zacios" },
+    Line { msg: Msg::MapNoWalk,    en: "blank hide -- it fills in where you walk carrying it", simple: "the map is empty -- carry it and walk, and it fills in", ru: "кожа пуста -- карта заполняется там, где вы прошли с ней", pl: "pusta skóra -- mapa zapełnia się tam, gdzie przejdziesz, niosąc ją" },
     // ---- the night ----
     Line { msg: Msg::Notice(Notice::WokenByWolves), en: "wolves! you wake to them circling your bed in the dark", simple: "wolves! they woke you - they are all around", ru: "волки! вы просыпаетесь: они кружат у постели в темноте", pl: "wilki! budzisz się, a one krążą w ciemności wokół posłania" },
 ];

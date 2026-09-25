@@ -564,6 +564,10 @@ pub type PlayerId = u64;
 /// ...and deaths told as a code: `notice::Said` gained `who` and `cause`
 /// and `Notice::PlayerDied` was appended. 57 still, which no release speaks.
 /// ...and the night: `Notice::WokenByWolves` appended. 57 still.
+/// ...and the road and the memory of it: `Blaze`, `NameMark` and
+/// `ForgetMark` out, `Trail` back, all appended, and blocks at ids 695-696
+/// (`types::BLOCK_MAP`, `types::BLOCK_BLAZE`) with one row at the end of
+/// `RECIPES`. 57 still, which no release speaks.
 pub const PROTOCOL_VERSION: u32 = 57;
 
 /// What kind of container a screen is showing.
@@ -2031,6 +2035,55 @@ pub enum ClientMessage {
     HelpUp {
         target: PlayerId,
     },
+    /// **Cut a blaze into the trunk being looked at** with the knife in
+    /// hand (`types::BLOCK_BLAZE`).
+    ///
+    /// A message of its own rather than a `UseBlock`, because a plain use
+    /// with a knife at a trunk already means something else entirely -- it
+    /// taps the tree for resin or bark (the server's `tap_trunk`) -- and
+    /// the two cannot be told apart from the cell alone. The client sends
+    /// this only for the modifier-held gesture; the server checks the
+    /// knife, the reach and the trunk for itself, because a client that
+    /// could name the cut could blaze the horizon.
+    ///
+    /// No face on the wire: which side of the trunk the mark goes on is
+    /// read off the player's own yaw, which the server already has and
+    /// already trusts for placing everything else that faces.
+    Blaze {
+        global_x: i32,
+        global_y: i32,
+        global_z: i32,
+    },
+    /// **Call this mark something**, on my map and nobody else's.
+    ///
+    /// Sent after the server has confirmed the cairn or the blaze, from the
+    /// chat box the client opens to ask (`ui::chat::Chat::open_naming`).
+    /// It names a cell rather than a mark index, because the client has no
+    /// index to name -- and the server refuses a cell it has no mark of,
+    /// so a client that made one up changes nothing.
+    NameMark {
+        global_x: i32,
+        global_y: i32,
+        global_z: i32,
+        name: String,
+    },
+    /// **That mark is not there any more**: the player went back to the
+    /// cell they had written down and found no cairn and no blaze.
+    ///
+    /// The client is the one that notices, because the client is the one
+    /// drawing the map and it has the chunk in hand
+    /// (`logic::map::ExploredMap::catch_up`). It has already rubbed the
+    /// mark off its own copy by the time it sends this -- a player standing
+    /// in front of the heap that is not there must not be shown one -- so
+    /// what this message is for is the *next* session, which reads the
+    /// profile. Safe to trust: the worst a lying client can do with it is
+    /// rub out its own player's mark, and the server refuses a cell it has
+    /// no mark of anyway.
+    ForgetMark {
+        global_x: i32,
+        global_y: i32,
+        global_z: i32,
+    },
 }
 
 /// Messages the server sends to the client.
@@ -2774,6 +2827,27 @@ pub enum ServerMessage {
     Said {
         said: crate::notice::Said,
         to_log: bool,
+    },
+    /// **Where this player has been with a map on them**, and what they
+    /// marked (`trail::Trail`).
+    ///
+    /// Sent whole once on join and then as the player walks out of what
+    /// they already had -- a few cells at a time, and nothing at all while
+    /// they stand still or walk over old ground. `whole` says which: true
+    /// replaces what the client holds, false adds to it. Without the flag
+    /// a client that joined mid-session would have to guess whether an
+    /// empty list meant "you have walked nowhere" or "nothing new".
+    ///
+    /// **The land itself is not in here.** The client already has the
+    /// chunks and surveys them into a picture of its own; this says which
+    /// of that picture the player is allowed to have looked at. Sending
+    /// the terrain a second time, as colours, would be a second copy of
+    /// the world on the wire for a page nobody has open.
+    /// Appended, so it rides fifty-seven's bump.
+    Trail {
+        cells: Vec<(i32, i32)>,
+        marks: Vec<crate::trail::Mark>,
+        whole: bool,
     },
 }
 

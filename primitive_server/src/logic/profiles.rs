@@ -76,7 +76,15 @@ use primitive_shared::injury::Injuries;
 use primitive_shared::inventory::{Equipment, Inventory};
 use primitive_shared::types::BlockId;
 
-const SAVE_FORMAT_VERSION: u32 = 11;
+const SAVE_FORMAT_VERSION: u32 = 12;
+/// The last version written before a player's walk was written down.
+///
+/// Read through `ProfileV11`, and everybody in one comes back having
+/// walked nowhere -- which is the only honest answer, because nobody
+/// wrote it down. It costs a veteran nothing they had: there were no maps
+/// in a world of version 11 (`types::BLOCK_MAP` is new with this), so
+/// there is nothing a blank trail takes away.
+const VERSION_WITHOUT_A_TRAIL: u32 = 11;
 /// The last version written before a position was an `f64`.
 ///
 /// Read through `ProfileV10`, and the player comes back where the `f32`
@@ -317,6 +325,21 @@ pub struct Profile {
     /// that a reconnect wiped would send them back to spawn with nothing
     /// and no idea which hill it was.
     pub bags: Vec<(i32, i32, i32)>,
+    /// Where this player has walked with a map on them, and what they
+    /// marked while they had one.
+    ///
+    /// **Here and not on the client**, which is where the picture of the
+    /// land still is. The record of the *walk* is a fact about a player,
+    /// like their pack and their wounds, and it decides what a map is
+    /// allowed to show -- so it belongs where every other such fact is,
+    /// keyed by the same uuid, flushed by the same autosave. A client that
+    /// kept it would be a client that could hand itself the whole world by
+    /// editing a file, and a player who moved to another machine would
+    /// arrive having never been anywhere.
+    ///
+    /// It is small by construction: one cell an eight blocks square, a few
+    /// thousand for a long life. See `primitive_shared::trail`.
+    pub trail: primitive_shared::trail::Trail,
 }
 
 impl Profile {
@@ -336,6 +359,7 @@ impl Profile {
             // Nothing held, nowhere to go back to.
             discovered: Vec::new(),
             bags: Vec::new(),
+            trail: primitive_shared::trail::Trail::default(),
             position: primitive_shared::geometry::wide(spawn),
             yaw: 0.0,
             pitch: 0.0,
@@ -417,6 +441,70 @@ struct SaveFile {
     profiles: Vec<Profile>,
 }
 
+// ---- what a player looked like before anybody drew a map ----
+//
+// Positional, like every shape below it: one field short read as the new
+// one is a profile full of the next player's numbers. See
+// `VERSION_WITHOUT_A_TRAIL`.
+
+#[derive(Serialize, Deserialize)]
+struct ProfileV11 {
+    uuid: Uuid,
+    username: String,
+    inventory: Inventory,
+    position: (f64, f64, f64),
+    yaw: f32,
+    pitch: f32,
+    health: f32,
+    selected_slot: u8,
+    joins: u64,
+    operator: bool,
+    nourishment: f32,
+    equipment: Equipment,
+    hydration: f32,
+    body_c: f32,
+    wetness: f32,
+    sick_for: f32,
+    injuries: Injuries,
+    fatigue: f32,
+    discovered: Vec<BlockId>,
+    bags: Vec<(i32, i32, i32)>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SaveFileV11 {
+    version: u32,
+    profiles: Vec<ProfileV11>,
+}
+
+impl From<ProfileV11> for Profile {
+    fn from(old: ProfileV11) -> Self {
+        Self {
+            uuid: old.uuid,
+            username: old.username,
+            inventory: old.inventory,
+            position: old.position,
+            yaw: old.yaw,
+            pitch: old.pitch,
+            health: old.health,
+            selected_slot: old.selected_slot,
+            joins: old.joins,
+            operator: old.operator,
+            nourishment: old.nourishment,
+            equipment: old.equipment,
+            hydration: old.hydration,
+            body_c: old.body_c,
+            wetness: old.wetness,
+            sick_for: old.sick_for,
+            injuries: old.injuries,
+            fatigue: old.fatigue,
+            discovered: old.discovered,
+            bags: old.bags,
+            trail: primitive_shared::trail::Trail::default(),
+        }
+    }
+}
+
 // ---- what a player looked like while a position was an `f32` ----
 //
 // Positional, like every shape below it: four bytes a coordinate read as
@@ -475,6 +563,7 @@ impl From<ProfileV10> for Profile {
             fatigue: old.fatigue,
             discovered: old.discovered,
             bags: old.bags,
+            trail: primitive_shared::trail::Trail::default(),
         }
     }
 }
@@ -538,6 +627,7 @@ impl From<ProfileV9> for Profile {
             fatigue: old.fatigue,
             discovered: old.discovered,
             bags: old.bags,
+            trail: primitive_shared::trail::Trail::default(),
         }
     }
 }
@@ -630,6 +720,7 @@ impl From<ProfileV4> for Profile {
             sick_for: 0.0,
             discovered: Vec::new(),
             bags: Vec::new(),
+            trail: primitive_shared::trail::Trail::default(),
         }
     }
 }
@@ -689,6 +780,7 @@ impl From<ProfileV7> for Profile {
             sick_for: 0.0,
             discovered: Vec::new(),
             bags: Vec::new(),
+            trail: primitive_shared::trail::Trail::default(),
         }
     }
 }
@@ -749,6 +841,7 @@ impl From<ProfileV8> for Profile {
             sick_for: 0.0,
             discovered: old.discovered,
             bags: old.bags,
+            trail: primitive_shared::trail::Trail::default(),
         }
     }
 }
@@ -819,6 +912,7 @@ impl From<ProfileV6> for Profile {
             sick_for: 0.0,
             discovered: Vec::new(),
             bags: Vec::new(),
+            trail: primitive_shared::trail::Trail::default(),
         }
     }
 }
@@ -879,6 +973,7 @@ impl From<ProfileV5> for Profile {
             sick_for: 0.0,
             discovered: Vec::new(),
             bags: Vec::new(),
+            trail: primitive_shared::trail::Trail::default(),
         }
     }
 }
@@ -929,6 +1024,7 @@ impl From<ProfileV3> for Profile {
             sick_for: 0.0,
             discovered: Vec::new(),
             bags: Vec::new(),
+            trail: primitive_shared::trail::Trail::default(),
         }
     }
 }
@@ -992,6 +1088,7 @@ impl From<ProfileV2> for Profile {
             sick_for: 0.0,
             discovered: Vec::new(),
             bags: Vec::new(),
+            trail: primitive_shared::trail::Trail::default(),
         }
     }
 }
@@ -1040,6 +1137,7 @@ impl From<ProfileV1> for Profile {
             sick_for: 0.0,
             discovered: Vec::new(),
             bags: Vec::new(),
+            trail: primitive_shared::trail::Trail::default(),
         }
     }
 }
@@ -1159,7 +1257,13 @@ impl Profiles {
     /// is the memory, which changes a few times an evening. Marked dirty
     /// only when it actually changed, so an autosave of an unchanged
     /// player does not rewrite the file for a list it already has.
-    pub fn remember(&mut self, uuid: Uuid, discovered: &Discovered, bags: &[(i32, i32, i32)]) {
+    pub fn remember(
+        &mut self,
+        uuid: Uuid,
+        discovered: &Discovered,
+        bags: &[(i32, i32, i32)],
+        trail: &primitive_shared::trail::Trail,
+    ) {
         let Some(profile) = self.by_uuid.get_mut(&uuid) else {
             return;
         };
@@ -1169,6 +1273,15 @@ impl Profiles {
         }
         if profile.bags != bags {
             profile.bags = bags.to_vec();
+            self.dirty = true;
+        }
+        // The walk comes through here rather than through `store` for the
+        // reason the other two do: it is memory, not body, and a reconnect
+        // must not reset it. Compared rather than copied, because a player
+        // standing still has an identical trail twenty times a second and
+        // a file rewritten for that is a file rewritten forever.
+        if &profile.trail != trail {
+            profile.trail = trail.clone();
             self.dirty = true;
         }
     }
@@ -1295,6 +1408,14 @@ impl Profiles {
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
                 payload.profiles
             }
+            VERSION_WITHOUT_A_TRAIL => {
+                // A world from before a map could be carried. Everybody
+                // comes back having walked nowhere; see
+                // `VERSION_WITHOUT_A_TRAIL`.
+                let payload: SaveFileV11 = bincode::deserialize(&bytes)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                payload.profiles.into_iter().map(Profile::from).collect()
+            }
             VERSION_WITH_F32_POSITIONS => {
                 // A world from before a position was an `f64`. See
                 // `VERSION_WITH_F32_POSITIONS`.
@@ -1417,6 +1538,8 @@ pub struct Restored {
     pub discovered: Discovered,
     /// The bags they have still to go back for.
     pub bags: Vec<(i32, i32, i32)>,
+    /// Where they have walked with a map on them. See `Profile::trail`.
+    pub trail: primitive_shared::trail::Trail,
     pub returning: bool,
     /// **Where a player saved dead lies**, if they were saved dead: the
     /// joining connection leaves their body there (`leave_corpse_at`).
@@ -1567,6 +1690,11 @@ impl Profiles {
             // back to what you were carrying.
             discovered: Discovered::from_kinds(profile.discovered.iter().copied()),
             bags: profile.bags.clone(),
+            // ...and the walk, on exactly the same terms: what you have
+            // seen of the land is not on your body, so dying does not
+            // wipe the paper. What dying *does* take is the map itself,
+            // which was in the pack.
+            trail: profile.trail.clone(),
             returning,
             died_at: if profile.health > 0.0 { None } else { profile.place_of_exit() },
         }
@@ -1576,6 +1704,7 @@ impl Profiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use primitive_shared::trail::Trail;
     use primitive_shared::types::BLOCK_STONE;
 
     const SPAWN: (f32, f32, f32) = (0.5, 40.0, 0.5);
@@ -2041,7 +2170,7 @@ mod tests {
         let joined = profiles.restore("wayfarer", SPAWN, 20.0);
         let mut held = Discovered::new();
         held.note(BLOCK_STONE);
-        profiles.remember(joined.uuid, &held, &[(12, 40, -3), (-600, 71, 90)]);
+        profiles.remember(joined.uuid, &held, &[(12, 40, -3), (-600, 71, 90)], &Trail::default());
         profiles.save(&dir).expect("save");
 
         let mut after = Profiles::new();
@@ -2054,15 +2183,47 @@ mod tests {
     }
 
     #[test]
+    fn the_walk_and_the_marks_on_it_survive_a_restart_and_a_death() {
+        // **The one thing a map is.** A trail that a restart wiped would be
+        // an evening's walking gone; one that a *death* wiped would make
+        // the map a thing you dare not carry, which is the opposite of
+        // what it is for. The hide itself is in the pack and does go with
+        // the body -- that is the item's price, and it is not this.
+        let dir = scratch("trail");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let mut walked = Trail::default();
+        let mut pack = Inventory::new();
+        pack.add(primitive_shared::types::BLOCK_MAP, 1);
+        walked.walk(400, -250, &pack);
+        walked.mark((404, 70, -248), primitive_shared::trail::MarkKind::Cairn, &pack);
+        walked.name_mark((404, 70, -248), "the ford");
+
+        let mut profiles = Profiles::new();
+        let joined = profiles.restore("wayfarer", SPAWN, 20.0);
+        profiles.remember(joined.uuid, &Discovered::new(), &[], &walked);
+        profiles.save(&dir).expect("save");
+
+        let mut after = Profiles::new();
+        assert_eq!(after.load(&dir).expect("load"), 1);
+        let restored = after.restore("wayfarer", SPAWN, 20.0);
+        assert!(restored.trail.knows(400, -250), "the walk was forgotten over a restart");
+        assert!(!restored.trail.knows(400, 4000), "the map came back knowing somewhere nobody went");
+        assert_eq!(restored.trail.marks().len(), 1);
+        assert_eq!(restored.trail.marks()[0].name, "the ford", "the mark came back nameless");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn remembering_the_same_thing_twice_does_not_rewrite_the_file() {
         let dir = scratch("remember-twice");
         std::fs::create_dir_all(&dir).expect("mkdir");
         let mut profiles = Profiles::new();
         let joined = profiles.restore("steady", SPAWN, 20.0);
         let held = Discovered::from_kinds([BLOCK_STONE]);
-        profiles.remember(joined.uuid, &held, &[(1, 2, 3)]);
+        profiles.remember(joined.uuid, &held, &[(1, 2, 3)], &Trail::default());
         assert!(profiles.save(&dir).expect("save").is_some());
-        profiles.remember(joined.uuid, &held, &[(1, 2, 3)]);
+        profiles.remember(joined.uuid, &held, &[(1, 2, 3)], &Trail::default());
         assert_eq!(profiles.save(&dir).expect("save"), None, "an unchanged memory was written again");
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -3160,6 +3160,10 @@ async fn tick_loop(ctx: Arc<Context>) {
                     // The way back: a body emptied, broken or burnt comes
                     // off the map. See `forget_recovered_bags`.
                     forget_recovered_bags(&ctx, handle);
+                    // ...and the way *there*: the circle round a player
+                    // with a map on them fills in as they walk. See
+                    // `walk_the_trail` for why it is asked every tick.
+                    walk_the_trail(handle);
                 }
 
                 // --- warmth, and the water it costs ---
@@ -4326,12 +4330,12 @@ pub(crate) fn store_profile(ctx: &Arc<Context>, handle: &Arc<players::PlayerHand
     // short lock rather than as two more columns of the tuple above: that
     // tuple is the body, and this is the memory -- see
     // `Profiles::remember`.
-    let (discovered, bags) = {
+    let (discovered, bags, trail) = {
         let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-        (state.discovered.clone(), state.bags.clone())
+        (state.discovered.clone(), state.bags.clone(), state.trail.clone())
     };
     let mut profiles = ctx.profiles.lock().unwrap_or_else(|e| e.into_inner());
-    profiles.remember(uuid, &discovered, &bags);
+    profiles.remember(uuid, &discovered, &bags, &trail);
     profiles.store(
         uuid,
         inventory,
@@ -13870,6 +13874,197 @@ pub(crate) fn send_landmarks(ctx: &Arc<Context>, handle: &Arc<players::PlayerHan
         spawn: (spawn.0.floor() as i32, spawn.1.floor() as i32, spawn.2.floor() as i32),
         bags,
     });
+}
+
+// ---- the road, and the memory of it (`primitive_shared::trail`) ----
+
+/// Sends a player their whole trail: every cell they have walked with a
+/// map on them, and every mark they wrote down.
+///
+/// Once, on join. Everything after it is `walk_the_trail`'s handful of
+/// cells -- a few hundred bytes -- because sending the whole thing every
+/// time it grew would be a packet that gets bigger the longer somebody
+/// plays, twenty times a second.
+pub(crate) fn send_trail(handle: &Arc<players::PlayerHandle>, whole: bool) {
+    let (cells, marks) = {
+        let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        (state.trail.cells().collect::<Vec<_>>(), state.trail.marks().to_vec())
+    };
+    handle.send(ServerMessage::Trail { cells, marks, whole });
+}
+
+/// One tick of walking: fills in the circle round a player who is
+/// carrying a map, and sends them only what is new.
+///
+/// **Every tick, and it costs nothing on nearly all of them.** The
+/// question is "which cells of a thirteen-by-thirteen block round me are
+/// not in the set yet", and the answer is none for a player standing
+/// still or walking over ground they have already covered -- which is
+/// what a player is doing almost always. Asked here rather than only when
+/// the player crosses into a new cell, because the *pack* can change
+/// without them moving: a map crafted at a camp has to fill in the camp,
+/// and a rule that waited for the next cell boundary would leave a hole
+/// exactly where the player was standing when they made it.
+pub(crate) fn walk_the_trail(handle: &Arc<players::PlayerHandle>) {
+    let added = {
+        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.vitals.is_dead() {
+            return;
+        }
+        let (x, z) = (state.position.0.floor() as i32, state.position.2.floor() as i32);
+        // Two borrows of one lock guard: the pack is read while the trail
+        // is written, which the borrow checker will not have as two fields
+        // of the same struct through one `&mut`. Split here rather than
+        // cloning the inventory, which is the pack twice a tick a player.
+        let state = &mut *state;
+        state.trail.walk(x, z, &state.inventory)
+    };
+    if !added.is_empty() {
+        handle.send(ServerMessage::Trail { cells: added, marks: Vec::new(), whole: false });
+    }
+}
+
+/// Writes a cairn or a blaze onto the placer's own map, if they are
+/// carrying one, and tells them so.
+///
+/// **The placer's map and nobody else's.** A mark is a thing you wrote
+/// down, not a thing that exists; somebody else walking past the same
+/// cairn sees a heap of stones and has to write it down themselves. That
+/// is what keeps "where is my friend's base" a question you answer by
+/// asking them.
+pub(crate) fn note_mark(handle: &Arc<players::PlayerHandle>, at: (i32, i32, i32), block: primitive_shared::types::BlockId) {
+    let Some(kind) = primitive_shared::trail::MarkKind::of(block) else {
+        return;
+    };
+    let marked = {
+        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = &mut *state;
+        state.trail.mark(at, kind, &state.inventory)
+    };
+    if let Some(mark) = marked {
+        // The cell it stands in comes with it (`Trail::mark`), so the
+        // client has ground to draw the mark on from the same message.
+        let cells = vec![primitive_shared::trail::cell_of(at.0, at.2)];
+        handle.send(ServerMessage::Trail { cells, marks: vec![mark], whole: false });
+    }
+}
+
+/// Gives a mark the name its player typed.
+pub(crate) fn name_mark(handle: &Arc<players::PlayerHandle>, at: (i32, i32, i32), name: &str) {
+    let named = {
+        let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.trail.name_mark(at, name);
+        state.trail.marks().iter().find(|mark| mark.at == at).cloned()
+    };
+    // Echoed back rather than taken on trust by the client, on the rule
+    // every other state in this game follows: what the server holds is
+    // what is drawn, and a name the server cut short (`MARK_NAME_CHARS`)
+    // must not stay long on the map that asked for it.
+    if let Some(mark) = named {
+        handle.send(ServerMessage::Trail { cells: Vec::new(), marks: vec![mark], whole: false });
+    }
+}
+
+/// Rubs a mark out: its player went back and found nothing there.
+///
+/// No echo, because there is nothing to echo -- the client has already
+/// stopped drawing it, and it only sent this so the *next* session agrees.
+pub(crate) fn forget_mark(handle: &Arc<players::PlayerHandle>, at: (i32, i32, i32)) {
+    let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+    state.trail.forget_mark(at);
+}
+
+/// **Cuts a blaze into the trunk being looked at** (`types::BLOCK_BLAZE`).
+///
+/// Everything the client said is checked again here: the reach, the knife,
+/// that the cell really is a standing trunk, and that there is an empty
+/// cell beside it on the player's side to put the mark in. What the client
+/// does *not* send is the face -- see `ClientMessage::Blaze` -- so the side
+/// is worked out from where the player is standing, which is the one thing
+/// about this that cannot be faked without also being somewhere else.
+///
+/// **Silent when it cannot.** A knife at a trunk that is already blazed,
+/// or boxed in on every side, does nothing and says nothing: the player
+/// can see the mark that is there, and a banner for "there is already a
+/// blaze on this tree" would fire on the double click everybody makes.
+pub(crate) fn cut_blaze(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, at: (i32, i32, i32)) {
+    use primitive_shared::types::{
+        block_axis, block_kind, is_air, is_knife, placed, Axis, BLOCK_BLAZE, BLOCK_STRIPPED_LOG,
+    };
+    let (feet, yaw, held, dead) = {
+        let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            state.position,
+            state.yaw,
+            state.inventory.block_in(state.selected_slot),
+            state.vitals.is_dead(),
+        )
+    };
+    if dead || !held.is_some_and(is_knife) {
+        return;
+    }
+    // The reach a use has, for a use's reason: a mark cut into a tree
+    // across the valley is the same cheat as a chest opened across it.
+    let centre = (at.0 as f32 + 0.5, at.1 as f32 + 0.5, at.2 as f32 + 0.5);
+    if !primitive_shared::combat::within_reach(
+        (feet.0, feet.1 + f64::from(primitive_shared::geometry::EYE_HEIGHT), feet.2),
+        primitive_shared::geometry::wide(centre),
+        None,
+    ) {
+        return;
+    }
+    let Some(block) = ctx.world.cached_block(at.0, at.1, at.2) else {
+        return;
+    };
+    // **A standing tree**, on `tap_trunk`'s own test so the two gestures
+    // agree about what a trunk is: a log lying in a woodpile is timber,
+    // and a mark on timber is a mark that walks off with whoever takes it.
+    let standing = primitive_shared::wildfire::fuel(block) == Some(primitive_shared::wildfire::Fuel::Log)
+        && block_axis(block) == Axis::Y
+        && block_kind(block) != BLOCK_STRIPPED_LOG;
+    if !standing {
+        return;
+    }
+    // Which side to cut: the player's own, then the other three. The
+    // nearest air is where a person standing there would actually reach,
+    // and the fallback is so a tree in a hedge can still be marked.
+    let (dx, dz) = (feet.0 - f64::from(centre.0), feet.2 - f64::from(centre.2));
+    let near = if dx.abs() >= dz.abs() {
+        (dx.signum() as i32, 0, 0)
+    } else {
+        (0, 0, dz.signum() as i32)
+    };
+    let sides = [near, (-near.0, 0, -near.2), (near.2, 0, near.0), (-near.2, 0, -near.0)];
+    for side in sides {
+        let cell = (at.0 + side.0, at.1, at.2 + side.2);
+        if !ctx.world.cached_block(cell.0, cell.1, cell.2).is_some_and(is_air) {
+            continue;
+        }
+        // `placed` turns the face that was cut into the facing that makes
+        // `support_at` name this trunk -- the bracket fungus's mechanism,
+        // and the reason a blaze falls when the tree does.
+        let mark = placed(BLOCK_BLAZE, yaw, side);
+        if !ctx.world.set_block(cell.0, cell.1, cell.2, mark) {
+            continue;
+        }
+        ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+        notify_mechanics(ctx, cell.0, cell.1, cell.2);
+        broadcast_block(ctx, cell, mark);
+        // The edge pays for it, which is the whole price of a blaze: a
+        // knife wears, and a player marking every tree on a ridge is a
+        // player who will be knapping another one.
+        let (slot, left) = {
+            let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+            let slot = state.selected_slot;
+            let _ = state.inventory.wear_tool(slot);
+            state.inventory_dirty = true;
+            (slot, state.inventory.block_in(slot))
+        };
+        held_slot_changed(ctx, handle.id, slot, left);
+        send_inventory(handle);
+        note_mark(handle, cell, mark);
+        return;
+    }
 }
 
 /// Takes the bodies that have been emptied or lost off a player's list.

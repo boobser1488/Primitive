@@ -6315,6 +6315,89 @@ pub const BLOCKS: &[BlockDef] = &[
         turns: false,
         propped: false,
     },
+    // **A map: one sheet to a slot, and half a kilo of it.** Not a stack,
+    // because two maps are not twice a map -- and because "one slot, and
+    // it is gone with your body" is the whole of what this thing costs
+    // (see `types::BLOCK_MAP`). Heavy enough to be felt beside the food
+    // and the ore and no heavier: a hide is not an anvil, and a weight
+    // that made a player choose between the map and dinner would make the
+    // map a thing nobody carries, which is the failure this is trying not
+    // to be.
+    BlockDef {
+        id: BLOCK_MAP,
+        name: "map",
+        shape: Shape::Item,
+        thickness: LAYERS_PER_BLOCK,
+        matter: Matter::Solid,
+        opacity: 15,
+        emission: 0,
+        hardness: None,
+        felled: None,
+        needs: Tier::Hand,
+        work: Work::Any,
+        tool: None,
+        drop: Some(BLOCK_MAP),
+        leaves_behind: None,
+        weight: 0.5,
+        stack: 1,
+        durability: None,
+        drag: 1.0,
+        grip: 1.0,
+        placeable: false,
+        foliage: false,
+        orientable: false,
+        faces: false,
+        falls: false,
+        container: false,
+        turns: false,
+        propped: false,
+    },
+    // **A blaze**: a patch of bark cut away, drawn as one thin board
+    // against the trunk (`mesh::blaze_block`). The bracket fungus's row,
+    // nearly to the field -- it hangs off a wall, it lets the light past,
+    // it fills nothing -- with two differences that matter.
+    //
+    // **It drops nothing.** A strip of bark that went into the pack would
+    // make a knife at a tree a way to farm bark, which `tap_trunk` already
+    // answers with a cut and a ten-minute wait. A blaze is a mark and not
+    // a yield.
+    //
+    // **Taken off by hand**, quickly: a mark you cannot rub out is a mark
+    // you regret, and the player who blazed the wrong tree in the dark
+    // should not have to fell it.
+    BlockDef {
+        id: BLOCK_BLAZE,
+        name: "blaze",
+        shape: Shape::Cross,
+        thickness: LAYERS_PER_BLOCK,
+        matter: Matter::Solid,
+        opacity: 0,
+        emission: 0,
+        hardness: Some(0.15),
+        felled: None,
+        needs: Tier::Hand,
+        work: Work::Plant,
+        tool: None,
+        drop: None,
+        leaves_behind: None,
+        weight: 0.0,
+        stack: 1,
+        durability: None,
+        drag: 1.0,
+        grip: 1.0,
+        // Never from the pack: it is cut where it stands, and there is no
+        // such thing as a blaze you are carrying.
+        placeable: false,
+        foliage: false,
+        orientable: false,
+        // Which way it looks out of the bark -- `types::support_at` turns
+        // that into the trunk holding it, the bracket's mechanism exactly.
+        faces: true,
+        falls: false,
+        container: false,
+        turns: false,
+        propped: false,
+    },
     // A water compass: a bowl of water with a needle on a leaf, one to a
     // hand -- a stack of them would be a stack of bowls of water.
     BlockDef {

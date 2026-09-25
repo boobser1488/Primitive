@@ -131,6 +131,12 @@ pub struct Scenario {
     pub downed: Option<primitive_shared::downed::Down>,
     pub chest_screen: ChestScreen,
     pub station_screen: StationScreen,
+    /// The map: the client's survey of the chunks it has been sent, and
+    /// the walk the server says this player has made (`logic::map`). Kept
+    /// here rather than in a test's own local, because both halves of it
+    /// arrive through the frame -- the chunks and the `Trail` -- and a
+    /// scenario that built one by hand would be testing neither.
+    pub explored: crate::logic::map::ExploredMap,
 
     /// Every correction the server has sent that the scenario did not ask
     /// for with [`Scenario::stand_at`], with its reason.
@@ -287,6 +293,7 @@ impl Scenario {
             dead: None,
             downed: None,
             chest_screen: ChestScreen::new(),
+            explored: crate::logic::map::ExploredMap::default(),
             station_screen: StationScreen::new(),
             corrections: Vec::new(),
             heard: Vec::new(),
@@ -455,6 +462,15 @@ impl Scenario {
         let held = self.inventory.block_in(self.input.hotbar_slot);
         let claim = crate::use_gesture(aimed.map(|(_, block)| block), held);
         let sprinting = self.input.action_down(&self.binds, Action::Sprint);
+        // **A blaze first, as `run` asks it first**: the modifier with a
+        // knife at a standing trunk is a mark, and everywhere else it is
+        // still the set-down below. See `types::BLOCK_BLAZE`.
+        if let (true, Some((cell, block)), Some(held)) = (sprinting, aimed, held) {
+            if primitive_shared::types::is_knife(held) && crate::blazeable(block) {
+                self.net.send(ClientMessage::Blaze { global_x: cell.0, global_y: cell.1, global_z: cell.2 });
+                return;
+            }
+        }
         let setting_down = held.is_some_and(primitive_shared::types::can_be_set_down)
             && !aimed.is_some_and(|(_, block)| primitive_shared::types::is_set_down(block))
             && claim != UseGesture::Hearth
@@ -587,6 +603,13 @@ impl Scenario {
         let now = self.last_frame;
 
         self.drain();
+        // The map's own streaming phase, as the frame runs it -- with no
+        // budget, because a scenario has no frame to be late for and a
+        // half-surveyed map is a test that passes on a fast machine.
+        self.explored.catch_up(&self.chunks, Duration::from_secs(1));
+        for at in self.explored.take_lost_marks() {
+            self.net.send(ClientMessage::ForgetMark { global_x: at.0, global_y: at.1, global_z: at.2 });
+        }
 
         let player_chunk = ChunkManager::chunk_for_world_pos(self.player.position.x, self.player.position.z);
         let (to_request, to_unload) = self.chunks.update(player_chunk, now);
@@ -742,6 +765,7 @@ impl Scenario {
         while let Ok(incoming) = self.net.to_game.try_recv() {
             let message = match incoming {
                 network::Incoming::Chunk(chunk) => {
+                    self.explored.note_chunk(chunk.pos);
                     self.chunks.insert(*chunk);
                     continue;
                 }
@@ -836,6 +860,9 @@ impl Scenario {
                     }
                 }
                 ServerMessage::SetDownItem { x, y, z, item } => self.chunks.note_set_down((*x, *y, *z), *item),
+                ServerMessage::Trail { cells, marks, whole } => {
+                    self.explored.trail_arrived(cells.clone(), marks.clone(), *whole);
+                }
                 // The horse arms of `drain_network`, the same statements.
                 ServerMessage::Mounted { horse, at, yaw, wind, fettle } => match horse {
                     Some(id) => match self.horseback.as_mut().filter(|h| h.horse == *id) {
@@ -874,6 +901,7 @@ impl Scenario {
 
     fn apply(&mut self, change: primitive_shared::protocol::BlockChange) {
         self.mining.confirm_placement(&change, Instant::now());
+        self.explored.note_edit(change.global_x, change.global_z);
         crate::sound_for(&self.audio, &mut self.soundscape, &self.chunks, &change);
         crate::apply_change(
             &mut self.chunks,

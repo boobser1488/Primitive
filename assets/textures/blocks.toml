@@ -726,6 +726,11 @@ bowl_milk = "food/bowl_milk.png"
 cairn = { all = "terrain/cobblestone.png", item = "terrain/cairn_item.png" }
 lodestone = "metal/lodestone.png"
 water_compass = "tools/water_compass.png"
+# ...and the road's two: the map is the leather's own tone drawn as a
+# sheet with charcoal on it, the blaze an oak's side with the cut taken
+# out of it in pale sapwood. Both recolours of what is already here.
+map = "hide/map.png"
+blaze = "terrain/blaze.png"
 
 # Building in stages (`build`). Every picture a recolour: the handfuls are
 # flour's heap filled with the ground they came out of; quicklime is chalk

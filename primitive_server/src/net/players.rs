@@ -259,6 +259,11 @@ pub struct PlayerRuntime {
     /// first. See `remember_bag` in `lib.rs` for why there is more than
     /// one and why there are at most four.
     pub bags: Vec<(i32, i32, i32)>,
+    /// Where this player has walked with a map on them, and what they
+    /// marked. The runtime copy of `profiles::Profile::trail`; written
+    /// every tick by `walk_the_trail` and read back into the profile by
+    /// the autosave.
+    pub trail: primitive_shared::trail::Trail,
     /// The raft this player is standing on, and where on its deck, in the
     /// deck's own frame (`raft::Body::local_of`).
     ///
@@ -412,6 +417,7 @@ impl PlayerHandle {
                 seat_facing: None,
                 discovered: primitive_shared::discovery::Discovered::new(),
                 bags: Vec::new(),
+                trail: primitive_shared::trail::Trail::default(),
                 // On their feet on the ground: nobody joins aboard a raft,
                 // because the raft they left from may have been broken up
                 // since, and a body placed on a deck that is not there is a
