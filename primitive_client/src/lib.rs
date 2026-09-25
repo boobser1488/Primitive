@@ -40,12 +40,19 @@
 //   net     -- the socket, and the state that arrives over it
 //   ui      -- what the player reads, clicks and presses
 //   logic   -- the world as the client understands it
+//   frame   -- the order those five happen in, once a frame
+//
+// `frame` is the newest and the reason is worth a line: the body of a
+// frame used to be written inline in `run`, which is why the scenario
+// harness had to keep a second copy of half of it. The phases live in
+// `frame/` now, and both the game and a scenario call the same ones.
 //
 // Everything below is what is left over: the entry point itself, the
 // settings file, the crash handler, and the assets baked into the
 // binary. They belong to no layer because every layer uses them.
 mod audio;
 mod engine;
+mod frame;
 mod platform;
 mod logic;
 mod net;
@@ -79,7 +86,7 @@ use glam::Vec3;
 // The game's own input vocabulary. `KeyCode` is an alias rather than a
 // rename because every use below means what it always meant -- a
 // physical key position -- and only the type behind the name changed.
-use platform::{Key as KeyCode, MouseButton};
+use platform::Key as KeyCode;
 
 use engine::camera::Camera;
 use logic::chunk_manager::{ChunkManager, NEIGHBOUR_OFFSETS};
@@ -1572,397 +1579,50 @@ fn run(
             }};
         }
 
-        // A finger, turned into whatever a hand would have done.
-        //
-        // The buttons that stand for a *click* or a *keystroke* become
-        // exactly that event and fall through the match below with the
-        // mouse and keyboard, so there is one path for placing a block
-        // and not two. The ones that stand for a *held* state -- the
-        // dig button, the movement stick, the drag that turns the
-        // camera -- are not events at all; they are read off `touch`
-        // once a frame, further down, where the keyboard's own held
-        // keys are read.
+        // A finger, turned into whatever a hand would have done, so that
+        // the match below has one path for placing a block and not two.
+        // See `frame::events::touch_to_event`, which is where the whole
+        // of that translation lives and why it is a translation rather
+        // than a second set of controls.
         let event = match event {
             platform::Event::Touch { id, phase, x, y } => {
-                // **A finger is two different things, and which one
-                // depends on what is on screen.**
-                //
-                // In the world it is a gamepad: the left of the glass
-                // is a stick, the right turns the camera, and the
-                // buttons dig and place. On a *menu* it is a mouse --
-                // and it has to be, because a menu has no stick and no
-                // camera. This used to be missing, and the effect was
-                // that the whole interface did nothing on a phone:
-                // every tap went into the movement stick and no button
-                // was ever pressed, because there is no world behind
-                // the main menu for a stick to move anybody in.
-                //
-                // The same condition the rest of the frame uses to
-                // decide whether the world has the input.
-                let world_has_input = world_owns_the_glass(
-                    net.is_some(),
+                match frame::events::touch_to_event(
+                    id,
+                    phase,
+                    x,
+                    y,
+                    net.as_ref(),
                     paused,
-                    inventory_screen.open,
-                    chest_screen.is_open() || station_screen.is_open(),
-                    death.is_open(),
-                    chat.is_typing(),
-                ) && !journal.is_open();
-
-                if !world_has_input {
-                    // **The journal takes the finger whole.** The map is
-                    // dragged in two directions and `Pointer` hands out
-                    // vertical scrolls only, so while the journal is open
-                    // it reads the raw touch itself -- see `ui::journal`.
-                    if journal.is_open() && net.is_some() && !paused && !death.is_open() {
-                        let at = widgets::cursor_to_ui(
-                            (x as f64, y as f64),
-                            (graphics.size.width, graphics.size.height),
-                            1.0,
-                        );
-                        let mark = player_mark(player.position.as_vec3(), camera.yaw);
-                        if journal.touch(id, phase, at, graphics.aspect(), mark)
-                            == ui::journal::Outcome::Closed
-                        {
-                            audio.play(audio::Sfx::Click);
-                            grab_cursor(&window, &mut input);
-                        }
-                        send_journal_command(&mut journal, net.as_ref(), &mut debug_stats);
-                        return;
-                    }
-                    // A pointer that is wherever the finger is. Placed
-                    // first and directly rather than as a queued
-                    // `CursorMoved`, because a tap is a move *and* a
-                    // click on the same screen at the same instant, and
-                    // a click at the last frame's cursor position is a
-                    // click on whatever the player was pointing at
-                    // before.
-                    let size = graphics.size;
-                    // Undivided, because the interface no longer has one
-                    // scale: each screen grows by what fits *it*. The
-                    // division that used to be here happens per screen
-                    // in `place_cursor`, against the same number that
-                    // screen's geometry was multiplied by.
-                    let at = widgets::cursor_to_ui(
-                        (x as f64, y as f64),
-                        (size.width, size.height),
-                        1.0,
-                    );
-                    // **What the finger turned out to mean.** A press
-                    // used to be sent through as a mouse button the
-                    // instant it landed, which decided the question
-                    // before the answer existed: a finger that goes on
-                    // to travel was scrolling a list, and pressing what
-                    // it started on as well is worse than not scrolling
-                    // at all. `Pointer` waits.
-                    let gesture = pointer.handle(
-                        graphics.size,
-                        id,
-                        phase,
-                        x,
-                        y,
-                        Instant::now(),
-                    );
-                    // Set from this gesture and from nothing else, so a
-                    // plain tap that follows a modified one clears it.
-                    thumb_quick = matches!(
-                        gesture,
-                        platform::touch::Gesture::Tapped(platform::touch::Chord::Quick),
-                    );
-                    // The pointer goes where the finger is, and leaves
-                    // when it does -- so a row does not stay lit under a
-                    // thumb that is no longer on the glass. A tap counts
-                    // as being over it: see `Gesture::carries_a_point`,
-                    // which is a method rather than a list here because
-                    // getting that list wrong made every tap in the game
-                    // do nothing.
-                    place_cursor(
-                        gesture.carries_a_point().then_some(at),
-                        net.is_none() || paused,
-                        widgets::Layout::for_screen(graphics.aspect(), graphics.ui_scale()),
-                        &mut menu,
-                        &mut death,
-                        &mut chest_screen,
-                        &mut station_screen,
-                        &mut inventory_screen,
-                    );
-                    // **The chat box before anything else, because
-                    // there is no Enter key on a phone.** A player
-                    // could open the box with the button on the glass,
-                    // type into it with the on-screen keyboard, and
-                    // then neither send nor leave: sending hangs on
-                    // `Enter` and leaving on `Escape`, and an input
-                    // method may send neither -- its action key is
-                    // often "Done" and often produces nothing a game
-                    // can read. The box carries its own two answers on
-                    // a touch device; see `chat::Tap`.
-                    //
-                    // Taken back through the growth the widget was
-                    // drawn with, exactly as the hotbar's own hit-test
-                    // is, because a finger lands in the grown picture
-                    // and the rectangles are authored in the small one.
-                    if chat.is_typing() && matches!(gesture, platform::touch::Gesture::Tapped(_)) {
-                        let grown = widgets::Layout::for_screen(
-                            graphics.aspect(),
-                            graphics.ui_scale(),
-                        )
-                        .fit_from_corner(chat::EXTENT);
-                        // The lift comes off first, because it went on
-                        // last: the widget was grown and then pushed up
-                        // the glass, so a finger has to come down the
-                        // glass and then be shrunk. Doing it the other
-                        // way round misses by the lift times the scale,
-                        // which on a phone is most of a button.
-                        let lifted = (
-                            at.0,
-                            at.1 - chat::keyboard_lift(touch_controls, true, grown),
-                        );
-                        let authored = widgets::unscale_about(
-                            lifted,
-                            widgets::anchor::BOTTOM_LEFT(graphics.aspect()),
-                            grown,
-                        );
-                        match chat.tapped(graphics.aspect(), touch_controls, authored) {
-                            Some(chat::Tap::Send) => {
-                                submit_chat(&mut chat, net.as_ref(), &mut debug_stats);
-                                close_chat(&mut chat, &window, &mut input, paused);
-                            }
-                            Some(chat::Tap::Leave) => {
-                                close_chat(&mut chat, &window, &mut input, paused);
-                            }
-                            // ...and a tap on the line itself puts the
-                            // caret in it, which is the first thing
-                            // anybody tries on text they can see.
-                            // ...unless the platform's own editor holds
-                            // the line, in which case it holds the
-                            // caret too and ours would be drawn where
-                            // the next character is *not* going. The
-                            // same guard the form fields carry -- see
-                            // `Menu::place_caret_under_cursor`.
-                            Some(chat::Tap::Caret(at)) if !window.ime_owns_text() => {
-                                chat.place_caret(at)
-                            }
-                            // ...and nothing at all where it does: the
-                            // editor holds the caret with the text, and
-                            // ours would be a bar drawn where the next
-                            // character is not going.
-                            Some(chat::Tap::Caret(_)) => {}
-                            // A tap anywhere else while the box is up is
-                            // a misclick, which is what it has always
-                            // been -- see the `MouseButton` arm.
-                            None => {}
-                        }
-                        return;
-                    }
-                    match gesture {
-                        // A tap, at the point the finger came *up*.
-                        // Only the press is sent: every screen in this
-                        // game acts on the press and returns on the
-                        // release -- see the `MouseButton` arm -- so a
-                        // release would be a second event that does
-                        // nothing.
-                        // A rested press is the right button -- but
-                        // **only where a right button means anything**.
-                        // Everywhere else in this game a click is a
-                        // click, and a player who pressed PLAY slowly
-                        // would otherwise have pressed nothing at all:
-                        // the menus act on the left button and drop the
-                        // right one in silence. The screens that do use
-                        // it are the two that hold stacks of things,
-                        // which is where the gesture was invented for.
-                        platform::touch::Gesture::Tapped(chord) => {
-                            let containers_are_open =
-                                inventory_screen.open || chest_screen.is_open() || station_screen.is_open();
-                            let secondary = matches!(
-                                chord,
-                                platform::touch::Chord::Secondary,
-                            ) && containers_are_open;
-                            platform::Event::MouseButton {
-                                button: if secondary {
-                                    MouseButton::Right
-                                } else {
-                                    MouseButton::Left
-                                },
-                                pressed: true,
-                            }
-                        }
-                        // ...and a drag, in the units the wheel already
-                        // speaks, so every list that could be scrolled
-                        // with a wheel can now be scrolled with a thumb
-                        // and none of them had to learn anything.
-                        platform::touch::Gesture::Scrolled(lines) => {
-                            platform::Event::MouseWheel { lines }
-                        }
-                        _ => return,
-                    }
-                } else {
-                    // **Giving up, on glass**, before the bar and the thumb
-                    // controls: the button is drawn over the look area, and
-                    // what is drawn on top is what is pressed. Taken back
-                    // through the same growth the overlay's words were
-                    // drawn with -- see `ui::downed::give_up_rect`.
-                    if touch_controls {
-                        let point = widgets::cursor_to_ui(
-                            (x as f64, y as f64),
-                            (graphics.size.width, graphics.size.height),
-                            1.0,
-                        );
-                        let authored = widgets::unscale_about(
-                            point,
-                            widgets::anchor::CENTRE(graphics.aspect()),
-                            graphics.ui_scale(),
-                        );
-                        match give_up_button.handle(
-                            id,
-                            phase,
-                            authored,
-                            body.downed.is_some(),
-                            graphics.ui_scale(),
-                        ) {
-                            ui::downed::GiveUpTap::Ignored => {}
-                            ui::downed::GiveUpTap::Held => return,
-                            // The same message the respawn key sends while
-                            // down, which the server takes as giving up.
-                            ui::downed::GiveUpTap::GiveUp => {
-                                if let Some(net) = net.as_ref() {
-                                    audio.play(audio::Sfx::Click);
-                                    net.send(ClientMessage::Respawn);
-                                }
-                                return;
-                            }
-                        }
-                    }
-                    let mut return_event = None;
-                    // **The bar first, and only where it is drawn.**
-                    //
-                    // A phone has no number row and no wheel, so the
-                    // hotbar was the one part of the HUD a thumb could
-                    // see and not use: the only way to change what you
-                    // were holding was to open the pack and drag. It is
-                    // checked before the thumb controls because it sits
-                    // over them in the drawing -- and what is drawn on
-                    // top has to be what is pressed, or the interface
-                    // is lying about which thing the finger is on.
-                    //
-                    // **Four gestures, not a tap.** The bar answers for
-                    // the number row, the wheel, `E` and `Q` -- seven
-                    // controls a phone has nowhere to put, all of which
-                    // point at the ten squares already on screen. What
-                    // tells them apart is what the finger does; see
-                    // `hotbar::Gestures`.
-                    {
-                        let point = widgets::cursor_to_ui(
-                            (x as f64, y as f64),
-                            (graphics.size.width, graphics.size.height),
-                            1.0,
-                        );
-                        // Back through the growth the HUD was drawn
-                        // with. See `widgets::unscale_about`: the bar
-                        // is authored at one size and grown about the
-                        // bottom of the screen, so a finger lands in
-                        // the grown picture and has to be asked about
-                        // in the authored one.
-                        let authored = widgets::unscale_about(
-                            point,
-                            widgets::anchor::BOTTOM(graphics.aspect()),
-                            graphics.ui_scale(),
-                        );
-                        // The same count the bar is drawn with, from
-                        // the same constant, so the hit-test cannot be
-                        // asking about a bar of a different width.
-                        let slot = hotbar::slot_at(
-                            authored.0,
-                            authored.1,
-                            crate::logic::inventory::HOTBAR_SLOTS,
-                        );
-                        // Whether this finger is the bar's, asked
-                        // *before* the gesture is fed in: a lift is the
-                        // event that ends the bar's ownership, and
-                        // asking afterwards would let the lift fall
-                        // through to the controls underneath.
-                        let claimed = slot.is_some() || bar_gestures.owns(id);
-                        let touched = bar_gestures.handle(
-                            phase,
-                            id,
-                            slot,
-                            authored,
-                            Instant::now(),
-                        );
-                        if let Some(event) =
-                            hotbar_gesture_event(touched, &mut input, &settings.keybinds)
-                        {
-                            return_event = Some(event);
-                        } else if claimed {
-                            // The bar has the finger and made nothing of
-                            // it yet; nothing else may also have it.
-                            return;
-                        }
-                    }
-                    if let Some(event) = return_event {
-                        event
-                    } else {
-
-                    touch.resize(graphics.size, touch_layout, graphics.ui_scale());
-                    // **A button on the glass is a key.** What it sends
-                    // is carried in the arrangement, not decided here,
-                    // and both edges are sent -- down when the thumb
-                    // lands, up when it lifts -- so what reaches the
-                    // game is indistinguishable from a keyboard. That
-                    // is the whole point: every binding the game has
-                    // works on a phone without being taught to, and so
-                    // does every one it grows later.
-                    //
-                    // This used to be a `match` on four named controls
-                    // turning each into the action it "meant", which is
-                    // why a touch player could not eat, drop, or reach
-                    // anything nobody had thought to name.
-                    let hit = touch.handle(id, phase, x, y, Instant::now());
-                    // A short tap in the look area is the right mouse
-                    // button, and it goes down the *same* path a real
-                    // one does -- placing a block, opening a chest,
-                    // striking a fire are one piece of code with one
-                    // set of rules, and a second copy for phones is a
-                    // second copy to keep in step. See
-                    // `touch::Touch::is_mining` for why the hands
-                    // moved off the glass.
-                    if touch.take_place() {
-                        platform::Event::MouseButton {
-                            button: MouseButton::Right,
-                            pressed: true,
-                        }
-                    } else {
-                    let (slot, pressed) = match hit {
-                        platform::touch::Hit::Pressed(slot) => (slot, true),
-                        platform::touch::Hit::Released(slot) => (slot, false),
-                        platform::touch::Hit::Nothing => return,
-                    };
-                    match touch_layout.buttons[slot].emits {
-                        // The wheel is about the glass rather than about
-                        // the game: it has already opened or closed
-                        // itself inside `touch`, and there is nothing
-                        // downstream to tell. See `settings::Emits::More`.
-                        settings::Emits::More => return,
-                        settings::Emits::Mine => platform::Event::MouseButton {
-                            button: MouseButton::Left,
-                            pressed,
-                        },
-                        settings::Emits::Place => platform::Event::MouseButton {
-                            button: MouseButton::Right,
-                            pressed,
-                        },
-                        settings::Emits::Key(key) => platform::Event::Keyboard {
-                            key: Some(key),
-                            // No text: a button on the glass is a key
-                            // being *pressed*, not a character being
-                            // typed. Sending text as well would put a
-                            // letter in whatever field had focus every
-                            // time the player jumped.
-                            text: platform::Text::default(),
-                            pressed,
-                            repeat: false,
-                        },
-                    }
-                    }
-                    }
+                    &graphics,
+                    &window,
+                    &audio,
+                    &settings.keybinds,
+                    touch_controls,
+                    touch_layout,
+                    &player,
+                    &camera,
+                    &body,
+                    &mut input,
+                    &mut menu,
+                    &mut chat,
+                    &mut journal,
+                    &mut death,
+                    &mut chest_screen,
+                    &mut station_screen,
+                    &mut inventory_screen,
+                    &mut pointer,
+                    &mut touch,
+                    &mut bar_gestures,
+                    &mut give_up_button,
+                    &mut thumb_quick,
+                    &mut debug_stats,
+                ) {
+                    Some(event) => event,
+                    // The finger was spoken for -- by the journal, the
+                    // chat box, the bar or a control on the glass --
+                    // and there is nothing left of it to fall through
+                    // the match below.
+                    None => return,
                 }
             }
             other => other,
@@ -2007,1563 +1667,110 @@ fn run(
 
             platform::Event::CursorLeft => menu.set_cursor(None),
 
+            // Every rule about what a key is allowed to mean lives in
+            // `frame::events::on_key`; what is left here is the one
+            // thing it cannot do, which is carry out a menu action --
+            // leaving a world stops a server and quitting ends the
+            // loop, and both of those are this closure's.
             platform::Event::Keyboard { key, text, pressed, repeat } => {
-                    // **Shift and control are tracked here, not read off
-                    // `input`.** `InputState` is deliberately emptied
-                    // whenever a screen takes the keyboard
-                    // (`release_all`), so in the one place the two
-                    // modifiers mean something -- editing text in a
-                    // form -- it knows nothing about them. Two bools in
-                    // the frame loop, updated before anything branches
-                    // on the screen, so a key pressed in a menu and
-                    // released in the world cannot leave one stuck.
-                    if let Some(code) = key {
-                        match code {
-                            KeyCode::ShiftLeft | KeyCode::ShiftRight => held_shift = pressed,
-                            KeyCode::ControlLeft | KeyCode::ControlRight => held_ctrl = pressed,
-                            _ => {}
-                        }
-                    }
-                    let is_pressed = pressed;
-                    let in_menu = net.is_none() || paused;
-
-                    if in_menu {
-                        if !is_pressed {
-                            return;
-                        }
-                        // Rebinding swallows the next key whatever it
-                        // is, so it has to come before every other
-                        // reading of the keyboard -- otherwise binding
-                        // an action to Escape or to a menu shortcut
-                        // would navigate instead of binding.
-                        if let Some(action) = menu.awaiting_key() {
-                            if let Some(code) = key {
-                                if code == KeyCode::Escape {
-                                    // Escape cancels rather than binds:
-                                    // it is the way out of every screen,
-                                    // and an action bound to it would
-                                    // have no way back.
-                                    menu.finish_rebind(false);
-                                } else if keybinds::is_bindable(code) {
-                                    settings.keybinds.bind(action, code);
-                                    settings_dirty = true;
-                                    menu.finish_rebind(true);
-                                } else {
-                                    menu.finish_rebind(false);
-                                }
-                            }
-                            return;
-                        }
-                        // **Whether keys may edit this field at all.**
-                        //
-                        // On a phone they may not, and the reason is
-                        // double entry rather than tidiness. While the
-                        // input method owns the field (see
-                        // `platform::Window::ime_owns_text`) every edit
-                        // has already been made in *its* copy and
-                        // arrives through the mirror in `AboutToWait`.
-                        // A soft keyboard that also sends a Backspace
-                        // as a key event -- and several do -- would
-                        // then delete one character here and one there,
-                        // and the player would watch two letters
-                        // vanish for one tap.
-                        //
-                        // Only the editing keys are held back. Escape,
-                        // Enter and Tab are navigation and still get
-                        // through: they are how a form is left,
-                        // submitted and moved around, and the input
-                        // method has no opinion about any of that.
-                        let ime_holds_the_field =
-                            menu.accepts_text() && window.ime_owns_text();
-                        // Text first: a character typed into a field must
-                        // not also be read as a shortcut.
-                        if keys_may_type_into_the_field(
-                            menu.accepts_text(),
-                            window.ime_owns_text(),
-                        ) {
-                            let mut typed = false;
-                            for c in text.chars() {
-                                if crate::engine::texture::has_glyph(c) {
-                                    menu.type_char(c);
-                                    typed = true;
-                                }
-                            }
-                            if typed {
-                                return;
-                            }
-                        }
-                        if let Some(code) = key {
-                            // Every key that edits or moves within the
-                            // text, not just the two that delete: while
-                            // an input method owns the field it owns
-                            // the caret too, and a Home sent through
-                            // here would move the game's copy out from
-                            // under the one the player can see in their
-                            // keyboard's own strip.
-                            if ime_holds_the_field
-                                && matches!(
-                                    code,
-                                    KeyCode::Backspace
-                                        | KeyCode::Delete
-                                        | KeyCode::Home
-                                        | KeyCode::End
-                                        | KeyCode::ArrowLeft
-                                        | KeyCode::ArrowRight
-                                )
-                            {
-                                return;
-                            }
-                            if let Some(key) =
-                                menu_key(code, text.first(), ime_holds_the_field, held_shift, held_ctrl)
-                            {
-                                if let Some(action) = menu.key(key) {
-                                    handle_action! { action }
-                                }
-                            }
-                        }
-                        return;
-                    }
-
-                    // The chat box owns the keyboard while it is open:
-                    // every letter is text, not a shortcut, or walking
-                    // keys would move the player as they type.
-                    if chat.is_typing() {
-                        if !is_pressed {
-                            return;
-                        }
-                        // The same division as the menu forms above:
-                        // while the input method owns the line, the
-                        // letters and the deletions arrive through the
-                        // mirror and a key that also made them would
-                        // make them twice.
-                        let ime_holds_the_line = window.ime_owns_text();
-                        if !ime_holds_the_line {
-                            for c in text.chars() {
-                                chat.type_char(c);
-                            }
-                        }
-                        if let Some(code) = key {
-                            // The whole editing set, not just
-                            // Backspace: while an input method owns the
-                            // line it owns the caret in it too, and a
-                            // Home sent through here would move the
-                            // game's copy out from under the one the
-                            // player can see in their keyboard's strip.
-                            // The same guard the menu forms carry --
-                            // see `menu_key`.
-                            if ime_holds_the_line
-                                && matches!(
-                                    code,
-                                    KeyCode::Backspace
-                                        | KeyCode::Delete
-                                        | KeyCode::Home
-                                        | KeyCode::End
-                                        | KeyCode::ArrowLeft
-                                        | KeyCode::ArrowRight
-                                )
-                            {
-                                return;
-                            }
-                            match code {
-                                KeyCode::Enter | KeyCode::NumpadEnter if !repeat => {
-                                    submit_chat(&mut chat, net.as_ref(), &mut debug_stats);
-                                    close_chat(&mut chat, &window, &mut input, paused);
-                                }
-                                KeyCode::Escape => {
-                                    close_chat(&mut chat, &window, &mut input, paused);
-                                }
-                                // The caret keys, on the same terms the
-                                // forms have them -- see `ui::field`.
-                                KeyCode::Backspace => {
-                                    chat.edit(chat::Edit::Backspace { word: held_ctrl })
-                                }
-                                KeyCode::Delete => {
-                                    chat.edit(chat::Edit::Delete { word: held_ctrl })
-                                }
-                                KeyCode::ArrowLeft => chat.edit(chat::Edit::Move {
-                                    motion: if held_ctrl {
-                                        ui::field::Motion::WordLeft
-                                    } else {
-                                        ui::field::Motion::Left
-                                    },
-                                    extend: held_shift,
-                                }),
-                                KeyCode::ArrowRight => chat.edit(chat::Edit::Move {
-                                    motion: if held_ctrl {
-                                        ui::field::Motion::WordRight
-                                    } else {
-                                        ui::field::Motion::Right
-                                    },
-                                    extend: held_shift,
-                                }),
-                                KeyCode::Home => chat.edit(chat::Edit::Move {
-                                    motion: ui::field::Motion::Home,
-                                    extend: held_shift,
-                                }),
-                                KeyCode::End => chat.edit(chat::Edit::Move {
-                                    motion: ui::field::Motion::End,
-                                    extend: held_shift,
-                                }),
-                                KeyCode::KeyA if held_ctrl => chat.edit(chat::Edit::SelectAll),
-                                // Up and down are the sent lines, not
-                                // the log: the log is scrolled with the
-                                // wheel, and a player holding a
-                                // keyboard is reaching for the arrows
-                                // to get a command back. See
-                                // `Chat::recall`.
-                                KeyCode::ArrowUp => chat.recall(-1),
-                                KeyCode::ArrowDown => chat.recall(1),
-                                _ => {}
-                            }
-                        }
-                        return;
-                    }
-
-                    // The journal, while it is open, has the keyboard the
-                    // way the chat box does: Escape shuts it, Tab turns the
-                    // page, and on the recipe page letters are a search
-                    // rather than shortcuts -- or typing "bronze" would
-                    // throw away whatever is in the hand.
-                    if journal.is_open() && net.is_some() && !paused && !death.is_open() {
-                        if !is_pressed {
-                            return;
-                        }
-                        let binds = &settings.keybinds;
-                        let action = key.and_then(|code| {
-                            keybinds::Action::ALL.into_iter().find(|a| binds.key(*a) == Some(code))
-                        });
-                        match key {
-                            Some(KeyCode::Escape) => {
-                                journal.close();
-                                grab_cursor(&window, &mut input);
-                            }
-                            Some(KeyCode::Tab) => journal.switch_tab(),
-                            Some(KeyCode::Backspace) if journal.takes_text() => journal.backspace(),
-                            _ => {
-                                let mut typed = false;
-                                if journal.takes_text() {
-                                    for c in text.chars().filter(|c| !c.is_control()) {
-                                        journal.type_char(c);
-                                        typed = true;
-                                    }
-                                }
-                                let tab = match action {
-                                    Some(keybinds::Action::Map) => Some(ui::journal::Tab::Map),
-                                    Some(keybinds::Action::Recipes) => Some(ui::journal::Tab::Recipes),
-                                    Some(keybinds::Action::Give) => Some(ui::journal::Tab::Give),
-                                    _ => None,
-                                };
-                                if let (false, Some(tab)) = (typed, tab) {
-                                    ask_if_operator(net.as_ref());
-                                    if !journal.toggle(tab) {
-                                        grab_cursor(&window, &mut input);
-                                    }
-                                }
-                            }
-                        }
-                        return;
-                    }
-
-                    if let Some(code) = key {
-                        if is_pressed {
-                            // Escape is deliberately not rebindable: it
-                            // is the way out of every screen, including
-                            // the one where keys are rebound, and a
-                            // player who bound it away would have no way
-                            // back.
-                            let binds = &settings.keybinds;
-                            let action = keybinds::Action::ALL
-                                .into_iter()
-                                .find(|a| binds.key(*a) == Some(code));
-                            match (code, action) {
-                                // Enter opens the chat box. Not
-                                // rebindable, for the same reason
-                                // Escape is not: it is the way out of
-                                // what it opens.
-                                //
-                                // Not while the inventory has the
-                                // screen: two things claiming the cursor
-                                // and the keyboard at once ends with the
-                                // inventory unusable behind a grabbed
-                                // pointer. And not on a key repeat --
-                                // holding Enter would open and close the
-                                // box tens of times a second.
-                                (KeyCode::Enter | KeyCode::NumpadEnter, _)
-                                    if net.is_some()
-                                        && !paused
-                                        && !inventory_screen.open
-                                        && !chest_screen.is_open()
-                            && !station_screen.is_open()
-                                        && !death.is_open()
-                                        && !repeat =>
-                                {
-                                    chat.open(Instant::now());
-                                    // A phone has no keyboard until it
-                                    // is asked for one. Nothing on a
-                                    // desktop, where it is already
-                                    // there.
-                                    window.set_ime_visible(true);
-                                    release_cursor(&window, &mut input);
-                                    input.release_all();
-                                }
-                                // The chest closes on the same two
-                                // keys the inventory does, and tells the
-                                // server -- which stops sending updates
-                                // for it and stops accepting gestures
-                                // against it.
-                                (KeyCode::Escape, _) | (_, Some(keybinds::Action::Inventory))
-                                    if chest_screen.is_open() =>
-                                {
-                                    close_chest(
-                                        &mut chest_screen,
-                                        net.as_ref(),
-                                        &mut debug_stats,
-                                    );
-                                }
-                                // The station screen, on the same two keys and
-                                // for the same reason: the server is holding a
-                                // seat open for this player and has to be told
-                                // the player has left it.
-                                (KeyCode::Escape, _) | (_, Some(keybinds::Action::Inventory))
-                                    if station_screen.is_open() =>
-                                {
-                                    close_station(
-                                        &mut station_screen,
-                                        net.as_ref(),
-                                        &mut debug_stats,
-                                    );
-                                }
-                                // **The blow, on the space bar.** No keybind of
-                                // its own: a run is four presses over five
-                                // seconds on a screen that says what to press,
-                                // and a binding nobody would ever change is a
-                                // row in the keybinds screen that only makes it
-                                // longer. Jump is what space does in the world,
-                                // and the world does not have the keyboard while
-                                // this screen is up. Key repeat is refused --
-                                // a held space is one blow, not forty.
-                                (KeyCode::Space, _) if station_screen.is_open() && !repeat => {
-                                    // Asked before the press, because the
-                                    // press is what ends the run -- see
-                                    // `StationScreen::striking`.
-                                    let blow = station_screen.striking();
-                                    let intent = station_screen.press();
-                                    if let Some(game) = blow {
-                                        audio.play_flat(audio::bank::station_blow(game), 0.7, 1.0);
-                                    }
-                                    if let (Some(intent), Some(net)) = (intent, net.as_ref()) {
-                                        send_station_intent(
-                                            intent,
-                                            &mut station_screen,
-                                            net,
-                                            &mut debug_stats,
-                                            &audio,
-                                        );
-                                    }
-                                }
-                                (KeyCode::Escape, _) if inventory_screen.open => {
-                                    // Esc backs out of the inventory
-                                    // before it reaches for the pause
-                                    // menu: one screen at a time.
-                                    inventory_screen.close();
-                                    grab_cursor(&window, &mut input);
-                                }
-                                // **A forced look is a photograph, and
-                                // a photograph cannot be paused.**
-                                //
-                                // A capture run is unattended and the
-                                // window it opens is not the one the
-                                // desktop has focus on; a single stray
-                                // Escape -- from a focus change, from
-                                // the terminal it was launched out of --
-                                // put the pause menu over every frame of
-                                // a seventy-frame sweep and the run
-                                // produced seventy photographs of a
-                                // menu. The failure is silent: the files
-                                // are written, the count is right, and
-                                // the picture is of the wrong thing.
-                                (KeyCode::Escape, _) if forced_look.is_some() => {}
-                                (KeyCode::Escape, _) => {
-                                    paused = true;
-                                    menu.open(Screen::Paused);
-                                    release_cursor(&window, &mut input);
-                                    input.release_all();
-                                }
-                                (_, Some(keybinds::Action::ToggleStats)) => {
-                                    debug_stats.toggle_console()
-                                }
-                                (_, Some(keybinds::Action::ToggleHud)) => hud_hidden = !hud_hidden,
-                                (_, Some(keybinds::Action::Respawn))
-                                    if death.is_open() =>
-                                {
-                                    if let Some(net) = net.as_ref() {
-                                        net.send(ClientMessage::Respawn);
-                                    }
-                                }
-                                // ...and on the ground the same key lets go:
-                                // the server takes it as giving up (see its
-                                // `Respawn` arm), and the death screen that
-                                // follows has its own respawn on it.
-                                (_, Some(keybinds::Action::Respawn))
-                                    if body.downed.is_some() =>
-                                {
-                                    if let Some(net) = net.as_ref() {
-                                        net.send(ClientMessage::Respawn);
-                                    }
-                                }
-                                // The death screen's buttons, from the
-                                // keyboard. Every other screen in the
-                                // game can be driven without the mouse,
-                                // and the one that arrives uninvited is
-                                // the worst one to make an exception of.
-                                (KeyCode::ArrowUp, _) if death.is_open() => {
-                                    death.move_focus(-1)
-                                }
-                                (KeyCode::ArrowDown, _) if death.is_open() => {
-                                    death.move_focus(1)
-                                }
-                                (KeyCode::Enter | KeyCode::NumpadEnter, _)
-                                    if death.is_open() =>
-                                {
-                                    match death.focused() {
-                                        Some(death::Choice::Respawn) => {
-                                            if let Some(net) = net.as_ref() {
-                                                net.send(ClientMessage::Respawn);
-                                            }
-                                        }
-                                        Some(death::Choice::LeaveWorld) => {
-                                            handle_action! { Action::LeaveWorld }
-                                        }
-                                        None => {}
-                                    }
-                                }
-                                // **Dead hands hold nothing.** See
-                                // `works_while_dead` for what fell through
-                                // the death screen before this arm.
-                                (_, Some(bound))
-                                    if death.is_open() && !works_while_dead(bound) => {}
-                                (
-                                    _,
-                                    Some(
-                                        keybinds::Action::Map
-                                        | keybinds::Action::Recipes
-                                        | keybinds::Action::Give,
-                                    ),
-                                ) if !chest_screen.is_open() && !station_screen.is_open() => {
-                                    let tab = match action {
-                                        Some(keybinds::Action::Map) => ui::journal::Tab::Map,
-                                        Some(keybinds::Action::Give) => ui::journal::Tab::Give,
-                                        _ => ui::journal::Tab::Recipes,
-                                    };
-                                    // One screen at a time, for the reason
-                                    // the pack gives below.
-                                    inventory_screen.close();
-                                    chat.close();
-                                    ask_if_operator(net.as_ref());
-                                    // Only a journal that actually opened
-                                    // takes the mouse. The give key of a
-                                    // player who is not an operator is
-                                    // refused by `toggle`, and releasing
-                                    // the cursor anyway left the camera
-                                    // dead with no screen to show for it
-                                    // -- the player saw the mouse come
-                                    // loose "for a window" that never came.
-                                    if journal.toggle(tab) {
-                                        release_cursor(&window, &mut input);
-                                        input.release_all();
-                                    }
-                                }
-                                (_, Some(keybinds::Action::Inventory)) => {
-                                    if inventory_screen.open {
-                                        inventory_screen.close();
-                                        grab_cursor(&window, &mut input);
-                                    } else {
-                                        // One screen at a time: the chat
-                                        // box and the inventory both
-                                        // want the cursor and the keys.
-                                        chat.close();
-                                        release_cursor(&window, &mut input);
-                                        input.release_all();
-                                        // Seeded with the middle of the
-                                        // screen: with no starting
-                                        // position the first click does
-                                        // nothing, which reads as the
-                                        // inventory ignoring the mouse.
-                                        inventory_screen.open_at(Some((0.0, 0.0)));
-                                    }
-                                }
-                                (_, Some(keybinds::Action::Eat)) => {
-                                    // The hovered slot while a screen is
-                                    // open, the selected one otherwise
-                                    // -- exactly the rule the drop key
-                                    // follows, because it is the same
-                                    // question about the same slot.
-                                    let slot = if inventory_screen.open {
-                                        inventory_screen.hovered_slot()
-                                    } else {
-                                        Some(input.hotbar_slot)
-                                    };
-                                    eat_from(
-                                        slot,
-                                        &inventory,
-                                        &mut meal,
-                                        &mut hand,
-                                    );
-                                }
-                                (_, Some(keybinds::Action::Drop)) => {
-                                    // The hovered slot while a screen
-                                    // is open, the selected one
-                                    // otherwise. Sprint modifier for the
-                                    // whole stack.
-                                    let slot = if inventory_screen.open {
-                                        inventory_screen.hovered_slot()
-                                    } else if chest_screen.is_open() {
-                                        // Only out of the pack: there is
-                                        // no message for throwing
-                                        // something out of a chest, and
-                                        // a chest is somewhere you put
-                                        // things rather than a bin.
-                                        chest_screen.hovered().and_then(|(side, slot)| {
-                                            (side == primitive_shared::protocol::Side::Pack)
-                                                .then_some(slot)
-                                        })
-                                    } else {
-                                        Some(input.hotbar_slot)
-                                    };
-                                    let slot = something_to_throw(slot, &inventory);
-                                    if let (Some(slot), Some(net)) = (slot, net.as_ref()) {
-                                        net.send(ClientMessage::DropSlot {
-                                            slot: slot as u8,
-                                            whole_stack: input.action_down(
-                                                binds,
-                                                keybinds::Action::Sprint,
-                                            ),
-                                        });
-                                        audio.play(audio::Sfx::Drop);
-                                        // ...and what it was. `Sfx::Drop`
-                                        // is the throw -- a hand opening,
-                                        // the same every time -- and
-                                        // what the player is actually
-                                        // listening for is the thing
-                                        // hitting the ground. An ingot
-                                        // and a handful of berries left
-                                        // the hand identically before
-                                        // this, which made throwing
-                                        // something away feel like
-                                        // pressing a key rather than
-                                        // like putting it down.
-                                        if let Some(thrown) = inventory.block_in(slot) {
-                                            audio.play_flat(
-                                                audio::Sfx::Material(
-                                                    audio::bank::Impact::Place,
-                                                    audio::bank::Material::of(thrown),
-                                                ),
-                                                0.5,
-                                                1.0,
-                                            );
-                                        }
-                                        debug_stats.network_messages_out_this_second += 1;
-                                    }
-                                }
-                                // A number key over a slot sends what is
-                                // in it to that place on the bar. The
-                                // gesture everyone brings with them from
-                                // other games, and the fastest way to
-                                // lay a bar out: point, press, done.
-                                (key, _)
-                                    if inventory_screen.open
-                                        && input::hotbar_slot_for(key).is_some() =>
-                                {
-                                    let from = inventory_screen.hovered_slot();
-                                    let to = input::hotbar_slot_for(key);
-                                    if let (Some(from), Some(to), Some(net)) =
-                                        (from, to, net.as_ref())
-                                    {
-                                        if from != to {
-                                            net.send(ClientMessage::MoveSlots {
-                                                from: from as u8,
-                                                to: to as u8,
-                                            });
-                                            debug_stats.network_messages_out_this_second += 1;
-                                        }
-                                    }
-                                }
-                                (_, Some(keybinds::Action::ToggleFullscreen)) => {
-                                    // Borderless: a window the size of
-                                    // the screen with no frame. Toggled
-                                    // here and *remembered*, because a
-                                    // player who plays fullscreen plays
-                                    // fullscreen tomorrow as well.
-                                    settings.fullscreen = !settings.fullscreen;
-                                    window.set_fullscreen(settings.fullscreen);
-                                    settings_dirty = true;
-                                }
-                                (_, Some(keybinds::Action::ToggleFog)) => {
-                                    // Change the setting, not a separate
-                                    // flag. They used to be two truths:
-                                    // pressing F turned fog off, and the
-                                    // next tweak of any setting at all
-                                    // silently turned it back on.
-                                    settings.fog_enabled = !settings.fog_enabled;
-                                    fog_enabled = settings.fog_enabled;
-                                    settings_dirty = true;
-                                }
-                                // **A number over a slot swaps it with that
-                                // square of the bar**, in the pack and at
-                                // an open container alike: "сделай
-                                // сочетания клавиш для работы в
-                                // хранилищах". Picking a stack up and
-                                // carrying it to the bar was two clicks and
-                                // an aim for the thing a player does most.
-                                // The bar's selection is left alone while a
-                                // screen is up, as the wheel's is.
-                                (_, _) if hover_swap(code, &inventory_screen, &chest_screen).is_some() => {
-                                    if let (Some(message), Some(net)) =
-                                        (hover_swap(code, &inventory_screen, &chest_screen), net.as_ref())
-                                    {
-                                        audio.play(audio::Sfx::Click);
-                                        net.send(message);
-                                        debug_stats.network_messages_out_this_second += 1;
-                                    }
-                                }
-                                _ => input.set_key(code, true),
-                            }
-                        } else {
-                            input.set_key(code, false);
-                        }
-                    }
+                if let Some(action) = frame::events::on_key(
+                    key,
+                    text,
+                    pressed,
+                    repeat,
+                    net.as_ref(),
+                    &window,
+                    &audio,
+                    &inventory,
+                    &body,
+                    forced_look.as_ref(),
+                    &mut settings,
+                    &mut settings_dirty,
+                    &mut paused,
+                    &mut held_shift,
+                    &mut held_ctrl,
+                    &mut hud_hidden,
+                    &mut fog_enabled,
+                    &mut input,
+                    &mut menu,
+                    &mut chat,
+                    &mut journal,
+                    &mut death,
+                    &mut chest_screen,
+                    &mut station_screen,
+                    &mut inventory_screen,
+                    &mut meal,
+                    &mut hand,
+                    &mut debug_stats,
+                ) {
+                    handle_action! { action }
                 }
+            }
 
-            platform::Event::MouseWheel { lines } => {
-                    // Wheel away from the player moves *up* the bar, so
-                    // "forward" through the slots is the wheel coming
-                    // back. Normalised to lines by the backend; the
-                    // hotbar only ever wants the sign.
-                    let forward = lines < 0.0;
-                    // On a menu the wheel belongs to whatever list is on
-                    // screen. It used to belong to nothing at all: the
-                    // handler returned before looking, so the only way
-                    // down a list longer than its panel was the arrow
-                    // keys, and the world list gave no sign there was
-                    // anything below the last row it had drawn.
-                    if net.is_none() || paused {
-                        menu.scroll(if forward { 1 } else { -1 });
-                        return;
-                    }
-                    // With the box open the wheel belongs to the log,
-                    // which is longer than the twelve rows on screen.
-                    // A thumb drag arrives here as well (see the
-                    // `Gesture::Scrolled` arm above), so the phone got
-                    // a scrollable chat without a control of its own.
-                    if chat.is_typing() {
-                        chat.scroll_by(if forward { -1 } else { 1 });
-                        return;
-                    }
-                    // The journal: zoom on the map, rows in the book.
-                    if journal.is_open() {
-                        journal.wheel(lines, graphics.aspect(), player_mark(player.position.as_vec3(), camera.yaw));
-                        return;
-                    }
-                    // With the inventory open the wheel belongs to the
-                    // recipe list, which is longer than the window on
-                    // it. It must *not* reach the hotbar there: the
-                    // bar's selection is not on screen, so scrolling
-                    // moved it invisibly and the player found out later,
-                    // having placed the wrong block.
-                    if inventory_screen.open {
-                        inventory_screen.scroll_recipes(if forward { 1 } else { -1 });
-                        return;
-                    }
-                    input.cycle_hotbar(forward);
-                }
+            platform::Event::MouseWheel { lines } => frame::events::on_wheel(
+                lines,
+                net.as_ref(),
+                paused,
+                &graphics,
+                &player,
+                &camera,
+                &mut input,
+                &mut menu,
+                &mut chat,
+                &mut journal,
+                &mut inventory_screen,
+            ),
 
+            // Who gets a click, and what it means where it lands, is all
+            // in `frame::events::on_mouse_button` -- including the whole
+            // of the right button in the world, which the scenarios play
+            // through the same code (see `frame::interact`).
             platform::Event::MouseButton { button, pressed } => {
-                    // Tracked whatever the game is doing, so releasing
-                    // the button over a menu doesn't leave the world
-                    // thinking it is still held.
-                    if button == MouseButton::Left {
-                        input.breaking = pressed
-                            && input.mouse_grabbed
-                            && !paused
-                            && !inventory_screen.open
-                            && !chest_screen.is_open()
-                            && !station_screen.is_open()
-                            && !journal.is_open()
-                            && !chat.is_typing();
-                    }
-                    // The same, for the button the rod is wound back with
-                    // (`logic::fishing::Hold`). Tracked wherever the game
-                    // is, for `breaking`'s reason: a button released over a
-                    // menu must not leave the rod winding for ever.
-                    if button == MouseButton::Right {
-                        input.using = pressed
-                            && input.mouse_grabbed
-                            && !paused
-                            && !inventory_screen.open
-                            && !chest_screen.is_open()
-                            && !station_screen.is_open()
-                            && !journal.is_open()
-                            && !chat.is_typing();
-                    }
-                    // Clicking while typing is a misclick, not a swing:
-                    // the cursor is loose because the chat box has it.
-                    // **Except in the box itself**, where it is a player
-                    // pointing at the letter they want to fix -- the
-                    // same gesture the form fields answer. Taken back
-                    // through the growth the widget was drawn with, on
-                    // exactly the terms the finger is: see the touch
-                    // path above, which is where that arithmetic is
-                    // explained.
-                    if chat.is_typing() {
-                        if button == MouseButton::Left && pressed {
-                            if let Some(at) = last_cursor {
-                                let grown = widgets::Layout::for_screen(
-                                    graphics.aspect(),
-                                    graphics.ui_scale(),
-                                )
-                                .fit_from_corner(chat::EXTENT);
-                                let lifted = (
-                                    at.0,
-                                    at.1 - chat::keyboard_lift(
-                                        touch_controls,
-                                        true,
-                                        grown,
-                                    ),
-                                );
-                                let authored = widgets::unscale_about(
-                                    lifted,
-                                    widgets::anchor::BOTTOM_LEFT(graphics.aspect()),
-                                    grown,
-                                );
-                                if let Some(chat::Tap::Caret(caret)) =
-                                    chat.tapped(graphics.aspect(), touch_controls, authored)
-                                {
-                                    if !window.ime_owns_text() {
-                                        chat.place_caret(caret);
-                                    }
-                                }
-                            }
-                        }
-                        return;
-                    }
-                    // **A release matters on exactly one screen.** The
-                    // arrangement editor is the only place in the menus
-                    // where a press and a release are different events:
-                    // everywhere else a click is decided when the button
-                    // goes down. Letting go is how a control is put
-                    // down, so it cannot be dropped here with the rest.
-                    if !pressed {
-                        if button == MouseButton::Left {
-                            menu.release_control();
-                        }
-                        return;
-                    }
-                    // The death screen takes the click before anything
-                    // else does. A dead player has nothing else to
-                    // click on, and the world behind is not theirs to
-                    // touch until they are back in it.
-                    if death.is_open() && net.is_some() && !paused {
-                        if button == MouseButton::Left {
-                            match death.click() {
-                                Some(death::Choice::Respawn) => {
-                                    if let Some(net) = net.as_ref() {
-                                        net.send(ClientMessage::Respawn);
-                                    }
-                                }
-                                // Straight through the pause menu's own
-                                // path, so leaving from here saves and
-                                // tears down exactly as leaving from
-                                // there does.
-                                Some(death::Choice::LeaveWorld) => {
-                                    handle_action! { Action::LeaveWorld }
-                                }
-                                None => {}
-                            }
-                        }
-                        return;
-                    }
-                    // The journal has the cursor while it is open, so it
-                    // has the click: a button, a row, or the start of a
-                    // drag across the map.
-                    if journal.is_open() && net.is_some() && !paused {
-                        if button == MouseButton::Left {
-                            if pressed {
-                                let mark = player_mark(player.position.as_vec3(), camera.yaw);
-                                if journal.press(graphics.aspect(), mark) == ui::journal::Outcome::Closed {
-                                    audio.play(audio::Sfx::Click);
-                                    grab_cursor(&window, &mut input);
-                                }
-                                send_journal_command(&mut journal, net.as_ref(), &mut debug_stats);
-                            } else {
-                                journal.release();
-                            }
-                        }
-                        return;
-                    }
-                    // The station screen, before the chest's: the two are
-                    // never open at once, and this one wants the click
-                    // wherever it lands (a blow is not aimed).
-                    if station_screen.is_open() && !paused && button == MouseButton::Left {
-                        // The same blow the strike key makes, and the same
-                        // reason it is asked first: while a run is up, the
-                        // whole panel is the hammer.
-                        let blow = station_screen.striking();
-                        let clicked = station_screen.click();
-                        if let Some(game) = blow {
-                            audio.play_flat(audio::bank::station_blow(game), 0.7, 1.0);
-                        }
-                        if let Some(intent) = clicked {
-                            if intent == station_screen::Intent::Close {
-                                audio.play(audio::Sfx::Back);
-                                close_station(&mut station_screen, net.as_ref(), &mut debug_stats);
-                                return;
-                            }
-                            if let Some(net) = net.as_ref() {
-                                send_station_intent(
-                                    intent,
-                                    &mut station_screen,
-                                    net,
-                                    &mut debug_stats,
-                                    &audio,
-                                );
-                            }
-                        }
-                        return;
-                    }
-                    // The chest screen, on the same footing as the
-                    // inventory: it has the cursor, so it has the click.
-                    if chest_screen.is_open() && net.is_some() && !paused {
-                        let click = match button {
-                            MouseButton::Left => Some(inventory_screen::Button::Left),
-                            MouseButton::Right => Some(inventory_screen::Button::Right),
-                            _ => None,
-                        };
-                        if let Some(click) = click {
-                            let quick = thumb_quick
-                                || input.action_down(
-                                    &settings.keybinds,
-                                    keybinds::Action::Sprint,
-                                );
-                            let intent = chest_screen.click(&inventory, click, quick, held_ctrl);
-                            // Closing goes through `close_chest`, which
-                            // also tells the server to stop sending
-                            // updates for the container. Handled before
-                            // the arm below so that it still works when
-                            // the connection has gone: a screen that
-                            // traps the player when the server drops is
-                            // the worst time to trap them.
-                            if matches!(intent, Some(chest_screen::Intent::Close)) {
-                                audio.play(audio::Sfx::Back);
-                                close_chest(&mut chest_screen, net.as_ref(), &mut debug_stats);
-                                return;
-                            }
-                            if let (Some(intent), Some(net)) = (intent, net.as_ref()) {
-                                // **A jug in the hand is not a container
-                                // the server has open**, so none of the
-                                // container messages below mean anything
-                                // for it: every gesture on it becomes one
-                                // of the pack's own jug messages, against
-                                // the jug's slot. See
-                                // `chest_screen::held_vessel_message`.
-                                if let Some(jug) = chest_screen.held_vessel() {
-                                    if let Some(message) =
-                                        chest_screen::held_vessel_message(intent, jug)
-                                    {
-                                        audio.play(audio::Sfx::Click);
-                                        net.send(message);
-                                        debug_stats.network_messages_out_this_second += 1;
-                                    }
-                                    return;
-                                }
-                                audio.play(audio::Sfx::Click);
-                                // `Close` was dealt with above, before the
-                                // connection was unwrapped, and is the one
-                                // intent with no message.
-                                if let Some(message) = chest_intent_message(intent) {
-                                    net.send(message);
-                                }
-                                debug_stats.network_messages_out_this_second += 1;
-                            }
-                        }
-                        return;
-                    }
-                    // The inventory takes the click before the world
-                    // does; it is the reason the cursor is loose.
-                    if inventory_screen.open && net.is_some() && !paused {
-                        let click = match button {
-                            MouseButton::Left => Some(inventory_screen::Button::Left),
-                            MouseButton::Right => Some(inventory_screen::Button::Right),
-                            _ => None,
-                        };
-                        if let Some(click) = click {
-                            // The screen decides *what* to ask for; the
-                            // server decides whether it happens. Nothing
-                            // moves locally, so there is no prediction to
-                            // be undone by the next snapshot.
-                            let quick = thumb_quick
-                                || input.action_down(
-                                    &settings.keybinds,
-                                    keybinds::Action::Sprint,
-                                );
-                            let intent = inventory_screen.click(&inventory, click, quick);
-                            // Closing is the screen's own business and
-                            // needs no server: handled here, before the
-                            // arm below that needs a connection, because
-                            // a way out that stops working when the
-                            // connection drops is the wrong way out.
-                            if matches!(intent, Some(inventory_screen::Intent::Close)) {
-                                audio.play(audio::Sfx::Click);
-                                inventory_screen.close();
-                                grab_cursor(&window, &mut input);
-                                return;
-                            }
-                            if let (Some(intent), Some(net)) = (intent, net.as_ref()) {
-                                use inventory_screen::Intent;
-                                // Three sounds for a dozen gestures, and
-                                // the split is by what the gesture *is*
-                                // rather than by which message it sends:
-                                // putting armour on is a different event
-                                // from moving a stack, and making
-                                // something is a different event again.
-                                audio.play(match &intent {
-                                    // A dressing going on is a thing put on
-                                    // the body, which is what the equip
-                                    // sound already is.
-                                    Intent::Equip(_) | Intent::Unequip(_) | Intent::Treat { .. } => {
-                                        audio::Sfx::Equip
-                                    }
-                                    // **A workshop is heard as itself.**
-                                    // The saw at the bench, the chisel at
-                                    // the mason's block, the wheel, the
-                                    // knife at the currier's -- so that
-                                    // carrying a bench into the woods is
-                                    // audible and not just a row in the
-                                    // menu turning white. Anything made
-                                    // in the hands or at a fire keeps the
-                                    // generic craft sound; see
-                                    // `bank::workshop_of`.
-                                    Intent::Craft { index, .. } => {
-                                        primitive_shared::crafting::RECIPES
-                                            .get(*index)
-                                            .and_then(|recipe| audio::bank::workshop_of(recipe.station))
-                                            .unwrap_or(audio::Sfx::Craft)
-                                    }
-                                    _ => audio::Sfx::Click,
-                                });
-                                net.send(match intent {
-                                    Intent::Move { from, to } => ClientMessage::MoveSlots {
-                                        from: from as u8,
-                                        to: to as u8,
-                                    },
-                                    Intent::Split { from, to } => ClientMessage::SplitSlot {
-                                        from: from as u8,
-                                        to: to as u8,
-                                    },
-                                    Intent::QuickMove(slot) => {
-                                        ClientMessage::QuickMoveSlot { slot: slot as u8 }
-                                    }
-                                    Intent::Sort => ClientMessage::SortInventory,
-                                    Intent::Equip(slot) => {
-                                        ClientMessage::Equip { slot: slot as u8 }
-                                    }
-                                    Intent::Unequip(slot) => {
-                                        ClientMessage::Unequip { slot: slot as u8 }
-                                    }
-                                    Intent::PourIntoJug { from, jug } => {
-                                        ClientMessage::PourIntoJug {
-                                            from: from as u8,
-                                            jug: jug as u8,
-                                        }
-                                    }
-                                    Intent::EmptyJug(slot) => {
-                                        ClientMessage::EmptyJug { slot: slot as u8 }
-                                    }
-                                    Intent::Treat { slot, part } => ClientMessage::TreatInjury {
-                                        slot: slot as u8,
-                                        part: part.index() as u8,
-                                    },
-                                    Intent::Craft { index, times } => ClientMessage::Craft {
-                                        index: index as u16,
-                                        times,
-                                    },
-                                    // Dealt with above, before the
-                                    // connection was unwrapped: closing
-                                    // a screen is not something to tell
-                                    // a server about.
-                                    Intent::Close => unreachable!(
-                                        "closing the pack is handled before the server is asked"
-                                    ),
-                                });
-                                debug_stats.network_messages_out_this_second += 1;
-                            }
-                        }
-                        return;
-                    }
-                    if net.is_none() || paused {
-                        if button == MouseButton::Left {
-                            // A press that lands on none of the
-                            // screen's own buttons, on the arrangement
-                            // screen, is a press on a control -- so it
-                            // is offered to the controls only after the
-                            // buttons have had their say.
-                            let arranging = menu.is_arranging();
-                            // **The editor is read before the click is
-                            // acted on, and that ordering is the whole
-                            // of it.** The platform's copy of the field
-                            // is *polled* once a frame, not delivered as
-                            // an event, so a character committed after
-                            // the last poll and before this press is
-                            // still sitting in the editor when the press
-                            // arrives -- and the press may be the one
-                            // that moves the focus to the next box.
-                            // Reconciled afterwards, that character is
-                            // either read into the box the player has
-                            // just tapped or thrown away; reconciled
-                            // here, it lands in the field it was typed
-                            // into. A phone is where this happens: the
-                            // last letter of a world's name, and then a
-                            // finger on the seed.
-                            reconcile_the_editor(&mut ime, &window, &mut menu, &mut chat, traced);
-                            let clicked = menu.click();
-                            if clicked.is_none()
-                                && arranging
-                                && menu.grab_at_cursor(settings.ui_scale)
-                            {
-                                return;
-                            }
-                            if let Some(action) = clicked {
-                                // Going back sounds different from going
-                                // in: one clip is a rising interval and
-                                // the other a falling one, and that is
-                                // the cheapest way there is to tell a
-                                // player which direction they just
-                                // moved.
-                                audio.play(match action {
-                                    Action::Back | Action::Cancel => audio::Sfx::Back,
-                                    _ => audio::Sfx::Click,
-                                });
-                                handle_action! { action }
-                            }
-                        }
-                        return;
-                    }
-                    // Never while a screen that wants the pointer is up:
-                    // a click there taking the mouse for the camera is
-                    // what left the map undraggable. See `Journal::press`.
-                    if !input.mouse_grabbed
-                        && !window.is_touch_primary()
-                        && !journal.is_open()
-                        && !inventory_screen.open
-                        && !chest_screen.is_open()
-                            && !station_screen.is_open()
-                    {
-                        grab_cursor(&window, &mut input);
-                        // The click that grabs the cursor is not also a
-                        // swing at whatever happens to be under the
-                        // crosshair.
-                        input.breaking = false;
-                    // **Never on a phone**, where there is no pointer to
-                    // capture and this branch would only eat the first
-                    // tap of every session -- and, since the hands moved
-                    // into the look area, that tap is a block the player
-                    // asked to place. `set_cursor_grabbed` answers
-                    // "granted" on Android without doing anything, so
-                    // the flag is normally true and this was normally
-                    // skipped; normally is not a guarantee, and the cost
-                    // of the exception is one silently lost action.
-                    } else if button == MouseButton::Right {
-                        // **On the ground the right click is a hand to your
-                        // own body**, and a hand to the world only for the
-                        // river and the hearth beside you. A dressing in the
-                        // hand goes on (`downed::part_to_dress` picks where);
-                        // food and a jug go through the ordinary eat and
-                        // drink below; everything else -- building, opening
-                        // a door, climbing into a bed -- is not something a
-                        // body with a clock on it does, and the server
-                        // refuses it anyway (`barred_while_downed`).
-                        //
-                        // **Standing, a click on somebody lying on the ground
-                        // is a hand to them** (`ClientMessage::HelpUp`), with
-                        // whatever is in it; the server decides whether it is
-                        // what they need.
-                        if body.downed.is_some() {
-                            let held = inventory.block_in(input.hotbar_slot);
-                            if let Some((net, treatment)) =
-                                net.as_ref().zip(held.and_then(primitive_shared::injury::Treatment::of))
-                            {
-                                let part = primitive_shared::downed::part_to_dress(&body.injuries, treatment);
-                                net.send(ClientMessage::TreatInjury {
-                                    slot: input.hotbar_slot as u8,
-                                    part: part.index() as u8,
-                                });
-                                debug_stats.network_messages_out_this_second += 1;
-                                return;
-                            }
-                            let aimed = aimed_block(&chunks, &camera);
-                            if !matches!(
-                                use_gesture(aimed.map(|(_, block)| block), held),
-                                UseGesture::Eat | UseGesture::Water | UseGesture::Hearth
-                            ) {
-                                return;
-                            }
-                        } else if let Some(net) = net.as_ref() {
-                            let held = inventory.block_in(input.hotbar_slot);
-                            if let Some(target) = player_under_crosshair(&remote_players, &chunks, &camera, None)
-                                .filter(|&id| remote_players.is_down(id))
-                            {
-                                if held.is_some() {
-                                    net.send(ClientMessage::HelpUp { target });
-                                    debug_stats.network_messages_out_this_second += 1;
-                                }
-                                return;
-                            }
-                        }
-                        // A block you can *open* takes the right click
-                        // before a block you could place does. Otherwise
-                        // the only way to use a chest with something in
-                        // hand would be to empty your hand first, and
-                        // the block would go on the front of it.
-                        // ...with one exception, and it is the fire.
-                        // A hearth is a container now, so a right click
-                        // opens it -- but *striking flint on it* is
-                        // still a gesture, and it is the one gesture
-                        // that is not about what is inside. Holding the
-                        // striker means lighting; holding anything else
-                        // means opening.
-                        //
-                        // Which of the four this gesture is, decided in
-                        // one place so the order can be checked by a
-                        // test rather than read down the page. See
-                        // `UseGesture`.
-                        // **A raft takes the click before anything behind it**:
-                        // the timber is in front of the lake, and a rower
-                        // reaching for the sail is not reaching for a drink.
-                        // What it does -- the oars, or the sail -- is the
-                        // server's to decide (`ClientMessage::UseRaft`). A tap
-                        // on the glass is this same right click, so a phone
-                        // takes the oars and raises the sail the same way.
-                        if let (Some((raft, distance)), Some(net)) = (
-                            entities.aimed_raft(camera.position, camera.forward(), INTERACT_RANGE),
-                            net.as_ref(),
-                        ) {
-                            if physics::raycast_block(&chunks, camera.position, camera.forward(), distance)
-                                .is_none()
-                            {
-                                net.send(ClientMessage::UseRaft { raft });
-                                debug_stats.network_messages_out_this_second += 1;
-                                return;
-                            }
-                        }
-                        let held = inventory.block_in(input.hotbar_slot);
-                        // **A horse takes a click with nothing to tend it in
-                        // hand**: a leg up, or -- with the rein key held --
-                        // a hand into its saddlebags. Whether it will have
-                        // you is the server's (`ClientMessage::Mount`), and a
-                        // wild horse says so; feed, a saddle or the bags in
-                        // hand go on to the tending below instead.
-                        if let Some(net) = net.as_ref() {
-                            let tending = held.is_some_and(primitive_shared::husbandry::is_tending_tool);
-                            let aimed = entities.aimed_at(camera.position, camera.forward(), INTERACT_RANGE);
-                            if let Some((horse, distance)) = aimed.filter(|_| !tending && entities.horseback.is_none()) {
-                                if entities.species_of(horse) == Some(primitive_shared::animals::Species::Horse)
-                                    && physics::raycast_block(&chunks, camera.position, camera.forward(), distance).is_none()
-                                {
-                                    let bags = input.action_down(&settings.keybinds, keybinds::Action::Rein);
-                                    net.send(if bags {
-                                        ClientMessage::OpenBags { horse }
-                                    } else {
-                                        ClientMessage::Mount { horse }
-                                    });
-                                    debug_stats.network_messages_out_this_second += 1;
-                                    return;
-                                }
-                            }
-                        }
-                        // **An animal takes the click next, with something to
-                        // tend it with in hand** -- feed, a knife, a bowl
-                        // (`husbandry::is_tending_tool`) -- and nothing else
-                        // does: a player walking planks past a sheep is
-                        // building, not asking it anything. What the click
-                        // does is the server's (`ClientMessage::TendAnimal`).
-                        if let (Some(held), Some(net)) = (held, net.as_ref()) {
-                            if primitive_shared::husbandry::is_tending_tool(held) {
-                                if let Some((animal, distance)) =
-                                    entities.aimed_at(camera.position, camera.forward(), INTERACT_RANGE)
-                                {
-                                    let is_animal = primitive_shared::protocol::entity_source(animal)
-                                        == Some(primitive_shared::protocol::EntitySource::Animal);
-                                    if is_animal
-                                        && physics::raycast_block(&chunks, camera.position, camera.forward(), distance)
-                                            .is_none()
-                                    {
-                                        net.send(ClientMessage::TendAnimal { animal });
-                                        debug_stats.network_messages_out_this_second += 1;
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                        // **A map in the hand opens the map**, whatever is
-                        // in front of it: it is a sheet of hide, there is
-                        // nothing else to do with one, and a player who has
-                        // just made their first map will hold it and click.
-                        // The map key does the same thing and is the one a
-                        // player ends up using; this is the gesture they
-                        // *try*, and a thing that does nothing when you use
-                        // it reads as a thing that is broken.
-                        //
-                        // **The plain click only.** With the modifier held
-                        // a map is laid on the ground like every other
-                        // thing a hand carries (`can_be_set_down`), and a
-                        // map that could not be put on a shelf would be the
-                        // one carried item that cannot.
-                        if held.is_some_and(|held| {
-                            primitive_shared::types::block_kind(held) == primitive_shared::types::BLOCK_MAP
-                        }) && !(thumb_quick || input.action_down(&settings.keybinds, keybinds::Action::Sprint))
-                        {
-                            if journal.toggle(ui::journal::Tab::Map) {
-                                release_cursor(&window, &mut input);
-                                input.release_all();
-                            }
-                            return;
-                        }
-                        let aimed = aimed_block(&chunks, &camera);
-                        let mut claim = use_gesture(aimed.map(|(_, block)| block), held);
-                        // **A blaze: the modifier, a knife, a standing
-                        // tree** (`types::BLOCK_BLAZE`). Before the set-down
-                        // that the modifier otherwise means, because a knife
-                        // aimed at the *side* of a trunk has nowhere to be
-                        // laid down anyway -- the set-down wants a flat top
-                        // (`set_down_cell`) -- so what this takes over is a
-                        // gesture that could only ever answer "not there".
-                        // The plain click stays what it was: a tap for resin
-                        // or bark, which is the thing a player does twenty
-                        // times an evening.
-                        if let (true, Some((cell, block)), Some(held), Some(net)) = (
-                            thumb_quick || input.action_down(&settings.keybinds, keybinds::Action::Sprint),
-                            aimed,
-                            held,
-                            net.as_ref(),
-                        ) {
-                            if primitive_shared::types::is_knife(held) && blazeable(block) {
-                                net.send(ClientMessage::Blaze {
-                                    global_x: cell.0,
-                                    global_y: cell.1,
-                                    global_z: cell.2,
-                                });
-                                debug_stats.network_messages_out_this_second += 1;
-                                hand.strike(Some(held));
-                                return;
-                            }
-                        }
-                        // **Set down, with the modifier held**: anything not
-                        // built with, one at a time, on the top of a block --
-                        // the jug's gesture (`UseGesture::OpenVessel`) for
-                        // everything else a hand carries. First, before the
-                        // food is eaten and the knife scores a trunk: the
-                        // modifier is the player saying "not that". The cost
-                        // is the jug's too: the modifier is the sprint key,
-                        // so a player running with bread who right-clicks
-                        // lays the loaf down; the eat key still eats.
-                        //
-                        // Not at a thing already set down, which the plain
-                        // click takes back (`use_gesture`): a knife laid on a
-                        // knife has nothing to lie on.
-                        // ...and not a torch held to a fire: Shift and the
-                        // click there light it, as the plain click does. A
-                        // torch laid on a burning campfire is a torch nobody
-                        // meant to put down.
-                        let setting_down = held.is_some_and(primitive_shared::types::can_be_set_down)
-                            && !aimed.is_some_and(|(_, block)| primitive_shared::types::is_set_down(block))
-                            && claim != UseGesture::Hearth
-                            && (thumb_quick
-                                || input.action_down(&settings.keybinds, keybinds::Action::Sprint));
-                        if setting_down {
-                            if let Some(net) = net.as_ref() {
-                                match set_down_cell(&chunks, &camera) {
-                                    Some(cell) => {
-                                        net.send(ClientMessage::SetDown {
-                                            global_x: cell.0,
-                                            global_y: cell.1,
-                                            global_z: cell.2,
-                                        });
-                                        debug_stats.network_messages_out_this_second += 1;
-                                    }
-                                    // Said here, in the player's language, and
-                                    // never sent: the server would refuse it
-                                    // in English.
-                                    None => {
-                                        notice = Some((
-                                            settings.language.text(ui::lang::Msg::SetDownWhere).to_string(),
-                                            Instant::now(),
-                                        ));
-                                    }
-                                }
-                            }
-                            return;
-                        }
-                        // **A rod in hand takes the press out of this path
-                        // altogether.** The throw is a hold and a release and
-                        // the strike is a tap, both of them driven off the
-                        // button's *state* once a frame (`rod_hold` below),
-                        // because a press here is an event and a wind-up is a
-                        // duration. Nothing is sent from here with a rod in
-                        // hand, and nothing must be: this is where a cast
-                        // used to turn into a `UseBlock`, and leaving it
-                        // would mean every throw also drank the lake.
-                        if held.is_some_and(|held| {
-                            primitive_shared::types::block_kind(held) == primitive_shared::types::BLOCK_FISHING_ROD
-                        }) {
-                            return;
-                        }
-                        // **Fishing: what is said instead of a reach into an
-                        // empty trap**, in the player's language, from the
-                        // survey the server makes too -- and never sent. See
-                        // `logic::fishing`.
-                        if let Some((cell, block)) = aimed {
-                            if held.is_none() {
-                                if let Some(said) =
-                                    logic::fishing::trap_notice(|x, y, z| chunks.block_at(x, y, z), cell, block)
-                                {
-                                    notice = Some((settings.language.text(said.msg()).to_string(), Instant::now()));
-                                    return;
-                                }
-                            }
-                            // ...and a snare or a salt pan with nothing to
-                            // give, whatever is in the hand (`set_notice`).
-                            if let Some(said) = logic::fishing::set_notice(block, held) {
-                                notice = Some((settings.language.text(said.msg()).to_string(), Instant::now()));
-                                return;
-                            }
-                        }
-                        // **Fires in the ground, where the world decides.**
-                        // `use_gesture` answers a pit kiln or a pile by its
-                        // block; these two need the cells round the aim --
-                        // pottery at the floor of an empty pit, and flint
-                        // at the sticks and log a firepit is laid from --
-                        // so they are asked here, and only of what would
-                        // otherwise be a placement. See `ground_fire_claim`.
-                        if claim == UseGesture::Place && ground_fire_claim(&chunks, &entities, aimed, held) {
-                            claim = UseGesture::Pit;
-                        }
-                        // ...and a log laid with the modifier held, which is
-                        // TerraFirmaCraft's log pile: shift and a right
-                        // click. Into the cell a placement would have used.
-                        if claim == UseGesture::Place
-                            && held.is_some_and(primitive_shared::pit::is_log)
-                            && (thumb_quick
-                                || input.action_down(&settings.keybinds, keybinds::Action::Sprint))
-                        {
-                            if let (Some((_, before)), Some(net)) = (
-                                physics::raycast_block(&chunks, camera.position, camera.forward(), INTERACT_RANGE),
-                                net.as_ref(),
-                            ) {
-                                net.send(ClientMessage::PileLog {
-                                    global_x: before.0,
-                                    global_y: before.1,
-                                    global_z: before.2,
-                                });
-                                debug_stats.network_messages_out_this_second += 1;
-                                return;
-                            }
-                        }
-                        // **A door swings here first, and is told to the
-                        // server after.** Everything else a right click does
-                        // waits for the server's answer; a door that waited
-                        // a round trip would stick on every server further
-                        // away than the next room, and the player walking
-                        // through it would walk into it. The server swings
-                        // the same two cells (`swing_door`) and puts a door
-                        // it refused back the way it hangs, so what this
-                        // predicts is only ever corrected, never kept wrong.
-                        if let (UseGesture::Swing, Some((cell, block)), Some(net)) =
-                            (claim, aimed, net.as_ref())
-                        {
-                            let swung = door_swing(&chunks, cell, block);
-                            let opening = primitive_shared::types::door_is_open(swung[0].block_id);
-                            audio.play_at_block(
-                                if opening { audio::Sfx::ChestOpen } else { audio::Sfx::ChestClose },
-                                cell,
-                                0.9,
-                                1.0,
-                            );
-                            for change in swung {
-                                apply_change(
-                                    &mut chunks,
-                                    &mut light,
-                                    &mut arrivals,
-                                    &mut urgent,
-                                    &mut dirty_set,
-                                    &mut chunk_versions,
-                                    change,
-                                );
-                            }
-                            net.send(ClientMessage::UseBlock {
-                                global_x: cell.0,
-                                global_y: cell.1,
-                                global_z: cell.2,
-                            });
-                            debug_stats.network_messages_out_this_second += 1;
-                            return;
-                        }
-                        // The anvil and the wheel: a question, like a chest's,
-                        // and the screen opens when the answer comes back. The
-                        // server decides whether there is a hammer in the hand
-                        // and how wide the sweet spot is, so a client cannot
-                        // open a forgiving anvil for itself.
-                        if let (UseGesture::Station, Some((cell, _)), Some(net)) =
-                            (claim, aimed, net.as_ref())
-                        {
-                            net.send(ClientMessage::OpenStation {
-                                global_x: cell.0,
-                                global_y: cell.1,
-                                global_z: cell.2,
-                            });
-                            station_screen.asked_to_open();
-                            debug_stats.network_messages_out_this_second += 1;
-                            return;
-                        }
-                        if let (UseGesture::Open, Some((cell, _)), Some(net)) =
-                            (claim, aimed, net.as_ref())
-                        {
-                            net.send(ClientMessage::OpenChest {
-                                global_x: cell.0,
-                                global_y: cell.1,
-                                global_z: cell.2,
-                            });
-                            // A new question: whatever it answers is
-                            // wanted, even about a chest just shut.
-                            chest_screen.asked_to_open();
-                            debug_stats.network_messages_out_this_second += 1;
-                            // The screen opens when the answer arrives.
-                            // Everything else waits for that, including
-                            // the cursor -- see the hand-off in the frame
-                            // loop.
-                            return;
-                        }
-                        // ...and a fire takes it before a placement too,
-                        // for exactly the same reason a chest does: the
-                        // only way to light one otherwise would be to
-                        // empty your hand first, and the flint you were
-                        // holding would go on the ground beside it.
-                        //
-                        // What the gesture *does* is the server's
-                        // business entirely -- strike a spark, or feed
-                        // the fire what is in your hand -- so the
-                        // message carries neither the effect nor the
-                        // item. See `ClientMessage::UseBlock`.
-                        //
-                        // A carcass goes the same way: the message says
-                        // *which cell*, and the server decides from what
-                        // it believes is in the hand whether that is a
-                        // cut, a ruined skin, or a hint about needing a
-                        // knife.
-                        //
-                        // Water joins them for the same reason: what a
-                        // click at a river does -- a mouthful, a filled
-                        // jug, or a warning that the sea is salt -- is
-                        // decided from the vitals and the water's kind,
-                        // and both live on the server.
-                        //
-                        // A pick goes the same way: whether there is room
-                        // in the pack for the apple is the server's
-                        // answer, and a client that predicted the leaves
-                        // bare would show a tree picked into a full pack.
-                        // **A cut takes the knife's time.** Held here and
-                        // sent when it is done (`Cut`), not sent on the
-                        // click; a second click while cutting is nothing.
-                        if let (UseGesture::Butcher, Some((cell, block))) = (claim, aimed) {
-                            if cut.is_none() {
-                                cut = Some(Cut { cell, block, slot: input.hotbar_slot, started: Instant::now() });
-                                hand.strike(held);
-                            }
-                            return;
-                        }
-                        if let (
-                            UseGesture::Hearth
-                            | UseGesture::Butcher
-                            | UseGesture::Water
-                            | UseGesture::Pick
-                            | UseGesture::Tend
-                            | UseGesture::Rest
-                            | UseGesture::Pit,
-                            Some((cell, _)),
-                            Some(net),
-                        ) = (claim, aimed, net.as_ref())
-                        {
-                            // The swallow, heard when the hand moves. See
-                            // `swallow_expected` for why the client
-                            // guesses at a sound it cannot be told.
-                            if claim == UseGesture::Water
-                                && swallow_expected(
-                                    aimed.map(|(_, block)| block),
-                                    held,
-                                    body.hydration,
-                                )
-                            {
-                                audio.play(audio::Sfx::Drink);
-                            }
-                            net.send(ClientMessage::UseBlock {
-                                global_x: cell.0,
-                                global_y: cell.1,
-                                global_z: cell.2,
-                            });
-                            debug_stats.network_messages_out_this_second += 1;
-                            return;
-                        }
-                        // **Food in the hand is eaten by using it.**
-                        // The player asked for this in as many words:
-                        // "сделай возможность есть взяв в руку, а не
-                        // через HUD". Eating hung on a key and, on a
-                        // phone, on resting a finger on the hotbar slot
-                        // -- a gesture on the interface for something
-                        // the hand does. Both of those stay; this is the
-                        // one the hand already makes.
-                        if claim == UseGesture::Eat {
-                            eat_from(
-                                Some(input.hotbar_slot),
-                                &inventory,
-                                &mut meal,
-                                &mut hand,
-                            );
-                            return;
-                        }
-                        // **A jug in the hand opens**, unless the
-                        // modifier is held -- which is how one is set
-                        // down now. See `UseGesture::OpenVessel`. Nothing
-                        // goes to the server: the jug and what is in it
-                        // are already in the pack snapshot.
-                        if claim == UseGesture::OpenVessel {
-                            let setting_down = thumb_quick
-                                || input.action_down(
-                                    &settings.keybinds,
-                                    keybinds::Action::Sprint,
-                                );
-                            if !setting_down {
-                                chest_screen.show_held_vessel(input.hotbar_slot, &inventory);
-                                return;
-                            }
-                        }
-                        // Placing is still instant; only breaking takes
-                        // time. Held-to-repeat placement would need its
-                        // own cooldown, and the server rate-limits edits
-                        // anyway.
-                        let others: Vec<glam::DVec3> = remote_players.iter_positions().collect();
-                        if let Some(net) = net.as_mut() {
-                            try_place_block(
-                                &chunks,
-                                &camera,
-                                &input,
-                                &player,
-                                &others,
-                                net,
-                                &inventory,
-                                &mut mining,
-                                &mut debug_stats,
-                            );
-                        }
-                    }
+                if let Some(action) = frame::events::on_mouse_button(
+                    button,
+                    pressed,
+                    net.as_ref(),
+                    paused,
+                    traced,
+                    thumb_quick,
+                    held_ctrl,
+                    touch_controls,
+                    last_cursor,
+                    &window,
+                    &audio,
+                    &graphics,
+                    &settings,
+                    &player,
+                    &camera,
+                    &body,
+                    &inventory,
+                    &remote_players,
+                    &entities,
+                    &mut chunks,
+                    &mut light,
+                    &mut arrivals,
+                    &mut urgent,
+                    &mut dirty_set,
+                    &mut chunk_versions,
+                    &mut input,
+                    &mut menu,
+                    &mut ime,
+                    &mut chat,
+                    &mut journal,
+                    &mut death,
+                    &mut chest_screen,
+                    &mut station_screen,
+                    &mut inventory_screen,
+                    &mut mining,
+                    &mut hand,
+                    &mut cut,
+                    &mut meal,
+                    &mut notice,
+                    &mut debug_stats,
+                ) {
+                    handle_action! { action }
                 }
+            }
 
             platform::Event::RedrawRequested => {
                     // Nothing to draw into. An Android activity that
@@ -4359,59 +2566,20 @@ fn run(
                         end_session = Some(reason);
                     }
 
-                    // How much of *this* frame streaming may take.
-                    //
-                    // The configured budgets are 3 ms and 4 ms, which on
-                    // a 60 Hz frame is nearly half of it: terrain
-                    // arriving while the player walks turned into a
-                    // visible hitch every few frames. Capping the pair
-                    // at a share of the frame the machine is actually
-                    // achieving keeps the hitch proportional -- and on a
-                    // fast machine it *raises* throughput, because two
-                    // hundred small slices a second is more work than
-                    // sixty large ones.
-                    //
-                    // Not while the world is still loading: there is
-                    // nothing to be smooth for yet, and the whole
-                    // configured budget gets the player into the world
-                    // sooner.
-                    let chunk_ms =
-                        streaming_budget(settings.chunk_budget_ms, dt, world_ready);
-                    let mesh_ms = streaming_budget(settings.mesh_budget_ms, dt, world_ready);
-
-                    integrate_chunks(
+                    // Chunks that have arrived, lit and put into the
+                    // world, and the map's survey of them -- both on a
+                    // ration of the frame. See `frame::streaming`.
+                    frame::streaming::integrate(
+                        &settings,
+                        dt,
+                        world_ready,
+                        net,
                         &mut arrivals,
                         &mut chunks,
                         &mut mesher,
-                        chunk_ms,
-                        &mut debug_stats,
                         &mut journal.explored,
+                        &mut debug_stats,
                     );
-                    // **The map is a streaming phase with a ration of its
-                    // own.** A quarter of what integration was given, and
-                    // never more than a millisecond: surveying a chunk
-                    // is a fraction of a millisecond (see
-                    // `logic::map::a_survey_is_cheap_enough_to_run_during_streaming`),
-                    // so this keeps up with the world arriving without
-                    // ever being the reason a frame is late. A map a few
-                    // frames behind the terrain is a map nobody can tell
-                    // is behind.
-                    journal.explored.catch_up(
-                        &chunks,
-                        Duration::from_secs_f32((chunk_ms * 0.25).clamp(0.2, 1.0) / 1000.0),
-                    );
-                    // ...and a mark whose cairn is gone is told to the
-                    // server, which is where this player's marks live.
-                    // Only what a survey just looked at, so this is empty
-                    // on all but a handful of frames in a session.
-                    for at in journal.explored.take_lost_marks() {
-                        net.send(ClientMessage::ForgetMark {
-                            global_x: at.0,
-                            global_y: at.1,
-                            global_z: at.2,
-                        });
-                        debug_stats.network_messages_out_this_second += 1;
-                    }
 
                     sky.tick(dt);
                     // What a line said now will be stamped with. Once a
@@ -4428,83 +2596,25 @@ fn run(
                     // `Sky::set_weather`.
                     sky.set_weather(weather);
 
-                    // Which chunks are near enough to deserve their
-                    // detail back, and which have fallen far enough to
-                    // lose some. Only when the player has crossed into
-                    // another chunk (or changed the setting): nothing
-                    // else can move a chunk across a threshold, and the
-                    // scan walks every loaded chunk. See `engine::lod`.
-                    let player_chunk = ChunkManager::chunk_for_world_pos(
-                        player.position.x,
-                        player.position.z,
-                    );
-                    // **The quality is part of the key**, not only the
-                    // distance: changing it changes what a coarse chunk
-                    // is made of (the light it keeps, the grass it
-                    // draws) without moving a single chunk across a
-                    // threshold, so a scan keyed on distance alone
-                    // would leave the world built the old way until the
-                    // player walked out of the chunk they were standing
-                    // in. Bumping the version of every coarse chunk is
-                    // what `restripe_detail_levels` does about it.
-                    let lod_key = (
-                        player_chunk,
-                        settings.lod_distance_chunks,
-                        settings.lod_quality,
-                        // The two lines a player moves from the same
-                        // screen: without them in the key, a changed
-                        // setting waited for the player to leave the chunk.
-                        (settings.relief_chunks, settings.transparent_leaves_chunks),
-                    );
-                    if lod_scanned_from != Some(lod_key) {
-                        let quality_changed = lod_scanned_from
-                            .is_some_and(|(_, _, was, _)| was != settings.lod_quality);
-                        lod_scanned_from = Some(lod_key);
-                        restripe_detail_levels(
-                            quality_changed,
-                            &chunks,
-                            player_chunk,
-                            settings.lod_distance_chunks,
-                            settings.relief_chunks,
-                            settings.transparent_leaves_chunks,
-                            &mut chunk_lod,
-                            &mut chunk_versions,
-                            &mut dirty,
-                            &mut dirty_set,
-                        );
-                    }
-                    dispatch_meshing(
-                        &mut urgent,
-                        &mut dirty,
-                        &mut dirty_set,
-                        &chunk_versions,
-                        &mut mesher,
-                        &chunks,
-                        &light,
-                        player_chunk,
-                        settings.lod_distance_chunks,
-                        settings.lod_quality,
-                        settings.relief_chunks,
-                        settings.transparent_leaves_chunks,
-                        &mut chunk_lod,
-                        mesh_ms,
-                        &mut debug_stats,
-                    );
-                    collect_worker_results(
-                        &mut mesher,
-                        &mut graphics,
+                    // Which chunks deserve their detail back, what goes
+                    // to the workers and what comes back from them, each
+                    // with its slice of the frame. See
+                    // `frame::streaming`.
+                    frame::streaming::mesh(
+                        &settings,
+                        dt,
+                        world_ready,
+                        &player,
                         &mut chunks,
                         &mut light,
+                        &mut mesher,
+                        &mut graphics,
                         &mut urgent,
                         &mut dirty,
                         &mut dirty_set,
-                        &chunk_versions,
-                        ChunkManager::chunk_for_world_pos(player.position.x, player.position.z),
-                        // The same budget the dispatch half gets, and
-                        // for the same reason: both are meshing, and a
-                        // burst landing in one frame is a frame the
-                        // player feels. See `streaming_budget`.
-                        mesh_ms,
+                        &mut chunk_versions,
+                        &mut chunk_lod,
+                        &mut lod_scanned_from,
                         &mut debug_stats,
                     );
 
@@ -4778,733 +2888,72 @@ fn run(
                         }
                     }
 
-                    // Whether the player is *actually* running, decided
-                    // once and used twice: stamina is billed for it and
-                    // the view bobs to it.
-                    //
-                    // **One value rather than two lists of conditions.**
-                    // The bob used to build its own -- the Sprint key,
-                    // not paused, not dead, grounded, not swimming --
-                    // and the two lists disagreed in both directions. A
-                    // phone has no Sprint key at all (the stick sprints
-                    // when it is pushed to the rim), so the view never
-                    // bobbed on Android; and a player holding Shift with
-                    // no stamina left bobbed while walking, which is the
-                    // one thing `walking_without_sprinting_does_not_bob`
-                    // exists to forbid. Read from the value that is
-                    // charged for and the bob cannot mean anything other
-                    // than "you are paying to run".
-                    let mut really_running = false;
-                    if world_ready {
-                        // Physics still runs while paused -- gravity does
-                        // not stop for a menu on an authoritative server
-                        // -- but the player stops steering.
-                        // A dead player steers no more than a paused one
-                        // does. Gravity still applies to both -- the
-                        // server is authoritative about where bodies
-                        // are, and a corpse hovering where it died would
-                        // rubber-band the moment it respawned.
-                        // ...and a sleeping player steers least of
-                        // all. The server has stopped reading their
-                        // transforms entirely (see
-                        // `ServerMessage::Asleep`), so a client that
-                        // kept walking would be walking a body nobody
-                        // else can see move -- and would then be
-                        // snapped back the moment they woke.
-                        let frozen = paused
-                            || death.is_open()
-                            || sleep.is_asleep()
-                            || inventory_screen.open
-                            || chest_screen.is_open()
-                            || station_screen.is_open()
-                            || journal.is_open()
-                            || chat.is_typing();
-                        let wish_dir = if frozen {
-                            Vec3::ZERO
-                        } else {
-                            wish_direction(&input, &camera, &settings.keybinds)
-                        };
-                        // --- a raft: the oars, and the deck underfoot ---
-                        //
-                        // **At the oars, the keys that walk row instead**, and so
-                        // does the stick: forward and back is the stroke, left
-                        // and right the turn, measured against where the camera
-                        // looks the way walking is. A breathless rower pulls at
-                        // `raft::TIRED_STROKE` rather than not at all. See
-                        // `riding::oars_from_axes`.
-                        let rowing = entities.steering().map(|steering| steering.id);
-                        let oars = match rowing {
-                            Some(_) if !frozen => logic::riding::oars_from_axes(
-                                wish_dir.dot(camera.forward_horizontal()) * input.stick_speed(),
-                                wish_dir.dot(camera.right_horizontal()) * input.stick_speed(),
-                                !stamina.can_sprint(),
-                            ),
-                            _ => primitive_shared::raft::Oars::REST,
-                        };
-                        let wish_dir = if rowing.is_some() { Vec3::ZERO } else { wish_dir };
-                        // The yard as this client's own hand is holding it,
-                        // before the prediction that pushes against it: the
-                        // sail's angle is what the wind is measured against
-                        // (`raft::Body::sail_normal`), so the drag has to be
-                        // in the raft *this frame steps*, not in the one the
-                        // next snapshot brings.
-                        entities.set_trim(riding.held_trim(now));
-                        // ...and the river under the rowed raft, which the
-                        // server's step reads off its own generator: see
-                        // `WorldGen::river_current`.
-                        entities.set_river_current(entities.steering().map_or((0.0, 0.0), |steering| {
-                            worldgen.river_current(steering.body.x as f32, steering.body.y, steering.body.z as f32)
-                        }));
-                        entities.predict(
-                            oars,
-                            primitive_shared::raft::wind(sky.world_days(), weather),
-                            sky.world_days(),
-                            &chunks,
-                            dt,
-                        );
-                        if let Some(message) = rowing.and_then(|raft| riding.row_message(raft, oars, now)) {
-                            net.send(message);
-                            debug_stats.network_messages_out_this_second += 1;
-                        }
-                        // ...and the angle itself, which the server is the
-                        // authority on: it decides whether this player is
-                        // standing where a hand reaches the sheets.
-                        if let Some(message) = riding.trim_message(now) {
-                            net.send(message);
-                            debug_stats.network_messages_out_this_second += 1;
-                        }
-                        // Carried before the collider runs -- see
-                        // `Riding::carry_player` for the shudder the other order
-                        // makes -- and the decks handed to it as they are now.
-                        let decks = entities.rafts();
-                        riding.carry_player(&decks, &mut player.position, &mut camera.yaw);
-                        player.decks = decks.iter().map(|pose| pose.now).collect();
-                        // --- a horse: the reins, and the body on its saddle ---
-                        //
-                        // **On a horse the keys that walk ride**, the oars'
-                        // rule: forward and back, left and right off the same
-                        // wish the walk is made of, measured against the
-                        // camera so a rider looking over their shoulder still
-                        // rides where the keys say (`Horseback::reins_from_keys`).
-                        // The body is put on the predicted saddle and not
-                        // stepped at all -- see the physics loop below.
-                        let on_horse = entities.horseback.is_some();
-                        if let Some(mut horseback) = entities.horseback.take() {
-                            let (forward, turn) = if frozen {
-                                (0.0, 0.0)
-                            } else {
-                                (
-                                    wish_dir.dot(camera.forward_horizontal()) * input.stick_speed(),
-                                    wish_dir.dot(camera.right_horizontal()) * input.stick_speed(),
-                                )
-                            };
-                            let reins = logic::horseback::Horseback::reins_from_keys(
-                                forward,
-                                turn,
-                                !frozen && input.action_down(&settings.keybinds, keybinds::Action::Sprint),
-                                !frozen && input.action_down(&settings.keybinds, keybinds::Action::Rein),
-                                !frozen && input.action_pressed(&settings.keybinds, keybinds::Action::Jump),
-                            );
-                            horseback.predict(reins, &|x, y, z| chunks.block_at(x, y, z), dt);
-                            if let Some(message) = horseback.rein_message(now) {
-                                net.send(message);
-                                debug_stats.network_messages_out_this_second += 1;
-                            }
-                            // **Getting down**: the rein key with the horse
-                            // standing and nothing asked of it. At a trot the
-                            // same key is a walk, which is how a rider comes
-                            // to a stop and then off.
-                            if !frozen
-                                && forward.abs() < 0.05
-                                && horseback.may_get_down()
-                                && input.action_pressed(&settings.keybinds, keybinds::Action::Rein)
-                            {
-                                net.send(ClientMessage::Dismount);
-                                debug_stats.network_messages_out_this_second += 1;
-                            }
-                            player.position = horseback.rider_feet();
-                            player.velocity = Vec3::ZERO;
-                            player.grounded = horseback.body.on_ground;
-                            entities.set_ridden(Some((horseback.horse, horseback.feet(), horseback.body.yaw)));
-                            entities.horseback = Some(horseback);
-                        }
-                        // **Getting up.** The screen said "asleep -- press
-                        // any key to get up" for as long as sleep existed,
-                        // and nothing behind it listened: the only way out of
-                        // a bed was a right click on that bed. A step or a
-                        // jump asks now, lying or sitting, and the dark says
-                        // so in those words (`ui::sleep`). A sitter is
-                        // already on their feet as far as the client is
-                        // concerned -- sitting is not a lock, and the step
-                        // they asked for is the one that gets them off the
-                        // stool -- while a sleeper waits for the server to
-                        // say where they stand (`ServerMessage::Posture`).
-                        //
-                        // **Not a key that was already down when the body
-                        // came to rest**, which is `Rising`'s whole reason: a
-                        // player who walked up to a bed holding forward was
-                        // stood back up by that same key on the first frame
-                        // they lay in it.
-                        let controls_free = !paused
-                            && !death.is_open()
-                            && !inventory_screen.open
-                            && !chest_screen.is_open()
-                            && !station_screen.is_open()
-                            && !journal.is_open()
-                            && !chat.is_typing();
-                        // A rower's movement keys are the oars, so only the
-                        // jump gets a rower up off the stern -- and a rider's
-                        // are the reins and the jump is the horse's, so
-                        // nothing here gets a rider down (the rein key does,
-                        // above).
-                        let asked = controls_free
-                            && !on_horse
-                            && ((rowing.is_none()
-                                && wish_direction(&input, &camera, &settings.keybinds) != Vec3::ZERO)
-                                || input.action_pressed(&settings.keybinds, keybinds::Action::Jump));
-                        if rising.ask(resting, asked) {
-                            net.send(ClientMessage::StandUp);
-                            debug_stats.network_messages_out_this_second += 1;
-                            if resting.is_sitting() {
-                                resting = logic::posture::Resting::Standing;
-                            }
-                        }
-                        // Weight slows you down and stamina decides
-                        // whether the sprint is available at all. Both
-                        // are folded in here so physics only ever sees
-                        // one speed and one flag.
-                        //
-                        // **Armour costs twice, and the two costs are
-                        // different things.** Its *weight* goes through
-                        // the same load rules a heavy pack does, which is
-                        // why it is added to the carried total rather
-                        // than handled apart; its *bulk* is that plate
-                        // is stiff, which has nothing to do with how much
-                        // it weighs and is a second multiplier. A player
-                        // in full iron is slow because they are carrying
-                        // thirty kilos and slower still because they
-                        // cannot bend -- see `equipment::Worn::mobility`.
-                        let carried = inventory.total_weight() + equipment.weight();
-                        player.speed_scale = primitive_shared::load::speed_scale(carried)
-                            * equipment.worn().mobility()
-                            // ...and how tired they are, which is the
-                            // fourth thing that decides a pace. Read
-                            // off the same number the server keeps (it
-                            // arrives with the other gauges), so the
-                            // two sides agree without a second rule:
-                            // the client is *applying* the server's
-                            // fatigue, not inventing one.
-                            * tiredness_speed(body.fatigue)
-                            // ...and a broken leg, set or not: a splint
-                            // is what lets it knit, not a leg to walk on.
-                            // See `Injuries::speed_factor`.
-                            //
-                            // **On the ground it is the crawl instead**, not
-                            // as well: a body on its belly is not favouring
-                            // a leg, and the crawl in `downed` is already the
-                            // whole of how fast it goes.
-                            * body.downed.map_or(body.injuries.speed_factor(), |down| down.crawl())
-                            // How hard a thumb is pushing, and 1.0 on
-                            // anything with a keyboard. It belongs in
-                            // the same multiplier that weight and
-                            // armour use, so physics still sees one
-                            // speed however the player asked for it.
-                            // Only ever *reduces* the scale, which is
-                            // why it needs nothing from the server: no
-                            // anti-cheat check has ever complained
-                            // about someone moving too slowly.
-                            * input.stick_speed();
-                        // ...and snowshoes, which are not a speed but a
-                        // surface: see `types::surface_drag_shod`.
-                        player.snowshoes = equipment.snowshoes();
-                        // ...and how much of the water's lift is left,
-                        // off the same weight. **Not multiplied by the
-                        // armour or the thumb**: those are about how
-                        // fast a body moves, and this is about whether
-                        // it floats -- a player in iron floats exactly
-                        // as well as the same weight of stone would.
-                        // See `load::buoyancy`, which the server bills
-                        // the breath by.
-                        player.buoyancy = primitive_shared::load::buoyancy(carried);
-                        // ...and whether it was the *client* that just took
-                        // the movement keys away, in which case the body
-                        // treads water rather than settling to the depth its
-                        // load asks for.
-                        //
-                        // Read off `frozen` -- the one value that already
-                        // means "the player is not steering because a screen
-                        // is up" -- rather than from a fresh list of screens
-                        // beside it. A second list is a second list to keep
-                        // in step, and the one screen left off it would be
-                        // the one a drowning player had open.
-                        //
-                        // See `Player::treading`: a player with a heavy pack
-                        // in deep water could only lighten it by opening the
-                        // pack, and opening the pack was what sank them.
-                        player.treading = frozen;
-                        let wants_sprint = !frozen
-                            && (input.action_down(&settings.keybinds, keybinds::Action::Sprint)
-                                // A thumb pushed to the rim, for a
-                                // screen with no Shift on it.
-                                || input.stick_sprinting());
-                        // ...and legs that will take a run. A broken one
-                        // will not, and the jump stays -- see
-                        // `Injuries::may_sprint` for why the one goes and
-                        // not the other.
-                        let sprinting = wants_sprint
-                            && stamina.can_sprint()
-                            && body.injuries.may_sprint()
-                            && body.downed.is_none();
-                        // **Up on jump, down on sprint** -- the two keys
-                        // a hand is already on, and neither of them does
-                        // anything else while flying: there is no ground
-                        // to jump off and no stamina to spend running.
-                        //
-                        // Read off the *keys* rather than off
-                        // `sprinting` above, which is gated on having
-                        // stamina left. An exhausted player who could
-                        // not descend would be stuck in the air with no
-                        // way to understand why.
-                        player.climb = if player.flying && !frozen {
-                            let up = input
-                                .action_down(&settings.keybinds, keybinds::Action::Jump);
-                            let down = input
-                                .action_down(&settings.keybinds, keybinds::Action::Sprint);
-                            (up as i32 - down as i32) as f32
-                        } else {
-                            0.0
-                        };
-                        // Physics in fixed slices, not one step of
-                        // however long the frame was.
-                        //
-                        // A step resolves collisions by moving and then
-                        // pushing back out, so its size bounds how far
-                        // the player may travel inside one: at 100 ms
-                        // and terminal velocity that is several blocks,
-                        // which goes *through* a floor. The server then
-                        // rejects the position and rubber-bands them
-                        // back, and what the player feels is the physics
-                        // lurching every time the frame rate hiccups.
-                        //
-                        // Bounded, so a stall cannot turn into a spiral
-                        // of catch-up steps that causes the next one.
-                        // A jump is a push, and an exhausted player has
-                        // nothing to push with. Refused here rather than
-                        // inside physics, which has no idea what stamina
-                        // is -- and refused rather than weakened, since
-                        // half a jump is a way to end up stuck in a hole.
-                        //
-                        // **Up a tree a jump is a climb**: dearer, slower
-                        // between pulls, and heavier under a load (see
-                        // `Stamina::climb_cost`). And nobody jumps at all
-                        // under more than they can carry (`load::can_jump`).
-                        let climbing = player.footing_is_a_tree(&chunks);
-                        // ...and nobody jumps off the ground they are lying
-                        // on. The held key still swims a downed body up in
-                        // water: that is a stroke, not a jump, and a body
-                        // that could not surface would drown in the first
-                        // pond it crawled into rather than choose to.
-                        let may_jump = primitive_shared::load::can_jump(carried)
-                            && body.downed.is_none()
-                            && if climbing { stamina.can_climb(carried) } else { stamina.can_jump() };
-                        // The river the player is in, once a frame: a
-                        // current changes over metres, not over the slices
-                        // of one frame. Asked only in water, because it is
-                        // a few columns of the generator. See
-                        // `physics::Player::current`.
-                        player.current = if player.in_water {
-                            worldgen.river_current(player.position.x as f32, player.position.y as f32, player.position.z as f32)
-                        } else {
-                            (0.0, 0.0)
-                        };
-                        let mut left = dt;
-                        let mut first = true;
-                        // **A sleeper's body is pinned, not simulated.** The
-                        // server lays it across the bed with an upright
-                        // collider, and under a roof two blocks up that
-                        // collider is inside the ceiling; the push-out that
-                        // follows walked sleepers out of their beds and
-                        // through the wall beside them. The server moves
-                        // nobody who is asleep, so nothing is lost by not
-                        // stepping.
-                        // ...and a rider's is carried by the horse: it was put
-                        // on the saddle above, and a collider stepped under it
-                        // would drop it through the horse's back.
-                        while left > 0.0 && !on_horse && !matches!(resting, logic::posture::Resting::Lying { .. }) {
-                            let step = left.min(PHYSICS_STEP);
-                            player.update(
-                                &chunks,
-                                &other_positions,
-                                wish_dir,
-                                // Where the camera points, not where the
-                                // player faces. Only water reads it, and
-                                // it is what lets a swimmer dive: see
-                                // `physics::stroke_direction`.
-                                camera.forward(),
-                                // Only the first slice may jump: the
-                                // press edge is one event, and firing it
-                                // in every slice is a jump that scales
-                                // with how bad the frame was.
-                                first
-                                    && !frozen
-                                    && may_jump
-                                    && input.action_pressed(
-                                        &settings.keybinds,
-                                        keybinds::Action::Jump,
-                                    ),
-                                !frozen
-                                    && input.action_down(
-                                        &settings.keybinds,
-                                        keybinds::Action::Jump,
-                                    ),
-                                sprinting,
-                                step,
-                            );
-                            // Billed per push that actually happened,
-                            // not per press: physics refuses a jump in
-                            // mid-air, and swimming up is not one at all.
-                            if player.jumped {
-                                if climbing {
-                                    stamina.spend_climb(carried);
-                                } else {
-                                    stamina.spend_jump();
-                                }
-                            }
-                            left -= step;
-                            first = false;
-                        }
-
-                        // Billed for the sprint the player actually got,
-                        // not the one they asked for: physics refuses it
-                        // in water and standing still, and charging for
-                        // a sprint that did not happen is the sort of
-                        // thing players notice and cannot explain.
-                        // Which deck the feet ended on, and everyone else put on
-                        // the decks as they are drawn this frame (see
-                        // `RemotePlayers::ride`).
-                        riding.settle(&decks, player.position);
-                        remote_players.ride(&decks, dt);
-                        // ...and everyone astride a horse put on its saddle as
-                        // it is drawn this frame (`RemotePlayers::mount`), the
-                        // decks' reason again.
-                        remote_players.mount(&entities.ridden_horses(Instant::now()));
-                        really_running = (sprinting
-                            && player.grounded
-                            && !player.swimming
-                            && player.horizontal_speed() > 0.5)
-                            // **Rowing costs breath as running does**, which is
-                            // what makes the sail's free pace worth its four
-                            // leathers. Not a bob, though: `footed` below is read
-                            // off the body's own speed, which a rower has none of.
-                            || oars.pulling();
-                        stamina.update(
-                            dt,
-                            primitive_shared::load::load_fraction(carried),
-                            really_running,
-                        );
-                    }
-                    // **Particles, once a frame.**
-                    //
-                    // After physics and before the camera is used to
-                    // draw them, so what is on screen is where they are
-                    // this instant rather than where they were last one.
-                    // The weather emits into the same pool: rain is
-                    // particles now, spawned above the player at a rate
-                    // and dying on whatever they land on -- see
-                    // `engine::particles`.
-                    {
-                        // Snow or rain is the season's call as much as
-                        // the climate's: see `season::falls_as_snow`.
-                        // ...and the latitude's: a tropical winter is no
-                        // winter (`season::seasonal_swing`), and rain in
-                        // the tropics must not turn to snow when the server
-                        // says the air is warm.
-                        // **Snow is not the only other answer to rain.**
-                        // Hot dry country gets the same front as grit
-                        // (`weather::Precipitation`), which is the
-                        // player's «сделай погоду в биомах нормальной»:
-                        // one sky over the world, and what reaches the
-                        // ground decided by the column it reaches.
-                        // Worked out from the two numbers the client
-                        // already has for the leaf tint, so it costs
-                        // nothing and cannot disagree with the ground.
-                        let (falling, wetness) =
-                            falling_on(&worldgen, &sky, weather, player.position);
-                        // **The rain falls in the world's own wind**, the
-                        // one that moves the rafts
-                        // (`raft::wind`) -- not a drift of its own.
-                        //
-                        // It *was* a drift of its own: a slow circle on the
-                        // frame clock, chosen so the rain was not a set of
-                        // vertical lines. Two weathers in one sky is what
-                        // that was. A player watching their sail braced hard
-                        // over to a wind out of the north, in rain falling
-                        // straight down the other way, is being told by the
-                        // game that one of the two is a decoration -- and the
-                        // sail is the one that costs four leathers, so the
-                        // rain is the one that has to give.
-                        //
-                        // Nothing is sent for this: both sides work the wind
-                        // out from the clock and the weather, which is the
-                        // whole reason `raft::wind` is a function and not a
-                        // message.
-                        let wind = primitive_shared::raft::wind(sky.world_days(), weather);
-                        let (wx, wz) = wind.vector();
-                        let drift = glam::Vec3::new(wx * RAIN_WIND_SPEED, 0.0, wz * RAIN_WIND_SPEED);
-                        particles.weather(
-                            // ...and it comes down harder in a squall and
-                            // eases off in a lull, so a calm reads as a calm
-                            // through the window as well as on the water.
-                            // Never to nothing, because a rain that stopped
-                            // would be the sky saying "clear" while the fires
-                            // were still going out.
-                            //
-                            // **And only as much of it as the clouds have
-                            // brought** (`Sky::rain_arrived`): the deck
-                            // closes first and the rain follows it.
-                            //
-                            // **...and harder in wet country than in dry**
-                            // (`weather::local_intensity`): one spell of
-                            // rain is a downpour in a marsh and a thin
-                            // shower on the steppe, which is the monsoon
-                            // in one multiply and the rest of what the
-                            // player meant by weather that suits the
-                            // country it falls on.
-                            primitive_shared::weather::local_intensity(weather, wetness)
-                                * (0.65 + 0.5 * wind.strength)
-                                * sky.rain_arrived(),
-                            falling,
-                            player.position.as_vec3(),
-                            drift,
-                            dt,
-                        );
-                        // ...and sparks over anything burning nearby.
-                        particles.fires(&chunks, player.position.as_vec3(), dt);
-                        // ...and white water on any rapid in view: the
-                        // river's current is the generator's, and it is
-                        // what tells a player from the bank where not to
-                        // swim. See `WorldGen::river_current`.
-                        particles.rapids(&chunks, player.position.as_vec3(), |x, y, z| worldgen.river_current(x, y, z), dt);
-                        // ...and the float of a line in the water, until the
-                        // line would be out of it or a fish comes up on it.
-                        // The fish in the pack is the bite: a count higher
-                        // than when the line went in. See `logic::fishing`.
-                        if let Some(float) = fishing_float.as_mut() {
-                            let landed = float.age == 0.0;
-                            float.age += dt;
-                            float.since += dt;
-                            let block_at = |x, y, z| chunks.block_at(x, y, z);
-                            let eye = (camera.position.x, camera.position.y, camera.position.z);
-                            let at = float.position(block_at);
-                            let at = glam::Vec3::new(at.0, at.1, at.2);
-                            // **The float's own plop, where it came down**, on
-                            // the first frame it is drawn -- which is the frame
-                            // it appears on the water, so the eye and the ear
-                            // agree. Up in pitch and down in level against the
-                            // hand in a pool the same recording once was: this
-                            // is a cork, a dozen blocks off. See `Sfx::FloatPlop`.
-                            if landed {
-                                audio.play_at(audio::Sfx::FloatPlop, at.as_dvec3(), 0.8, 1.35);
-                            }
-                            // The splash of the fish coming out is drawn
-                            // where the float goes (`ServerMessage::Line`),
-                            // which is the frame the pack has grown in.
-                            if float.holds(primitive_shared::geometry::narrow(eye), input.hotbar_slot, inventory.block_in(input.hotbar_slot), block_at) {
-                                particles.float(at, dt);
-                                // The ring a fish makes taking the bait, and
-                                // the water's own blip under it -- quieter
-                                // than a splash, because the whole of the
-                                // strike is noticing something small.
-                                // Placed at the float, not in the player's
-                                // head: it was the hand-in-water sound at full
-                                // level, which said "you" about something a
-                                // dozen blocks off. See `Sfx::FloatBite`.
-                                if float.phase == logic::fishing::Phase::Dipping && float.since < dt * 1.5 {
-                                    particles.float_ring(at);
-                                    audio.play_at(audio::Sfx::FloatBite, at.as_dvec3(), 1.0, 1.0);
-                                }
-                                // ...and the water breaking over a fish that
-                                // is on and running.
-                                if float.phase == logic::fishing::Phase::Fighting && float.strain > 0.6 {
-                                    particles.float_ring(at);
-                                }
-                            } else {
-                                fishing_float = None;
-                            }
-                        }
-                        // **The rod itself**: winding up, throwing, striking
-                        // and reeling, all off one button. See
-                        // `logic::fishing::Hold::step` for why this is state
-                        // and not events.
-                        {
-                            let holding_rod = inventory
-                                .block_in(input.hotbar_slot)
-                                .map(primitive_shared::types::block_kind)
-                                == Some(primitive_shared::types::BLOCK_FISHING_ROD);
-                            let fighting = fishing_float
-                                .is_some_and(|float| float.phase == logic::fishing::Phase::Fighting);
-                            let giving_way = input.action_down(&settings.keybinds, keybinds::Action::Sprint);
-                            // A screen up means the button's state has
-                            // stopped arriving: the wind-up is dropped
-                            // rather than let go of. See `Hold::cancel`.
-                            if !input.mouse_grabbed {
-                                rod_hold.cancel();
-                            }
-                            for order in rod_hold.step(
-                                dt,
-                                input.using && input.mouse_grabbed,
-                                holding_rod,
-                                fishing_float.is_some(),
-                                fighting,
-                                giving_way,
-                            ) {
-                                use logic::fishing::Order;
-                                let message = match order {
-                                    Order::Cast(power) => {
-                                        // Judged here first, in the player's
-                                        // own language, against this side's
-                                        // own chunks: a throw onto the bank
-                                        // is never sent.
-                                        let eye = (
-                                            camera.position.x as f32,
-                                            camera.position.y as f32,
-                                            camera.position.z as f32,
-                                        );
-                                        let look = camera.forward();
-                                        match logic::fishing::cast_along(
-                                            eye,
-                                            (look.x, look.y, look.z),
-                                            power,
-                                            |x, y, z| chunks.block_at(x, y, z),
-                                        ) {
-                                            Ok(at) => {
-                                                fishing_float = Some(logic::fishing::Float {
-                                                    at,
-                                                    slot: input.hotbar_slot,
-                                                    fish_before: inventory
-                                                        .count(primitive_shared::types::BLOCK_RAW_FISH),
-                                                    age: 0.0,
-                                                    phase: logic::fishing::Phase::Settling,
-                                                    strain: 0.0,
-                                                    liveliness: 0.0,
-                                                    since: 0.0,
-                                                });
-                                                audio.play(audio::Sfx::Swing);
-                                                // ...and the rod whips forward
-                                                // from wherever it was drawn
-                                                // back to. See `hand::Rod`.
-                                                hand.cast_rod();
-                                                Some(ClientMessage::CastLine { power })
-                                            }
-                                            Err(said) => {
-                                                notice = Some((
-                                                    settings.language.text(said.msg()).to_string(),
-                                                    Instant::now(),
-                                                ));
-                                                None
-                                            }
-                                        }
-                                    }
-                                    Order::Strike => {
-                                        // **Said here, not by the server.**
-                                        // This side knows whether the float
-                                        // was under; the server refuses the
-                                        // strike either way
-                                        // (`Fishing::strike`), and what it
-                                        // sends back is the float going.
-                                        if fishing_float
-                                            .is_some_and(|float| float.phase != logic::fishing::Phase::Dipping)
-                                        {
-                                            notice = Some((
-                                                settings
-                                                    .language
-                                                    .text(ui::lang::Msg::FishingStruckAtNothing)
-                                                    .to_string(),
-                                                Instant::now(),
-                                            ));
-                                        }
-                                        Some(ClientMessage::Strike)
-                                    }
-                                    Order::Reel(pulling) => Some(ClientMessage::Reel { pulling }),
-                                    Order::In => {
-                                        fishing_float = None;
-                                        Some(ClientMessage::ReelIn)
-                                    }
-                                };
-                                if let Some(message) = message {
-                                    net.send(message);
-                                    debug_stats.network_messages_out_this_second += 1;
-                                }
-                            }
-                        }
-                        // ...and blood wherever the server says an
-                        // animal was struck since the last frame. Here
-                        // rather than in `drain_network` because a
-                        // snapshot is applied there and this is a
-                        // *drawing* of it: several snapshots can arrive
-                        // in one frame, and one burst per blow is a
-                        // property of the frame rather than of the
-                        // socket. See `Entities::take_blows`.
-                        for at in entities.take_blows() {
-                            particles.blood(at);
-                        }
-                        // ...and the player's own, on a timer, when
-                        // somebody is photographing it. See
-                        // `bleeding_for_a_photograph`.
-                        if bleeding_for_a_photograph() {
-                            bleed_in -= dt;
-                            if bleed_in <= 0.0 {
-                                bleed_in = BLEED_EVERY;
-                                particles.blood(
-                                    player.eye_position().as_vec3() - glam::Vec3::Y * 0.35,
-                                );
-                            }
-                        }
-                        particles.update(&chunks, dt);
-                        // ...and the butterflies, fireflies and frogs. The
-                        // wolves the frogs fall quiet for are the ones the
-                        // last snapshot brought -- behind a hill or in the
-                        // dark, but not unknown to the client.
-                        let dangers: Vec<glam::Vec3> = entities
-                            .heard()
-                            .into_iter()
-                            .filter(|animal| animal.species.is_hostile())
-                            .map(|animal| animal.at.as_vec3())
-                            .collect();
-                        let country = |gx: i32, gy: i32, gz: i32| {
-                            (
-                                worldgen.biome_at(gx, gz),
-                                worldgen.climate_at(gx, gy, gz).0,
-                                primitive_shared::season::seasonal_swing(worldgen.latitude_degrees(gz)),
-                            )
-                        };
-                        critters.update(
-                            &engine::critters::Surroundings {
-                                chunks: &chunks,
-                                player: player.position.as_vec3(),
-                                world_time: sky.world_days(),
-                                wet: weather.is_wet(),
-                                dangers: &dangers,
-                                country: &country,
-                                light: &light,
-                                lantern: inventory
-                                    .block_in(input.hotbar_slot)
-                                    .is_some_and(primitive_shared::types::is_lit_torch),
-                            },
-                            dt,
-                        );
-                        breeze.update(
-                            &engine::breeze::Air {
-                                chunks: &chunks,
-                                light: &light,
-                                player: player.position.as_vec3(),
-                                wind: primitive_shared::raft::wind(sky.world_days(), weather),
-                                world_time: sky.world_days(),
-                                wet: weather.is_wet(),
-                            },
-                            dt,
-                        );
-                    }
+                    // The oars, the reins, the load, the collider and
+                    // the stamina bill -- one frame of the body, and
+                    // whether the player is really running. See
+                    // `frame::body`.
+                    let really_running = frame::body::step(
+                        dt,
+                        now,
+                        world_ready,
+                        paused,
+                        &settings,
+                        &chunks,
+                        &worldgen,
+                        &sky,
+                        weather,
+                        &inventory,
+                        &equipment,
+                        &body,
+                        &sleep,
+                        &death,
+                        &inventory_screen,
+                        &chest_screen,
+                        &station_screen,
+                        &journal,
+                        &chat,
+                        &input,
+                        &other_positions,
+                        net,
+                        &mut player,
+                        &mut camera,
+                        &mut entities,
+                        &mut riding,
+                        &mut remote_players,
+                        &mut stamina,
+                        &mut rising,
+                        &mut resting,
+                        &mut debug_stats,
+                    );
+                    // The weather, the particles, the small life, the
+                    // wind and the line in the water -- after the body
+                    // and before the camera draws them. See
+                    // `frame::effects`.
+                    frame::effects::step(
+                        dt,
+                        &settings,
+                        &worldgen,
+                        &sky,
+                        weather,
+                        &chunks,
+                        &light,
+                        &player,
+                        &camera,
+                        &input,
+                        &inventory,
+                        &audio,
+                        net,
+                        &mut particles,
+                        &mut critters,
+                        &mut breeze,
+                        &mut entities,
+                        &mut hand,
+                        &mut rod_hold,
+                        &mut fishing_float,
+                        &mut notice,
+                        &mut bleed_in,
+                        &mut debug_stats,
+                    );
                     // The eye of a body that is sitting or lying is not at
                     // standing height: see `logic::posture`. Only the view
                     // moves -- the aim still comes from `eye_position`,
@@ -8242,7 +5691,7 @@ enum Aimed {
 /// Nothing is decided here. How often a blow comes is `hand::Strikes`'s,
 /// and reach, damage and whether the target is still alive are the
 /// server's, judged against its own positions on arrival.
-fn send_blow(target: Aimed, net: &mut network::NetworkHandle, debug_stats: &mut DebugStats) {
+fn send_blow(target: Aimed, net: &network::NetworkHandle, debug_stats: &mut DebugStats) {
     net.send(match target {
         Aimed::Player(target) => ClientMessage::Attack { target },
         Aimed::Animal(target) => ClientMessage::AttackEntity { target },
@@ -8406,7 +5855,7 @@ fn aimed_block_for(
 fn request_break(
     chunks: &ChunkManager,
     cell: (i32, i32, i32),
-    net: &mut network::NetworkHandle,
+    net: &network::NetworkHandle,
     debug_stats: &mut DebugStats,
 ) {
     if chunks.block_at(cell.0, cell.1, cell.2).is_none() {
@@ -8435,7 +5884,7 @@ fn request_dig(
     chunks: &ChunkManager,
     cell: (i32, i32, i32),
     face: (i8, i8, i8),
-    net: &mut network::NetworkHandle,
+    net: &network::NetworkHandle,
     debug_stats: &mut DebugStats,
 ) {
     if chunks.block_at(cell.0, cell.1, cell.2).is_none() {
@@ -8523,7 +5972,7 @@ fn try_place_block(
     input: &input::InputState,
     player: &Player,
     others: &[glam::DVec3],
-    net: &mut network::NetworkHandle,
+    net: &network::NetworkHandle,
     inventory: &Inventory,
     // Told what was asked for, so that the *confirmation* can be
     // animated. See `Mining::note_placed`: nothing is drawn here,
@@ -8722,7 +6171,7 @@ fn try_place_block(
 fn request_and_unload(
     chunks: &mut ChunkManager,
     light: &mut LightMap,
-    net: &mut network::NetworkHandle,
+    net: &network::NetworkHandle,
     player: &Player,
     now: Instant,
     graphics: &mut GraphicsState,
@@ -8748,7 +6197,7 @@ fn request_and_unload(
 /// snapshot) while standing still staring at a wall.
 #[allow(clippy::too_many_arguments)]
 fn maybe_send_transform(
-    net: &mut network::NetworkHandle,
+    net: &network::NetworkHandle,
     player: &Player,
     camera: &Camera,
     now: Instant,
