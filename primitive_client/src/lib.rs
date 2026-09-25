@@ -90,12 +90,12 @@ use platform::Key as KeyCode;
 
 use engine::camera::Camera;
 use logic::chunk_manager::{ChunkManager, NEIGHBOUR_OFFSETS};
-use ui::debug::{DebugStats, FrameInfo};
+use ui::debug::DebugStats;
 use ui::menu::{Action, Menu, Screen};
 use primitive_shared::geometry::block_overlaps_player;
 use primitive_shared::lighting::LightMap;
 use primitive_shared::protocol::{ClientMessage, PlayerId, ServerMessage};
-use primitive_shared::types::{block_name, BlockId, ChunkPos, BLOCK_AIR};
+use primitive_shared::types::{BlockId, ChunkPos, BLOCK_AIR};
 use logic::inventory::Inventory;
 use logic::physics::Player;
 
@@ -2019,107 +2019,22 @@ fn run(
                             menu_title_set = true;
                         }
 
-                        // **The backdrop, and the only place in the
-                        // client that makes world without being told
-                        // to.** Started the first frame the menu is on
-                        // screen with the setting on, rebuilt when the
-                        // player changes which place they want, and
-                        // dropped -- meshes and all -- when they switch
-                        // it off. The switch has to reach the card as
-                        // well as the flag: the geometry is the
-                        // renderer's now, so forgetting to clear it
-                        // would leave a shore behind a menu that says
-                        // the backdrop is off.
-                        //
-                        // **And only while there is still no session.**
-                        // The connection above completes *inside* this
-                        // block -- the `net.is_none()` that opened it
-                        // was tested at the top of the frame -- so on
-                        // the one frame a world opens, `menu_scene` has
-                        // just been cleared and `sky` has just been set
-                        // to the server's clock, and this would build a
-                        // fresh backdrop over the top of both and put
-                        // `menu_scene::TIME_OF_DAY` back. What a player
-                        // saw was a world that opened at dusk and
-                        // jumped to morning a second later, when the
-                        // first `TimeSync` landed and `Sky::on_time_sync`
-                        // snapped a delta too big to be drift. What the
-                        // machine did was mesh a patch of world nobody
-                        // would ever see, in the frame the real one
-                        // started streaming.
-                        if settings.menu_background && net.is_none() {
-                            if menu_scene.is_some()
-                                && menu_scene_asked_for != settings.menu_background_place()
-                            {
-                                menu_scene = None;
-                                graphics.clear_chunk_meshes();
-                            }
-                            let scene = match menu_scene.as_mut() {
-                                Some(scene) => scene,
-                                None => {
-                                    menu_scene_asked_for = settings.menu_background_place();
-                                    // Dusk, and fixed: the veil over the
-                                    // scene is measured against how
-                                    // bright the scene can get, so the
-                                    // menu's clock does not run. See
-                                    // `menu_scene::TIME_OF_DAY`.
-                                    sky = Sky::new(menu_scene::TIME_OF_DAY, 900.0);
-                                    let fresh = menu_scene::MenuScene::spawn(
-                                        menu_scene_asked_for,
-                                        menu_scene_roll(),
-                                        graphics.textures.face_layers(),
-                                    );
-                                    // Printed because a backdrop that
-                                    // came out wrong is otherwise a
-                                    // report with nothing in it: the
-                                    // place and the seed are between
-                                    // them the whole of what was
-                                    // chosen, and `look_for` is pure,
-                                    // so those two numbers reproduce
-                                    // the picture exactly.
-                                    menu_scene_started = Some(Instant::now());
-                                    let spot = fresh.spot();
-                                    println!(
-                                        "menu backdrop: {} at {}, {} in seed {}",
-                                        spot.place.name(),
-                                        spot.eye.x.round(),
-                                        spot.eye.z.round(),
-                                        spot.seed,
-                                    );
-                                    menu_scene.insert(fresh)
-                                }
-                            };
-                            scene.tick(menu_dt);
-                            // Landing a mesh is a copy to the card, so
-                            // it is rationed here exactly as it is for
-                            // the streamed world -- twenty-five of them
-                            // in the frame they all happen to be ready
-                            // in is a hitch on the one screen where
-                            // nothing else is going on.
-                            let landing = Instant::now();
-                            let budget =
-                                Duration::from_secs_f32(settings.mesh_budget_ms / 1000.0);
-                            while let Some(built) = scene.poll() {
-                                if built.buffers.indices.is_empty() {
-                                    graphics.drop_chunk_mesh(built.pos);
-                                } else {
-                                    graphics.set_chunk_mesh(built.pos, &built.buffers);
-                                }
-                                if landing.elapsed() >= budget {
-                                    break;
-                                }
-                            }
-                            camera.position = scene.eye().as_dvec3();
-                            camera.yaw = scene.yaw();
-                            camera.pitch = scene.pitch();
-                            camera.aspect = graphics.aspect();
-                            camera.fov_y_radians = settings.fov_degrees.to_radians();
-                            render_origin = render_origin_for(camera.position, render_origin);
-                        } else if menu_scene.take().is_some() {
-                            graphics.clear_chunk_meshes();
-                            menu_scene_asked_for = None;
-                        }
-                        let scene_behind = menu_scene.as_ref().map(|s| s.spot().place);
+                        // The world standing behind the menus, built,
+                        // ticked or dropped. See `frame::backdrop` --
+                        // including why it must not run on the one frame
+                        // a session opens.
+                        let scene_behind = frame::menu_frame::backdrop(
+                            menu_dt,
+                            net.is_some(),
+                            &settings,
+                            &mut graphics,
+                            &mut camera,
+                            &mut sky,
+                            &mut render_origin,
+                            &mut menu_scene,
+                            &mut menu_scene_asked_for,
+                            &mut menu_scene_started,
+                        );
 
                         // **`PRIMITIVE_SHOT` on the menu, which it did
                         // not use to answer.** The shot below the world
@@ -2149,47 +2064,18 @@ fn run(
                         // an idle menu is the stillest screen in the
                         // game, and it used to be relaid and re-uploaded
                         // every frame. See `UiKey`.
-                        // The arrangement screen is the one that needs
-                        // pixels: a thumb control is sized against the
-                        // physical screen, not against interface space.
-                        menu.set_screen_size(graphics.size.width, graphics.size.height);
-                        // **Applied while the player watches.** Moving a
-                        // control and only seeing it land after leaving
-                        // the screen is arranging blind. `resize` is
-                        // free when nothing changed -- it compares the
-                        // arrangement it was last given -- so this costs
-                        // nothing on every other frame.
-                        if menu.is_arranging() {
-                            let wanted = menu.arrangement();
-                            if !wanted.same_as(&settings.touch_layout) {
-                                settings.touch_layout = wanted;
-                                touch_layout = wanted;
-                                touch.resize(graphics.size, touch_layout, graphics.ui_scale());
-                                arrangement_unsaved = true;
-                            }
-                        } else {
-                            // **Kept in step while the screen is shut**,
-                            // so that opening it starts from what the
-                            // player actually has rather than from what
-                            // the game shipped. Done here rather than in
-                            // the action that opens the screen, because
-                            // the menu has no settings of its own to
-                            // read and handing it a stale copy once is
-                            // how an editor comes to be editing a
-                            // layout nobody is using.
-                            menu.begin_arranging(settings.touch_layout);
-                            if arrangement_unsaved {
-                                // Written down once, on the way out,
-                                // rather than on every frame of a drag:
-                                // a settings file rewritten sixty times
-                                // a second while a thumb moves is a lot
-                                // of disk for one decision.
-                                arrangement_unsaved = false;
-                                if let Err(e) = settings.save() {
-                                    eprintln!("could not save the arrangement: {e}");
-                                }
-                            }
-                        }
+                        // The controls on the glass, kept in step with
+                        // the editor while it is open and with the
+                        // settings while it is shut. See
+                        // `frame::menu_frame::arrangement`.
+                        frame::menu_frame::arrangement(
+                            &mut settings,
+                            &mut menu,
+                            &graphics,
+                            &mut touch,
+                            &mut touch_layout,
+                            &mut arrangement_unsaved,
+                        );
                         let ui_rebuilt = {
                             let ctx = menu_context(&settings, &worlds, &graphics, scene_behind);
                             let key =
@@ -2419,119 +2305,35 @@ fn run(
                         &mut fishing_float,
                     );
 
-                    // **A cairn the server has just agreed to asks for its
-                    // name**, in the chat box (see `Chat::open_naming` for
-                    // why that box). Not over a screen the player has open
-                    // or a line they are typing: the heap is already a mark
-                    // on this player's map, and this only gives it a word.
-                    //
-                    // **...and only for a player carrying a map**, because
-                    // for anybody else there is no mark to name: the server
-                    // writes one down for the placer only if they had the
-                    // hide on them (`trail::Trail::mark`). A box asking
-                    // "name this cairn for your map" from somebody with no
-                    // map is a prompt whose answer goes nowhere.
-                    if let Some(cell) = mining.take_piled_cairn() {
-                        if journal.carries_map()
-                            && !paused
-                            && !chat.is_typing()
-                            && !inventory_screen.open
-                            && !chest_screen.is_open()
-                            && !station_screen.is_open()
-                            && !journal.is_open()
-                            && !death.is_open()
-                        {
-                            let current = journal.explored.mark_name(cell).unwrap_or("").to_string();
-                            chat.open_naming(cell, &current, Instant::now());
-                            window.set_ime_visible(true);
-                            release_cursor(&window, &mut input);
-                            input.release_all();
-                        }
-                    }
-
-                    // Dying and coming back are the two moments the
-                    // cursor changes hands without the player pressing
-                    // anything, and both of them arrive as a message
-                    // rather than as an event -- so the hand-off is done
-                    // here, once, on the frame the answer changes.
-                    // The dark a sleeper's screen goes, and the morning it
-                    // lifts on. The morning is said once the dark has gone
-                    // rather than when the server wakes the player, or the
-                    // line would spend its three seconds printed on black --
-                    // and only to a player still lying there: one a blow
-                    // woke is on their feet by now and has no morning to be
-                    // told about.
-                    if sleep.tick(dt) && matches!(resting, logic::posture::Resting::Lying { .. }) {
-                        notice = Some((
-                            settings.language.text(ui::lang::Msg::SleepMorning).to_string(),
-                            Instant::now(),
-                        ));
-                    }
-
-                    death.tick(dt);
-                    if death.is_open() != was_dead {
-                        was_dead = death.is_open();
-                        if was_dead {
-                            // One screen at a time, and this one is not
-                            // optional.
-                            chat.close();
-                            inventory_screen.close();
-                            chest_screen.close();
-                            station_screen.close();
-                            release_cursor(&window, &mut input);
-                            input.release_all();
-                        } else if !paused && !chat.is_typing() {
-                            grab_cursor(&window, &mut input);
-                        }
-                    }
-
-                    // A chest opens when the server answers, not when
-                    // the player clicks, so the cursor changes hands
-                    // here for the same reason dying does.
-                    if chest_screen.is_open() != chest_was_open {
-                        chest_was_open = chest_screen.is_open();
-                        // The lid, on the frame the answer changes --
-                        // which is when the server says so, not when the
-                        // player clicked.
-                        if chest_was_open {
-                            chest_lid = chest_screen.at().and_then(|(x, y, z)| chunks.block_at(x, y, z)).is_some_and(
-                                |block| primitive_shared::types::block_kind(block) == primitive_shared::types::BLOCK_CHEST,
-                            );
-                        }
-                        if chest_lid {
-                            audio.play(if chest_was_open { audio::Sfx::ChestOpen } else { audio::Sfx::ChestClose });
-                        }
-                        if chest_was_open {
-                            // One screen at a time.
-                            inventory_screen.close();
-                            chat.close();
-                            release_cursor(&window, &mut input);
-                            input.release_all();
-                        } else if !paused && !death.is_open() && !chat.is_typing() {
-                            grab_cursor(&window, &mut input);
-                        }
-                    }
-
-                    // ...and the station screen, which opens on the server's
-                    // answer exactly as the chest does.
-                    if station_screen.is_open() != station_was_open {
-                        station_was_open = station_screen.is_open();
-                        if station_was_open {
-                            inventory_screen.close();
-                            chat.close();
-                            release_cursor(&window, &mut input);
-                            input.release_all();
-                        } else if !paused && !death.is_open() && !chat.is_typing() {
-                            grab_cursor(&window, &mut input);
-                        }
-                    }
-                    // A run whose last window has gone by is handed in without
-                    // the player doing anything: the blows they did not strike
-                    // are misses, and a screen that waited for ever for a
-                    // fourth press would be a screen holding their bar.
-                    if let Some(intent) = station_screen.poll() {
-                        send_station_intent(intent, &mut station_screen, net, &mut debug_stats, &audio);
-                    }
+                    // The screens the messages just drained caused: the
+                    // cairn's name, the morning, dying, a chest or a
+                    // station the server opened. The cursor changes hands
+                    // here and nowhere else -- see `frame::screens`.
+                    frame::screens::hand_off(
+                        dt,
+                        paused,
+                        &settings,
+                        net,
+                        &window,
+                        &audio,
+                        &chunks,
+                        resting,
+                        &mut sleep,
+                        &mut mining,
+                        &mut input,
+                        &mut chat,
+                        &mut journal,
+                        &mut inventory_screen,
+                        &mut chest_screen,
+                        &mut station_screen,
+                        &mut death,
+                        &mut notice,
+                        &mut was_dead,
+                        &mut chest_was_open,
+                        &mut station_was_open,
+                        &mut chest_lid,
+                        &mut debug_stats,
+                    );
 
                     // The session ended without the player asking. Tear
                     // it down here, at the top of the frame, rather than
@@ -3210,168 +3012,52 @@ fn run(
                         Some(area_loaded as f32 / area_needed.max(1) as f32)
                     };
 
-                    // The title bar is a window-manager call and a fresh
-                    // format! of a dozen numbers; the readout behind it
-                    // samples the biome generator. Neither is worth
-                    // doing every frame -- nobody reads a title bar at
-                    // 200 Hz -- so both are built only when something is
-                    // going to look at them.
-                    const TITLE_INTERVAL: Duration = Duration::from_millis(250);
-                    let title_due = now.duration_since(last_title_update) >= TITLE_INTERVAL;
-                    // Is there a fire within working range?
-                    //
-                    // Asked of the client's own copy of the world, and
-                    // it is only ever *advice*: the server asks the same
-                    // question against its own copy of where the player
-                    // is standing and refuses a craft that fails it.
-                    // What this buys is that the crafting column greys
-                    // out the fireside recipes as you walk away from the
-                    // fire rather than a round trip later.
-                    //
-                    // **Not every frame.** It is a scan of three hundred
-                    // and forty-three cells through the chunk map -- a
-                    // hash lookup per cell -- and the only thing that
-                    // reads the answer is a menu that is shut. At two
-                    // hundred frames a second that is seventy thousand
-                    // lookups a second spent on nothing. Now: only while
-                    // the inventory is open, and once as it opens so the
-                    // first frame of it is already right.
-                    let heat_due = inventory_screen.open || heat_was_open;
-                    heat_was_open = inventory_screen.open;
-                    if heat_due {
-                        let heat = fire_within_reach(&chunks, player.position.as_vec3());
-                        last_heat = heat;
-                        inventory_screen.set_heat(heat);
-                    }
-                    let heat = last_heat;
-
-                    // **The memory readout is counted at the title's pace,
-                    // not the frame's.** With the F3 readout on -- which is
-                    // every benchmark -- `FrameInfo` is built every frame,
-                    // and these two sums walk every section of every loaded
-                    // chunk twice: at a render distance of twenty-four,
-                    // fifty-seven thousand sections a frame for a number
-                    // printed once a second. That was frame time the
-                    // benchmark charged to the game and a player with F3
-                    // open paid for.
-                    if title_due {
-                        counted_bytes = (chunks.heap_bytes(), light.heap_bytes());
-                    }
-                    let info = (title_due || debug_stats.console_enabled).then(|| FrameInfo {
-                        position: player.position.as_vec3(),
-                        chunk: ChunkManager::chunk_for_world_pos(
-                            player.position.x,
-                            player.position.z,
-                        ),
-                        grounded: player.grounded,
-                        loaded_chunks: chunks.loaded_count(),
-                        pending_chunks: chunks.pending_count(),
-                        chunk_bytes: counted_bytes.0,
-                        light_bytes: counted_bytes.1,
-                        arena_bytes: graphics.arena_usage(),
-                        // The size the frame is *drawn* at, not the
-                        // window: every millisecond on this line is a
-                        // millisecond per those pixels, and on a phone
-                        // drawing at seven tenths the two differ by
-                        // half the area.
-                        surface: (graphics.render_size().width, graphics.render_size().height),
-                        anisotropy: settings.anisotropy,
-                        // What the pass is drawn at, not the setting:
-                        // an adapter without the asked-for count runs
-                        // at a lower one, and the number a frame time
-                        // has to be read against is the one in force.
-                        msaa: graphics.sample_count(),
-                        sky_scale: settings.sky_scale,
-                        // The mode in force, not the setting that asked
-                        // for it: on Android those are routinely
-                        // different, and the difference is the whole
-                        // question when the frame rate reads high and
-                        // the motion does not.
-                        present_mode: match graphics.present_mode() {
-                            wgpu::PresentMode::Fifo => "fifo",
-                            wgpu::PresentMode::FifoRelaxed => "fifo-relaxed",
-                            wgpu::PresentMode::Mailbox => "mailbox",
-                            wgpu::PresentMode::Immediate => "immediate",
-                            wgpu::PresentMode::AutoVsync => "auto-vsync",
-                            wgpu::PresentMode::AutoNoVsync => "auto-novsync",
-                        },
-                        render_distance: chunks.render_distance(),
-                        // Everything between "this chunk needs a mesh"
-                        // and "the card has it": waiting to be
-                        // dispatched, out with a worker, and -- since
-                        // landing one is rationed -- finished and
-                        // waiting for frame time. A number that only
-                        // ever grows means the budget is set below what
-                        // this machine can keep up with, and that is
-                        // worth being able to see.
-                        queued_meshes: dirty.len()
-                            + urgent.len()
-                            + mesher.in_flight()
-                            + mesher.pending_count(),
-                        queued_arrivals: arrivals.len(),
-                        lighting_jobs: mesher.lighting_in_flight(),
-                        remote_players: remote_players.len(),
-                        entities: entities.len(),
-                        clock: sky.clock_string(),
-                        season: primitive_shared::season::Season::at(sky.world_days()).name(),
-                        sun_intensity: sky.sun_intensity(),
-                        seed: world_seed,
+                    // The page of figures behind F3, the window title and
+                    // the fire within working range -- none of them every
+                    // frame. See `frame::readout`.
+                    let (info, heat) = frame::readout::gather(
+                        now,
+                        &settings,
+                        &window,
+                        &graphics,
+                        &player,
+                        &chunks,
+                        &light,
+                        &mesher,
+                        &dirty,
+                        &urgent,
+                        &arrivals,
+                        &remote_players,
+                        &entities,
+                        &sky,
+                        &worldgen,
+                        weather,
+                        world_seed,
                         nourishment,
-                        weather: weather.name(),
-                        falling: falling_on(&worldgen, &sky, weather, player.position).0,
-                        heat,
-                        // In the player's language: the one line of this
-                        // panel a player reads for the game rather than
-                        // for a bug report.
-                        biome: ui::names::biome(
-                            worldgen.biome_at(
-                                player.position.x.floor() as i32,
-                                player.position.z.floor() as i32,
-                            ),
-                            settings.language,
-                        ),
-                        latitude: worldgen.latitude_degrees(player.position.z.floor() as i32),
-                        particles: particles.len(),
-                        audio: audio.status(),
-                        selected_block: inventory
-                            .block_in(input.hotbar_slot)
-                            .map(block_name)
-                            .unwrap_or("nothing"),
-                        draw_calls: graphics.draw_calls_last_frame,
-                        solid_indices: graphics.solid_indices_last_frame,
-                        solid_indices_in_view: graphics.solid_indices_in_view_last_frame,
-                        cutout_indices: graphics.cutout_indices_last_frame,
-                        chunks_culled: graphics.chunks_culled_last_frame,
-                        // What the mesher actually built, counted here
-                        // because `chunk_lod` is where the answer is: one
-                        // `Detail` per loaded chunk, holding the level it
-                        // was meshed at. A walk over a few hundred entries
-                        // once a frame, and it is the only way from outside
-                        // a phone to tell a coarse band that moved from one
-                        // that did not. See `ui::debug::Info::chunk_levels`.
-                        chunk_levels: chunk_lod.values().fold([0usize; 3], |mut counts, built| {
-                            counts[(built.level as usize).min(2)] += 1;
-                            counts
-                        }),
+                        &particles,
+                        &audio,
+                        &inventory,
+                        &input,
+                        &chunk_lod,
                         underwater,
                         health,
                         max_health,
-                        held: inventory.count_in(input.hotbar_slot),
-                        carried: inventory.total_items(),
-                        mining: mining.target().map(|cell| (cell, mining.progress())),
-                    });
-                    if let Some(info) = info.as_ref() {
-                        if title_due {
-                            window.set_title(&debug_stats.title(info));
-                            last_title_update = now;
-                            menu_title_set = false;
-                        }
-                        debug_stats.maybe_dump_console(info);
-
-                        // The clock starts on the first frame with a
-                        // world in front of it, not at launch: loading
-                        // one takes seconds and none of them are frame
-                        // time. See `bench_seconds`.
+                        &mining,
+                        &mut inventory_screen,
+                        &mut debug_stats,
+                        &mut last_title_update,
+                        &mut menu_title_set,
+                        &mut counted_bytes,
+                        &mut last_heat,
+                        &mut heat_was_open,
+                    );
+                    // The bench clock starts on the first frame with a
+                    // world in front of it, not at launch: loading one
+                    // takes seconds and none of them are frame time. Here
+                    // rather than in the readout because ending the run
+                    // is the event loop's, not a readout's. See
+                    // `bench_seconds`.
+                    if info.is_some() {
                         if let Some(seconds) = bench_seconds {
                             let started = *bench_started.get_or_insert_with(Instant::now);
                             if started.elapsed().as_secs_f32() >= seconds {
