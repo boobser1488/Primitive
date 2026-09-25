@@ -3451,8 +3451,16 @@ fn a_gallery_of_steps() {
 /// second and two), so a pause twice as long as the timeout is four
 /// seconds of a test rather than a minute -- what is being tested is the
 /// pause being longer than the timeout, not how long either is.
+/// A world that times a silent client out in two seconds -- **and whose
+/// server keeps its own wall clock**, unlike every other scenario's.
+///
+/// The two scenarios below are the only ones whose subject is that clock:
+/// what the world does while nobody draws a frame. A server that ticked
+/// only when a frame asked would make both of them pass by saying
+/// nothing -- no frames, so of course nothing happened. See
+/// `Scenario::with_a_server_on_its_own_clock`.
 fn impatient_world() -> Scenario {
-    Scenario::with(primitive_server::settings::ServerSettings {
+    Scenario::with_a_server_on_its_own_clock(primitive_server::settings::ServerSettings {
         keepalive_interval_secs: 1.0,
         client_timeout_secs: 2.0,
         ..super::scenario_settings()

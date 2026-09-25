@@ -338,6 +338,78 @@ pub struct Context {
     /// A test's simulated sleep, taken by the tick loop on its next tick.
     /// See `Server::stall_tick_loop_for`.
     stall: std::sync::Mutex<Option<Duration>>,
+    /// Present only when the ticks are somebody else's to hand out. See
+    /// [`TickPacer`].
+    pacer: Option<TickPacer>,
+}
+
+/// **The tick loop's clock, taken out of the wall and given to the
+/// caller.** With one of these installed the loop runs a tick when it is
+/// asked for one and not a tick more; without it, nothing changes and
+/// the interval is still the wall's.
+///
+/// Why it exists: a scenario (`primitive_client::scenario`) is a real
+/// client playing a real server, and it counts its own time in frames.
+/// Left to the wall, the two clocks are the same only on an idle
+/// machine: put half a dozen builds beside it and the client's sixty
+/// frames take three seconds of wall while the server ticks sixty times
+/// into them, so the world ages three times as fast as the player does.
+/// What that looked like was a handful of scenarios out of seventy going
+/// red per run, never the same ones -- a downed player who "died before
+/// the clock ran out", a horse that threw its rider before the rider had
+/// finished getting on. Tied to the frames instead, the simulation is
+/// the same length on a free machine and a loaded one, and only the wall
+/// time the whole run takes differs.
+///
+/// Rejected: making the scenario's own waits longer. A timeout raised
+/// until it is never hit is not a fixed test, it is a slower flaky one --
+/// and it does nothing at all about the *other* direction, a world that
+/// has aged further than the player by the time the assertion is read.
+///
+/// Rejected: a virtual clock inside the server, with every `Instant::now`
+/// behind it. That is the pure answer and it is the whole server: the
+/// anticheat, the item despawns, the keepalives and every mod's idea of
+/// time. This moves one number -- how often the tick body runs -- and
+/// the tick body already steps by `tick_duration` and not by what the
+/// wall says passed.
+struct TickPacer {
+    /// Ticks asked for and not yet run. A semaphore because the tick
+    /// loop waits for one *asynchronously*: a condvar here would park a
+    /// runtime worker thread between ticks.
+    asked: tokio::sync::Semaphore,
+    /// Ticks the loop has finished, and a way for a caller on an
+    /// ordinary thread to wait for the number to reach what it asked
+    /// for. A condvar here for the mirror image of the reason above: the
+    /// waiter is `Scenario::frame`, which is not async at all.
+    done: std::sync::Mutex<u64>,
+    grew: std::sync::Condvar,
+}
+
+impl TickPacer {
+    fn new() -> Self {
+        Self {
+            asked: tokio::sync::Semaphore::new(0),
+            done: std::sync::Mutex::new(0),
+            grew: std::sync::Condvar::new(),
+        }
+    }
+
+    fn finished_one(&self) {
+        *self.done.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.grew.notify_all();
+    }
+}
+
+/// Counts the tick as run however the loop's iteration ends -- including
+/// the `continue` a paused server takes. A tick that was asked for and
+/// silently not counted is a caller waiting for a number that will never
+/// come, which is a hang rather than a failure.
+struct TickFinish<'a>(&'a TickPacer);
+
+impl Drop for TickFinish<'_> {
+    fn drop(&mut self) {
+        self.0.finished_one();
+    }
 }
 
 impl Context {
@@ -409,6 +481,10 @@ pub struct RunOptions {
     pub console: bool,
     /// Print the startup banner and the periodic stats line.
     pub logging: bool,
+    /// The tick loop waits to be asked rather than watching the wall.
+    /// Off everywhere a person plays; see [`TickPacer`] and
+    /// [`Server::ask_for_ticks`].
+    pub ticks_by_hand: bool,
 }
 
 impl RunOptions {
@@ -423,6 +499,7 @@ impl RunOptions {
             local_operator: false,
             console: true,
             logging: true,
+            ticks_by_hand: false,
         }
     }
 
@@ -436,7 +513,16 @@ impl RunOptions {
             local_operator: true,
             console: false,
             logging: false,
+            ticks_by_hand: false,
         }
+    }
+
+    /// The same, but **the tick loop runs a tick when it is asked to**.
+    /// For a harness that keeps its own clock -- see [`TickPacer`] for
+    /// which harness, and what goes wrong without it.
+    #[doc(hidden)]
+    pub fn ticks_by_hand(self) -> Self {
+        Self { ticks_by_hand: true, ..self }
     }
 }
 
@@ -564,6 +650,50 @@ impl Server {
 
     pub fn is_paused(&self) -> bool {
         self.ctx.paused.load(Ordering::Acquire)
+    }
+
+    /// **Asks for `n` more ticks**, on a server started with
+    /// `RunOptions::ticks_by_hand`. A no-op on any other, which is every
+    /// server a person plays on.
+    ///
+    /// The asks pile up, so a caller may run ahead and catch up later;
+    /// what it may not do is let the pile grow without reading it, or
+    /// the world it asserts about is a second behind the world it drove.
+    /// See [`Server::wait_for_ticks`].
+    #[doc(hidden)]
+    pub fn ask_for_ticks(&self, n: u32) {
+        if let Some(pacer) = &self.ctx.pacer {
+            pacer.asked.add_permits(n as usize);
+        }
+    }
+
+    /// Waits until the tick loop has run `n` ticks in all, and says
+    /// whether it did before `cap` of **wall** time ran out.
+    ///
+    /// The cap is not a timing assertion, it is the difference between a
+    /// test that fails and a test that hangs: a server that has stopped
+    /// answering would otherwise take the whole suite down with it, and
+    /// a suite that never finishes tells nobody anything. Every number a
+    /// scenario asserts on is counted in ticks and frames; the cap only
+    /// decides how long a broken server is given to prove it is broken.
+    #[doc(hidden)]
+    pub fn wait_for_ticks(&self, n: u64, cap: Duration) -> bool {
+        let Some(pacer) = &self.ctx.pacer else {
+            return true;
+        };
+        let deadline = Instant::now() + cap;
+        let mut done = pacer.done.lock().unwrap_or_else(|e| e.into_inner());
+        while *done < n {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            let (guard, _) = pacer
+                .grew
+                .wait_timeout(done, left)
+                .unwrap_or_else(|e| e.into_inner());
+            done = guard;
+        }
+        true
     }
 
     /// **Freezes the tick loop's thread for `how_long`**, the way a
@@ -1701,6 +1831,7 @@ fn build_context(settings: ServerSettings, options: RunOptions) -> anyhow::Resul
         started: Instant::now(),
         paused: std::sync::atomic::AtomicBool::new(false),
         stall: std::sync::Mutex::new(None),
+        pacer: options.ticks_by_hand.then(TickPacer::new),
     });
 
     Ok(ctx)
@@ -1976,10 +2107,27 @@ async fn tick_loop(ctx: Arc<Context>) {
         // client starts and stops a server for every singleplayer
         // session, and a tick loop per world left running would go on
         // ticking, saving and simulating for the rest of the game.
-        tokio::select! {
-            _ = ticker.tick() => {}
-            _ = ctx.shutdown_requested() => break,
+        // Whose clock the tick is on: the wall's, or the caller's. See
+        // `TickPacer`.
+        match &ctx.pacer {
+            None => tokio::select! {
+                _ = ticker.tick() => {}
+                _ = ctx.shutdown_requested() => break,
+            },
+            Some(pacer) => tokio::select! {
+                permit = pacer.asked.acquire() => match permit {
+                    // Taken for good: the count of ticks run is the
+                    // answer, and handing the permit back would let the
+                    // same ask be spent twice.
+                    Ok(permit) => permit.forget(),
+                    Err(_) => break,
+                },
+                _ = ctx.shutdown_requested() => break,
+            },
         }
+        // From here to the end of the iteration this tick is owed to
+        // whoever asked for it, however the iteration ends.
+        let _finish = ctx.pacer.as_ref().map(TickFinish);
         if let Some(stall) = ctx.stall.lock().unwrap_or_else(|e| e.into_inner()).take() {
             std::thread::sleep(stall);
         }
