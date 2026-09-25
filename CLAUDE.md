@@ -166,6 +166,44 @@ PRIMITIVE_IME_TYPE=<text>               type <text> into a new world's name,
                                         and create the world
 ```
 
+**The frame-cost switches** (`engine/opt.rs`), one per hypothesis, every one
+off by default, so that a run with it and a run without it differ in exactly
+one thing. They exist because a phone cannot be driven: a setting that can
+only be reached through a menu cannot be measured on a device unattended.
+
+```
+PRIMITIVE_OPT_DEPTH_DISCARD=1     the main pass stops storing its depth
+                                  buffer — nothing reads it, and on a
+                                  tile-based GPU the store is a copy of the
+                                  whole buffer out of tile memory each frame
+PRIMITIVE_OPT_DEPTH_PREPASS=1     the solid terrain lays depth down first
+                                  (no varyings, no fetch, no colour) and
+                                  then shades with `LessEqual`. Multi-draw
+                                  devices only; not while shadows are on
+PRIMITIVE_OPT_TRILINEAR=1         at anisotropy 1, minification and the mip
+                                  choice filter while magnification stays
+                                  nearest — the pixel art is still crisp up
+                                  close and the ground running away from the
+                                  eye stops being one point sample of one
+                                  over-coarse level
+PRIMITIVE_OPT_MIP_BIAS=-0.5       the terrain fetch asks for a sharper mip
+                                  level; compiled into the shader, so it
+                                  costs nothing per fragment
+PRIMITIVE_OPT_ANISO=4             overrides the anisotropy setting
+PRIMITIVE_OPT_RESOLUTION=50       overrides the resolution scale, in per cent
+PRIMITIVE_OPT_LOD=4               overrides where the coarse bands start, in
+                                  chunks; 0 is the simplification off
+```
+
+The last three change nothing about how the game draws. They are there
+because "is this pass paying for pixels or for triangles?" is answered by
+halving the pixels and reading the stage line, and then by halving the
+triangles and reading it again — the measurement `engine/lod.rs` is built on,
+which until now could only be made on a desktop.
+
+A build with any of them on prints one `[opt]` line at startup, so a
+measurement taken off a device says on its face which build it came from.
+
 `PRIMITIVE_IME_TYPE` is the Android text path checked without a person: it
 hands the platform's editor a string exactly as GameTextInput would and then
 the game's own mirror has to notice it, filter it and fill the field. On a

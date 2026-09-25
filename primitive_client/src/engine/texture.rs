@@ -1483,6 +1483,12 @@ impl AtlasSplit {
         for (call, replacement) in [
             ("textureSampleGrad(", "atlas_sample_grad("),
             ("textureSampleLevel(", "atlas_sample_level("),
+            // Before the plain one, though `find` matches on the open
+            // bracket and so could not confuse the two: the order of this
+            // list is the order a reader checks it in, and a fetch left
+            // out of it is a phone drawing the wrong picture for every
+            // layer past the first array.
+            ("textureSampleBias(", "atlas_sample_bias("),
             ("textureSample(", "atlas_sample("),
             ("textureLoad(", "atlas_load("),
         ] {
@@ -1524,6 +1530,12 @@ impl AtlasSplit {
                 "uv: vec2<f32>, layer: i32, level: f32",
                 "vec4<f32>",
                 "textureSampleLevel({t}, block_sampler, uv, slot, level)",
+            ),
+            (
+                "atlas_sample_bias",
+                "uv: vec2<f32>, layer: i32, bias: f32",
+                "vec4<f32>",
+                "textureSampleBias({t}, block_sampler, uv, slot, bias)",
             ),
             ("atlas_load", "texel: vec2<i32>, layer: i32, level: i32", "vec4<f32>", "textureLoad({t}, texel, slot, level)"),
         ] {
@@ -2832,14 +2844,33 @@ pub fn build_sampler(device: &wgpu::Device, anisotropy: u16) -> wgpu::Sampler {
     } else {
         wgpu::FilterMode::Nearest
     };
+    // **Magnification and minification are not the same question**, and at
+    // anisotropy 1 they used to get the same answer because the mode above
+    // is one value. Nearest magnification is the decision -- 16x16 pixel
+    // art smears under a linear filter. Nearest *minification*, with
+    // nearest between mip levels, is what fell out of it: one point sample
+    // from one level, chosen from the longer of the two derivatives, with
+    // no blend where one level ends. That is what a phone photographed as
+    // "мыльная картинка" -- ground running away from the eye fetched from
+    // a level far coarser than its short axis needs.
+    //
+    // Behind `PRIMITIVE_OPT_TRILINEAR` because it is a change to the
+    // picture and the device has to be shown both. wgpu only refuses
+    // mixed modes above anisotropy 1, so there is nothing to guard: above
+    // 1 every mode is already Linear and this changes nothing.
+    let minified = if crate::engine::opt::trilinear_minification() {
+        wgpu::FilterMode::Linear
+    } else {
+        mode
+    };
     device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("block texture sampler"),
         address_mode_u: BLOCK_ADDRESS_MODE,
         address_mode_v: BLOCK_ADDRESS_MODE,
         address_mode_w: BLOCK_ADDRESS_MODE,
         mag_filter: mode,
-        min_filter: mode,
-        mipmap_filter: mode,
+        min_filter: minified,
+        mipmap_filter: minified,
         anisotropy_clamp: anisotropy,
         ..Default::default()
     })
@@ -3402,7 +3433,13 @@ mod tests {
                 let marker = split_source.find("// ---- the atlas in").expect("the dispatch was appended");
                 let rewritten = &split_source[..marker];
                 assert!(rewritten.contains("atlas_sample("), "{name}: nothing was rewritten");
-                for call in ["textureSample(", "textureSampleGrad(", "textureSampleLevel(", "textureLoad("] {
+                for call in [
+                    "textureSample(",
+                    "textureSampleGrad(",
+                    "textureSampleLevel(",
+                    "textureSampleBias(",
+                    "textureLoad(",
+                ] {
                     assert_eq!(
                         rewrite_calls(rewritten, call, "missed("),
                         rewritten,
