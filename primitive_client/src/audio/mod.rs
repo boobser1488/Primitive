@@ -79,8 +79,9 @@ use mixer::{Mixer, Shared};
 pub struct Audio {
     /// `None` when there is no working device -- see the module note.
     shared: Option<Arc<Shared>>,
-    /// Kept alive and otherwise untouched. Dropping it stops the device.
-    _stream: Option<cpal::Stream>,
+    /// Kept alive. Dropping it stops the device, and pausing it is how
+    /// the game goes quiet in a pocket -- see [`Audio::set_suspended`].
+    stream: Option<cpal::Stream>,
     /// What the device ended up running at, for the debug overlay.
     pub sample_rate: u32,
     pub channels: u16,
@@ -117,7 +118,7 @@ impl Audio {
     pub fn silent() -> Audio {
         Audio {
             shared: None,
-            _stream: None,
+            stream: None,
             sample_rate: 0,
             channels: 0,
             device_name: "none".to_string(),
@@ -248,13 +249,68 @@ impl Audio {
 
         Ok(Audio {
             shared: Some(shared),
-            _stream: Some(stream),
+            stream: Some(stream),
             sample_rate: rate,
             channels: config.channels,
             device_name,
             #[cfg(test)]
             heard: Default::default(),
         })
+    }
+
+    /// The activity has gone off the screen, or come back.
+    ///
+    /// ## Why sound needs telling at all
+    ///
+    /// Because nothing else tells it. On Android the frame loop blocks
+    /// while there is no surface -- it has to, or the game burns a core
+    /// in the player's pocket -- but the audio callback belongs to the
+    /// system and goes on being called at its own rate. What it plays
+    /// is the last state the mixer was left in, so the music and the
+    /// world's weather carry on over the phone call the player answered,
+    /// out of an app that is not on the screen. Two players called it
+    /// "the game keeps playing in the background".
+    ///
+    /// ## Why both the flag and the stream
+    ///
+    /// The flag is the guarantee and the pause is the saving. Pausing
+    /// the stream is what stops the device waking the CPU every few
+    /// milliseconds, and it goes through `cpal` to a backend whose
+    /// `pause` may be a no-op; the flag reaches the mixer, which is
+    /// this crate's own code and cannot decline. A failure to pause is
+    /// reported and otherwise survivable: a silent stream that still
+    /// runs costs battery, and a game that shouted over a call costs a
+    /// player.
+    pub fn set_suspended(&self, suspended: bool) {
+        let Some(shared) = &self.shared else {
+            return;
+        };
+        shared.set_suspended(suspended);
+        // One line, because this is a thing that happens on a device
+        // and nowhere else: whether the sound really stopped when the
+        // player took a call is a question answered by `adb logcat`,
+        // and an unanswerable question is how it came to be wrong in
+        // the first place.
+        println!(
+            "[sound] {} the activity leaving the screen",
+            if suspended { "quiet for" } else { "back after" }
+        );
+        let Some(stream) = &self.stream else {
+            return;
+        };
+        // Two error types for one question, so each is turned into a
+        // sentence where it is known and only the sentence travels.
+        let trouble = if suspended {
+            stream.pause().err().map(|e| e.to_string())
+        } else {
+            stream.play().err().map(|e| e.to_string())
+        };
+        if let Some(e) = trouble {
+            eprintln!(
+                "sound could not be {}: {e}",
+                if suspended { "paused" } else { "resumed" }
+            );
+        }
     }
 
     /// Is anything actually going to come out?

@@ -186,7 +186,6 @@ pub fn arrangement(
         if !wanted.same_as(&settings.touch_layout) {
             settings.touch_layout = wanted;
             *touch_layout = wanted;
-            *touch_layout = wanted;
             touch.resize(graphics.size, *touch_layout, graphics.ui_scale());
             *arrangement_unsaved = true;
         }

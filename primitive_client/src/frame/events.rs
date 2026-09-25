@@ -161,6 +161,30 @@ pub fn touch_to_event(
             (size.width, size.height),
             1.0,
         );
+        // **The arrangement editor takes the finger whole**, before
+        // `Pointer` can turn it into a click -- the same exception the
+        // journal's map makes two blocks up, and for the same reason.
+        // A control is dragged, and a drag is the one thing `Pointer`
+        // is built to swallow: it decides on the lift, it decides
+        // nothing when the finger travelled, and it never sends a
+        // release at all. See `Menu::arranging_touch` for what each of
+        // those three did to this screen.
+        //
+        // Only while it is carrying something. A finger that grabbed no
+        // control goes on to be an ordinary tap, which is what presses
+        // RESET and DONE.
+        //
+        // The same condition `place_cursor` gives the menu the pointer
+        // under, and not merely "the editor's screen is the last one it
+        // was on": a chest, the death screen and the journal all leave
+        // the world without input, and a finger meant for one of them
+        // must not reach a screen that is not in front of it.
+        if (net.is_none() || paused)
+            && menu.is_arranging()
+            && menu.arranging_touch(id, phase, at, graphics.ui_scale())
+        {
+            return None;
+        }
         // **What the finger turned out to mean.** A press
         // used to be sent through as a mouse button the
         // instant it landed, which decided the question

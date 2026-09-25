@@ -1436,6 +1436,19 @@ pub struct Menu {
     /// button being snatched rather than picked up.
     dragging: Option<(ControlUnderHand, (f32, f32))>,
 
+    /// Which finger is carrying it, when a finger is.
+    ///
+    /// **`None` means a mouse.** A mouse has one pointer and a press
+    /// that lasts until a release, so `drag_scale` above is enough to
+    /// say "something is being carried". A phone has neither: there are
+    /// several fingers, any of them may be the one that let go, and the
+    /// second finger to land must not steal a control the first is
+    /// holding. So a finger's drag is owned by its id and is driven
+    /// from [`Menu::arranging_touch`] alone -- `set_cursor` does not
+    /// move it, which is what stops a thumb resting anywhere else on
+    /// the glass from teleporting the button somebody is aiming.
+    drag_finger: Option<crate::platform::TouchId>,
+
     /// The action waiting for a key, if the player is rebinding one.
     /// While it is set the controls screen swallows the next keypress.
     rebinding: Option<crate::ui::keybinds::Action>,
@@ -1772,6 +1785,7 @@ impl Menu {
             arrangement: crate::settings::TouchLayout::default(),
             dragging: None,
             drag_scale: None,
+            drag_finger: None,
             rebinding: None,
             notice: None,
             cursor: None,
@@ -2581,6 +2595,14 @@ impl Menu {
         if self.screen != was {
             // The table still describes the screen we just left.
             self.hot.clear();
+            // ...and nothing is being carried on a screen that has no
+            // controls to carry. **A finger's drag is owned by its id**
+            // (see `arranging_touch`), and its lift only reaches the
+            // editor while the editor is up: a thumb still holding a
+            // button when another thumb pressed DONE would otherwise
+            // leave the drag open for the rest of the session, and the
+            // next control picked up would be refused.
+            self.release_control();
             // Otherwise arriving on a new screen finds the highlight
             // already sitting on whichever row happened to share an
             // index with the last one -- so the pause screen would open
@@ -2832,7 +2854,11 @@ impl Menu {
             }
             Action::OpenTouchControls => {
                 self.screen = Screen::TouchControls;
-                self.dragging = None;
+                // Everything a drag consists of, not only the half of
+                // it a mouse uses: a finger's drag is owned by an id
+                // and would otherwise survive the screen being opened
+                // again. See `Menu::arranging_touch`.
+                self.release_control();
                 self.notice = None;
             }
             Action::ResetTouchControls => {
@@ -2840,7 +2866,7 @@ impl Menu {
                 // written out by hand rather than computed: RESET has
                 // somewhere to go back to.
                 self.arrangement = crate::settings::TouchLayout::default();
-                self.dragging = None;
+                self.release_control();
             }
             Action::OpenControls => {
                 self.notice = None;
@@ -4007,14 +4033,13 @@ impl Menu {
     /// control that is not on the glass is a control that cannot be
     /// arranged.
     fn placed_controls(&self, ui_scale: f32) -> crate::platform::touch::Layout {
-        crate::platform::touch::Layout::for_size(
+        crate::platform::touch::Layout::for_arranging(
             crate::platform::Size {
                 width: self.window_px.0,
                 height: self.window_px.1,
             },
             self.arrangement,
             ui_scale,
-            true,
         )
     }
 
@@ -4032,9 +4057,21 @@ impl Menu {
         // so the trip back is unscaled too, or the grab lands somewhere
         // the control is not.
         let (px, py) = widgets::ui_to_cursor(at, self.window_px, 1.0);
+        // **The one whose middle is nearest, not the last one in the
+        // list.** Taking whichever came last in the array gives a thumb
+        // in an overlap to whichever control happens to be further down
+        // the arrangement, which is not something a player can see. A
+        // player aiming at the middle of something gets that something
+        // -- the same rule `Layout::button_at` plays by in the game.
         let mut found = None;
+        let mut nearest = f32::INFINITY;
         for (slot, button) in touch.buttons.iter().enumerate() {
-            if button.shown && button.contains(px, py, 0.0) {
+            if !button.shown || !button.contains(px, py, 0.0) {
+                continue;
+            }
+            let from_middle = (px - button.centre.0).hypot(py - button.centre.1);
+            if from_middle < nearest {
+                nearest = from_middle;
                 found = Some((ControlUnderHand::Button(slot), button.centre));
             }
         }
@@ -4063,18 +4100,118 @@ impl Menu {
             width: self.window_px.0,
             height: self.window_px.1,
         };
+        // **Never on top of another control.** Two controls in one
+        // place is one control that can never be pressed, and the
+        // player cannot see which of the two it is. See
+        // `touch::clear_of_the_others` for why it pushes rather than
+        // refuses.
+        let placed = self.placed_controls(ui_scale);
+        let (mine, others) = match which {
+            ControlUnderHand::Stick => (placed.stick, placed.others_than_the_stick()),
+            ControlUnderHand::Button(index) => (placed.buttons[index], placed.others_than(index)),
+        };
+        let wanted = crate::platform::touch::clear_of_the_others(wanted, &mine, &others, size);
         let slot = match which {
             ControlUnderHand::Stick => &mut self.arrangement.stick,
             ControlUnderHand::Button(index) => &mut self.arrangement.buttons[index],
         };
         *slot = crate::platform::touch::placement_for(wanted, size, *slot);
-        let _ = ui_scale;
     }
 
     /// The finger has come off.
     pub fn release_control(&mut self) {
         self.dragging = None;
         self.drag_scale = None;
+        self.drag_finger = None;
+    }
+
+    /// One finger on the arrangement screen, from the moment it lands.
+    ///
+    /// ## What was broken, and it was everything
+    ///
+    /// A menu's finger is turned into a mouse by `platform::touch::
+    /// Pointer`, which deliberately decides nothing until the finger
+    /// comes **up**: a finger that travels was scrolling a list, and a
+    /// list that also presses what it started on is worse than a list
+    /// that does not scroll. So a press arrives on lift, only when the
+    /// finger did *not* travel, and no release is ever sent at all --
+    /// see the `Tapped` arm in `frame::events`.
+    ///
+    /// Every one of those three is fatal here, and together they are
+    /// the whole of the player's report that "moving the buttons does
+    /// not work":
+    ///
+    /// * a drag *is* travel, so the gesture ended as `Nothing` and the
+    ///   editor was never told a finger had touched anything -- the
+    ///   control did not move by one pixel, on any phone, ever;
+    /// * a *tap* on a control did grab it, and with no release to let
+    ///   go, the control then followed every later touch anywhere on
+    ///   the glass -- tap a button, tap DONE, and the button is on the
+    ///   DONE button;
+    /// * and neither of those can be seen from a desktop, where the
+    ///   mouse path (`grab_at_cursor`, `set_cursor`, `release_control`)
+    ///   is correct and the tests that cover it all pass.
+    ///
+    /// So the editor takes the finger whole, exactly as the journal's
+    /// map does and for the same reason: what it needs is the press,
+    /// the movement and the lift, and `Pointer` is a thing that turns
+    /// all three into one click.
+    ///
+    /// Returns whether this finger is carrying a control, which is the
+    /// caller's signal to keep the rest of the interface out of it --
+    /// the footer buttons (RESET, DONE) still want the ordinary tap, so
+    /// a finger that grabbed nothing is handed straight back.
+    pub fn arranging_touch(
+        &mut self,
+        id: crate::platform::TouchId,
+        phase: crate::platform::TouchPhase,
+        at: (f32, f32),
+        ui_scale: f32,
+    ) -> bool {
+        use crate::platform::TouchPhase;
+        if !self.is_arranging() {
+            return false;
+        }
+        match phase {
+            TouchPhase::Started => {
+                // One control at a time: a second thumb landing while
+                // the first is carrying something is a palm, not a
+                // second drag, and it may still be meant for DONE.
+                if self.drag_finger.is_some() {
+                    return false;
+                }
+                if !self.grab_control(at, ui_scale) {
+                    return false;
+                }
+                self.drag_finger = Some(id);
+                // **The pointer does not carry this one.** `set_cursor`
+                // moves whatever `drag_scale` says is being held, which
+                // is how a mouse drags; leaving it unset means only the
+                // finger that took hold of the control can move it.
+                self.drag_scale = None;
+                self.cursor = Some(at);
+                true
+            }
+            TouchPhase::Moved => {
+                if self.drag_finger != Some(id) {
+                    return false;
+                }
+                self.cursor = Some(at);
+                self.drag_control(at, ui_scale);
+                true
+            }
+            // A lift *and* a cancel: the system taking a finger away --
+            // a notification pulled down over the screen -- is a
+            // control put down where it is, not a control left stuck to
+            // a finger that no longer exists.
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                if self.drag_finger != Some(id) {
+                    return false;
+                }
+                self.release_control();
+                true
+            }
+        }
     }
 
     /// The screen where the thumb controls are moved about.
@@ -5432,6 +5569,447 @@ pub fn controls_row_height() -> f32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// A phone, in the pixels the one this was found on has.
+    fn phone() -> (u32, u32) {
+        (2712, 1220)
+    }
+
+    /// The arrangement screen, open, at phone proportions.
+    fn arranging() -> Menu {
+        let mut menu = Menu::new(ServerList::default());
+        menu.set_screen_size(phone().0, phone().1);
+        menu.begin_arranging(crate::settings::TouchLayout::default());
+        menu.open(Screen::TouchControls);
+        assert!(menu.is_arranging());
+        menu
+    }
+
+    /// A point on the glass, in the interface space the frame loop
+    /// hands the menu -- exactly the conversion `frame::events` does
+    /// for a touch.
+    fn on_glass(px: (f32, f32)) -> (f32, f32) {
+        widgets::cursor_to_ui((px.0 as f64, px.1 as f64), phone(), 1.0)
+    }
+
+    /// A thumb drags a control and it goes with the thumb.
+    ///
+    /// **The player's report, in one test.** The editor was driven by
+    /// `Pointer`, which decides on the lift and decides nothing at all
+    /// when the finger travelled -- so a drag, which is travel, moved
+    /// nothing on any phone. This drives the finger the way the frame
+    /// loop does now: down, along, up.
+    #[test]
+    fn a_thumb_dragging_a_control_carries_it_across_the_glass() {
+        use crate::platform::{TouchPhase, TouchId};
+        const THUMB: TouchId = 7;
+        let scale = 1.5;
+        let mut menu = arranging();
+
+        let before = menu.placed_controls(scale);
+        let slot = before
+            .buttons
+            .iter()
+            .position(|b| matches!(b.emits, crate::settings::Emits::Key(crate::platform::Key::Space)))
+            .expect("the jump button is on the glass");
+        let from = before.buttons[slot].centre;
+        // Taken hold of off-centre, which is what a thumb does.
+        let grab = (from.0 + 30.0, from.1 - 20.0);
+        assert!(
+            menu.arranging_touch(THUMB, TouchPhase::Started, on_glass(grab), scale),
+            "the thumb landed on JUMP and picked nothing up",
+        );
+
+        let steps = [(0.55, 0.45), (0.40, 0.42), (0.30, 0.40)];
+        for (fx, fy) in steps {
+            let at = (phone().0 as f32 * fx, phone().1 as f32 * fy);
+            assert!(menu.arranging_touch(THUMB, TouchPhase::Moved, on_glass(at), scale));
+            // ...and it is under the thumb *during* the drag, not only
+            // at the end of it: a control that catches up on release is
+            // a control being aimed blind.
+            let now = menu.placed_controls(scale).buttons[slot].centre;
+            let held = (at.0 - (grab.0 - from.0), at.1 - (grab.1 - from.1));
+            assert!(
+                (now.0 - held.0).abs() < 2.0 && (now.1 - held.1).abs() < 2.0,
+                "the thumb is at {at:?} holding it at {held:?} and it is drawn at {now:?}",
+            );
+        }
+        let last = (
+            phone().0 as f32 * steps[2].0,
+            phone().1 as f32 * steps[2].1,
+        );
+        assert!(menu.arranging_touch(THUMB, TouchPhase::Ended, on_glass(last), scale));
+
+        // ...and the next finger, anywhere at all, does not take it
+        // with it. There is no release event on a phone, and a control
+        // that goes on following every later touch is what a tap on one
+        // used to do.
+        let settled = menu.arrangement();
+        menu.set_cursor(Some(on_glass((100.0, 100.0))));
+        assert!(
+            !menu.arranging_touch(THUMB + 1, TouchPhase::Moved, on_glass((100.0, 100.0)), scale),
+            "a finger that grabbed nothing was allowed to carry something",
+        );
+        assert!(
+            menu.arrangement().same_as(&settled),
+            "the control was still being carried after the thumb left",
+        );
+    }
+
+    /// Every control the game puts on the glass can be taken hold of on
+    /// the screen that exists to move it.
+    ///
+    /// **Two of them could not.** The editor holds the wheel open so
+    /// its members can be seen, and in play an open wheel takes off the
+    /// glass whatever it is standing on -- so PACK and MAP were drawn
+    /// nowhere on the arrangement screen at INTERFACE SIZE 1.5 on a
+    /// 2712x1220 phone, and a player could not move the two buttons the
+    /// wheel was covering, which are precisely the two they would want
+    /// to move.
+    #[test]
+    fn every_control_in_play_can_be_taken_hold_of_in_the_editor() {
+        use crate::platform::{TouchPhase, TouchId};
+        for scale in [1.0, 1.5, 2.0] {
+            let in_play = crate::platform::touch::Layout::for_size(
+                crate::platform::Size { width: phone().0, height: phone().1 },
+                crate::settings::TouchLayout::default(),
+                scale,
+                false,
+            );
+            for slot in 0..crate::settings::TouchLayout::BUTTONS {
+                if !in_play.buttons[slot].shown {
+                    continue;
+                }
+                let mut menu = arranging();
+                let editor = menu.placed_controls(scale);
+                assert!(
+                    editor.buttons[slot].shown,
+                    "at {scale} the game draws {:?} and the editor does not",
+                    in_play.buttons[slot].emits,
+                );
+                let at = editor.buttons[slot].centre;
+                assert!(
+                    menu.arranging_touch(0 as TouchId, TouchPhase::Started, on_glass(at), scale),
+                    "at {scale} nothing was picked up from the middle of {:?}",
+                    editor.buttons[slot].emits,
+                );
+            }
+        }
+    }
+
+    /// The editor draws the controls the game draws, and only those.
+    ///
+    /// **Where the whole screen went wrong.** It used to lay itself out
+    /// with the wheel held open, so that the three buttons inside it
+    /// could be seen -- and an open wheel is a state with two rules
+    /// attached. Its members are placed by the ring rather than by the
+    /// arrangement, so dragging one wrote a number nothing reads; and
+    /// an open wheel takes off the glass whatever it stands on, so PACK
+    /// and MAP were drawn nowhere at all on the screen whose only job
+    /// is moving them. Three controls that could not be moved, two that
+    /// could not be reached, and no sign of why.
+    ///
+    /// Compared against the game's own layout rather than against a
+    /// list of expected numbers: what this screen must never again do
+    /// is show a control somewhere the game will not put it.
+    #[test]
+    fn the_editor_draws_what_the_game_draws() {
+        for scale in [1.0, 1.5, 2.5] {
+            let menu = arranging();
+            let editor = menu.placed_controls(scale);
+            let in_play = crate::platform::touch::Layout::for_size(
+                crate::platform::Size { width: phone().0, height: phone().1 },
+                crate::settings::TouchLayout::default(),
+                scale,
+                false,
+            );
+            for slot in 0..crate::settings::TouchLayout::BUTTONS {
+                assert_eq!(
+                    (editor.buttons[slot].shown, editor.buttons[slot].centre),
+                    (in_play.buttons[slot].shown, in_play.buttons[slot].centre),
+                    "at {scale} the editor and the game disagree about {:?}",
+                    in_play.buttons[slot].emits,
+                );
+            }
+            assert_eq!(editor.stick.centre, in_play.stick.centre);
+        }
+    }
+
+    /// A thumb still on a control when the screen is left does not
+    /// hold it for the rest of the session.
+    ///
+    /// A finger's drag is owned by its id, and only the editor hears
+    /// that finger lift. Leave the screen with a control in hand --
+    /// one thumb dragging, another pressing DONE -- and the lift goes
+    /// somewhere that is no longer listening, so the editor would come
+    /// back believing something was still being carried and refuse to
+    /// pick anything up. One control at a time is a rule that has to
+    /// end when the screen does.
+    #[test]
+    fn leaving_the_editor_with_a_control_in_hand_does_not_jam_it() {
+        use crate::platform::{TouchPhase, TouchId};
+        const THUMB: TouchId = 9;
+        let scale = 1.5;
+        let mut menu = arranging();
+        let before = menu.placed_controls(scale);
+        let slot = before.buttons.iter().position(|b| b.shown).expect("a button");
+        assert!(menu.arranging_touch(
+            THUMB,
+            TouchPhase::Started,
+            on_glass(before.buttons[slot].centre),
+            scale
+        ));
+        // The other thumb presses DONE, and the screen goes.
+        menu.apply(Action::Back);
+        menu.open(Screen::TouchControls);
+
+        let again = menu.placed_controls(scale);
+        assert!(
+            menu.arranging_touch(
+                THUMB + 1,
+                TouchPhase::Started,
+                on_glass(again.buttons[slot].centre),
+                scale
+            ),
+            "the editor still thought the last thumb was holding something",
+        );
+    }
+
+    /// Two controls cannot be dropped in one place.
+    ///
+    /// Two boxes drawn through one another is one button that can never
+    /// be pressed: `Layout::button_at` answers with the first control
+    /// whose drawn box the thumb is inside, so the other one is a
+    /// picture. The player cannot see which of the two they have lost,
+    /// which is why the editor will not let it happen.
+    #[test]
+    fn two_controls_cannot_be_dropped_on_one_another() {
+        use crate::platform::{TouchPhase, TouchId};
+        const THUMB: TouchId = 1;
+        let scale = 1.0;
+        let mut menu = arranging();
+        let before = menu.placed_controls(scale);
+        let jump = before
+            .buttons
+            .iter()
+            .position(|b| matches!(b.emits, crate::settings::Emits::Key(crate::platform::Key::Space)))
+            .expect("JUMP");
+        let pack = before
+            .buttons
+            .iter()
+            .position(|b| matches!(b.emits, crate::settings::Emits::Key(crate::platform::Key::KeyI)))
+            .expect("PACK");
+        let onto = before.buttons[pack].centre;
+
+        assert!(menu.arranging_touch(
+            THUMB,
+            TouchPhase::Started,
+            on_glass(before.buttons[jump].centre),
+            scale
+        ));
+        assert!(menu.arranging_touch(THUMB, TouchPhase::Moved, on_glass(onto), scale));
+        menu.arranging_touch(THUMB, TouchPhase::Ended, on_glass(onto), scale);
+
+        let after = menu.placed_controls(scale);
+        let (a, b) = (after.buttons[jump], after.buttons[pack]);
+        let apart = (a.centre.0 - b.centre.0).abs() >= a.half.0 + b.half.0
+            || (a.centre.1 - b.centre.1).abs() >= a.half.1 + b.half.1;
+        assert!(
+            apart,
+            "JUMP at {:?} and PACK at {:?} are drawn through one another",
+            a.centre, b.centre,
+        );
+        // ...and both are still the button a thumb on them presses.
+        assert_eq!(after.button_at(a.centre.0, a.centre.1), Some(jump));
+        assert_eq!(after.button_at(b.centre.0, b.centre.1), Some(pack));
+    }
+
+    /// A control that has been moved is pressed where it is drawn --
+    /// in the game, not in the editor, and at any interface size.
+    ///
+    /// The editor writes an arrangement and the game lays it out again
+    /// through three further rules. If the two ends disagree the button
+    /// is drawn in one place and answers in another, which is the one
+    /// failure this whole screen can produce and never explain.
+    #[test]
+    fn a_control_that_has_been_moved_is_pressed_where_the_game_draws_it() {
+        use crate::platform::{TouchPhase, TouchId};
+        const THUMB: TouchId = 2;
+        for scale in [1.0, 1.5, 2.5] {
+            let mut menu = arranging();
+            let before = menu.placed_controls(scale);
+            let slot = before
+                .buttons
+                .iter()
+                .position(|b| matches!(b.emits, crate::settings::Emits::Key(crate::platform::Key::Space)))
+                .expect("JUMP");
+            let to = (phone().0 as f32 * 0.62, phone().1 as f32 * 0.30);
+            assert!(menu.arranging_touch(
+                THUMB,
+                TouchPhase::Started,
+                on_glass(before.buttons[slot].centre),
+                scale
+            ));
+            assert!(menu.arranging_touch(THUMB, TouchPhase::Moved, on_glass(to), scale));
+            menu.arranging_touch(THUMB, TouchPhase::Ended, on_glass(to), scale);
+
+            // The layout the *game* builds, wheel shut, from the
+            // arrangement the editor wrote.
+            let played = crate::platform::touch::Layout::for_size(
+                crate::platform::Size { width: phone().0, height: phone().1 },
+                menu.arrangement(),
+                scale,
+                false,
+            );
+            let drawn = played.buttons[slot];
+            assert!(drawn.shown, "at {scale} the moved button is not on the glass");
+            assert_eq!(
+                played.button_at(drawn.centre.0, drawn.centre.1),
+                Some(slot),
+                "at {scale} a thumb in the middle of the button pressed something else",
+            );
+        }
+    }
+
+    /// The arrangement survives the settings file.
+    ///
+    /// A drag writes a `Placement`, the settings file writes it as
+    /// text, and the next launch reads it back: a control moved on a
+    /// phone has to be where the player put it tomorrow, or the screen
+    /// is a toy.
+    #[test]
+    fn an_arrangement_dragged_out_survives_being_written_down_and_read_back() {
+        use crate::platform::{TouchPhase, TouchId};
+        const THUMB: TouchId = 4;
+        let scale = 1.5;
+        let mut menu = arranging();
+        let before = menu.placed_controls(scale);
+        let slot = before
+            .buttons
+            .iter()
+            .position(|b| matches!(b.emits, crate::settings::Emits::Key(crate::platform::Key::Space)))
+            .expect("JUMP");
+        let to = (phone().0 as f32 * 0.35, phone().1 as f32 * 0.25);
+        assert!(menu.arranging_touch(
+            THUMB,
+            TouchPhase::Started,
+            on_glass(before.buttons[slot].centre),
+            scale
+        ));
+        assert!(menu.arranging_touch(THUMB, TouchPhase::Moved, on_glass(to), scale));
+        menu.arranging_touch(THUMB, TouchPhase::Ended, on_glass(to), scale);
+        let moved = menu.arrangement();
+
+        // Through the file, in the format the game really writes.
+        let settings = crate::settings::ClientSettings {
+            touch_layout: moved,
+            ..crate::settings::ClientSettings::default()
+        };
+        let text = toml::to_string(&settings).expect("the settings serialise");
+        let read: crate::settings::ClientSettings =
+            toml::from_str(&text).expect("and come back");
+        assert!(
+            read.touch_layout.same_as(&moved),
+            "the arrangement did not survive the settings file",
+        );
+
+        // ...and a game started from that file draws the control in the
+        // same place.
+        let after_restart = crate::platform::touch::Layout::for_size(
+            crate::platform::Size { width: phone().0, height: phone().1 },
+            read.touch_layout,
+            scale,
+            false,
+        );
+        let played = crate::platform::touch::Layout::for_size(
+            crate::platform::Size { width: phone().0, height: phone().1 },
+            moved,
+            scale,
+            false,
+        );
+        assert_eq!(
+            after_restart.buttons[slot].centre,
+            played.buttons[slot].centre,
+        );
+    }
+
+    /// A control keeps its corner of the glass when the phone is turned.
+    ///
+    /// The arrangement is written down as an inset from a corner for
+    /// exactly this reason. A button moved to the right thumb has to
+    /// still be under the right thumb in the other orientation, and a
+    /// button that is off the glass in one of them is a button that is
+    /// gone.
+    #[test]
+    fn an_arrangement_made_in_one_orientation_is_still_on_the_glass_in_the_other() {
+        use crate::platform::{TouchPhase, TouchId};
+        const THUMB: TouchId = 5;
+        let scale = 1.5;
+        let mut menu = arranging();
+        let before = menu.placed_controls(scale);
+        let slot = before
+            .buttons
+            .iter()
+            .position(|b| matches!(b.emits, crate::settings::Emits::Key(crate::platform::Key::Space)))
+            .expect("JUMP");
+        let to = (phone().0 as f32 * 0.80, phone().1 as f32 * 0.70);
+        assert!(menu.arranging_touch(
+            THUMB,
+            TouchPhase::Started,
+            on_glass(before.buttons[slot].centre),
+            scale
+        ));
+        assert!(menu.arranging_touch(THUMB, TouchPhase::Moved, on_glass(to), scale));
+        menu.arranging_touch(THUMB, TouchPhase::Ended, on_glass(to), scale);
+
+        let turned = crate::platform::touch::Layout::for_size(
+            crate::platform::Size { width: phone().1, height: phone().0 },
+            menu.arrangement(),
+            scale,
+            false,
+        );
+        let placed = turned.buttons[slot];
+        assert!(
+            placed.centre.0 - placed.half.0 >= -0.5
+                && placed.centre.0 + placed.half.0 <= phone().1 as f32 + 0.5
+                && placed.centre.1 - placed.half.1 >= -0.5
+                && placed.centre.1 + placed.half.1 <= phone().0 as f32 + 0.5,
+            "turned the phone and the button is at {:?}",
+            placed.centre,
+        );
+        // Measured from the right-hand side, it stays on the right.
+        assert!(
+            placed.centre.0 * 2.0 > phone().1 as f32,
+            "a button under the right thumb crossed to the left when the phone turned",
+        );
+    }
+
+    /// RESET puts the controls back exactly as they shipped.
+    #[test]
+    fn resetting_the_arrangement_gives_back_the_one_the_game_ships() {
+        use crate::platform::{TouchPhase, TouchId};
+        const THUMB: TouchId = 6;
+        let scale = 1.5;
+        let mut menu = arranging();
+        let before = menu.placed_controls(scale);
+        let slot = 0;
+        let to = (phone().0 as f32 * 0.5, phone().1 as f32 * 0.5);
+        assert!(menu.arranging_touch(
+            THUMB,
+            TouchPhase::Started,
+            on_glass(before.buttons[slot].centre),
+            scale
+        ));
+        assert!(menu.arranging_touch(THUMB, TouchPhase::Moved, on_glass(to), scale));
+        menu.arranging_touch(THUMB, TouchPhase::Ended, on_glass(to), scale);
+        assert!(!menu.arrangement().same_as(&crate::settings::TouchLayout::default()));
+
+        menu.apply(Action::ResetTouchControls);
+        assert!(
+            menu.arrangement().same_as(&crate::settings::TouchLayout::default()),
+            "RESET left the arrangement somewhere in between",
+        );
+    }
 
     /// A control dragged with a finger ends up under the finger.
     ///
