@@ -41,7 +41,7 @@
   **The version code is the version name, and it only ever goes up.**
   major*10000 + minor*100 + patch: 1.5.1 is 10501. Play refuses an
   upload whose code is not greater than the last one, and a code that
-  has been used is used forever -- there is no taking it back, which
+  has been used is used forever: there is no taking it back, which
   is why it is derived from the name rather than incremented by hand.
   The name is what a player reads; the code is what the store sorts
   by, and the two disagreeing is how a build nobody can update gets
