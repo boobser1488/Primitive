@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Refuses a commit signed by anyone but this repository's own identity.
+#
+# **Why this exists.** An agent working in this repository once committed
+# as the owner's personal address instead of the project's. Nothing was
+# misconfigured -- `user.email` was correct in the repository and there
+# was no global setting and no `EMAIL` in the environment -- so it was
+# passed explicitly at commit time, once. It reached GitHub, and GitHub
+# builds its contributors list from commit authorship: the address
+# appeared as a separate person on the repository's front page. Getting
+# it off meant rewriting twenty-four commits, force-pushing two branches
+# and moving a tag, and the stale entry still sat in GitHub's cache for
+# a day afterwards.
+#
+# One line of prevention against that: the check is at the moment of the
+# commit, where the fix is free.
+#
+# Installed by `tools/install-hooks.sh`; hooks live in `.git/`, which is
+# not version-controlled, so the file kept here is the original.
+
+set -euo pipefail
+
+allowed_email="primitive@users.noreply.github.com"
+allowed_name="Primitive"
+
+# What git is *about to* record, which is not necessarily what
+# `git config user.email` says: `--author`, `-c user.email=...` and
+# `GIT_AUTHOR_EMAIL` all overrule it, and all three were candidates for
+# what happened. `git var` answers with the value of the commit being
+# made.
+author="$(git var GIT_AUTHOR_IDENT)"
+committer="$(git var GIT_COMMITTER_IDENT)"
+
+# "Name <email> 1727356800 +0300" -> the address between the brackets.
+address_of() { printf '%s' "$1" | sed -n 's/.*<\(.*\)>.*/\1/p'; }
+name_of() { printf '%s' "$1" | sed -n 's/^\(.*\) <.*/\1/p'; }
+
+refuse() {
+    printf '\n  This commit would be signed %s <%s>,\n' "$2" "$3" >&2
+    printf '  and this repository commits as %s <%s>.\n\n' "$allowed_name" "$allowed_email" >&2
+    printf '  %s\n\n' "$1" >&2
+    printf '  GitHub builds its contributors list from this field, so a\n' >&2
+    printf '  stray address becomes a person on the front page and takes a\n' >&2
+    printf '  history rewrite to remove. See tools/pre-commit.\n\n' >&2
+    printf '  If the address is right and this hook is wrong, fix the hook\n' >&2
+    printf '  rather than passing --no-verify: the next commit would make\n' >&2
+    printf '  the same mistake silently.\n\n' >&2
+    exit 1
+}
+
+if [ "$(address_of "$author")" != "$allowed_email" ]; then
+    refuse "The author address is not this repository's." "$(name_of "$author")" "$(address_of "$author")"
+fi
+if [ "$(address_of "$committer")" != "$allowed_email" ]; then
+    refuse "The committer address is not this repository's." "$(name_of "$committer")" "$(address_of "$committer")"
+fi
+
+# The name matters less than the address -- GitHub keys the contributor
+# off the address -- but a commit reading "Admin <primitive@...>" is a
+# misconfiguration worth catching in the same breath.
+if [ "$(name_of "$author")" != "$allowed_name" ]; then
+    refuse "The author name is not this repository's." "$(name_of "$author")" "$(address_of "$author")"
+fi
