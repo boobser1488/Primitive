@@ -975,9 +975,9 @@ impl Species {
             // row here is: see `animal_model::the_shared_hit_box_is_the_model_that_is_drawn`.
             Species::Fox => (0.125, 0.525, 0.8125),
             Species::Elk => (0.375, 1.2375, 1.8125),
-            Species::Beaver => (0.1938, 0.2, 0.7188),
+            Species::Beaver => (0.1875, 0.2, 0.7188),
             Species::Duck => (0.1531, 0.3275, 0.4875),
-            Species::Frog => (0.1625, 0.0912, 0.275),
+            Species::Frog => (0.1625, 0.09, 0.275),
         }
     }
 

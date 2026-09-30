@@ -543,13 +543,6 @@ fn fox(
         .iter()
         .map(|f| (f.at, (f.at.0 - animal.at().0).hypot(f.at.2 - animal.at().2)))
         .min_by(|a, b| a.1.total_cmp(&b.1));
-    // **Where it last stood under the open sky**, kept in `home` -- which
-    // nothing else of a fox's uses. Under a roof it is the way it came in:
-    // see the carrying branch below.
-    let covered = roofed(world, animal.at());
-    if !covered {
-        animal.home = Some((animal.at().0, animal.at().2));
-    }
     // **Carrying: going home**, away from whoever is nearest and into cover,
     // at a trot. The kill is eaten where it was going; nothing of it comes
     // back unless somebody stops the fox on the way (`struck`).
@@ -564,18 +557,25 @@ fn fox(
         };
         animal.mind = Mind::Wander;
         animal.attitude = Attitude::Easy;
-        // **Out of a building the way it came in.** Animals here do not find
-        // paths -- one that could find its way out of a pit is one nobody can
-        // trap (the parent module's doc) -- and none of `way_out`'s sixteen
-        // headings threads a one-cell door from the back of a hen house. What
-        // a fox has instead is the last spot it stood on under the sky, which
-        // for a coop is the step outside its door, and a line to that goes
-        // through the door it came in by.
-        animal.wants_yaw = match animal.home.filter(|_| covered) {
-            Some((hx, hz)) => (hz - animal.at().2).atan2(hx - animal.at().0),
+        // **Out of a building the way it came in**: under a roof, by the
+        // first step of the shortest way to open sky (`way_to_the_sky`), and
+        // re-aimed every few strides so it takes the next one. None of
+        // `way_out`'s sixteen headings threads a one-cell door from the back
+        // of a hen house, which is why the search is here at all.
+        //
+        // **Not a line to where it last stood outside.** That was the version
+        // before this: `home` kept the last open spot it thought on, and the fox
+        // made for it in a straight line. From a back corner that line
+        // crosses the wall beside the door, not the door, and the fox slid
+        // along the stone toward the gap at a fifth of a block a second: a
+        // full run of the scenarios watched it do that for twelve seconds
+        // with the grouse in its jaws, and runs that passed had it crawling.
+        let covered = roofed(world, animal.at());
+        animal.wants_yaw = match covered.then(|| way_to_the_sky(world, animal)).flatten() {
+            Some(yaw) => yaw,
             None => way_out(world, animal, away),
         };
-        animal.next_thought = rng.range(0.6, 1.2);
+        animal.next_thought = if covered { rng.range(0.15, 0.3) } else { rng.range(0.6, 1.2) };
         return true;
     }
     if animal.fed_for > 0.0 {
@@ -668,6 +668,53 @@ fn way_out(world: &dyn BlockWorld, animal: &Animal, away: f32) -> f32 {
     }
     best.0
 }
+
+/// **The first step out from under a roof**: a heading at the centre of the
+/// next cell on the shortest way, over the floor, to a cell with open sky
+/// above it -- or `None` if there is none within `SKY_SEARCH` cells.
+///
+/// **A search, where everything else an animal does is steering**, and the
+/// parent module's rule against paths still holds, because of what it
+/// searches: only floor under a roof, a cell at a time by `footing` -- the
+/// same step up and step down `walk` allows. A pit is open to the sky, so an
+/// animal in one never searches at all; one whose walls are too tall to step
+/// has no way out to find. What it finds is a door, which is the thing a
+/// fox in a hen house needs and nothing a trap depends on.
+///
+/// The target is the *centre* of the neighbouring cell: from anywhere in its
+/// own cell a line to that point stays inside the two cells, so it never
+/// crosses the jamb of the door it is going through.
+fn way_to_the_sky(world: &dyn BlockWorld, animal: &Animal) -> Option<f32> {
+    let start = animal.at();
+    let origin = (start.0.floor() as i32, start.2.floor() as i32);
+    let mut seen = std::collections::HashSet::from([origin]);
+    let mut queue = std::collections::VecDeque::from([(origin, start.1, None::<(i32, i32)>)]);
+    while let Some((cell, y, first)) = queue.pop_front() {
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let next = (cell.0 + dx, cell.1 + dz);
+            if seen.len() >= SKY_SEARCH || !seen.insert(next) {
+                continue;
+            }
+            let centre = (next.0 as f32 + 0.5, y, next.1 as f32 + 0.5);
+            let Some(stands) = footing(world, centre, animal.species) else {
+                continue;
+            };
+            let first = first.unwrap_or(next);
+            if !roofed(world, (centre.0, stands, centre.2)) {
+                let (tx, tz) = (first.0 as f32 + 0.5, first.1 as f32 + 0.5);
+                return Some((tz - start.2).atan2(tx - start.0));
+            }
+            queue.push_back((next, stands, Some(first)));
+        }
+    }
+    None
+}
+
+/// How many cells `way_to_the_sky` looks at before it gives up: a barn's
+/// floor. Every tick of a carrying fox under a roof can ask, so this is its
+/// whole cost -- a hundred block reads a quarter of a second, for the one
+/// fox that has a bird in its jaws.
+const SKY_SEARCH: usize = 96;
 
 /// How far ahead `way_out` counts room, in blocks: past the door of a hen
 /// house and a stride into the open.
@@ -771,7 +818,16 @@ pub(super) fn plunge(animal: &mut Animal, world: &dyn BlockWorld, away: f32) -> 
     }
     animal.mind = Mind::Flee;
     animal.next_thought = FLEE_SECONDS;
-    if animal.afloat || in_liquid(world, animal.position, animal.species) {
+    // **On the water is its feet in it**, not its middle. A beaver floats
+    // with its middle at the surface, and bobs: `afloat` and `in_liquid`
+    // (both asked at the middle) are true one tick and false the next. A
+    // fright that landed on a false tick used to send the beaver "to the
+    // water" -- across the surface of the pond it was already swimming in,
+    // with a player on the bank watching it paddle off instead of going
+    // under, one run in three of the scenario that says it goes under.
+    let feet = (animal.position.0.floor() as i32, animal.position.1.floor() as i32, animal.position.2.floor() as i32);
+    let feet_wet = world.block(feet.0, feet.1, feet.2).is_some_and(primitive_shared::types::is_liquid);
+    if animal.afloat || feet_wet || in_liquid(world, animal.position, animal.species) {
         // How long this dive is, from the animal and where it went under:
         // `bolt` has no dice to hand, and two beavers diving off one bank
         // should not come up together.
@@ -1376,6 +1432,30 @@ mod tests {
     }
 
     #[test]
+    fn a_beaver_frightened_at_the_top_of_its_bob_still_goes_under() {
+        // A floating beaver's middle crosses the surface as it bobs, so on
+        // some ticks nothing asked at its middle says it is in the water.
+        // The fright that lands on one of those used to send it paddling
+        // across its own pond "to the water".
+        let world = meadow_with_a_pond(24, 6);
+        let mut animals = Animals::seeded(15);
+        let id = animals.spawn(Species::Beaver, (9.5, 20.5, 0.5)).expect("beaver");
+        let mut up = false;
+        for _ in 0..200 {
+            animals.step(&world, &far_off(), 0.05, NOON);
+            let beaver = animals.find(id).expect("beaver");
+            if !beaver.afloat && !in_liquid(&world, beaver.position, Species::Beaver) {
+                up = true;
+                break;
+            }
+        }
+        assert!(up, "the beaver never bobbed out of the water, so this says nothing");
+        let beaver = animals.find_mut_for_test(id).expect("beaver");
+        assert!(plunge(beaver, &world, 0.0));
+        assert!(beaver.under_for > 0.0, "a beaver at the top of its bob swam for the water it was in");
+    }
+
+    #[test]
     fn a_duck_on_its_pond_floats_on_it_and_dabbles() {
         let world = meadow_with_a_pond(24, 4);
         let mut animals = Animals::seeded(16);
@@ -1434,6 +1514,47 @@ mod tests {
         let dropped: Vec<Species> = animals.take_fallen().into_iter().map(|d| d.species).collect();
         assert_eq!(dropped, [Species::Fowl], "the fox kept the grouse when it was hit");
         assert_eq!(animals.find(fox).expect("fox").carrying, None);
+    }
+
+    #[test]
+    fn a_fox_with_a_kill_in_the_back_corner_of_a_hen_house_finds_the_door() {
+        // Stone walls round a three-by-three floor, a roof on top, and one
+        // door a cell wide in the middle of the west wall: the coop of the
+        // scenario, where a fox making for its last open spot in a straight
+        // line slid along the wall beside the door instead of through it.
+        let world = meadow(24);
+        for x in 0..5 {
+            for z in 0..5 {
+                let edge = x == 0 || x == 4 || z == 0 || z == 4;
+                for y in 21..=22 {
+                    if edge && !(x == 0 && z == 2) {
+                        world.put(x, y, z, BLOCK_STONE);
+                    }
+                }
+                world.put(x, 23, z, BLOCK_STONE);
+            }
+        }
+        for corner in [(3.4, 1.4), (3.4, 3.6), (1.3, 1.3), (1.3, 3.7)] {
+            let mut animals = Animals::seeded(5);
+            let fox = animals.spawn(Species::Fox, (corner.0, 21.0, corner.1)).expect("fox");
+            {
+                let fox = animals.find_mut_for_test(fox).expect("fox");
+                fox.carrying = Some(Carried::Kill(Species::Fowl));
+                fox.fed_for = Species::Fox.fed_seconds();
+                fox.next_thought = 0.0;
+            }
+            let mut out = false;
+            for _ in 0..160 {
+                animals.step(&world, &far_off(), 0.05, NOON);
+                let at = animals.find(fox).expect("fox").at();
+                if !(-0.3..5.3).contains(&at.0) || !(-0.3..5.3).contains(&at.2) {
+                    out = true;
+                    break;
+                }
+            }
+            let at = animals.find(fox).expect("fox").at();
+            assert!(out, "a fox with a grouse at {corner:?} in a hen house was still inside eight seconds later, at {at:?}");
+        }
     }
 
     #[test]

@@ -5105,13 +5105,43 @@ fn a_beaver_in_its_pond_goes_under_when_a_player_comes_along_the_bank() {
     dig_a_pond(&mut s, x0 + 12, z - 4, 9, 10);
     let beaver = s
         .server()
-        .spawn_animal(Species::Beaver, (x0 as f32 + 17.5, GROUND as f32 + 0.3, z as f32 + 0.5))
+        .spawn_animal(Species::Beaver, (x0 as f32 + 14.5, GROUND as f32 + 0.3, z as f32 + 0.5))
         .expect("no beaver would come");
-    s.seconds(2.0);
+    // **Swimming first**, as the client sees it: a beaver on its pond. It may
+    // have paddled to the bank in the meantime -- it lives on both -- and one
+    // on the bank makes for the water before it can go under it, which is a
+    // different scenario from this one.
+    use primitive_shared::protocol::Attitude;
+    let afloat = s.until(15.0, |s| seen_animal(s, beaver).is_some_and(|(_, attitude, _)| attitude == Attitude::Swimming));
+    assert!(afloat, "the beaver never swam on its pond");
     let surface = f64::from(GROUND) + 1.0;
-    s.face(0.0);
-    s.hold(Action::Forward);
-    let under = s.until(10.0, |s| seen_animal(s, beaver).is_some_and(|(at, _, _)| at.y < surface - 0.45));
+    // **Walking at the beaver, wherever it has paddled to, and stopping on
+    // the bank**, turned a quarter of a second at a time -- what the name
+    // says a player does. The first version walked a straight line down the
+    // pond and on into it, and went red about one run in three. Most of that
+    // was the beaver's: frightened at the top of its bob it paddled off
+    // across the surface instead of diving (`woods::plunge`, and the test
+    // `a_beaver_frightened_at_the_top_of_its_bob_still_goes_under`). The
+    // rest was the walk: a player who wades in and sinks to the bed is not
+    // one on the bank, and the edge is a block and a half short of the water
+    // because a quarter of a second of walking is a block.
+    let edge = f64::from(x0 + 12) - 1.5;
+    let mut under = false;
+    for _ in 0..48 {
+        if s.feet().x < edge {
+            if let Some(at) = server_sees(&s, beaver) {
+                let to = at - s.feet();
+                s.face(to.z.atan2(to.x) as f32);
+            }
+            s.hold(Action::Forward);
+        } else {
+            s.release(Action::Forward);
+        }
+        under = s.until(0.25, |s| seen_animal(s, beaver).is_some_and(|(at, _, _)| at.y < surface - 0.45));
+        if under {
+            break;
+        }
+    }
     s.release(Action::Forward);
     assert!(under, "a beaver on its pond let a player walk up the bank to it");
 }
