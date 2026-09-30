@@ -568,7 +568,17 @@ pub type PlayerId = u64;
 /// `ForgetMark` out, `Trail` back, all appended, and blocks at ids 695-696
 /// (`types::BLOCK_MAP`, `types::BLOCK_BLAZE`) with one row at the end of
 /// `RECIPES`. 57 still, which no release speaks.
-pub const PROTOCOL_VERSION: u32 = 57;
+///
+/// **58: an animal's glance.** `EntityKind::Animal` gained a byte, `glance`
+/// -- which way its head is turned off its body -- and that is a field in
+/// the middle of a struct, which bincode cannot read around. 57 is spoken by
+/// 1.5.0 and 1.5.1, so this one is a bump and not a rider: an old client
+/// joining a new server would read every animal after the first one as
+/// noise. Carried with it, appended and harmless to an old reader: three
+/// more [`Attitude`]s (`Resting`, `Startled`, `Swimming`), five species at
+/// the end of `Species`, and blocks at ids 780-784
+/// (`types::BLOCK_CARCASS_ELK`).
+pub const PROTOCOL_VERSION: u32 = 58;
 
 /// What kind of container a screen is showing.
 ///
@@ -1228,6 +1238,26 @@ pub enum Attitude {
     /// old client reads a 6 as `Easy`, and sees an animal stand still for a
     /// second before its carcass appears, which is what it saw before.
     Dying,
+    /// **Lying down**, legs folded under it: the deep rest of the middle of
+    /// the day and the small hours, where `Dozing` is resting on its feet.
+    ///
+    /// Appended, for `Dying`'s reason. **It costs the animal something**, and
+    /// that is why it is on the wire at all rather than a pose the client
+    /// picks: a lying animal has to get up before it can run (the server's
+    /// `RISING_SECONDS`), so a herd bedded down in the long grass is the one
+    /// herd a careful player can get close to -- and a player has to be able
+    /// to see which herd that is.
+    Resting,
+    /// **Frozen, head high, facing what it heard**: the half second between
+    /// noticing something and deciding about it. What a deer does before it
+    /// bolts, and the moment a player who stops dead can still turn into
+    /// nothing at all (the server's `FREEZE_SECONDS`).
+    Startled,
+    /// **In the water on purpose**: swimming with its head up, or sitting on
+    /// the surface. Sent rather than guessed because the client does not
+    /// know where the water is round an animal without asking its chunks
+    /// for every one every frame, and the server already knows.
+    Swimming,
 }
 
 impl From<u8> for Attitude {
@@ -1239,6 +1269,9 @@ impl From<u8> for Attitude {
             4 => Attitude::Stalking,
             5 => Attitude::Dozing,
             6 => Attitude::Dying,
+            7 => Attitude::Resting,
+            8 => Attitude::Startled,
+            9 => Attitude::Swimming,
             _ => Attitude::Easy,
         }
     }
@@ -1312,6 +1345,19 @@ pub enum EntityKind {
         /// deer costs one byte. Zero reads as a wild animal with nothing on,
         /// which is the one reading that cannot put a rider on a boar.
         tack: u8,
+        /// **Which way its head is turned off its body**, in hundredths of a
+        /// radian: positive to its right, the way a growing yaw turns
+        /// (`Camera::right_horizontal`). Nought is straight ahead.
+        ///
+        /// The one thing about an animal's attention a player reads before
+        /// anything else, and the server is the only side that knows what it
+        /// is attending to: a deer that heard a twig break to its left turns
+        /// its head left before its body, and a wolf watching a person keeps
+        /// its eyes on them while it walks round. Derived from where the
+        /// animal last placed a threat (`animals::Animal::threat_at`) and
+        /// clamped to what a neck does; a byte, because a neck does not need
+        /// finer than a degree.
+        glance: i8,
     },
     /// A raft on the water. The entity's `y` is its waterline -- see
     /// `raft::Body`.

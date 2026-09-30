@@ -1931,6 +1931,10 @@ mod tests {
                 "carcass_lion",
                 // ...and the horse's, half a cell like the zebra's.
                 "carcass_horse",
+                // ...and the woods' and the water's, on the same terms.
+                "carcass_elk",
+                "carcass_fox",
+                "carcass_beaver",
                 "nest_eggs",
                 "nest",
                 // ...and the three low pieces of furniture. A bed

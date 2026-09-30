@@ -917,6 +917,10 @@ const GORE_INTERVAL: f32 = 2.0;
 /// How long the red flash on a struck animal lasts, in seconds.
 const HURT_SECONDS: f32 = 0.4;
 
+/// How far a head turns off the body at the most, in radians: a little over
+/// sixty degrees. See `Animal::glance`.
+const GLANCE_MOST: f32 = 1.1;
+
 /// How long a killed animal takes to go down, in seconds: the time between
 /// the blow and the carcass.
 ///
@@ -2379,6 +2383,33 @@ pub struct Animal {
     /// Seconds before a gentled horse that has just thrown somebody lets
     /// anybody try its back again (`husbandry::SETTLE_SECONDS`).
     settle_for: f32,
+    /// **In the water on purpose**, as of the last `walk`: an elk standing
+    /// in the bog, a duck on the pond, a beaver swimming its stream. Read by
+    /// `attitude_now` (the body swims) and by `think` (the shore is not
+    /// where it is hurrying). Only a species that `takes_to_water` is ever
+    /// set; anything else in the water is `wading` and making for the bank.
+    afloat: bool,
+    /// Seconds it still needs to get up, when something finds it lying down.
+    /// See `RISING_SECONDS`: nought for anything on its feet.
+    rising_for: f32,
+    /// Seconds it stays frozen, head up, before it decides. See
+    /// `FREEZE_SECONDS`.
+    freeze_for: f32,
+    /// What a fox has in its jaws, if anything: the kill it is taking home.
+    /// See `carried` -- struck on the way, it drops it.
+    carrying: Option<Species>,
+    /// Seconds a beaver or a frog stays under after it dived. See `dive`.
+    under_for: f32,
+    /// Seconds before a beaver next looks at its stream for somewhere to put
+    /// a stick. See `build_dam`.
+    dam_for: f32,
+    /// **A bear asleep in its den for the winter.** See `hibernate`: it does
+    /// not move, it does not notice much, and what wakes it is a blow or a
+    /// person standing over it.
+    denned: bool,
+    /// Seconds a woken bear is still half asleep: slow, and then very angry.
+    /// See `GROGGY_SECONDS`.
+    groggy_for: f32,
 }
 
 /// A horse with a rider: the body `horse::step` moves, and what the reins
@@ -2550,6 +2581,7 @@ impl Animal {
                 attitude: self.attitude_now(),
                 growth: youth::to_wire(self.growth),
                 tack: self.tack(),
+                glance: self.glance(),
             },
             x: f64::from(self.at().0),
             // The *centre* of the animal, which is what the client draws
@@ -2561,6 +2593,28 @@ impl Animal {
             y: f64::from(self.at().1 + self.frame().height * 0.5),
             z: f64::from(self.at().2),
         }
+    }
+
+    /// Which way its head is turned off its body, for the wire: see
+    /// `EntityKind::Animal::glance`.
+    ///
+    /// **At whatever it last placed a threat**, while it is standing, watching
+    /// or walking and not running from it: a running animal looks where it is
+    /// going, and a head turned back over the shoulder of a bolting deer
+    /// would be a deer that runs into trees. Clamped to what a neck does,
+    /// `GLANCE_MOST` either way -- past that the animal turns its body, which
+    /// is `think`'s business and not the neck's.
+    fn glance(&self) -> i8 {
+        if matches!(self.mind, Mind::Flee | Mind::Charge | Mind::Chase | Mind::Homing | Mind::Soar) {
+            return 0;
+        }
+        let Some((tx, tz)) = self.threat_at else {
+            return 0;
+        };
+        let (x, _, z) = self.at();
+        let mut off = (tz - z).atan2(tx - x) - self.yaw;
+        off = (off + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        (off.clamp(-GLANCE_MOST, GLANCE_MOST) * 100.0).round() as i8
     }
 
     /// The `horse::TACK_*` bits for everybody who can see it.
@@ -2598,7 +2652,17 @@ impl Animal {
         use primitive_shared::protocol::Attitude;
         let moving = self.velocity.0.hypot(self.velocity.2) > STANDING_STILL;
         match self.attitude {
-            Attitude::Feeding | Attitude::Drinking | Attitude::Dozing if moving => Attitude::Easy,
+            Attitude::Dying => Attitude::Dying,
+            // **A duck with its head under is still a duck on the water**, and
+            // it is the one feeding the client draws tail-up: the dabble.
+            Attitude::Feeding if self.afloat && self.species == Species::Duck => Attitude::Feeding,
+            // Afloat outranks the rest: an elk in the bog is swimming whatever
+            // its last thought said, and a head-down pose drawn in water is a
+            // drowned animal.
+            _ if self.afloat => Attitude::Swimming,
+            Attitude::Feeding | Attitude::Drinking | Attitude::Dozing | Attitude::Resting | Attitude::Startled if moving => {
+                Attitude::Easy
+            }
             other => other,
         }
     }
@@ -3559,6 +3623,14 @@ impl Animals {
             gear: None,
             ride: None,
             settle_for: 0.0,
+            afloat: false,
+            rising_for: 0.0,
+            freeze_for: 0.0,
+            carrying: None,
+            under_for: 0.0,
+            dam_for: 0.0,
+            denned: false,
+            groggy_for: 0.0,
         }
     }
 

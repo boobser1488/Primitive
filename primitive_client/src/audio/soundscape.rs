@@ -1837,9 +1837,47 @@ fn idle_chance(species: Species, night: bool) -> f32 {
         // off all at once is something under the trees that is not you, and
         // there is no other warning of that on a coast with no wolves.
         Species::Monkey => 0.6,
+        // **A flock on a pond talks the whole time it is feeding**, and it is
+        // how a player finds water in a wood before they see it -- and a
+        // pond gone quiet with the ducks still on it is a flock that is
+        // watching something.
+        Species::Duck => {
+            if night {
+                0.15
+            } else {
+                0.45
+            }
+        }
+        // **The chorus.** A frog is the loudest thing in a marsh after dark
+        // and nearly silent by day; and what makes it a mechanic rather than
+        // an ambience is that it stops (`Attitude::Alert` on the wire, from
+        // the server's `hush`): see `calls`.
+        Species::Frog => {
+            if night {
+                0.9
+            } else {
+                0.08
+            }
+        }
+        // The scream of a fox at night is the most startling sound in a
+        // wood, and it is rare: a few times a night, never by day.
+        Species::Fox => {
+            if night {
+                0.08
+            } else {
+                0.0
+            }
+        }
+        // A grunt now and then from the willows. The rut's bellow is the
+        // autumn's, and the soundscape does not know the season -- so the
+        // calm voice is the quiet one.
+        Species::Elk => 0.05,
         // A crab says nothing, ever. It has no voice at all, and what a
         // beach at night sounds like is the surf.
         Species::Crab
+        // A beaver has no calm voice a player hears over the water: what it
+        // has is the tail, and that is its alarm (`cry_of`).
+        | Species::Beaver
         | Species::Hare
         | Species::Fish
         | Species::Cod

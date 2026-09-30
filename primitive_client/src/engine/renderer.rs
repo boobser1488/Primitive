@@ -25058,6 +25058,7 @@ mod raft_repro {
                     attitude: primitive_shared::protocol::Attitude::Easy,
                     growth: u8::MAX,
                     tack,
+                    glance: 0,
                 },
                 x: f64::from(x),
                 y: f64::from(ground + species.height() * 0.5),

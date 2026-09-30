@@ -112,6 +112,11 @@ pub fn breeds(species: Species) -> bool {
             // plains herd is, and whose kept mare is how a second horse comes
             // without a second breaking.
             | Species::Horse
+            // ...and the elk, whose calf is the reason its mother fights: a
+            // cow elk standing between a player and the young one in the
+            // willows is the one elk that comes at anybody (the server's
+            // `defends`).
+            | Species::Elk
     )
 }
 
@@ -240,6 +245,7 @@ pub fn young_name(species: Species) -> Option<&'static str> {
         // A foal as well, and its own key: "foal" is the zebra's, and one
         // row cannot say "young zebra" and "young horse" both.
         Species::Horse => Some("horse_foal"),
+        Species::Elk => Some("elk_calf"),
         _ => None,
     }
 }

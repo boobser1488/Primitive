@@ -3018,6 +3018,14 @@ async fn tick_loop(ctx: Arc<Context>) {
                     // it gets right is the *kind* of hurt, so a hand that
                     // has been nipped bleeds a little rather than aching.
                     Species::Crab => Blow::Claw,
+                    // **A forehoof coming down, with the biggest animal alive
+                    // behind it**: no edge, all weight, and heavy enough to
+                    // break -- which is `Crush`, the falling tree's blow. The
+                    // elk is the only one of the five that lands one at all
+                    // (`Species::damage`); the other four are named for the
+                    // compile error above.
+                    Species::Elk => Blow::Crush,
+                    Species::Fox | Species::Beaver | Species::Duck | Species::Frog => Blow::Blunt,
                 };
                 let outcome = strike_player(&ctx, &victim, blow.damage, how, wound);
                 if !matches!(outcome, survival::Outcome::Unchanged) {

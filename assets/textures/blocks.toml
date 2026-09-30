@@ -842,6 +842,9 @@ carcass_zebra = "food/hide.png"
 carcass_antelope = "food/hide.png"
 carcass_lion = "food/hide.png"
 carcass_horse = "food/hide.png"
+carcass_elk = "food/hide.png"
+carcass_fox = "food/hide.png"
+carcass_beaver = "food/hide.png"
 
 # The floor of the world. Its own picture, because a rock a player
 # meets once and has to recognise from across a shaft is a rock that
@@ -1266,6 +1269,12 @@ cooked_mussels = "food/cooked_mussels.png"
 # (see the fish above).
 crab_meat = "food/crab_meat.png"
 cooked_crab = "food/cooked_crab.png"
+# A frog, whole, from above: bait for a pike (`types::BLOCK_FROG`). Drawn
+# by `tools/draw_fauna.py` beside the frog's own sheet.
+frog = "food/frog.png"
+# A beaver's dam: sticks every way through a packing of mud, the one block
+# in the world an animal lays (`types::BLOCK_BEAVER_DAM`).
+beaver_dam = "terrain/beaver_dam.png"
 
 # Winter feed. **Both recoloured, neither drawn**: hay is the fibre's hank
 # and a haystack the straw pallet's stalks, each pushed from pale straw

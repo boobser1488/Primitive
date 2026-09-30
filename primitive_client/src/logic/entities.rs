@@ -2144,6 +2144,7 @@ mod tests {
                     attitude: Attitude::Easy,
                     growth: u8::MAX,
                     tack: 0,
+                    glance: 0,
                 },
                 // Four blocks a second, along +X.
                 x: tick as f64 * 0.2,
@@ -2210,6 +2211,7 @@ mod tests {
                     attitude: Attitude::Easy,
                     growth: u8::MAX,
                     tack: 0,
+                    glance: 0,
                 },
                 x: tick as f64 * 0.2,
                 y: 20.0,
@@ -2270,6 +2272,7 @@ mod tests {
                         attitude: Attitude::Easy,
                         growth: u8::MAX,
                         tack: 0,
+                        glance: 0,
                     },
                     x,
                     y: 20.0,
@@ -2335,6 +2338,7 @@ mod tests {
                         attitude: Attitude::Easy,
                         growth: u8::MAX,
                         tack: 0,
+                        glance: 0,
                     },
                     x: 0.0,
                     y: 20.0,
@@ -2407,6 +2411,7 @@ mod tests {
                             attitude: Attitude::Easy,
                             growth: u8::MAX,
                             tack: 0,
+                            glance: 0,
                         },
                         x,
                         y: 20.0,
@@ -2498,7 +2503,7 @@ mod tests {
         let at = |yaw: f32| {
             vec![EntityState {
                 id: 1,
-                kind: EntityKind::Animal { species: Species::Deer, yaw, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0 },
+                kind: EntityKind::Animal { species: Species::Deer, yaw, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0, glance: 0 },
                 x: 0.0,
                 y: 20.0,
                 z: 0.0,
@@ -2523,7 +2528,7 @@ mod tests {
         use primitive_shared::animals::Species;
         vec![EntityState {
             id: 1,
-            kind: EntityKind::Animal { species: Species::Deer, yaw: 0.0, hurt, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0 },
+            kind: EntityKind::Animal { species: Species::Deer, yaw: 0.0, hurt, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0, glance: 0 },
             x: 4.0,
             y: 31.0,
             z: -2.0,
@@ -2807,6 +2812,7 @@ mod tests {
                 attitude,
                 growth: u8::MAX,
                 tack: 0,
+                glance: 0,
             },
         };
         let mut entities = Entities::default();
@@ -2870,6 +2876,7 @@ mod tests {
                 attitude: primitive_shared::protocol::Attitude::Easy,
                 growth: u8::MAX,
                 tack: 0,
+                glance: 0,
             },
         };
         entities.apply_snapshot(100, &[walked(0.0)]);
@@ -2970,6 +2977,7 @@ mod tests {
                 attitude: primitive_shared::protocol::Attitude::Easy,
                 growth: u8::MAX,
                 tack: 0,
+                glance: 0,
             },
         };
         entities.apply_snapshot(10, &[at(0.0)]);
@@ -3050,7 +3058,7 @@ mod tests {
             let mut entities = Entities::default();
             let at = |x: f64| {
                 vec![
-                    EntityState { id: 1, kind: EntityKind::Animal { species: primitive_shared::animals::Species::Deer, yaw: 0.4, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0 }, x: base.x + x, y: base.y + 21.0, z: base.z + 3.3 },
+                    EntityState { id: 1, kind: EntityKind::Animal { species: primitive_shared::animals::Species::Deer, yaw: 0.4, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0, glance: 0 }, x: base.x + x, y: base.y + 21.0, z: base.z + 3.3 },
                     EntityState { id: 2, kind: EntityKind::FallingBlock { block: BLOCK_SAND }, x: base.x + 5.0, y: base.y + 25.0 - x, z: base.z + 1.0 },
                 ]
             };
@@ -3207,6 +3215,7 @@ mod tests {
                 attitude: primitive_shared::protocol::Attitude::Easy,
                 growth: u8::MAX,
                 tack: 0,
+                glance: 0,
             },
             x: 1.0,
             y: 1.4,
@@ -3285,6 +3294,7 @@ mod tests {
                 attitude: primitive_shared::protocol::Attitude::Easy,
                 growth: u8::MAX,
                 tack: 0,
+                glance: 0,
             },
             x: f64::from(x),
             y: 20.0,
@@ -3437,7 +3447,7 @@ mod tests {
                     let species = Species::ALL[i % Species::ALL.len()];
                     EntityState {
                         id: i as u64 + 1,
-                        kind: EntityKind::Animal { species, yaw: i as f32 * 0.4, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0 },
+                        kind: EntityKind::Animal { species, yaw: i as f32 * 0.4, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0, glance: 0 },
                         x: f64::from((i % 10) as f32 * 3.0 + shift),
                         y: f64::from(20.0 + species.height() * 0.5),
                         z: f64::from((i / 10) as f32 * 3.0),

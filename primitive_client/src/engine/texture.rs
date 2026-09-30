@@ -266,6 +266,22 @@ pub const ANIMAL_SHEETS: &[&str] = &[
     // that is that.
     "animals/monkey.png",
     "animals/crab.png",
+    // **The woods' and the water's five, each a recolour of a cousin's
+    // sheet** (`tools/fauna_sheets.py`), which is the house rule for a new
+    // picture: the grain of an animal here is what makes it belong, and
+    // redrawing it from nothing is how a new animal ends up looking pasted
+    // in. The fox is the wolf's coat turned to rust with black stockings;
+    // the elk the deer's gone near-black over pale legs, with a palm of
+    // antler where the deer has tines; the beaver the rat's gone to wet
+    // chestnut, its tail a scaled black paddle in the tusk slot; the duck
+    // the gull's grey with a mallard's green head and orange feet; and the
+    // frog the one drawn over a green of its own, mottled, pale underneath,
+    // its eyes on top of its head where a frog's are.
+    "animals/fox.png",
+    "animals/elk.png",
+    "animals/beaver.png",
+    "animals/duck.png",
+    "animals/frog.png",
 ];
 
 /// Which sheet a species wears, as a row of `ANIMAL_SHEETS`.
@@ -301,6 +317,11 @@ pub fn sheet_index(species: primitive_shared::animals::Species) -> usize {
         Species::Horse => 17,
         Species::Monkey => 18,
         Species::Crab => 19,
+        Species::Fox => 20,
+        Species::Elk => 21,
+        Species::Beaver => 22,
+        Species::Duck => 23,
+        Species::Frog => 24,
     }
 }
 

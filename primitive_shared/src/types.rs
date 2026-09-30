@@ -3765,6 +3765,38 @@ pub const BLOCK_SADDLE: BlockId = 485;
 /// ore home, and pays for it in pace.
 pub const BLOCK_SADDLEBAGS: BlockId = 486;
 
+// ---- the fauna of the woods and the water: fox, elk, beaver, frog ----
+//
+// **Ids 780..=784, from the gap after the fishing fly**, for the horse's
+// reason: several branches add blocks to this file at once, and the low gaps
+// are the ones every one of them reaches for first. 790..=794 are held for
+// the fishing work that was written beside this one. The test
+// `the_faunas_ids_are_its_own` holds them apart from every other id.
+
+/// **An elk where it fell**: the biggest carcass in the world, on the horse's
+/// row -- half a cell of dead animal, and a day's butchering. What it is worth
+/// is the reason to go north with a spear (`animals::Species::Elk`).
+pub const BLOCK_CARCASS_ELK: BlockId = 780;
+/// A fox where it fell: small, and almost all of it is the pelt.
+pub const BLOCK_CARCASS_FOX: BlockId = 781;
+/// A beaver where it fell: the second warm pelt in the world, and a little
+/// fat. See `animals::Species::Beaver`.
+pub const BLOCK_CARCASS_BEAVER: BlockId = 782;
+/// **A frog, caught by hand at the water's edge.** Not food -- a player who
+/// is hungry enough to eat one has a hare in the next meadow -- but the bait
+/// a pike comes to above all others (`fishing::Bait::Frog`). What a frog is
+/// worth alive is the other half of the animal: its chorus stops when
+/// something is moving near the water (`animals::Species::Frog`).
+pub const BLOCK_FROG: BlockId = 783;
+/// **A beaver's dam: sticks and mud, laid across running water.** Built by
+/// the animal and by nothing else (not placeable), a cell at a time, and the
+/// one thing an animal in this world ever adds to it -- see
+/// `animals::Species::Beaver` for why that rule bends here and nowhere else.
+/// It holds water the way any solid block does, so the pond behind it is
+/// the water simulation's own doing and not a second rule. Broken, it gives
+/// back the sticks.
+pub const BLOCK_BEAVER_DAM: BlockId = 784;
+
 // ---- winter feed: hay, and the stack a flock eats it from ----
 //
 // **Two ids from the gap after 671**, for the reason the horse's took the
@@ -4887,6 +4919,12 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     (BLOCK_CARCASS_LION, "carcass_lion"),
     // ...and the plains' horse, beside them. See `animals::Species::Horse`.
     (BLOCK_CARCASS_HORSE, "carcass_horse"),
+    // ...and the woods' and the water's. See `BLOCK_CARCASS_ELK`.
+    (BLOCK_CARCASS_ELK, "carcass_elk"),
+    (BLOCK_CARCASS_FOX, "carcass_fox"),
+    (BLOCK_CARCASS_BEAVER, "carcass_beaver"),
+    (BLOCK_FROG, "frog"),
+    (BLOCK_BEAVER_DAM, "beaver_dam"),
     (BLOCK_BASALT, "basalt"),
     (BLOCK_BRACKET_FUNGUS, "bracket_fungus"),
     // Fur, which shares the leather set's pictures the way the wool and
@@ -6738,6 +6776,9 @@ pub fn is_carcass(id: BlockId) -> bool {
             | BLOCK_CARCASS_ANTELOPE
             | BLOCK_CARCASS_LION
             | BLOCK_CARCASS_HORSE
+            | BLOCK_CARCASS_ELK
+            | BLOCK_CARCASS_FOX
+            | BLOCK_CARCASS_BEAVER
     )
 }
 
@@ -10958,6 +10999,10 @@ mod depth_tests {
                 "carcass_antelope",
                 "carcass_lion",
                 "carcass_horse",
+                // ...and the woods' and the water's, on the same terms.
+                "carcass_elk",
+                "carcass_fox",
+                "carcass_beaver",
                 "nest_eggs",
                 "nest",
                 // ...and the furniture, none of which fills its
@@ -11199,6 +11244,9 @@ mod depth_tests {
             BLOCK_CARCASS_ANTELOPE,
             BLOCK_CARCASS_LION,
             BLOCK_CARCASS_HORSE,
+            BLOCK_CARCASS_ELK,
+            BLOCK_CARCASS_FOX,
+            BLOCK_CARCASS_BEAVER,
         ] {
             for stage in 0..8u16 {
                 let staged = carcass | (stage << VARIANT_SHIFT);
@@ -12206,6 +12254,24 @@ mod corpse_tests {
         // quietly deleting something valuable because nobody classified
         // it.
         assert!(!rots_with_a_body(60_000));
+    }
+}
+
+#[cfg(test)]
+mod fauna_id_tests {
+    use super::*;
+
+    /// **The woods' and the water's five ids are their own**: inside the ten
+    /// bits of a kind, clear of the 790s held for the fishing work, and named
+    /// by nothing else in the table. See `BLOCK_CARCASS_ELK` for why they
+    /// came out of the gap after the fishing fly.
+    #[test]
+    fn the_faunas_ids_are_its_own() {
+        for id in [BLOCK_CARCASS_ELK, BLOCK_CARCASS_FOX, BLOCK_CARCASS_BEAVER, BLOCK_FROG, BLOCK_BEAVER_DAM] {
+            assert!((780..790).contains(&id) && id & !KIND_MASK == 0, "{id} is out of the fauna's room");
+            let named: Vec<&str> = ALL_BLOCK_IDS.iter().filter(|&&(other, _)| other == id).map(|&(_, n)| n).collect();
+            assert_eq!(named.len(), 1, "id {id} is named {named:?}");
+        }
     }
 }
 

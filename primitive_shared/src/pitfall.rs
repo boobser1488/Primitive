@@ -54,7 +54,10 @@ pub fn breaks_through(species: Species) -> bool {
         | Species::Zebra
         | Species::Antelope
         | Species::Lion
-        | Species::Horse => true,
+        | Species::Horse
+        // The heaviest thing that walks, and the one a pit on an elk trail is
+        // dug for.
+        | Species::Elk => true,
         Species::Hare
         | Species::Rat
         // A monkey is the size of a dog and goes over a covered pit on four
@@ -67,7 +70,12 @@ pub fn breaks_through(species: Species) -> bool {
         | Species::Cod
         | Species::Trout
         | Species::Pike
-        | Species::Herring => false,
+        | Species::Herring
+        // A fox and a beaver are the hare's weight, a duck and a frog less.
+        | Species::Fox
+        | Species::Beaver
+        | Species::Duck
+        | Species::Frog => false,
     }
 }
 

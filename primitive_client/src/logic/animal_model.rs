@@ -104,7 +104,7 @@ pub enum Skin {
     /// game can see: it is dark and ringed where an antler is pale bone, and
     /// a skeleton keeps only its core -- the sheath rots -- where it keeps
     /// the whole antler. Dressing the antelope in `Antler` would have given
-    /// it the deer's bone and made `only_the_deer_carries_bone_on_its_head`
+    /// it the deer's bone and made `only_the_deer_and_the_elk_carry_bone_on_their_heads`
     /// a sentence that was no longer true of the picture.
     Horn,
     /// The hide again, drawn coarse, for the parts that are two or three
@@ -635,6 +635,14 @@ pub fn head_carried(attitude: Attitude) -> f32 {
         Attitude::Dozing => -0.5,
         // Dropped, and let go: the neck gives with the rest of it.
         Attitude::Dying => -0.35,
+        // **Lying, head still up**: a bedded deer watches over the grass. The
+        // body's going down is `Motion::lie`, not the neck.
+        Attitude::Resting => -0.1,
+        // **Flung up**, higher than alert: the frozen half second before a
+        // bolt, and the one pose a player reads as "it has seen me".
+        Attitude::Startled => 0.45,
+        // Held up out of the water, the chin on the surface.
+        Attitude::Swimming => 0.3,
     }
 }
 
@@ -3204,8 +3212,9 @@ mod tests {
                         "the antelope's horns do not stand out of its crown"
                     );
                 }
-                Species::Deer => {
-                    assert_eq!(antlers, 4, "the deer's skeleton has lost its antlers");
+                // The elk's palm is its tine: two pieces a side, as a deer's.
+                Species::Deer | Species::Elk => {
+                    assert_eq!(antlers, 4, "the {}'s skeleton has lost its antlers", species.name());
                     assert!(
                         bones.iter().filter(|bone| bone.name == "antler").all(|bone| dorsal(bone) < crown),
                         "the deer's antlers do not stand out of its crown"
@@ -3225,7 +3234,7 @@ mod tests {
                 }
                 _ => {}
             }
-            if species != Species::Deer {
+            if !matches!(species, Species::Deer | Species::Elk) {
                 assert_eq!(antlers, 0, "{} grew antlers in death", species.name());
             }
             if species != Species::Boar {
@@ -4528,7 +4537,10 @@ mod tests {
             // ...nor on a fish, which hears through its skin.
             // ...nor on the crab, which has no head to put them on
             // (`is_shelled`).
-            let wanted = if species.flies() || species.swims() || is_shelled(species) { 0 } else { 2 };
+            // A frog's ear is a drum flush with the side of its head, and a
+            // box standing up there would be a frog with a hare's ears.
+            let earless = species.flies() || species.swims() || is_shelled(species) || species == Species::Frog;
+            let wanted = if earless { 0 } else { 2 };
             assert_eq!(ears.len(), wanted, "{} has {} ears", species.name(), ears.len());
             for e in ears {
                 assert_eq!(
@@ -4645,10 +4657,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_deer_carries_bone_on_its_head() {
+    fn only_the_deer_and_the_elk_carry_bone_on_their_heads() {
         for &species in Species::ALL {
             let antlers = parts(species).iter().filter(|p| p.skin == Skin::Antler).count();
-            let wanted = if species == Species::Deer { 4 } else { 0 };
+            // ...and the elk, whose beam and palm are the deer's beam and
+            // tine made broad: bone on the head is what the two of them are
+            // known by across a clearing, and nothing else here has it.
+            let wanted = if matches!(species, Species::Deer | Species::Elk) { 4 } else { 0 };
             assert_eq!(antlers, wanted, "{} has {antlers} antler parts", species.name());
         }
     }
