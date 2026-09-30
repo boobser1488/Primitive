@@ -63,6 +63,17 @@
 //!   while they are asleep, and there is no version of that which is
 //!   worth the deer. (This used to say "swim" as well, and nothing on four
 //!   legs does; the two that swim are the next rule.)
+//!
+//!   **One exception, written down where the rule is: the beaver**
+//!   (`woods`, `Species::Beaver`). It lays sticks on water that is moving
+//!   -- and in a world where water only moves because somebody let it out,
+//!   that is a drain cut from a pond or a trench led to a field, never a
+//!   house. What the rule protects against is a player's work undone while
+//!   they sleep; what a beaver does is close a leak, in the open, where the
+//!   player can see which animal did it and take the dam apart. The same
+//!   goes for the bear eating a wild hive or a berry bush bare and the fox
+//!   eating into a carcass left lying: things the world grew, or a player
+//!   left out, and never anything built.
 //! * **A fish lives in the water and nowhere else.** `Species::swims` sends
 //!   it down a second, smaller path: `think_fish` for the mind (drift with
 //!   the school, bolt from a swimmer, dive), `swim` for the body (a depth
@@ -4329,8 +4340,19 @@ impl Animals {
                     // one that costs a compare, because this loop already
                     // looks at every animal.
                     let flushes = animal.species.flies() && other.species.is_hostile();
-                    if ((other.species.hunts(animal.species) && other.fed_for <= 0.0) || flushes)
-                        && distance_sq <= animal.species.awareness() * animal.species.awareness()
+                    // **A frog goes quiet for anything that means harm**, not
+                    // only for what eats frogs: a wolf passing the marsh stops
+                    // the chorus on that side as surely as a fox does, and
+                    // further off than the frog would ever run from it
+                    // (`woods::FROG_HUSHES_FOR`). That silence is the frog's
+                    // whole worth alive -- a pond gone quiet in the dark with
+                    // nobody near it is a wolf the player has not seen yet.
+                    let hushes = animal.species == Species::Frog
+                        && (other.species.is_hostile() || other.species.is_predator())
+                        && distance_sq <= woods::FROG_HUSHES_FOR * woods::FROG_HUSHES_FOR;
+                    if hushes
+                        || ((other.species.hunts(animal.species) && other.fed_for <= 0.0) || flushes)
+                            && distance_sq <= animal.species.awareness() * animal.species.awareness()
                     {
                         match threat {
                             Some((_, best)) if best <= distance_sq => {}

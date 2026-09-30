@@ -852,6 +852,13 @@ fn duck(animal: &mut Animal, figures: &[Figure], rng: &mut Rng) -> bool {
 /// one side of the marsh is somebody over there.
 const HUSH_SECONDS: f32 = 15.0;
 
+/// How far a frog goes quiet round anything that means harm -- a wolf, a
+/// boar, a bear, a fox -- in blocks. Twelve, the old chorus's number: wider
+/// than any frog runs from, so the silence travels with whatever is moving
+/// along the bank, and under a wolf's own awareness (eighteen), so a player
+/// who hears the frogs stop has a few seconds before the wolf has them.
+pub(super) const FROG_HUSHES_FOR: f32 = 12.0;
+
 /// How far a frog hears a person, in blocks: four, and six more for every
 /// unit of how loud they are (`Gait::loudness`). A creeping player is heard
 /// at six, a walking one at ten, a running one at sixteen.
@@ -1302,6 +1309,23 @@ mod tests {
         the(&mut animals, id).wary_for = 0.0;
         frog(the(&mut animals, id), &[], &quiet(), &world, &mut rng);
         assert_eq!(the(&mut animals, id).attitude, Attitude::Easy, "the frog never sang again");
+    }
+
+    #[test]
+    fn a_frog_goes_quiet_for_a_wolf_passing_the_marsh_that_would_never_eat_it() {
+        let world = meadow_with_a_pond(30, 4);
+        let mut animals = Animals::seeded(22);
+        let frog_id = animals.spawn(Species::Frog, (2.5, 21.0, 0.5)).expect("frog");
+        animals.spawn(Species::Wolf, (2.5, 21.0, 10.5)).expect("wolf");
+        for _ in 0..40 {
+            animals.step(&world, &far_off(), 0.05, 0.0);
+        }
+        let frog = animals.find(frog_id).expect("frog");
+        let EntityKind::Animal { attitude, .. } = frog.state().kind else {
+            panic!("a frog that is not an animal");
+        };
+        assert_eq!(attitude, Attitude::Alert, "the chorus sang on with a wolf ten blocks along the bank");
+        assert!(!Species::Wolf.hunts(Species::Frog), "the wolf is a frog's hunter now, and this says nothing");
     }
 
     #[test]
