@@ -3011,6 +3011,11 @@ thread_local! {
     /// being measured. Two builds cannot answer the question; one binary
     /// timing both in the same minute can.
     pub(super) static CLAY_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The tors, the combes and the river terraces off on this thread
+    /// (`landforms`, "What makes a place a place"): the ground as it was
+    /// before them, for the prints that hold the rest of it still and for
+    /// `what_the_landforms_cost_a_chunk`.
+    pub(super) static PLACES_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Is the clay switched off on this thread? Always false outside the tests.
@@ -3457,6 +3462,15 @@ impl WorldGen {
     /// archipelago and the Earth's coast, and a tile read across them is
     /// one's heights under the other's rivers.
     fn key(&self) -> WorldKey {
+        // **A test that turns the places off is another world to the tile
+        // caches** (`PLACES_OFF`): the switch moves the heights, and a
+        // thread that remembered a tile from before it was flipped handed
+        // the old ground back -- a before and an after that were the same
+        // picture. Far past any real latitude, so no world is keyed there.
+        #[cfg(test)]
+        if PLACES_OFF.with(std::cell::Cell::get) {
+            return (self.seed, self.preset, self.origin_degrees + 1_000_000, self.scale);
+        }
         (self.seed, self.preset, self.origin_degrees, self.scale)
     }
 
@@ -4426,12 +4440,23 @@ impl WorldGen {
             // the crowns stood over the mountain line and a hill country
             // read from afar as a range (`a_mountain_belt_stands_high_and_a_lowland_does_not`).
             let under = base + relief + hills + rolling * land;
-            let downs = if hill > 0.0 {
-                hill * self.downs(gx, gz, region) * smoothstep(SEA_LEVEL as f64 + 36.0, SEA_LEVEL as f64 + 16.0, under)
+            let (downs, shape) = if hill > 0.0 {
+                let (height, shape) = self.downs(gx, gz, region);
+                (hill * height * smoothstep(SEA_LEVEL as f64 + 36.0, SEA_LEVEL as f64 + 16.0, under), shape)
             } else {
-                0.0
+                (0.0, 0.0)
             };
-            self.soft_ceiling(base + relief + hills + detail + grain + (rolling + downs) * land)
+            // **The places** (`landforms`, "What makes a place a place"): a
+            // tor on a hard crest, a combe let into hill country. Both faded
+            // at the water with everything else here, and a combe kept off
+            // ground within a few blocks of the sea's level, where a crease
+            // let down would be a hollow under the water line -- a pond
+            // nothing fills, or a sea inlet in a meadow.
+            let tor = self.tor(gx, gz, region, plain) * shore_fade;
+            let combe = self.combe(gx, gz, hill, shape)
+                * shore_fade
+                * smoothstep(SEA_LEVEL as f64 + 5.0, SEA_LEVEL as f64 + 9.0, under + downs);
+            self.soft_ceiling(base + relief + hills + detail + grain + tor - combe + (rolling + downs) * land)
         } else {
             self.soft_ceiling(base + relief + hills + detail + self.rolling(gx, gz, highland) * land)
         };
@@ -4526,6 +4551,12 @@ impl WorldGen {
             let floodplain = self.floodplain_at(order, gx, gz, cut.bank.distance);
             if height > floodplain {
                 height = height * (1.0 - cut.valley) + floodplain * cut.valley;
+                // ...and on a river's valley wall, a terrace: the bench an
+                // older river left (`landforms::river_terrace`). Not along a
+                // brook, whose valley is a fold and not a wall.
+                if order.feeds.is_none() {
+                    height = self.river_terrace(gx, gz, height, cut.valley, floodplain);
+                }
             }
         }
 
@@ -5245,6 +5276,10 @@ impl WorldGen {
         surface = self.island_shore(gx, gz, biome, surface);
         if let Some(bed) = Self::lake_bed(height, self.water_level_at(gx, gz)) {
             surface = bed;
+        }
+        // A tor's bare rock, as the cache lays it (`landforms::tor`).
+        if height > self.water_level_at(gx, gz) && self.on_a_tor(gx, gz) {
+            surface = Surface { top: BLOCK_COBBLESTONE, filler: BLOCK_STONE, soil: 1 };
         }
         if biome == Biome::Bog && surface.filler == BLOCK_PEAT {
             surface.soil = Self::bog_soil(self.seed, gx, gz);
@@ -10598,7 +10633,16 @@ fn build_column_tile(gen: &WorldGen, tx: i32, tz: i32) -> ColumnTile {
                 .map(|&(dx, dz)| height_at(lx + dx, lz + dz) - height_at(lx, lz))
                 .max()
                 .unwrap_or(0);
-            let clay_bed = gen.clay_bed(gx, gz, height, water, uphill, biome);
+            // **A tor is bare rock** (`landforms::tor`), top and sides: a
+            // knob of turf is a hummock, and the tor is there to be seen
+            // from the next hill. Laid as a face first, so the stratum and
+            // the rubble read it as the cliff it is, and the living rock
+            // itself put on top after them.
+            let tor = height > water && gen.on_a_tor(gx, gz);
+            if tor {
+                surface = Surface { top: BLOCK_COBBLESTONE, filler: BLOCK_STONE, soil: 1 };
+            }
+            let clay_bed = if tor { 0 } else { gen.clay_bed(gx, gz, height, water, uphill, biome) };
             // The soil over it cut back to a skin, so the band is within
             // reach of a spade and of every bank that is cut. Peat keeps
             // its depth: see `CLAY_BED_SOIL`.
@@ -10626,6 +10670,10 @@ fn build_column_tile(gen: &WorldGen, tx: i32, tz: i32) -> ColumnTile {
                 };
                 surface.top = remap(surface.top);
                 surface.filler = remap(surface.filler);
+            }
+            if tor {
+                surface.top = rock;
+                surface.filler = rock;
             }
             // **Scree in a wet country is mossy on top** -- the one cell of
             // it the sky sees. The column's data, so it costs the fill loop
@@ -19869,7 +19917,15 @@ mod pebble_tests {
         }
         assert!(shaded > 200, "only {shaded} shaded columns");
         let share = shaded_litter as f32 / shaded as f32;
-        assert!(share > 0.15, "fallen leaves on {:.0}% of the floor under the crowns", share * 100.0);
+        // **One floor in seven, and it was drawn one in 6.6.** The bound
+        // was 0.15 over a sample that measured 15.1 per cent; the places
+        // (`landforms`, "What makes a place a place") moved the ground of
+        // this wood by a block here and there and the same sample came out 14.7
+        // (341 of 2321 shaded columns, against 351 of 2319 with
+        // `PLACES_OFF`) -- not one tor stood under these crowns. A brown
+        // floor under the crowns and none in the clearings is the claim,
+        // and a third of a per cent of one sample is not what it is about.
+        assert!(share > 0.14, "fallen leaves on {:.0}% of the floor under the crowns", share * 100.0);
         assert_eq!(open_litter, 0, "fallen leaves lie in a clearing with no crown over it");
         assert_eq!(crate::blocks::definition(crate::types::BLOCK_LEAF_LITTER).drop, Some(crate::types::BLOCK_LEAF_HANDFUL));
         assert!(crate::wildfire::fuel(crate::types::BLOCK_LEAF_LITTER).is_some(), "fallen leaves do not burn");
@@ -20944,6 +21000,14 @@ mod slope_tests {
                 "\nseed {seed}: {total} seams, worst step {worst} blocks, \
                  {:.1}% of seams are 2 or more",
                 steep as f32 / total as f32 * 100.0
+            );
+            // ...and the lowland's own share, which is the tighter bound.
+            let lowland = steps_below(seed, 200, 20);
+            let lowland_steep: usize = lowland.iter().skip(2).sum();
+            println!(
+                "   lowland: {:.2}% of {} seams are 2 or more",
+                lowland_steep as f32 * 100.0 / lowland.iter().sum::<usize>().max(1) as f32,
+                lowland.iter().sum::<usize>()
             );
             for (step, count) in histogram.iter().enumerate().take(9) {
                 if *count > 0 {

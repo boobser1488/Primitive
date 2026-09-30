@@ -4315,8 +4315,16 @@ pub fn build_mesh(
                             neighbor_id,
                             cache.block_near(cell, y, n[0], -1, n[2]),
                         );
+                    // ...and it wears the turf's cut edge rather than the
+                    // top itself (`FaceLayers::turf_edge`): the top's own
+                    // grass on every riser of a hillside ran the steps
+                    // into one tone.
                     let layer = moss_layer.unwrap_or_else(|| {
-                        textures.layer_for_face(pictured, if wrapped { 0 } else { face_index })
+                        if wrapped {
+                            textures.turf_edge(pictured).unwrap_or_else(|| textures.layer_for_face(pictured, 0))
+                        } else {
+                            textures.layer_for_face(pictured, face_index)
+                        }
                     });
 
                     // Light comes from the *air* cell in front of the
@@ -9512,6 +9520,77 @@ mod tests {
             assert!(
                 mesh.vertices.iter().filter(|v| (v.position[1] - top).abs() < 1e-4).all(|v| v.tint() != 0),
                 "the top of {quarters} quarters of turf is not the meadow's colour"
+            );
+        }
+    }
+
+    #[test]
+    fn a_riser_of_turf_wears_the_cut_edge_of_the_turf_and_a_dug_wall_its_soil() {
+        // **"Плавные переходы на траве ... сливаются в кашу."** A riser
+        // between two steps of turf wore the top's own grass
+        // (`ground::turf_wraps_the_side`), so every step of a hillside was
+        // the same green as the treads round it and ran into them. It wears
+        // the turf's cut edge now (`FaceLayers::turf_edge`): blades over
+        // thatch, a different picture from the top. What it must not do is
+        // spread to a face the turf does not go on past -- a wall dug into
+        // a meadow is soil under a fringe, as it always was.
+        use primitive_shared::dig;
+        use primitive_shared::types::{block_kind, BLOCK_DIRT, BLOCK_DRY_TURF, BLOCK_GRASS};
+        use super::transparency_tests::cache_of;
+        const AT: (i32, i32, i32) = (8, 4, 8);
+        let textures = FaceLayers::by_kind_for_test();
+        let layers_of = |fill: &dyn Fn(i32, i32, i32) -> BlockId, from: f32| {
+            let mut out = MeshBuffers::default();
+            build_mesh(ChunkPos::new(0, 0), &cache_of(fill), &textures, &primitive_shared::worldgen::WorldGen::new(0), &mut out);
+            // The corners of side faces in the column's +x plane, above
+            // `from`: the face index rides in the light word (`pack_light`), and
+            // +x is face 2 (`FACE_OUTWARD`) -- the tops and the z sides have
+            // corners on the same edge.
+            let plane = (AT.0 + 1) as f32;
+            let mut seen: Vec<u32> = out
+                .vertices
+                .iter()
+                .filter(|v| (v.light() >> 10) & 7 == 2)
+                .filter(|v| (v.position[0] - plane).abs() < 1e-2 && v.position[1] > AT.1 as f32 + from - 1e-3)
+                .filter(|v| v.position[2] > AT.2 as f32 - 1e-2 && v.position[2] < (AT.2 + 1) as f32 + 1e-2)
+                .map(Vertex::tex_layer)
+                .collect();
+            seen.sort_unstable();
+            seen.dedup();
+            seen
+        };
+        for turf in [BLOCK_GRASS, BLOCK_DRY_TURF] {
+            let edge = textures.turf_edge(turf).expect("turf has a cut edge");
+            assert_ne!(edge, textures.layer_for_face(turf, 0), "{turf}: the edge is the top's own picture");
+            // A whole turf beside the next lip down the ramp, and a lip beside
+            // a lower lip: both risers of one hillside.
+            for (here, beside) in [(turf, dig::lowered(turf, 1)), (dig::lowered(turf, 3), dig::lowered(turf, 1))] {
+                let fill = move |x: i32, y: i32, z: i32| match (x, y, z) {
+                    c if c == AT => here,
+                    (x, y, z) if (x, y, z) == (AT.0 + 1, AT.1, AT.2) => beside,
+                    (_, y, _) if y < AT.1 => BLOCK_DIRT,
+                    _ => BLOCK_AIR,
+                };
+                let riser_from = 0.25 + 1e-2;
+                assert_eq!(
+                    layers_of(&fill, riser_from),
+                    vec![edge],
+                    "the riser of {:#x} over {:#x} is not the turf's cut edge",
+                    block_kind(here),
+                    beside
+                );
+            }
+            // A wall dug into the meadow: air beside, soil under the air.
+            let pit = move |x: i32, y: i32, z: i32| match (x, y, z) {
+                c if c == AT => turf,
+                (x, y, z) if x == AT.0 + 1 && z == AT.2 && y >= AT.1 - 1 => BLOCK_AIR,
+                (_, y, _) if y < AT.1 => BLOCK_DIRT,
+                _ => BLOCK_AIR,
+            };
+            assert_eq!(
+                layers_of(&pit, 0.01),
+                vec![textures.layer_for_face(turf, 2)],
+                "a dug wall of {turf} is not the turf's side"
             );
         }
     }

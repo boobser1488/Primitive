@@ -448,6 +448,15 @@ pub const EXTRA_TEXTURES: &[&str] = &[
     "furniture/willow/door_item.png",
     "plants/willow/leaf_litter.png",
     "plants/willow/leaf_handful.png",
+    // **The cut edge of turf** (`ground::turf_wraps_the_side`): what the
+    // riser of a turf step wears -- blades hanging over the thatch and the
+    // soil -- for the meadow's grass and the savanna's dry turf, in that
+    // order (`FaceLayers::turf_edge`). Drawn by `tools/draw_turf_edge.py`
+    // out of each turf's own top and side. After the woods' runs, whose
+    // indices are arithmetic from the furniture's, and before the cured
+    // skin, whose index is arithmetic from the end.
+    "terrain/grass_edge.png",
+    "terrain/dry_turf_edge.png",
     // **The same skin cured**, laced in a hide frame once it has dried
     // (`types::HIDE_CURED`): the stretched hide above in leather's browns,
     // drawn for the same slab and so worn whole as well. Last, because every
@@ -588,6 +597,10 @@ pub const EXTRA_STRETCHED_LEATHER: usize = EXTRA_UI_SKIN - 3;
 /// The turf's low blades, green and dry. See `engine::meadow`.
 pub const EXTRA_TURF_BLADES: usize = EXTRA_UI_SKIN - 2;
 pub const EXTRA_TURF_BLADES_DRY: usize = EXTRA_UI_SKIN - 1;
+
+/// The cut edge of the meadow's turf, and the dry turf's after it: the two
+/// entries before the cured skin. See `FaceLayers::turf_edge`.
+pub const EXTRA_TURF_EDGE: usize = EXTRA_STRETCHED_LEATHER - 2;
 
 /// The first of the interface's own pictures, in `ui::widgets::Piece`
 /// order. See [`UI_SKIN_PIECES`] and `ui::widgets::Skin`.
@@ -981,6 +994,31 @@ impl FaceLayers {
     #[inline]
     pub fn extra(&self, index: usize) -> u32 {
         self.extra.get(index).copied().unwrap_or(0)
+    }
+
+    /// The picture a riser of turf wears where the turf goes on past it
+    /// (`ground::turf_wraps_the_side`): the cut edge of the mat, not the
+    /// top's own grass.
+    ///
+    /// **It was the top's picture**, and that was the second of two wrong
+    /// answers. The first was the side's own soil under a fringe, which
+    /// drew every rise of a green hill as a brown stripe; the second drew
+    /// every riser as the same green as the tread over and under it, and a
+    /// hillside of quarter steps -- lit only a little differently, textured
+    /// exactly the same -- ran together into one tone: "сливаются в кашу".
+    /// The edge is grass where a step is short and shows its thatch and
+    /// soil only where a step is taller, because a side wears its picture's
+    /// top rows, as many as it is tall.
+    ///
+    /// `None` for anything that is not turf, and for an atlas without the
+    /// picture -- which then draws the top's picture, as before.
+    pub fn turf_edge(&self, block_id: BlockId) -> Option<u32> {
+        let index = match primitive_shared::types::block_kind(block_id) {
+            primitive_shared::types::BLOCK_GRASS => EXTRA_TURF_EDGE,
+            primitive_shared::types::BLOCK_DRY_TURF => EXTRA_TURF_EDGE + 1,
+            _ => return None,
+        };
+        Some(self.extra(index)).filter(|&layer| layer != 0)
     }
 
     /// The block's picture with moss grown over it, if this is a block that

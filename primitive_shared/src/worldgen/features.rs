@@ -1670,20 +1670,29 @@ mod tests {
             let chunks = chunks_under(&gen, &site);
             let (butt, tip) = giant_span(&site);
             let limb = (butt + tip) / 2;
-            let (lx, lz) = site.world(limb, 2);
-            let (tx, tz) = site.world(limb, 1);
-            // The step is the limb, or -- where the ground rises one under
+            // **As wide as this giant is**: two, or three for a hollow one,
+            // whose limb is a stair of two (`plan_giant`). This read the
+            // two-wide giant's cells for every giant and held while the four
+            // sampled on these seeds happened to be solid; when the country
+            // got its places (`landforms`, "What makes a place a place") the
+            // sample took a hollow one, and its "trunk top" was the tunnel.
+            let w = site.width();
+            let (lx, lz) = site.world(limb, w);
+            let (tx, tz) = site.world(limb, w - 1);
+            // Each step is the limb, or -- where the ground rises one under
             // it -- the hump itself (`plan_giant`). Either is a block a
-            // player stands on one below the trunk's top.
-            let step = block_at(&chunks, lx, site.ground + 1, lz);
-            assert!(
-                block_kind(step) == site.material || crate::types::is_collidable(step),
-                "seed {seed}: nothing to step up on beside the giant at ({}, {}), only {}",
-                site.x,
-                site.z,
-                crate::types::block_name(step)
-            );
-            assert_eq!(block_kind(block_at(&chunks, tx, site.ground + 2, tz)), site.material, "seed {seed}: no trunk top");
+            // player stands on, the last of them one below the trunk's top.
+            for dy in 1..w {
+                let step = block_at(&chunks, lx, site.ground + dy, lz);
+                assert!(
+                    block_kind(step) == site.material || crate::types::is_collidable(step),
+                    "seed {seed}: nothing to step up on beside the giant at ({}, {}), only {}",
+                    site.x,
+                    site.z,
+                    crate::types::block_name(step)
+                );
+            }
+            assert_eq!(block_kind(block_at(&chunks, tx, site.ground + w, tz)), site.material, "seed {seed}: no trunk top");
             // **Room for the body, not an empty cell.** This read
             // `== BLOCK_AIR` until the ground round a giant got its grain
             // (`landforms::GRAIN_HEIGHT`) and the step beside one was more
@@ -1692,7 +1701,7 @@ mod tests {
             // and a tuft is walked through (`types::is_collidable`). What
             // the climb needs is that a player's feet fit where they land;
             // grass growing round their boots is a wood.
-            let over_step = block_at(&chunks, lx, site.ground + 2, lz);
+            let over_step = block_at(&chunks, lx, site.ground + w, lz);
             assert!(
                 !crate::types::is_collidable(over_step),
                 "seed {seed}: nothing to stand on the step in, only {}",

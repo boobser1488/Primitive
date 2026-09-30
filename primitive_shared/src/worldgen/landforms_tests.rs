@@ -259,11 +259,21 @@ fn an_old_worlds_new_chunks_are_the_old_generators_to_the_block() {
 /// **All eight taken again when the second round of wild plants came**
 /// (`features::wild_plant`: lichen, heather, the dog rose, yarrow, thistle and
 /// four flowers). They grow in a landformed world only, on the columns the
-/// ground cover already rolled for, and they are the only change: the
-/// Regional and Earth prints above are the numbers they were.
+/// ground cover already rolled for; with the places off below, the eight are
+/// exactly the plants' prints, which is how the two changes were told apart
+/// when they met in one merge.
+///
+/// **And held twice when the country got its places** -- the tors, the
+/// combes and the river terraces (`landforms`, "What makes a place a place").
+/// With them off (`PLACES_OFF`) all eight are the numbers they were before,
+/// which says the places are the only thing that moved the ground: the lips
+/// took new shapes in the same change (`lips::profile`), and `dig::whole`
+/// reads every one of them back to the block it was cut from. With them on,
+/// the chunks a place stands in are taken again; the ones that did not move
+/// have none, which is the other half -- somewhere, not everywhere.
 #[test]
 fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
-    let held: [((i32, i32), u64); 8] = [
+    let before_places: [((i32, i32), u64); 8] = [
         ((0, 0), 0xe082_1f40_a51d_abf1),
         ((5, -3), 0xaf82_5fc2_b1cb_867f),
         ((-40, 90), 0xb49a_0dbe_b0b5_760e),
@@ -273,16 +283,37 @@ fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
         ((-1864, -1864), 0xcd58_ff9d_03e6_df63),
         ((-1873, -1866), 0x38a7_9737_6768_0261),
     ];
+    let with_places: [((i32, i32), u64); 8] = WITH_PLACES;
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(true));
-    for ((x, z), print) in held {
-        assert_eq!(
-            fingerprint_as(&gen, ChunkPos::new(x, z), crate::dig::whole),
-            print,
-            "landforms chunk {x},{z} is not the ground it was"
-        );
+    for (held, places_off) in [(before_places, true), (with_places, false)] {
+        super::PLACES_OFF.with(|off| off.set(places_off));
+        for ((x, z), print) in held {
+            assert_eq!(
+                fingerprint_as(&gen, ChunkPos::new(x, z), crate::dig::whole),
+                print,
+                "landforms chunk {x},{z} is not the ground it was (places off: {places_off})"
+            );
+        }
+    }
+    super::PLACES_OFF.with(|off| off.set(false));
+    for (x, z) in [(0,0),(5,-3),(-1875,-1875),(-1868,-1872)] {
+        println!("LIPS {x},{z} {:#018x}", fingerprint(&gen, ChunkPos::new(x, z)));
     }
 }
+
+/// The eight prints of `the_landforms_draw_the_ground_they_drew_before_they_
+/// were_made_cheaper` with the places in them.
+const WITH_PLACES: [((i32, i32), u64); 8] = [
+    ((0, 0), 0xe082_1f40_a51d_abf1),
+    ((5, -3), 0xaf82_5fc2_b1cb_867f),
+    ((-40, 90), 0xb49a_0dbe_b0b5_760e),
+    ((313, -77), 0xcd7a_cc7b_c6ed_1b47),
+    ((-1875, -1875), 0x2712_ef67_eff9_605b),
+    ((-1868, -1872), 0x8c4d_4c71_c0b8_41f4),
+    ((-1864, -1864), 0x937d_049a_31e5_3055),
+    ((-1873, -1866), 0x9c4f_b5d0_0d95_2b00),
+];
 
 /// **The lips are laid the same every time**: the chunks above, as they are
 /// with their lips, to the block. A lip is a function of the seed and the
@@ -311,12 +342,18 @@ fn the_landforms_lay_the_same_lips_every_time() {
         // fresh water, bare paths to a pond, talus round a cave mouth and
         // copper in a hillside all write into cells a lip then reads.
         //
-        // ...and again for the second round of wild plants, which stand on
-        // the lips as the tufts do (`features::wild_plant`).
+        // ...and three again when the ramps stopped being one flight
+        // (`lips::profile`) and the hill country got its tors and combes:
+        // the lips are other lips now, which is the change. Round the
+        // origin chunk nothing a lip was cut came out another shape.
+        //
+        // ...and all four once more where the wild plants met the places in
+        // one merge: the plants stand on the lips as the tufts do
+        // (`features::wild_plant`), so a print holds both.
         ((0, 0), 0x1e78_3a9f_6b6b_c8e1),
-        ((5, -3), 0x329c_988f_d4bb_815f),
-        ((-1875, -1875), 0xd7c5_4ecf_9f26_fd4a),
-        ((-1868, -1872), 0x4645_24a2_f466_fc3d),
+        ((5, -3), 0x1834_a3eb_4720_358f),
+        ((-1875, -1875), 0x76c4_859b_f1d8_3a0e),
+        ((-1868, -1872), 0x0ecd_e178_14da_9fec),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     for ((x, z), print) in held {
@@ -340,9 +377,14 @@ fn print_fingerprints() {
     // again from them failed the test it was taken for.
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(true));
-    for (x, z) in LANDFORM_CHUNKS {
-        println!("((({x}, {z})), {:#018x}),", fingerprint_as(&gen, ChunkPos::new(x, z), crate::dig::whole));
+    for places_off in [true, false] {
+        super::PLACES_OFF.with(|off| off.set(places_off));
+        println!("places off: {places_off}");
+        for (x, z) in LANDFORM_CHUNKS {
+            println!("((({x}, {z})), {:#018x}),", fingerprint_as(&gen, ChunkPos::new(x, z), crate::dig::whole));
+        }
     }
+    super::PLACES_OFF.with(|off| off.set(false));
     super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(false));
     for (x, z) in LANDFORM_CHUNKS.iter().take(2).chain(LANDFORM_CHUNKS[4..6].iter()) {
         println!("lips (({x}, {z})), {:#018x},", fingerprint(&gen, ChunkPos::new(*x, *z)));
@@ -629,14 +671,16 @@ fn what_the_landforms_cost_a_chunk() {
     // ...and once more with the clay's two rules off (`worldgen::CLAY_OFF`),
     // which is what the alluvial bed and the deep parting cost, measured in
     // the same binary as the ground with them in it.
-    let mut spent = [[0f64; 2]; 5];
+    let mut spent = [[0f64; 2]; 7];
     for _round in 0..5 {
-        for (index, (scale, lips, stepped, clay)) in [
-            (Scale::Earth, true, false, true),
-            (Scale::Landforms, true, false, true),
-            (Scale::Landforms, false, false, true),
-            (Scale::Landforms, true, true, true),
-            (Scale::Landforms, true, false, false),
+        for (index, (scale, lips, stepped, clay, (places, even))) in [
+            (Scale::Earth, true, false, true, (true, false)),
+            (Scale::Landforms, true, false, true, (true, false)),
+            (Scale::Landforms, false, false, true, (true, false)),
+            (Scale::Landforms, true, true, true, (true, false)),
+            (Scale::Landforms, true, false, false, (true, false)),
+            (Scale::Landforms, true, false, true, (false, false)),
+            (Scale::Landforms, true, false, true, (true, true)),
         ]
         .into_iter()
         .enumerate()
@@ -646,6 +690,8 @@ fn what_the_landforms_cost_a_chunk() {
                     super::lips::LIPS_OFF.with(|off| off.set(!lips));
                     super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(stepped));
                     super::CLAY_OFF.with(|off| off.set(!clay));
+                    super::PLACES_OFF.with(|off| off.set(!places));
+                    super::lips::EVEN_LIPS.with(|e| e.set(even));
                     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, scale);
                     let clock = Instant::now();
                     for dz in 0..12 {
@@ -661,7 +707,7 @@ fn what_the_landforms_cost_a_chunk() {
             }
         }
     }
-    for (index, name) in ["earth", "landforms", "no lips", "stepped", "no clay"].iter().enumerate() {
+    for (index, name) in ["earth", "landforms", "no lips", "stepped", "no clay", "no places", "even lips"].iter().enumerate() {
         println!(
             "{name:>9}: {:.2} ms a chunk round the origin, {:.2} ms in hill country",
             spent[index][0] * 1000.0 / (5.0 * 144.0),
@@ -841,3 +887,119 @@ fn probe_beds() {
         println!("{name:>10}: {:>3}..{:<3} mean {mean:5.2} sd {sd:4.2}", v.iter().min().unwrap(), v.iter().max().unwrap());
     }
 }
+
+/// **The country has its places, somewhere and not everywhere**
+/// (`landforms`, "What makes a place a place"): tors on the hard ground
+/// round the origin of 1337, combes in the hill country thirty kilometres
+/// out, terraces along a river's valley -- and together they move under one
+/// column in twenty, because a place that is everywhere is a texture. A tor
+/// is bare living rock in the chunk, not a hummock of turf: that is what
+/// makes it a landmark from the next hill.
+#[test]
+fn the_country_has_tors_combes_and_terraces_somewhere_and_not_everywhere() {
+    let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
+    let (mut tors, mut combes, mut terraces, mut moved, mut dry) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    let mut a_tor = None;
+    for (centre, reach) in [((0, 0), 800), ((-29_950, -30_600), 400)] {
+        for gz in (centre.1 - reach..centre.1 + reach).step_by(8) {
+            for gx in (centre.0 - reach..centre.0 + reach).step_by(8) {
+                let now = gen.height_at(gx, gz);
+                if now <= SEA_LEVEL {
+                    continue;
+                }
+                dry += 1;
+                super::PLACES_OFF.with(|off| off.set(true));
+                let before = gen.height_at(gx, gz);
+                super::PLACES_OFF.with(|off| off.set(false));
+                if now == before {
+                    continue;
+                }
+                moved += 1;
+                if gen.on_a_tor(gx, gz) {
+                    tors += 1;
+                    a_tor.get_or_insert((gx, gz, now));
+                } else if gen.biome_at(gx, gz) == Biome::Hills {
+                    combes += u32::from(now < before);
+                } else {
+                    terraces += 1;
+                }
+            }
+        }
+    }
+    println!("{dry} dry columns: {moved} moved, {tors} tors, {combes} combes, {terraces} terraces");
+    assert!(tors > 0 && combes > 0 && terraces > 0, "tors {tors}, combes {combes}, terraces {terraces}");
+    assert!(moved * 20 <= dry, "the places moved {moved} of {dry} columns: that is a texture, not a place");
+    let (gx, gz, top) = a_tor.expect("a tor was found");
+    let chunk = gen.generate_chunk(ChunkPos::from_world(gx, gz));
+    let (lx, lz) = (gx.rem_euclid(CHUNK_SIZE_X as i32) as usize, gz.rem_euclid(CHUNK_SIZE_Z as i32) as usize);
+    let rock = chunk.get(lx, top as usize, lz);
+    assert!(
+        matches!(crate::ground::rock_of(rock), Some((_, None))),
+        "the tor at ({gx}, {gz}) is topped with {}",
+        crate::types::block_name(rock)
+    );
+}
+
+/// Where the places are (`landforms`, "What makes a place a place"), as the
+/// difference they make to the height field: a tor raises it on bare rock, a
+/// combe lets it down in hill country, a terrace pulls a valley wall onto a
+/// level. Counted on a grid over a square round the origin, with the
+/// nearest of each printed so a picture can be taken of it.
+///
+/// ```text
+/// cargo test -p primitive_shared --lib -- --ignored --nocapture probe_places
+/// ```
+#[test]
+#[ignore = "a measurement, not an assertion"]
+fn probe_places() {
+    let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
+    // `PROBE_AT=x,z` moves the square: the hill country of `what_the_landforms_cost_a_chunk` is thirty kilometres out.
+    let centre = std::env::var("PROBE_AT").ok().and_then(|v| { let (x, z) = v.split_once(",")?; Some((x.parse().ok()?, z.parse().ok()?)) }).unwrap_or((0, 0));
+    let (reach, step) = (1_600, 4);
+    let (mut tors, mut combes, mut terraces, mut total) = (0u32, 0u32, 0u32, 0u32);
+    // The nearest of each kind: how far squared, where, and by how much.
+    type Nearest = Option<(i32, (i32, i32), i32)>;
+    let mut nearest: [Nearest; 3] = [None; 3];
+    for gz in (centre.1 - reach..centre.1 + reach).step_by(step) {
+        for gx in (centre.0 - reach..centre.0 + reach).step_by(step) {
+            let now = gen.height_at(gx, gz);
+            if now <= SEA_LEVEL {
+                continue;
+            }
+            total += 1;
+            super::PLACES_OFF.with(|off| off.set(true));
+            let before = gen.height_at(gx, gz);
+            super::PLACES_OFF.with(|off| off.set(false));
+            let change = now - before;
+            if change == 0 {
+                continue;
+            }
+            let kind = if gen.on_a_tor(gx, gz) {
+                tors += 1;
+                0
+            } else if gen.biome_at(gx, gz) == Biome::Hills || change < -1 {
+                combes += 1;
+                1
+            } else {
+                terraces += 1;
+                2
+            };
+            let far = (gx - centre.0).pow(2) + (gz - centre.1).pow(2);
+            if nearest[kind].is_none_or(|(held, _, _)| far < held) {
+                nearest[kind] = Some((far, (gx, gz), change));
+            }
+            // Open country, with the place standing out of it: the ones a
+            // picture can be taken of.
+            let biome = gen.biome_at(gx, gz);
+            if change.abs() >= 2 && matches!(biome, Biome::Plains | Biome::Hills | Biome::Steppe) && far < 900 * 900 {
+                println!("  {} at ({gx}, {gz}) in {biome:?}, {change:+}", ["tor", "combe", "terrace"][kind]);
+            }
+        }
+    }
+    let share = |n: u32| 100.0 * n as f32 / total.max(1) as f32;
+    println!("{total} dry samples: tors {:.2}%, combes {:.2}%, terraces {:.2}%", share(tors), share(combes), share(terraces));
+    for (name, found) in ["tor", "combe", "terrace"].iter().zip(nearest) {
+        println!("nearest {name}: {found:?}");
+    }
+}
+
