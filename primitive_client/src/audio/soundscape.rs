@@ -919,7 +919,9 @@ impl Soundscape {
         self.aloft = aloft;
 
         for cry in self.voices.hear(dt, animals, self.ear, self.night, &mut self.rng) {
-            let pitch = self.jitter(0.05);
+            // The size first and the jitter on it, as the rustle below does:
+            // a fox is a fox a few per cent either way, never a wolf.
+            let pitch = cry.pitch * self.jitter(0.05);
             audio.play_at(cry.sfx, cry.at, cry.gain, pitch);
         }
 
@@ -1833,7 +1835,7 @@ fn idle_chance(species: Species, night: bool) -> f32 {
         // troop in the crowns chatters at each other all day about nothing,
         // and a player who has learned the sound knows there is a grove over
         // the dune before they can see one. What it *also* means -- because
-        // the same voice is the alarm (`cry_of`) -- is that a troop going
+        // the same voice is the alarm (`bank::voice_of`) -- is that a troop going
         // off all at once is something under the trees that is not you, and
         // there is no other warning of that on a coast with no wolves.
         Species::Monkey => 0.6,
@@ -1859,8 +1861,9 @@ fn idle_chance(species: Species, night: bool) -> f32 {
                 0.08
             }
         }
-        // The scream of a fox at night is the most startling sound in a
-        // wood, and it is rare: a few times a night, never by day.
+        // The bark of a fox at night -- a short string of them from the
+        // dark, a few times a night and never by day. The wolf's bark,
+        // higher (`bank::throat_of`, where the scream is argued out).
         Species::Fox => {
             if night {
                 0.08
@@ -1876,7 +1879,7 @@ fn idle_chance(species: Species, night: bool) -> f32 {
         // beach at night sounds like is the surf.
         Species::Crab
         // A beaver has no calm voice a player hears over the water: what it
-        // has is the tail, and that is its alarm (`cry_of`).
+        // has is the tail, and that is its alarm (`bank::voice_of`).
         | Species::Beaver
         | Species::Hare
         | Species::Fish
@@ -1893,6 +1896,10 @@ pub struct Utterance {
     pub sfx: Sfx,
     pub at: glam::DVec3,
     pub gain: f32,
+    /// The playback rate the cry is asked at before the jitter: a borrowed
+    /// throat at the animal's own size (`bank::voice_pitch`), and one for
+    /// every animal that has recordings of its own.
+    pub pitch: f32,
 }
 
 /// What the soundscape remembers about one animal between frames.
@@ -1999,7 +2006,8 @@ impl Voices {
                     // Not twice for one blow arriving over two snapshots.
                     if clock - before.wounded_at > 0.3 {
                         if let Some(sfx) = voice_of(animal.species, Cry::Hurt) {
-                            said.push(Utterance { sfx, at: animal.at, gain: 0.85 });
+                            let pitch = bank::voice_pitch(animal.species, Cry::Hurt);
+                            said.push(Utterance { sfx, at: animal.at, gain: 0.85, pitch });
                         }
                     }
                     now.wounded_at = clock;
@@ -2028,7 +2036,8 @@ impl Voices {
                 if clock >= now.cried_until && !herd_spoke && (animal.at - ear).length() < f64::from(crate::audio::HEARING) && self.spend() {
                     if let Some(sfx) = voice_of(animal.species, cry) {
                         let gain = if cry == Cry::Threat { 0.9 } else { 0.7 };
-                        said.push(Utterance { sfx, at: animal.at, gain });
+                        let pitch = bank::voice_pitch(animal.species, cry);
+                        said.push(Utterance { sfx, at: animal.at, gain, pitch });
                         now.cried_until = clock + 2.5;
                         now.quiet_until = now.quiet_until.max(clock + 2.5);
                         if cry == Cry::Alarm {
@@ -2058,7 +2067,8 @@ impl Voices {
                 && self.spend()
             {
                 if let Some(sfx) = voice_of(animal.species, Cry::Idle) {
-                    said.push(Utterance { sfx, at: animal.at, gain: 0.6 });
+                    let pitch = bank::voice_pitch(animal.species, Cry::Idle);
+                    said.push(Utterance { sfx, at: animal.at, gain: 0.6, pitch });
                     now.quiet_until = now.quiet_until.max(clock + 6.0);
                 }
             }
@@ -2078,7 +2088,8 @@ impl Voices {
             }
             if clock - gone.wounded_at < DEATH_WINDOW && (gone.at - ear).length() < f64::from(crate::audio::HEARING) {
                 if let Some(sfx) = voice_of(gone.species, Cry::Death) {
-                    said.push(Utterance { sfx, at: gone.at, gain: 0.9 });
+                    let pitch = bank::voice_pitch(gone.species, Cry::Death);
+                    said.push(Utterance { sfx, at: gone.at, gain: 0.9, pitch });
                 }
             }
         }
@@ -2115,7 +2126,8 @@ impl Voices {
                 if rng.chance(chance) && self.spend() {
                     if let Some(sfx) = voice_of(species, Cry::Idle) {
                         let gain = if ringing { 0.75 } else { 0.55 };
-                        said.push(Utterance { sfx, at: self.known[i].at, gain });
+                        let pitch = bank::voice_pitch(species, Cry::Idle);
+                        said.push(Utterance { sfx, at: self.known[i].at, gain, pitch });
                         self.known[i].quiet_until = clock + if ringing { rng.range(3.0, 6.0) } else { rng.range(5.0, 12.0) };
                     }
                 }
@@ -3239,6 +3251,24 @@ mod tests {
         };
         assert_eq!(howls(false), 0, "a wolf howled in daylight");
         assert!(howls(true) > 0, "a pack was silent for two minutes of night");
+    }
+
+    /// **Every animal the woods and the water gained is heard at its own
+    /// size**: the cry `Voices` hands out carries the pitch `bank::voice_pitch`
+    /// gives it, so a fox's yelp is not the wolf's.
+    #[test]
+    fn a_wounded_fox_cries_higher_than_a_wounded_wolf() {
+        let cry = |species: Species| {
+            let mut voices = Voices::new();
+            let mut rng = Rng::new(4);
+            let at = Vec3::new(8.0, 0.0, 0.0);
+            listen(&mut voices, 10, &[animal(1, species, at, 0.0, 0.0)], false, &mut rng);
+            let said = listen(&mut voices, 2, &[animal(1, species, at, 0.0, 1.0)], false, &mut rng);
+            *said.iter().find(|c| c.gain > 0.8).expect("no wound cry")
+        };
+        let (fox, wolf) = (cry(Species::Fox), cry(Species::Wolf));
+        assert_eq!(fox.sfx, wolf.sfx, "a fox borrows the wolf's throat");
+        assert!(fox.pitch > wolf.pitch * 1.1, "a fox at {:.2} against a wolf at {:.2}", fox.pitch, wolf.pitch);
     }
 
     /// A squall is gusts that leave no room between them. Scaling only
