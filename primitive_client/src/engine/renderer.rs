@@ -256,6 +256,14 @@ pub struct FrameParams {
     /// soaked the meadow under it. Nought in every tool that never heard of
     /// weather, which is the dry world as it was.
     pub rain: f32,
+    /// The wind the plants bend in this frame (`engine::sway`): the world's
+    /// wind with the player's step in it, and the phases of its waves at the
+    /// render origin. Calm in every tool that never heard of wind, which is
+    /// the still meadow as it was.
+    pub breeze: crate::engine::sway::Breeze,
+    /// How far from the eye the turf's blades have sunk into the ground, in
+    /// blocks (`meadow::Density::fade_line`). Nought where none are drawn.
+    pub blade_line: f32,
 }
 
 impl Default for FrameParams {
@@ -289,6 +297,8 @@ impl Default for FrameParams {
             cloud_drift: glam::Vec2::ZERO,
             moon: [0.0, 1.0, 0.0, 0.0],
             rain: 0.0,
+            breeze: crate::engine::sway::Breeze::CALM,
+            blade_line: 0.0,
         }
     }
 }
@@ -367,6 +377,9 @@ struct Globals {
     /// (`FrameParams::rain`); y..w spare. Appended, for the reason `anim`
     /// gives.
     weather: [f32; 4],
+    /// The wind in the grass and the edge of the turf's blades, two rows:
+    /// see `sway::Breeze::uniform`. Appended, for the reason `anim` gives.
+    breeze: [[f32; 4]; 2],
 }
 
 /// The sun's compass bearing for `glow_lobe`: toward the sun, flattened
@@ -3919,6 +3932,7 @@ impl GraphicsState {
             },
             moon: params.moon,
             weather: [params.rain.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+            breeze: params.breeze.uniform(params.blade_line),
         };
         self.queue
             .write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));

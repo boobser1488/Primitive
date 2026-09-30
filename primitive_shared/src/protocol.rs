@@ -568,6 +568,10 @@ pub type PlayerId = u64;
 /// `ForgetMark` out, `Trail` back, all appended, and blocks at ids 695-696
 /// (`types::BLOCK_MAP`, `types::BLOCK_BLAZE`) with one row at the end of
 /// `RECIPES`. 57 still, which no release speaks.
+/// ...and the second round of wild plants: blocks at ids 790-801
+/// (`types::BLOCK_TUMBLEWEED` to `BLOCK_BUTTERCUP`) and two rows at the end
+/// of `RECIPES`. A tumbleweed rolls as an `EntityKind::Item`, which is on the
+/// wire already. 57 still.
 pub const PROTOCOL_VERSION: u32 = 57;
 
 /// What kind of container a screen is showing.

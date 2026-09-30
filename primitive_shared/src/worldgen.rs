@@ -6785,6 +6785,16 @@ impl WorldGen {
                     }
                 }
 
+                // **The second round of wild plants** -- lichen, heather,
+                // the dog rose, the herbs and the four flowers -- asked once,
+                // in one line, before the berry bush: rarer than the bush
+                // everywhere they meet it, and the rarer wins a cell. See
+                // `features::wild_plant`.
+                if let Some(plant) = self.wild_plant(biome, ground, (gx, gz), shaded, waterline) {
+                    blocks[air_index] = plant;
+                    continue;
+                }
+
                 // Berry bushes: the first food in the world.
                 //
                 // Before the grass, because where the two compete the

@@ -803,6 +803,21 @@ impl Vertex {
         self
     }
 
+    /// Marks how far this corner stands above its root, for the wind
+    /// (`engine::sway`), and whether it is one of the turf's blades
+    /// (`sway::COVER_BIT`). `bits` is what `sway::reach_bits` gave.
+    ///
+    /// **Only on a plain cell coordinate.** The fine coordinate and water
+    /// both use the bits the reach sits in, and neither is anything a wind
+    /// should move -- a model's box, a pool's face -- so the mark is not
+    /// written on them rather than written and misread.
+    pub fn swaying(mut self, bits: u32) -> Self {
+        if self.uv & FINE_UV_BIT == 0 && self.packed & TRANSLUCENT_BIT == 0 {
+            self.uv |= bits;
+        }
+        self
+    }
+
     /// The decoders, mirroring what the shader does. Used by the tests
     /// that check the packing round-trips -- a silent mismatch here
     /// shows up as the whole world wearing the wrong textures.
@@ -1737,6 +1752,17 @@ pub struct Neighbourhood {
     /// after `fill` by the dispatch, cleared by `fill` -- so, like the
     /// stones, a snapshot nobody told draws the canopy see-through.
     leaves_solid: bool,
+    /// How thick the turf's own blades are drawn in this chunk
+    /// (`engine::meadow`), or `Off` past the player's blade line. Set after
+    /// `fill` by the dispatch, which knows the distance
+    /// (`meadow::meshes_blades_at`); reset to `Off` by `fill`, so a snapshot
+    /// nobody told -- every test and photograph that counts a mesh -- draws
+    /// the grass as it always was.
+    meadow: crate::engine::meadow::Density,
+    /// The season, for the flowers that bloom in only some of them
+    /// (`types::is_in_bloom`). `None` -- every snapshot nobody told -- is
+    /// every flower in flower, the picture the game always had.
+    season: Option<primitive_shared::season::Season>,
 }
 
 /// A whole cell's worth of cover: this block hides anything behind it.
@@ -2438,6 +2464,18 @@ impl Neighbourhood {
         self.leaves_solid = solid;
     }
 
+    /// Lays the turf's own blades over this chunk at `density`, or none. See
+    /// `meadow::meshes_blades_at` for which chunks.
+    pub fn grow_blades(&mut self, density: crate::engine::meadow::Density) {
+        self.meadow = density;
+    }
+
+    /// Which season the flowers of this chunk are drawn in. See
+    /// `types::is_in_bloom`.
+    pub fn in_season(&mut self, season: primitive_shared::season::Season) {
+        self.season = Some(season);
+    }
+
     /// What is in the pit kilns of this chunk. See `pottery`.
     pub fn set_pottery(&mut self, pottery: Vec<((i32, i32, i32), Vec<BlockId>)>) {
         self.pottery = pottery;
@@ -2533,6 +2571,8 @@ impl Default for Neighbourhood {
             swung_lids: Vec::new(),
             stone_detail: crate::engine::lod::StoneDetail::Full,
             leaves_solid: false,
+            meadow: crate::engine::meadow::Density::Off,
+            season: None,
         }
     }
 }
@@ -2594,6 +2634,9 @@ impl Neighbourhood {
         self.stone_detail = crate::engine::lod::StoneDetail::Full;
         // ...nor its solid crowns.
         self.leaves_solid = false;
+        // ...nor a near chunk's blades, nor the season it was told.
+        self.meadow = crate::engine::meadow::Density::Off;
+        self.season = None;
 
         // **The skyline first, so the copy below can stop under it.**
         //
@@ -3037,6 +3080,13 @@ pub fn build_mesh(
     // A crown's inside, or only its outside: see `face_visible` and
     // `MeshBuffers::leaves_solid`.
     let shell_crowns = coarse || cache.leaves_solid;
+    // The turf's own blades, never in a coarse chunk: a coarse chunk is
+    // a stand-in for ground a long way off, where a blade is not a pixel.
+    let blades = !coarse && cache.meadow != crate::engine::meadow::Density::Off;
+    let blade_pictures = crate::engine::meadow::Blades {
+        green: textures.extra(crate::engine::texture::EXTRA_TURF_BLADES),
+        dry: textures.extra(crate::engine::texture::EXTRA_TURF_BLADES_DRY),
+    };
 
     // Climate per column of the chunk, sampled on first use and reused
     // by every leaf and blade above it.
@@ -3130,6 +3180,37 @@ pub fn build_mesh(
                     // carry that in their variant. See `surface_tint`.
                     surface_tint(id).unwrap_or(0)
                 };
+
+                // **The turf's own blades** (`engine::meadow`): on a turf
+                // with nothing over it but air or a plant, in a chunk inside
+                // the player's blade line. Asked of every block, answered by
+                // one compare for all but turf -- and the cube is still drawn
+                // below, the blades are as well as it, not instead.
+                if blades && crate::engine::meadow::may_grow_on(id) {
+                    let over = cache.block_near(cell, y, 0, 1, 0);
+                    if over == BLOCK_AIR || (is_cross(over) && !primitive_shared::types::stands_in_water(over)) {
+                        let [temperature, humidity] = sampled_climate();
+                        let under = cache.block_near(cell, y, 0, -1, 0);
+                        let drop = primitive_shared::types::stand_drop(
+                            primitive_shared::types::BLOCK_TALL_GRASS,
+                            id,
+                            under,
+                        );
+                        crate::engine::meadow::grow(
+                            &crate::engine::meadow::Turf {
+                                cell: [gx, y, gz],
+                                top: [x as f32, (y + 1) as f32 - drop, z as f32],
+                                ground: id,
+                                light: cache.light_near(cell, y, 0, 1, 0),
+                                tint: pack_tint(cooled_by_altitude(temperature, y + 1), humidity),
+                            },
+                            cache.meadow,
+                            blade_pictures,
+                            vertices,
+                            sprites,
+                        );
+                    }
+                }
 
                 // Plants are not cubes. Two quads on the cell's
                 // diagonals, no face culling to do (there are no faces
@@ -3887,7 +3968,7 @@ pub fn build_mesh(
                             [gx, y, gz],
                             [x as f32, y as f32 - cross_drop(cache, cell, y, id), z as f32],
                             id,
-                            textures.layer_for_face(id, cross_face(id)),
+                            textures.layer_for_face(id, cross_face_in(id, cache.season)),
                             cache.light_near(cell, y, 0, 0, 0),
                             tint,
                             vertices,
@@ -4765,6 +4846,21 @@ pub fn build_mesh(
         solid_groups[face + 1] = indices.len() as u32;
     }
     *solid_index_count = indices.len() as u32;
+    // **The canopy shivers in a wind** (`engine::sway`): every corner of
+    // a leaf face is given the same small reach, so a crown moves as one
+    // mass and two faces sharing a corner move it the same way -- the
+    // bend is a function of where the corner is and nothing else. Marked
+    // here, on the range, rather than at the half-dozen places a leaf face
+    // is made (a lone face, a merged rectangle, a crown in a pond): the
+    // range is what "a leaf" means to the renderer. `swaying` skips a
+    // model's box and water, so a fish trap or a drowned crown in this
+    // range stays still.
+    for &index in leaves.iter() {
+        let vertex = &mut vertices[index as usize];
+        if vertex.packed & MOTTLED_BIT != 0 {
+            *vertex = vertex.swaying(crate::engine::sway::reach_bits(crate::engine::sway::LEAF_REACH));
+        }
+    }
     indices.extend_from_slice(leaves);
     *leaf_end = indices.len() as u32;
     indices.extend_from_slice(sprites);
@@ -8934,6 +9030,16 @@ pub(crate) fn cross_face(id: BlockId) -> usize {
     }
 }
 
+/// `cross_face`, for a season: **a flower out of its season wears its side
+/// picture**, which is its leaves (`blocks.toml`, and `types::is_in_bloom`).
+/// With no season -- a snapshot nobody told -- every flower is in flower.
+pub(crate) fn cross_face_in(id: BlockId, season: Option<primitive_shared::season::Season>) -> usize {
+    match season {
+        Some(season) if primitive_shared::types::is_flower(id) && !primitive_shared::types::is_in_bloom(id, season) => 2,
+        _ => cross_face(id),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cross_block(
     cell: [i32; 3],
@@ -8953,13 +9059,70 @@ fn cross_block(
 
     // The corners come from `cross_planes`, which the mining overlay
     // reads too -- see there for why they are not worked out here.
+    let rooted = rooted_at(block);
     for plane in cross_planes(cell, at, block) {
         let base = vertices.len() as u32;
         for (corner, uv) in plane.into_iter().zip([[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]])
         {
-            vertices.push(Vertex::tinted(corner, uv, layer, packed, tint));
+            let reach = rooted.map_or(0, |root| crate::engine::sway::reach_bits(root.reach(corner[1] - at[1])));
+            vertices.push(Vertex::tinted(corner, uv, layer, packed, tint).swaying(reach));
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+}
+
+/// Where a cross-shaped thing is held, for the wind (`engine::sway`): by
+/// its foot, by its top, or not at all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Root {
+    /// A plant on the ground. `upper` is the second cell of a tall plant,
+    /// whose root is a whole block below its own floor.
+    Foot { upper: bool, tall: bool },
+    /// Moss hanging from a bough: the free end is the bottom.
+    Top { height: f32 },
+}
+
+impl Root {
+    /// How far a corner `y` above its own cell's floor is from where the
+    /// thing is held, in the units `sway::reach_bits` takes.
+    ///
+    /// **A tall plant bends over its whole two blocks**, not twice over
+    /// one: its lower half's top and its upper half's foot are one point
+    /// of one stalk and must be given one reach, or the stalk would kink at
+    /// the seam in a wind. Halving both cells' heights over the root does
+    /// that and keeps the top at a block's reach, which is the cap.
+    pub(crate) fn reach(self, y: f32) -> f32 {
+        match self {
+            Root::Foot { upper, tall } => {
+                let above = y + if upper { 1.0 } else { 0.0 };
+                if tall {
+                    above * 0.5
+                } else {
+                    above
+                }
+            }
+            Root::Top { height } => (height - y).max(0.0),
+        }
+    }
+}
+
+/// Whether the wind moves this cross, and from which end. `None` for what
+/// is not a plant -- a stake, a lattice, a fire -- for what stands in water
+/// (kelp is moved by a current, not a wind, and that is not drawn), and for
+/// a fungus, which is rooted in wood and stands stiff.
+pub(crate) fn rooted_at(block: BlockId) -> Option<Root> {
+    use primitive_shared::blocks::{definition, Work};
+    use primitive_shared::types::{
+        block_kind, is_plant_top, is_tall_plant, stands_in_water, BLOCK_BRACKET_FUNGUS, BLOCK_HANGING_MOSS,
+        BLOCK_MUSHROOM, BLOCK_TOADSTOOL,
+    };
+    if definition(block).work != Work::Plant || stands_in_water(block) {
+        return None;
+    }
+    match block_kind(block) {
+        BLOCK_MUSHROOM | BLOCK_TOADSTOOL | BLOCK_BRACKET_FUNGUS => None,
+        BLOCK_HANGING_MOSS => Some(Root::Top { height: 1.0 }),
+        _ => Some(Root::Foot { upper: is_plant_top(block), tall: is_tall_plant(block) }),
     }
 }
 

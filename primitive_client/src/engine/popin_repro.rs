@@ -211,7 +211,7 @@ fn walk(layers: crate::engine::texture::FaceLayers, settings: &ClientSettings) -
         }
         if lod_scanned_from != Some(player_chunk) {
             lod_scanned_from = Some(player_chunk);
-            crate::restripe_detail_levels(false, &chunks, player_chunk, lod, settings.relief_chunks, settings.transparent_leaves_chunks, &mut chunk_lod, &mut versions, &mut dirty, &mut dirty_set);
+            crate::restripe_detail_levels(false, &chunks, player_chunk, lod, settings.relief_chunks, settings.transparent_leaves_chunks, crate::Vegetation::NONE, &mut chunk_lod, &mut versions, &mut dirty, &mut dirty_set);
         }
         crate::dispatch_meshing(
             &mut urgent,
@@ -226,6 +226,7 @@ fn walk(layers: crate::engine::texture::FaceLayers, settings: &ClientSettings) -
             settings.lod_quality,
             settings.relief_chunks,
             settings.transparent_leaves_chunks,
+            crate::Vegetation::NONE,
             &mut chunk_lod,
             settings.mesh_budget_ms,
             &mut stats,

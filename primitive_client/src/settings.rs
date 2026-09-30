@@ -328,6 +328,24 @@ pub struct ClientSettings {
     /// felt. Grass is not in this: a tuft was never flat.
     #[serde(default = "default_relief_chunks")]
     pub relief_chunks: i32,
+    /// How thick the turf's own blades are drawn between the tufts
+    /// (`engine::meadow`): off, sparse, thick, lush. "сделай так, чтобы
+    /// трава и растительность была густой, как в жизни".
+    ///
+    /// **A graphics step and not a world rule**: the blades are the mesher's
+    /// and nobody else's -- they cannot be pulled up, walked into or aimed
+    /// at -- so a phone can draw bare turf and a desktop a hayfield over the
+    /// same world. What each step costs is measured beside
+    /// `meadow::Density::clumps`. Off on a phone by default, where nothing of
+    /// it has been measured yet, and thick on a desktop.
+    #[serde(default = "default_grass_density")]
+    pub grass_density: crate::engine::meadow::Density,
+    /// How much the wind moves the grass, the plants and the leaves
+    /// (`engine::sway`): off, gentle, or as the world's wind blows. Applied
+    /// the frame it is changed -- it is a number the shader reads, not a
+    /// mesh. Off on a phone by default, for `grass_density`'s reason.
+    #[serde(default = "default_wind_sway")]
+    pub wind_sway: crate::engine::sway::Sway,
     /// Shadows cast by the sun and by fire: Off, Hard or Soft.
     ///
     /// The sun's are a depth picture of the world around the player taken
@@ -1173,6 +1191,22 @@ fn default_relief_chunks() -> i32 {
     crate::engine::lod::RELIEF_CHUNKS
 }
 
+fn default_grass_density() -> crate::engine::meadow::Density {
+    if cfg!(target_os = "android") {
+        crate::engine::meadow::Density::Off
+    } else {
+        crate::engine::meadow::Density::Thick
+    }
+}
+
+fn default_wind_sway() -> crate::engine::sway::Sway {
+    if cfg!(target_os = "android") {
+        crate::engine::sway::Sway::Off
+    } else {
+        crate::engine::sway::Sway::Full
+    }
+}
+
 /// The stops the relief row walks, in chunks: flat everywhere, then out
 /// to eight. See `ClientSettings::relief_chunks` for why no further.
 pub const RELIEF_STOPS: [i32; 6] = [0, 2, 3, 4, 6, 8];
@@ -1489,6 +1523,8 @@ impl Default for ClientSettings {
             transparent_leaves_chunks: default_transparent_leaves_chunks(),
             transparent_leaves: None,
             relief_chunks: default_relief_chunks(),
+            grass_density: default_grass_density(),
+            wind_sway: default_wind_sway(),
             shadows: crate::engine::shadow::Mode::Off,
             shadow_distance: default_shadow_distance(),
             plant_shadows: crate::engine::shadow::PlantShadows::Trees,
@@ -1631,6 +1667,29 @@ impl ClientSettings {
         // (`renderer::choose_sample_count`), so what a run was really
         // drawn at is the `msaa:` line the renderer prints rather than
         // this.
+        // **The two vegetation rows, reachable without a menu**, for the
+        // reason every row here is: the table of what each blade step costs
+        // was taken by running one binary once a step, and a phone cannot be
+        // made to tap a row.
+        if let Some(raw) = var("PRIMITIVE_GRASS") {
+            use crate::engine::meadow::Density;
+            match raw.trim() {
+                "off" | "0" => self.grass_density = Density::Off,
+                "sparse" | "1" => self.grass_density = Density::Sparse,
+                "thick" | "2" => self.grass_density = Density::Thick,
+                "lush" | "3" => self.grass_density = Density::Lush,
+                other => eprintln!("PRIMITIVE_GRASS={other} is none of off, sparse, thick, lush; ignored"),
+            }
+        }
+        if let Some(raw) = var("PRIMITIVE_WIND") {
+            use crate::engine::sway::Sway;
+            match raw.trim() {
+                "off" | "0" => self.wind_sway = Sway::Off,
+                "gentle" | "1" => self.wind_sway = Sway::Gentle,
+                "full" | "2" => self.wind_sway = Sway::Full,
+                other => eprintln!("PRIMITIVE_WIND={other} is none of off, gentle, full; ignored"),
+            }
+        }
         if let Some(raw) = var("PRIMITIVE_MSAA") {
             match raw.trim().parse::<u32>() {
                 Ok(count) => self.msaa = count,
@@ -1683,6 +1742,8 @@ pub struct Graphics {
     pub cloudiness: f32,
     pub transparent_leaves_chunks: i32,
     pub relief_chunks: i32,
+    pub grass_density: crate::engine::meadow::Density,
+    pub wind_sway: crate::engine::sway::Sway,
 }
 
 /// A whole graphics screen in one row: "НАБОР".
@@ -1771,7 +1832,9 @@ impl Preset {
         use crate::engine::lamp_shadow::FireShadows;
         use crate::engine::lighting::Quality as Light;
         use crate::engine::lod::Quality as Lod;
+        use crate::engine::meadow::Density;
         use crate::engine::shadow::{Mode, PlantShadows};
+        use crate::engine::sway::Sway;
         match self {
             // Custom has no table of its own: it is what the settings read
             // as when they match none of the five. Asked for one anyway --
@@ -1798,6 +1861,8 @@ impl Preset {
                 cloudiness: 0.45,
                 transparent_leaves_chunks: 6,
                 relief_chunks: 4,
+                grass_density: Density::Thick,
+                wind_sway: Sway::Full,
             },
             // The phone, and the one row on the screen that is allowed to
             // ask the game to pick a resolution: `None` is `auto`, which
@@ -1825,6 +1890,10 @@ impl Preset {
                 cloudiness: 0.45,
                 transparent_leaves_chunks: 6,
                 relief_chunks: 4,
+                // The phone's: none of the meadow's cost has been measured on
+                // one, and LOW is the step that holds sixty frames there.
+                grass_density: Density::Off,
+                wind_sway: Sway::Off,
             },
             // **Playable, not a joke.** The fog stays on: at four chunks the
             // world ends close enough that without it the edge is a wall,
@@ -1854,6 +1923,8 @@ impl Preset {
                 cloudiness: 0.0,
                 transparent_leaves_chunks: 0,
                 relief_chunks: 0,
+                grass_density: Density::Off,
+                wind_sway: Sway::Off,
             },
             // Twice the world MEDIUM draws, with the hard shadows on. Hard
             // rather than Soft because it is the cheaper step and the one
@@ -1879,6 +1950,8 @@ impl Preset {
                 cloudiness: 0.45,
                 transparent_leaves_chunks: 8,
                 relief_chunks: 6,
+                grass_density: Density::Thick,
+                wind_sway: Sway::Full,
             },
             // The whole streamed world, meshed block for block to its edge.
             // `lod_distance_chunks: 0` is the simplification off, which is
@@ -1904,6 +1977,8 @@ impl Preset {
                 cloudiness: 0.45,
                 transparent_leaves_chunks: crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE,
                 relief_chunks: 8,
+                grass_density: Density::Lush,
+                wind_sway: Sway::Full,
             },
         }
     }
@@ -1969,6 +2044,8 @@ impl ClientSettings {
             cloudiness: self.cloudiness,
             transparent_leaves_chunks: self.transparent_leaves_chunks,
             relief_chunks: self.relief_chunks,
+            grass_density: self.grass_density,
+            wind_sway: self.wind_sway,
         }
     }
 
@@ -2001,6 +2078,8 @@ impl ClientSettings {
             cloudiness,
             transparent_leaves_chunks,
             relief_chunks,
+            grass_density,
+            wind_sway,
         } = graphics;
         self.render_distance_chunks = render_distance_chunks;
         self.resolution_scale = resolution_scale;
@@ -2021,6 +2100,8 @@ impl ClientSettings {
         self.cloudiness = cloudiness;
         self.transparent_leaves_chunks = transparent_leaves_chunks;
         self.relief_chunks = relief_chunks;
+        self.grass_density = grass_density;
+        self.wind_sway = wind_sway;
     }
 }
 
@@ -2963,6 +3044,12 @@ mod file_tests {
             assert!(cheap.render_distance_chunks <= dear.render_distance_chunks, "{:?} draws more world than {:?}", pair[0], pair[1]);
             assert!(cheap.sky_scale >= dear.sky_scale, "{:?} draws a finer sky than {:?}", pair[0], pair[1]);
             assert!(cheap.detail_distance <= dear.detail_distance, "{:?} draws tufts further than {:?}", pair[0], pair[1]);
+            assert!(
+                cheap.grass_density.clumps() <= dear.grass_density.clumps(),
+                "{:?} draws a thicker meadow than {:?}",
+                pair[0],
+                pair[1]
+            );
         }
     }
 

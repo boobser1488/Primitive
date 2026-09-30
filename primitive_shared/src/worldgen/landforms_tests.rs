@@ -255,17 +255,23 @@ fn an_old_worlds_new_chunks_are_the_old_generators_to_the_block() {
 /// not move are chunks with none of those things in them, which is the other
 /// half of the assertion -- the tells are *somewhere*, not everywhere. The
 /// Regional and Earth prints above did not move at all.
+///
+/// **All eight taken again when the second round of wild plants came**
+/// (`features::wild_plant`: lichen, heather, the dog rose, yarrow, thistle and
+/// four flowers). They grow in a landformed world only, on the columns the
+/// ground cover already rolled for, and they are the only change: the
+/// Regional and Earth prints above are the numbers they were.
 #[test]
 fn the_landforms_draw_the_ground_they_drew_before_they_were_made_cheaper() {
     let held: [((i32, i32), u64); 8] = [
-        ((0, 0), 0xcdc1_48db_f291_184b),
-        ((5, -3), 0x9faf_666e_2823_b1eb),
-        ((-40, 90), 0x844e_9b4e_9783_f206),
-        ((313, -77), 0xdffd_008f_e7cf_d068),
-        ((-1875, -1875), 0x42b3_115c_25ea_d3e8),
-        ((-1868, -1872), 0xa84e_8dee_614a_b222),
-        ((-1864, -1864), 0xba6b_a426_448c_80a1),
-        ((-1873, -1866), 0x5257_7fdd_6bfb_50a1),
+        ((0, 0), 0xe082_1f40_a51d_abf1),
+        ((5, -3), 0xaf82_5fc2_b1cb_867f),
+        ((-40, 90), 0xb49a_0dbe_b0b5_760e),
+        ((313, -77), 0xcd7a_cc7b_c6ed_1b47),
+        ((-1875, -1875), 0x2712_ef67_eff9_605b),
+        ((-1868, -1872), 0x3655_b833_aca0_b0a9),
+        ((-1864, -1864), 0xcd58_ff9d_03e6_df63),
+        ((-1873, -1866), 0x38a7_9737_6768_0261),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     super::lips::FEATURES_KEEP_THEIR_STEP.with(|keep| keep.set(true));
@@ -304,10 +310,13 @@ fn the_landforms_lay_the_same_lips_every_time() {
         // go (`landforms`, "What the ground tells a newcomer"): shingle at
         // fresh water, bare paths to a pond, talus round a cave mouth and
         // copper in a hillside all write into cells a lip then reads.
-        ((0, 0), 0x0fe5_0f0f_2c10_d0db),
-        ((5, -3), 0xfe4f_9277_6a8d_ecdb),
-        ((-1875, -1875), 0xd3ef_f6d9_0e79_0cc5),
-        ((-1868, -1872), 0xe5b7_6067_47dc_6ff2),
+        //
+        // ...and again for the second round of wild plants, which stand on
+        // the lips as the tufts do (`features::wild_plant`).
+        ((0, 0), 0x1e78_3a9f_6b6b_c8e1),
+        ((5, -3), 0x329c_988f_d4bb_815f),
+        ((-1875, -1875), 0xd7c5_4ecf_9f26_fd4a),
+        ((-1868, -1872), 0x4645_24a2_f466_fc3d),
     ];
     let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
     for ((x, z), print) in held {

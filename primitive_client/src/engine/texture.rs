@@ -454,6 +454,14 @@ pub const EXTRA_TEXTURES: &[&str] = &[
     // index above is arithmetic on its neighbours (`extra_in_wood`) and a
     // picture put among them would move a wood's run by one.
     "hide/stretched_leather.png",
+    // **The turf's low blades** (`engine::meadow`), green for turf and straw
+    // for the dry country's. After the cured skin and before the interface's
+    // run, and both indices are counted back from where that run starts, for
+    // the reason `EXTRA_STRETCHED_LEATHER` gives. Here rather than in
+    // `blocks.toml` because no block is these: they are what a meadow is
+    // drawn *with*, around the tufts that are blocks.
+    "plants/turf_blades.png",
+    "plants/turf_blades_dry.png",
     // **The interface's own pictures**, in `ui::widgets::Piece` order,
     // and that order is the whole of the lookup: the skin is one base
     // layer plus a piece number, so a picture inserted in the middle of
@@ -568,14 +576,18 @@ pub const EXTRA_FLAME: usize = 2;
 /// fourteen.
 pub const EXTRA_STRETCHED_HIDE: usize = 8;
 /// A skin laced in a frame and cured: what a hide frame's slab wears once it has
-/// dried. The last entry before the interface's own run.
+/// dried. Before the turf's two blades, which are the last entries before the
+/// interface's own run.
 ///
 /// **Derived from where that run starts, not from the end of the list.**
 /// It was `EXTRA_TEXTURES.len() - 1` while the cured skin happened to be
 /// last, and the first picture appended after it would have dressed every
 /// hide frame in a panel -- a build that compiles, a test suite that
 /// passes, and a drying rack wearing a button.
-pub const EXTRA_STRETCHED_LEATHER: usize = EXTRA_UI_SKIN - 1;
+pub const EXTRA_STRETCHED_LEATHER: usize = EXTRA_UI_SKIN - 3;
+/// The turf's low blades, green and dry. See `engine::meadow`.
+pub const EXTRA_TURF_BLADES: usize = EXTRA_UI_SKIN - 2;
+pub const EXTRA_TURF_BLADES_DRY: usize = EXTRA_UI_SKIN - 1;
 
 /// The first of the interface's own pictures, in `ui::widgets::Piece`
 /// order. See [`UI_SKIN_PIECES`] and `ui::widgets::Skin`.
@@ -3617,6 +3629,8 @@ mod tests {
         }
         assert_eq!(EXTRA_TEXTURES[EXTRA_STRETCHED_HIDE], "hide/stretched_hide.png");
         assert_eq!(EXTRA_TEXTURES[EXTRA_STRETCHED_LEATHER], "hide/stretched_leather.png");
+        assert_eq!(EXTRA_TEXTURES[EXTRA_TURF_BLADES], "plants/turf_blades.png");
+        assert_eq!(EXTRA_TEXTURES[EXTRA_TURF_BLADES_DRY], "plants/turf_blades_dry.png");
 
         // ...and the arithmetic the mesher uses agrees with all of it.
         let layers = FaceLayers::numbered_for_test();

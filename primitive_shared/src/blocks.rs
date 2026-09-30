@@ -11392,6 +11392,85 @@ pub const BLOCKS: &[BlockDef] = &[
         turns: false,
         propped: false,
     },
+    // ---- the second round of wild plants, and the tumbleweed ----
+    //
+    // Written against the grass's row (`GRASS_ROW`: a cross, no opacity, a
+    // quarter second by hand, worked as a plant) with what each changes, for
+    // the ground rows' reason: twelve copies of twenty-seven fields is where
+    // a stale `falls` hides. See `types::BLOCK_TUMBLEWEED` for what each is.
+    //
+    // **A tumbleweed is an item and never a block in the world**: what rolls
+    // is the server's drop (`logic::items`), and a tumbleweed set down would
+    // be a ball of stems that the wind no longer moved. Kindling and fibre.
+    BlockDef {
+        id: BLOCK_TUMBLEWEED,
+        name: "tumbleweed",
+        shape: Shape::Item,
+        opacity: 15,
+        hardness: None,
+        work: Work::Any,
+        drop: Some(BLOCK_TUMBLEWEED),
+        weight: 0.3,
+        placeable: false,
+        ..GRASS_ROW
+    },
+    // Lichen lies flat, as a leaf litter does, and is picked whole.
+    BlockDef {
+        id: BLOCK_LICHEN,
+        name: "lichen",
+        shape: Shape::Flat,
+        hardness: Some(0.15),
+        drop: Some(BLOCK_LICHEN),
+        weight: 0.02,
+        ..GRASS_ROW
+    },
+    // Heather is wood as much as leaf: pulled up whole, a bundle of it to
+    // burn -- or to set back in the ground, as the plantain is.
+    BlockDef { id: BLOCK_HEATHER, name: "heather", hardness: Some(0.45), drop: Some(BLOCK_HEATHER), weight: 0.15, ..GRASS_ROW },
+    // The dog rose, on the berry bush's terms: the hips come off with a
+    // break and the bush stays, bare. Thorny, and slower by hand.
+    BlockDef {
+        id: BLOCK_ROSEHIP_BUSH,
+        name: "rosehip_bush",
+        hardness: Some(0.6),
+        drop: Some(BLOCK_ROSEHIPS),
+        leaves_behind: Some(BLOCK_ROSEHIP_BARE),
+        weight: 0.3,
+        placeable: false,
+        ..GRASS_ROW
+    },
+    BlockDef {
+        id: BLOCK_ROSEHIP_BARE,
+        name: "rosehip_bare",
+        hardness: Some(0.6),
+        // Nothing, for the bilberry's reason: a bush that could be carried
+        // off would be a larder in a pack.
+        drop: None,
+        weight: 0.3,
+        placeable: false,
+        ..GRASS_ROW
+    },
+    BlockDef {
+        id: BLOCK_ROSEHIPS,
+        name: "rosehips",
+        shape: Shape::Item,
+        opacity: 15,
+        hardness: None,
+        work: Work::Any,
+        drop: Some(BLOCK_ROSEHIPS),
+        weight: 0.05,
+        placeable: false,
+        ..GRASS_ROW
+    },
+    // The herbs and the flowers are picked whole and set down again, as the
+    // plantain and the first flower are. The yarrow's leaves are foliage and
+    // take the climate's green; a flower's colour is its own.
+    BlockDef { id: BLOCK_YARROW, name: "yarrow", drop: Some(BLOCK_YARROW), weight: 0.03, foliage: true, ..GRASS_ROW },
+    BlockDef { id: BLOCK_THISTLE, name: "thistle", hardness: Some(0.35), drop: Some(BLOCK_THISTLE), weight: 0.05, ..GRASS_ROW },
+    BlockDef { id: BLOCK_POPPY, name: "poppy", drop: Some(BLOCK_POPPY), weight: 0.02, ..GRASS_ROW },
+    BlockDef { id: BLOCK_CORNFLOWER, name: "cornflower", drop: Some(BLOCK_CORNFLOWER), weight: 0.02, ..GRASS_ROW },
+    BlockDef { id: BLOCK_BLUEBELL, name: "bluebell", drop: Some(BLOCK_BLUEBELL), weight: 0.02, ..GRASS_ROW },
+    BlockDef { id: BLOCK_BUTTERCUP, name: "buttercup", drop: Some(BLOCK_BUTTERCUP), weight: 0.02, ..GRASS_ROW },
     // ---- the fir and the saxaul ----
     //
     // Each wood's four rows are the oak's four rows with its own names on
@@ -13185,9 +13264,10 @@ mod tests {
         // ...and four: a palm's coconuts are the apple's idea on a coast.
         // ...and six: the bilberry and the wild strawberry are the bush's idea
         // on a forest floor and at its edge.
+        // ...and seven: the dog rose is the bush's idea in winter.
         assert_eq!(
             residues,
-            ["palm_coconuts", "apple_leaves_fruit", "berry_bush", "nest_eggs", "bilberry", "strawberry"]
+            ["palm_coconuts", "apple_leaves_fruit", "berry_bush", "nest_eggs", "bilberry", "strawberry", "rosehip_bush"]
         );
         // ...and what each leaves has to be a real block of the same
         // shape that can stand where it did, or picking would put a hole
@@ -13199,6 +13279,7 @@ mod tests {
             BLOCK_PALM_COCONUTS,
             BLOCK_BILBERRY,
             BLOCK_STRAWBERRY,
+            BLOCK_ROSEHIP_BUSH,
         ] {
             let bare = definition(picked).leaves_behind.expect("checked above");
             assert_eq!(definition(bare).shape, definition(picked).shape);

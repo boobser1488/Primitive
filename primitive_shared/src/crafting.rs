@@ -4246,6 +4246,33 @@ pub const RECIPES: &[Recipe] = &[
         returns: &[],
         failure: 0.0,
     },
+    // ---- the second round of wild plants ----
+    //
+    // **The steppe's poultice**, for the plantain's reason: a wound is
+    // dressed with what grows near it, and on the dry steppe that is yarrow,
+    // not the plantain of the trodden wet meadow. The same dressing by a
+    // third road; which road is where the player is standing.
+    Recipe {
+        name: "herb poultice",
+        inputs: &[(crate::types::BLOCK_YARROW, 2), (BLOCK_FIBER, 1)],
+        output: (BLOCK_POULTICE, 1),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
+    // **A tumbleweed pulled apart is fibre**: three strands of the dry stems,
+    // which is the kiln's straw and the torch's wad on a steppe with no
+    // meadow grass on it. Less than it would give burnt whole in minutes of
+    // cooking; more than it gives as tinder in everything else. Which one is
+    // the decision.
+    Recipe {
+        name: "tumbleweed tow",
+        inputs: &[(crate::types::BLOCK_TUMBLEWEED, 1)],
+        output: (BLOCK_FIBER, 3),
+        station: Station::Hands,
+        returns: &[],
+        failure: 0.0,
+    },
 ];
 
 /// Why a craft cannot happen, or that it can.
