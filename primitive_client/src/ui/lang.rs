@@ -1066,6 +1066,19 @@ pub enum Msg {
     WindSway,
     WindGentle,
     WindFull,
+    // ---- fishing, read off the float ----
+    /// A strike while the float only trembled: the fish was nosing the
+    /// bait and has gone, and the cast with it (`fishing::Bite`).
+    FishingStruckTooSoon,
+    /// No strike by the end of the take: the bait is eaten.
+    FishingBaitTaken,
+    /// The label in front of a small fish's name, in place of
+    /// `FishingCaught`: "small catch: trout". A label for the catch rather
+    /// than an adjective for the fish, for `FishingCaught`'s reason -- the
+    /// name's gender and ending are not this line's to know.
+    FishingCaughtSmall,
+    /// ...and a big one's.
+    FishingCaughtBig,
 }
 
 /// One line of interface text, in every language at once.
@@ -1962,6 +1975,10 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::WindSway, en: "WIND IN THE GRASS", simple: "GRASS MOVES IN THE WIND", ru: "ВЕТЕР В ТРАВЕ", pl: "WIATR W TRAWIE" },
     Line { msg: Msg::WindGentle,   en: "GENTLE", simple: "A LITTLE",  ru: "СЛАБЫЙ",  pl: "SŁABY" },
     Line { msg: Msg::WindFull,     en: "FULL",   simple: "AS IT BLOWS", ru: "ПОЛНЫЙ", pl: "PEŁNY" },
+    Line { msg: Msg::FishingStruckTooSoon, en: "too soon: it was only nibbling", simple: "too early - the fish was only nibbling", ru: "рано: рыба только трогала наживку", pl: "za wcześnie: ryba tylko skubała" },
+    Line { msg: Msg::FishingBaitTaken,     en: "too late: the bait is gone", simple: "too late - the fish ate the bait", ru: "поздно: наживку объели", pl: "za późno: przynęta zjedzona" },
+    Line { msg: Msg::FishingCaughtSmall,   en: "small catch", simple: "a small fish", ru: "мелкий улов", pl: "mały połów" },
+    Line { msg: Msg::FishingCaughtBig,     en: "big catch", simple: "a big fish", ru: "крупный улов", pl: "duży połów" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as

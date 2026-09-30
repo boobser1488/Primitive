@@ -19,7 +19,7 @@ use crate::engine::texture::TextureManager;
 
 const SIZE: (u32, u32) = (960, 540);
 
-pub(super) fn write(scenario: &Scenario, dir: &Path, name: &str) {
+pub(super) fn write(scenario: &Scenario, dir: &Path, name: &str, specks: &[(glam::DVec3, f32, primitive_shared::types::BlockId)]) {
     let Some((device, queue)) = crate::engine::test_gpu() else {
         println!("[scenario] no GPU adapter; no picture of {name}");
         return;
@@ -64,6 +64,42 @@ pub(super) fn write(scenario: &Scenario, dir: &Path, name: &str) {
             cache.fill(pos, &scenario.chunks, &light);
             let mut buffers = crate::engine::mesh::MeshBuffers::default();
             crate::engine::mesh::build_mesh(pos, &cache, &layers, &generator, &mut buffers);
+            // ...and whatever the scenario asked to be seen in this chunk.
+            let (ox, oz) = (f64::from(pos.x) * 16.0, f64::from(pos.z) * 16.0);
+            let mine: Vec<([f32; 3], f32, u32)> = specks
+                .iter()
+                .filter(|(at, _, _)| ChunkPos::from_world(at.x.floor() as i32, at.z.floor() as i32) == pos)
+                .map(|&(at, half, block)| {
+                    let local = [(at.x - ox) as f32, at.y as f32, (at.z - oz) as f32];
+                    (local, half, layers.layer_for_face(block, crate::engine::texture::FACE_TOP))
+                })
+                .collect();
+            crate::engine::mesh::add_specks(&mut buffers, &mine);
+            // **...and the animals**, which the offscreen tool does not draw
+            // either: every entity this client has been told about, built by
+            // the game's own entity list around this chunk's corner and put in
+            // the chunk the camera stands in. Built fresh from the last states
+            // heard rather than from a list that has been easing them, so what
+            // is drawn is the pose the snapshot says -- lying, head up, in the
+            // water -- and not somewhere between two.
+            if pos == centre {
+                let states = scenario.in_view.clone();
+                let mut drawn = crate::logic::entities::Entities::default();
+                drawn.apply_snapshot(1, &states);
+                drawn.tick(0.0);
+                let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+                drawn.build_meshes_into(
+                    glam::Vec3::new(ox as f32, 0.0, oz as f32),
+                    &layers,
+                    &light,
+                    Some(textures),
+                    &mut vertices,
+                    &mut indices,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                );
+                crate::engine::mesh::add_geometry(&mut buffers, &vertices, &indices);
+            }
             (pos, buffers)
         })
         .collect();

@@ -254,6 +254,7 @@ mod tests {
                 attitude: primitive_shared::protocol::Attitude::Easy,
                 growth: u8::MAX,
                 tack: horse::TACK_RIDDEN | horse::TACK_SADDLE,
+                glance: 0,
             },
             x: feet.x,
             y: feet.y + f64::from(species.height() * 0.5),

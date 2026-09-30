@@ -101,7 +101,7 @@ pub fn update(
         shake.on_landing(hardness);
     }
     // ...and what lives near the player: gulls, a bird going
-    // up, the frogs. A call of its own for the reason
+    // up, the frogs the server sent. A call of its own for the reason
     // `Soundscape::wildlife` gives.
     if world_ready {
         soundscape.wildlife(
@@ -109,7 +109,6 @@ pub fn update(
             dt,
             chunks,
             &entities.heard(),
-            &critters.croaking(),
             &critters.buzzing(),
             &critters.flapping(),
             critters.air_here(),

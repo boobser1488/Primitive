@@ -787,6 +787,63 @@ impl Particles {
         }
     }
 
+    /// **A fish rising**: a ring of beads spreading flat over the water from
+    /// where it broke the surface (`ServerMessage::FishRise`).
+    ///
+    /// Flat and slow, and wider than the float's own ring, because what a
+    /// rise has to be is *seen from the bank* -- at twenty paces a ring
+    /// that only ever reached a hand's width is a speck of light, and a
+    /// speck of light on water is the sun. Beads on a circle rather than
+    /// thrown at random: the circle is what the eye reads as a rise.
+    pub fn rise_ring(&mut self, at: Vec3) {
+        let beads = 14;
+        let turn = self.between(0.0, std::f32::consts::TAU);
+        for i in 0..beads {
+            let angle = turn + i as f32 / beads as f32 * std::f32::consts::TAU;
+            let speed = self.between(0.55, 0.7);
+            let life = self.between(0.9, 1.3);
+            let size = self.between(0.03, 0.05);
+            self.emit(Particle {
+                position: (at + Vec3::Y * 0.02).as_dvec3(),
+                velocity: Vec3::new(angle.cos() * speed, 0.0, angle.sin() * speed),
+                life,
+                total: life,
+                size,
+                look: Look::Foam,
+                texel: (0, 0),
+                gravity: 0.0,
+                drag: 1.0,
+                collides: false,
+            });
+        }
+    }
+
+    /// **A fish clean out of the water**: a silver chip of a fish thrown up
+    /// in an arc, and the splash it goes back into.
+    ///
+    /// A chip of the raw fish's own picture, for the float's reason
+    /// ([`Particles::float`]): at the distance a leap is seen from, a fish
+    /// is a bright speck with a fish's colour, and a model would be a new
+    /// entity the server never sends for a quarter of a second of flight.
+    pub fn leap(&mut self, at: Vec3) {
+        let bearing = self.between(0.0, std::f32::consts::TAU);
+        let life = 0.55;
+        self.emit(Particle {
+            position: at.as_dvec3(),
+            velocity: Vec3::new(bearing.cos() * 1.2, 4.2, bearing.sin() * 1.2),
+            life,
+            total: life,
+            size: 0.22,
+            look: Look::Chip(primitive_shared::types::BLOCK_RAW_FISH),
+            texel: (7, 7),
+            gravity: 16.0,
+            drag: 1.0,
+            collides: false,
+        });
+        self.catch_splash(at);
+        self.rise_ring(at);
+    }
+
     /// The water breaking where a fish came up: a ring of foam thrown up off
     /// the float. The river's own spray (`Look::Foam`), so a catch is white
     /// water the way a rapid is.

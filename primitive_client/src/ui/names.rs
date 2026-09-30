@@ -328,6 +328,13 @@ const ANIMALS: &[Name] = &[
     Name { id: "foal", en: "foal", simple: "young zebra", ru: "жеребёнок", pl: "źrebię" },
     Name { id: "antelope_calf", en: "antelope calf", simple: "young antelope", ru: "антилопёнок", pl: "młode antylopy" },
     Name { id: "horse_foal", en: "foal", simple: "young horse", ru: "жеребёнок", pl: "źrebię" },
+    // The woods' and the water's five, and the elk's calf. See `Species::Fox`.
+    Name { id: "fox", en: "fox", simple: "fox", ru: "лиса", pl: "lis" },
+    Name { id: "elk", en: "elk", simple: "moose", ru: "лось", pl: "łoś" },
+    Name { id: "beaver", en: "beaver", simple: "beaver", ru: "бобр", pl: "bóbr" },
+    Name { id: "duck", en: "duck", simple: "duck", ru: "утка", pl: "kaczka" },
+    Name { id: "frog", en: "frog", simple: "frog", ru: "лягушка", pl: "żaba" },
+    Name { id: "elk_calf", en: "elk calf", simple: "young moose", ru: "лосёнок", pl: "łosiątko" },
 ];
 
 /// How an animal killed somebody, in each language, keyed by `Species::name`:
@@ -345,6 +352,8 @@ const DEATHS: &[Name] = &[
     // a player who died of a crab has to be told that is what happened
     // rather than "killed by an animal". See `Species::Crab`.
     Name { id: "crab", en: "was nipped by a crab", simple: "a crab pinched you and you died", ru: "укушен крабом", pl: "uszczypnięty przez kraba" },
+    // A cow elk with her calf behind her. See `Species::Elk`.
+    Name { id: "elk", en: "was trampled by an elk", simple: "a moose killed you", ru: "затоптан лосем", pl: "stratowany przez łosia" },
 ];
 
 /// How anything that is not an animal killed somebody, keyed by the
@@ -991,6 +1000,12 @@ pub const BLOCKS: &[Name] = &[
     // Winter feed. See `types::BLOCK_HAY`.
     Name { id: "hay", en: "Hay", simple: "Dry grass for animals", ru: "Сено", pl: "Siano" },
     Name { id: "haystack", en: "Haystack", simple: "Pile of hay", ru: "Стог сена", pl: "Stóg siana" },
+    // The woods' and the water's. See `types::BLOCK_CARCASS_ELK`.
+    Name { id: "carcass_elk", en: "Elk carcass", simple: "Dead moose", ru: "Туша лося", pl: "Tusza łosia" },
+    Name { id: "carcass_fox", en: "Fox carcass", simple: "Dead fox", ru: "Тушка лисы", pl: "Tuszka lisa" },
+    Name { id: "carcass_beaver", en: "Beaver carcass", simple: "Dead beaver", ru: "Тушка бобра", pl: "Tuszka bobra" },
+    Name { id: "frog", en: "Frog", simple: "Frog (fish bait)", ru: "Лягушка", pl: "Żaba" },
+    Name { id: "beaver_dam", en: "Beaver dam", simple: "Sticks and mud in a stream", ru: "Бобровая плотина", pl: "Tama bobrów" },
 ];
 
 /// Every recipe, by `Recipe::name`, in `crafting::RECIPES`'s order.

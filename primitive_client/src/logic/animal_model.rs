@@ -45,7 +45,7 @@
 use glam::Vec3;
 
 use primitive_shared::animals::Species;
-use primitive_shared::horse::{TACK_BAGS, TACK_HALTER, TACK_RIDDEN, TACK_SADDLE, TACK_SHORN, TACK_STALLION};
+use primitive_shared::horse::{TACK_BAGS, TACK_CARRYING, TACK_HALTER, TACK_RIDDEN, TACK_SADDLE, TACK_SHORN, TACK_STALLION};
 use primitive_shared::protocol::Attitude;
 
 use crate::engine::texture::FaceLayers;
@@ -104,7 +104,7 @@ pub enum Skin {
     /// game can see: it is dark and ringed where an antler is pale bone, and
     /// a skeleton keeps only its core -- the sheath rots -- where it keeps
     /// the whole antler. Dressing the antelope in `Antler` would have given
-    /// it the deer's bone and made `only_the_deer_carries_bone_on_its_head`
+    /// it the deer's bone and made `only_the_deer_and_the_elk_carry_bone_on_their_heads`
     /// a sentence that was no longer true of the picture.
     Horn,
     /// The hide again, drawn coarse, for the parts that are two or three
@@ -574,6 +574,40 @@ pub struct Motion {
     /// snapshot (`EntityKind::Animal::tack`). Nought on every other animal and
     /// on a wild horse, which is what `Motion::default()` draws. See `tack`.
     pub tack: u8,
+    /// Which gait the legs are in: nought a walk, one a trot, two a gallop,
+    /// and everything between is a blend. See [`gait_of`].
+    ///
+    /// **Eased on the client** (`Entity::gait`) and handed in, because the
+    /// speed it comes from is a step function -- one value a snapshot -- and
+    /// a leg's place in the cycle read straight off it would jump between two
+    /// gaits every time a packet landed. `None` is "work it out from the
+    /// speed now", which is what every test and tool that builds one pose
+    /// wants.
+    pub gait: Option<f32>,
+    /// How far down it is lying, 0..1: see `Attitude::Resting`. Eased on the
+    /// client for the reason the head is (`Entity::lie`).
+    pub lie: f32,
+    /// Where the head is turned off the body, in radians, positive to its
+    /// right: see `EntityKind::Animal::glance`. Eased on the client.
+    pub glance: f32,
+    /// How far it is swimming, 0..1: see `Attitude::Swimming`. Eased on the
+    /// client.
+    pub swim: f32,
+    /// How settled it is on its feet, 0..1: nought moving, one when it has
+    /// been standing a moment. What a fidget is weighed by (`fidget`).
+    ///
+    /// **Eased, because the speed is not**: a gate on the speed switched a
+    /// scratch on at full reach in the frame an animal pulled up, if its
+    /// clock happened to be in the middle of one -- a leg thrown up out of
+    /// nowhere. One by default, which is a standing animal.
+    pub settled: f32,
+    /// Which hip it lies on: `+1` its right, `-1` its left. The animal's own,
+    /// from its id (`Entity::hip`), so a herd bedded down does not all lean
+    /// one way and one deer does not roll over between two frames.
+    pub hip: f32,
+    /// How far the legs reach, 0..1, eased on the client: see [`reach_of`].
+    /// `None` is "work it out from the speed now".
+    pub reach: Option<f32>,
 }
 
 impl Default for Motion {
@@ -598,6 +632,14 @@ impl Default for Motion {
             youth: 0.0,
             fallen: 0.0,
             tack: 0,
+            // Worked out from the speed; on its feet, head straight, dry.
+            gait: None,
+            lie: 0.0,
+            glance: 0.0,
+            swim: 0.0,
+            settled: 1.0,
+            hip: 1.0,
+            reach: None,
         }
     }
 }
@@ -635,6 +677,14 @@ pub fn head_carried(attitude: Attitude) -> f32 {
         Attitude::Dozing => -0.5,
         // Dropped, and let go: the neck gives with the rest of it.
         Attitude::Dying => -0.35,
+        // **Lying, head still up**: a bedded deer watches over the grass. The
+        // body's going down is `Motion::lie`, not the neck.
+        Attitude::Resting => -0.1,
+        // **Flung up**, higher than alert: the frozen half second before a
+        // bolt, and the one pose a player reads as "it has seen me".
+        Attitude::Startled => 0.45,
+        // Held up out of the water, the chin on the surface.
+        Attitude::Swimming => 0.3,
     }
 }
 
@@ -788,7 +838,7 @@ const EAR_TURN: f32 = 0.33;
 /// tenth of a block a second. With no floor under the swing that second
 /// is a full-amplitude walk cycle performed on the spot, which is
 /// exactly what "it squirms" describes.
-const STANDING: f32 = 0.6;
+pub(crate) const STANDING: f32 = 0.6;
 
 /// How fast the legs go over, per block travelled.
 ///
@@ -802,6 +852,204 @@ const STRIDE: f32 = 2.0;
 /// swing their full amount, in blocks a second: the shoulder on the dead
 /// zone. See the `pace` it is used in.
 const STANDING_BAND: f32 = 0.5;
+
+// ---- the gaits ----
+//
+// **"Разные аллюры (шаг, рысь, бег)".** Four legs used to swing in two
+// diagonal pairs at every speed -- a trot, whether the animal was ambling to
+// the water or running for its life -- and a deer walking and a deer bolting
+// differed only in how fast the same two pairs went over. A walk is four
+// beats, each foot on its own quarter of the cycle; a trot is the two
+// diagonals; a gallop is the two hind feet together and then the two fore,
+// with the body rocking over them. Which one is a fact about how fast the
+// animal is going *for its kind* (`gait_of`), and the change between them is
+// a blend of where in the cycle each foot is (`leg_offset`), so a deer
+// breaking from a walk into a run passes through a trot on the way the way
+// one does.
+
+/// Where each foot is in the cycle, in whole cycles, for a walk, a trot and
+/// a gallop: left fore, right fore, left hind, right hind.
+///
+/// **The trot is the pairs the models were built in** -- a group `leg_front`
+/// is the left fore and the right hind, `leg_back` the other diagonal -- so a
+/// trot here is exactly what every animal did before there were gaits, and
+/// what the older tests of the legs measure. The walk is the lateral four-
+/// beat (hind, fore on the same side, then the other side); the gallop the
+/// transverse one (the hinds a tenth apart, then the fores half a cycle
+/// later). Written unwrapped rather than modulo one, so that the blend from
+/// one table to the next is a straight line with no foot jumping a cycle.
+const WALK_FEET: [f32; 4] = [0.25, 0.75, 1.0, 0.5];
+const TROT_FEET: [f32; 4] = [0.0, 0.5, 0.5, 0.0];
+const GALLOP_FEET: [f32; 4] = [0.45, 0.55, 0.0, 0.1];
+
+/// How many strides a gallop takes over a block, against a walk's: a
+/// gallop's stride is long, so its legs go over less often for the ground
+/// covered. Applied to the stride clock the client keeps (`Entity::strode`),
+/// never multiplied into the sine here, for `CLIMB_BEATS`'s reason.
+const GALLOP_STRIDE: f32 = 0.6;
+
+/// How far the body rocks over a gallop, in radians, and how high it bobs
+/// over a trot and a gallop, as a fraction of its height.
+const GALLOP_ROCK: f32 = 0.07;
+const TROT_BOB: f32 = 0.025;
+const GALLOP_BOB: f32 = 0.05;
+
+/// How far a leg folds under a lying body, in radians. The fore legs fold
+/// back under the chest and the hind forward under the belly.
+const LIE_FOLD: f32 = 1.5;
+
+/// How much of its belly's height off the ground a lying body comes down,
+/// so the folded legs under it stay above the ground they are folded on.
+const LIE_DROP: f32 = 0.85;
+
+/// How far a lying body leans over onto one hip, in radians: an animal
+/// lying square on its belly is a table with its legs sawn off.
+const LIE_ROLL: f32 = 0.12;
+
+/// How far a lying animal's tail is laid back, in radians.
+const TAIL_LIE: f32 = 1.3;
+const TAIL_DROOP: f32 = 0.2;
+
+/// How fast a swimming animal's legs paddle, in radians a second, and how far.
+const PADDLE_RATE: f32 = 7.0;
+const PADDLE: f32 = 0.5;
+
+/// How far a swimming four-legged animal holds its nose up, in radians, and
+/// how far a dabbling duck tips over, tail up.
+const SWIM_TRIM: f32 = 0.12;
+const DABBLE: f32 = 1.05;
+
+/// How far the fore end drops as the knees go, in radians, at the middle of
+/// the death fall: the front goes down first and then the body goes over.
+const FALL_BUCKLE: f32 = 0.25;
+
+/// How long between two idle fidgets, in seconds of an animal's own clock,
+/// and how long each one lasts. See `fidget`.
+const FIDGET_EVERY: f32 = 9.0;
+const FIDGET_SECONDS: f32 = 1.4;
+
+/// Does this species walk on four legs in the way the gaits are about?
+///
+/// Not a bird (two legs), a fish (fins), a crab (eight legs going the way it
+/// is wide) or a frog (which does not walk at all -- it hops; see `hop`).
+pub fn four_legged(species: Species) -> bool {
+    !species.flies() && !species.swims() && !species.sidles() && species != Species::Frog
+}
+
+/// Which gait an animal is in at this speed: nought a walk, one a trot, two
+/// a gallop, and a blend between.
+///
+/// **By its own paces, not by a number of blocks a second**: a sheep at
+/// three is running and a horse at three is barely walking. A walk up to a
+/// little over its walking speed, a trot by halfway to its running speed, a
+/// full gallop by nine tenths of it.
+pub fn gait_of(species: Species, speed: f32) -> f32 {
+    let (walk, run) = (species.walk_speed() * 1.1, species.run_speed());
+    let trot = (walk + run) * 0.5;
+    if speed <= walk {
+        0.0
+    } else if speed <= trot {
+        (speed - walk) / (trot - walk).max(1e-3)
+    } else {
+        1.0 + ((speed - trot) / (run * 0.9 - trot).max(1e-3)).clamp(0.0, 1.0)
+    }
+}
+
+/// How much further the stride clock goes per block in this gait: one at a
+/// walk, less at a trot, `GALLOP_STRIDE` at a gallop.
+pub fn stride_factor(gait: f32) -> f32 {
+    1.0 - (1.0 - GALLOP_STRIDE) * (gait.clamp(0.0, 2.0) * 0.5)
+}
+
+/// Where a foot is in the cycle at this gait, in whole cycles. See
+/// `WALK_FEET`.
+fn leg_offset(fore: bool, left: bool, gait: f32) -> f32 {
+    let foot = match (fore, left) {
+        (true, true) => 0,
+        (true, false) => 1,
+        (false, true) => 2,
+        (false, false) => 3,
+    };
+    let gait = gait.clamp(0.0, 2.0);
+    if gait <= 1.0 {
+        WALK_FEET[foot] + (TROT_FEET[foot] - WALK_FEET[foot]) * gait
+    } else {
+        TROT_FEET[foot] + (GALLOP_FEET[foot] - TROT_FEET[foot]) * (gait - 1.0)
+    }
+}
+
+/// How far a body can drop before it is lying on the ground, in blocks: the
+/// height of the belly off the ground. Measured off the model's still parts
+/// that are not tails, so a lying animal lies on the bottom of its own body
+/// and not on a number.
+fn belly_clearance(model: &[Part], species: Species) -> f32 {
+    let ground = -species.height() * 0.5 / SCALE;
+    model
+        .iter()
+        .filter(|part| part.gait == Gait::Still && !part.name.contains("tail"))
+        .map(|part| part.at[1] - part.size[1] * 0.5 - ground)
+        .fold(f32::MAX, f32::min)
+        .max(0.0)
+        * SCALE
+}
+
+/// **An animal standing about does something with itself**: scratches a
+/// flank with a hind foot, shakes its head, looks round -- one of the three,
+/// for `FIDGET_SECONDS` in every `FIDGET_EVERY`, off its own clock.
+///
+/// Returned as what it does to the head (a turn and a nod) and to the one
+/// hind foot that scratches. **Off the animal's own clock (`Motion::age`),
+/// which starts at a different place for every animal** (`Entity::age`), so
+/// a herd standing together does not scratch in unison -- the thing that
+/// would make three deer read as one deer drawn three times. The window
+/// sits at the *end* of the cycle, so an animal that has just come into
+/// view, and every pose built with a small age, is simply standing.
+///
+/// Only four-legged animals standing at their ease on dry ground: nothing
+/// grazing (its head is busy), lying, swimming, flying or dying. `idle` is how
+/// much of that is true, 0..1 (see `build`), and the fidget is that much of
+/// itself.
+fn fidget(age: f32, idle: f32) -> (f32, f32, f32) {
+    if idle <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let cycle = age.div_euclid(FIDGET_EVERY);
+    let into = age.rem_euclid(FIDGET_EVERY) - (FIDGET_EVERY - FIDGET_SECONDS);
+    if into <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let u = into / FIDGET_SECONDS;
+    // In and out on a sine, so the fidget starts and stops at rest -- and
+    // only as much of it as there is room for (`idle`).
+    let envelope = (std::f32::consts::PI * u).sin() * idle;
+    match (cycle as i64).rem_euclid(3) {
+        // The scratch: head round to the left flank and down, the left hind
+        // foot up and working.
+        0 => (-envelope, -0.35 * envelope, (0.5 + 0.35 * (into * 18.0).sin()) * envelope),
+        // The head shake: quick, and small.
+        1 => (0.3 * (into * 22.0).sin() * envelope, 0.0, 0.0),
+        // A look round, to one side and back.
+        _ => (0.7 * envelope * if (cycle as i64).rem_euclid(2) == 0 { 1.0 } else { -1.0 }, 0.1 * envelope, 0.0),
+    }
+}
+
+/// How far the legs reach at this speed, 0..1: nought standing, faded in
+/// over `STANDING_BAND` above `STANDING`, and growing with the speed to a
+/// full stride at four blocks a second.
+///
+/// **A function of its own so the client can ease it** (`Entity::reach`).
+/// The speed is one number a snapshot, and a reach read straight off it
+/// fades a stride out across the standing band in the three frames an
+/// animal pulling up takes to cross it -- the legs snapping still under a
+/// body that is still gliding to a halt.
+pub fn reach_of(speed: f32) -> f32 {
+    if speed < STANDING {
+        return 0.0;
+    }
+    let eased = ((speed - STANDING) / STANDING_BAND).clamp(0.0, 1.0);
+    let eased = eased * eased * (3.0 - 2.0 * eased);
+    (speed / 4.0).clamp(0.35, 1.0) * eased
+}
 
 /// The whole model, appended to a terrain mesh.
 ///
@@ -839,11 +1087,14 @@ pub(crate) fn build_parts(
     vertices: &mut Vec<crate::engine::mesh::Vertex>,
     indices: &mut Vec<u32>,
 ) {
-    let Motion { walked, speed, rise, beat, hurt, head, turning, flinch_side, age, youth, fallen, tack } = motion;
+    let Motion { walked, speed, rise, beat, hurt, head, turning, flinch_side, age, youth, fallen, tack, gait, lie, glance, swim, settled, hip, reach } =
+        motion;
     // A sheep's coat off (`horse::TACK_SHORN`), read before the byte is
     // narrowed to the horse's: it is the one bit that means something on a
     // sheep.
     let shorn = species == Species::Sheep && tack & TACK_SHORN != 0;
+    // ...and a fox's jaws full (`horse::TACK_CARRYING`), on the same terms.
+    let carrying = species == Species::Fox && tack & TACK_CARRYING != 0;
     // Only a horse wears anything; a stray bit on another animal draws nothing.
     let tack = if species == Species::Horse { tack } else { 0 };
     // The death fall, eased so it goes slowly at first and hits the ground.
@@ -873,13 +1124,10 @@ pub(crate) fn build_parts(
     // stops a standing animal dead (`walk`'s "an animal that has decided to
     // stand still stands still"), so the band is crossed by something that
     // really is setting off.
-    let pace = if speed < STANDING {
-        0.0
-    } else {
-        let eased = ((speed - STANDING) / STANDING_BAND).clamp(0.0, 1.0);
-        let eased = eased * eased * (3.0 - 2.0 * eased);
-        (speed / 4.0).clamp(0.35, 1.0) * eased
-    };
+    //
+    // ...and the reach itself can be handed in eased (`Motion::reach`), which
+    // is how a living animal on screen gets it: see `reach_of`.
+    let pace = if falling > 0.0 { 0.0 } else { reach.unwrap_or_else(|| reach_of(speed)).clamp(0.0, 1.0) };
     let swing = SWING * pace;
     let phase = walked * STRIDE;
     // **A bird in the air is a different drawing**: wings spread and
@@ -921,14 +1169,56 @@ pub(crate) fn build_parts(
     // sign rather than trusted as a number, so nothing off the wire can roll
     // an animal further than a blow is allowed to.
     let side = if flinch_side < 0.0 { -1.0 } else { 1.0 };
+    // **The gait, the rest and the water**, for everything with four legs.
+    // See `gait_of` for the gaits, `Motion::lie` and `Motion::swim` for the
+    // other two, and `fidget` for what a standing animal does with itself.
+    let four = four_legged(species);
+    let gait = gait.unwrap_or_else(|| gait_of(species, speed)).clamp(0.0, 2.0);
+    let lie = if four { lie.clamp(0.0, 1.0) * (1.0 - falling) } else { 0.0 };
+    let swim = swim.clamp(0.0, 1.0) * (1.0 - falling);
+    let gallop = (gait - 1.0).clamp(0.0, 1.0);
+    let trot = 1.0 - (gait - 1.0).abs().min(1.0);
+    let moving = swing / SWING;
+    let (bob, rock) = if four && !aloft {
+        let dry = (1.0 - swim) * moving;
+        (
+            phase.sin().abs() * (TROT_BOB * trot + GALLOP_BOB * gallop) * species.height() * dry,
+            GALLOP_ROCK * gallop * (phase + std::f32::consts::FRAC_PI_2).sin() * dry,
+        )
+    } else {
+        (0.0, 0.0)
+    };
+    // **A frog hops**: half the stride in the air, hind legs thrown back.
+    let hop = if species == Species::Frog { (phase * 0.5).sin().max(0.0) * moving } else { 0.0 };
+    let drop = if four { lie * LIE_DROP * belly_clearance(model, species) } else { 0.0 };
+    // **The knees go first**: the fore end drops before the body rolls. Ends
+    // at nought, which is the carcass's pitch (`fallen_pose`).
+    let buckle = if four { -FALL_BUCKLE * (std::f32::consts::PI * falling).sin() } else { 0.0 };
+    let trim = if four { SWIM_TRIM * swim } else { 0.0 };
+    // A duck with its head down on the water is upended, tail to the sky.
+    let dabble = if species == Species::Duck { swim * ((-head - 0.5) / 0.3).clamp(0.0, 1.0) } else { 0.0 };
+    // **How much of a fidget there is room for**, as a weight rather than a
+    // gate: settled on its feet, head up, not lying, not swimming -- each a
+    // number that moves smoothly, so the fidget fades in and out with them.
+    let idle = if four && !aloft && falling == 0.0 {
+        settled.clamp(0.0, 1.0) * (1.0 - lie) * (1.0 - swim)
+    } else {
+        0.0
+    };
+    let (fidget_turn, fidget_nod, scratch) = fidget(age, idle);
+    // Which hip a lying animal leans onto: its own (`Motion::hip`).
+    let hip = if hip < 0.0 { -1.0 } else { 1.0 };
     let standing = Pose {
-        pitch,
-        roll: lean + STAGGER_ROLL * flash * side,
+        pitch: pitch + rock + trim + buckle - DABBLE * dabble,
+        roll: lean + STAGGER_ROLL * flash * side + LIE_ROLL * lie * hip,
         // Sideways along the flinch, so the body is shoved rather than
         // pivoted on the spot. Negative because `Pose::shift` is taken *off*
-        // every local point -- see its own note.
-        shift: Vec3::new(-STAGGER_SHOVE * flash * side, 0.0, 0.0),
+        // every local point -- see its own note. Down by the lying, up by
+        // the bob and the hop, on the same terms.
+        shift: Vec3::new(-STAGGER_SHOVE * flash * side, drop - bob - hop * species.height() * 0.8, 0.0),
         scale: primitive_shared::youth::size(1.0 - youth),
+        glance: (glance + fidget_turn).clamp(-1.3, 1.3),
+        neck: neck_of(model),
     };
     // **Going down: from the standing pose to the carcass's**, roll and shift
     // together. The carcass is placed by its underside on the ground and the
@@ -944,6 +1234,9 @@ pub(crate) fn build_parts(
             // A dead bird is not flying, so there is no pitch to ease out of.
             pitch: standing.pitch * (1.0 - falling),
             scale: standing.scale,
+            // ...and the head comes round to the body as it goes over.
+            glance: standing.glance * (1.0 - falling),
+            neck: standing.neck,
         }
     } else {
         standing
@@ -958,7 +1251,7 @@ pub(crate) fn build_parts(
     // that takes a step still bobs, and a head that has reached the grass has
     // stopped bobbing already, because it has stopped walking and `swing` is
     // zero. Named once because a halter nods with the head it is on (`tack`).
-    let nod = head + phase.sin() * swing * 0.10;
+    let nod = head + phase.sin() * swing * 0.10 + fidget_nod;
 
     for part in model {
         if !part.gait.shown(aloft) {
@@ -1003,6 +1296,37 @@ pub(crate) fn build_parts(
             // that is how the carcass lies (`fallen_pose`, every swing
             // nought), and a body that landed splayed would snap its legs in
             // when the block took over.
+            // **Four legs, each on its own place in the gait** -- see
+            // `leg_offset` -- paddling in the water, folded under a lying
+            // body, and one hind foot at a scratch. The death kick is the
+            // pair's, as it always was.
+            Gait::LegFront | Gait::LegBack if four => {
+                let (fore, left) = (part.at[2] < 0.0, part.at[0] < 0.0);
+                let offset = std::f32::consts::TAU * leg_offset(fore, left, gait);
+                let stride = (phase + offset).sin() * swing * (1.0 + 0.15 * gallop) * (1.0 - falling);
+                let paddle = (age * PADDLE_RATE + offset).sin() * PADDLE;
+                let fold = if fore { -LIE_FOLD } else { LIE_FOLD };
+                let kick = STIFF_LEGS * (std::f32::consts::PI * falling).sin();
+                let kick = if part.gait == Gait::LegFront { kick } else { -kick };
+                let scratching = if !fore && left { scratch } else { 0.0 };
+                (stride * (1.0 - swim) + paddle * swim) * (1.0 - lie) + fold * lie + kick + scratching
+            }
+            // **A frog's legs hop**: the hind pair thrown back while it is
+            // in the air, the fore pair reaching; kicking together in the
+            // water.
+            Gait::LegFront | Gait::LegBack if species == Species::Frog => {
+                let kick = (age * PADDLE_RATE).sin().max(0.0) * swim;
+                if part.at[2] < 0.0 {
+                    0.5 * hop
+                } else {
+                    -1.2 * (hop + kick).min(1.0)
+                }
+            }
+            // A bird's feet paddle under it on the water, one after the other.
+            Gait::LegFront | Gait::LegBack if swim > 0.0 && !aloft => {
+                let paddle = (age * PADDLE_RATE).sin() * PADDLE * swim;
+                if part.gait == Gait::LegFront { paddle } else { -paddle }
+            }
             Gait::LegFront => phase.sin() * swing * (1.0 - falling) + STIFF_LEGS * (std::f32::consts::PI * falling).sin(),
             Gait::LegBack => -phase.sin() * swing * (1.0 - falling) - STIFF_LEGS * (std::f32::consts::PI * falling).sin(),
             // See `nod`.
@@ -1013,6 +1337,21 @@ pub(crate) fn build_parts(
             // A flying bird's tail does not swish, and nothing else it has
             // is a part that moves on its own.
             Gait::Still if aloft => 0.0,
+            // **A lying animal's tail lies out behind it**, rather than
+            // hanging down through the ground it is lying on: a horse's tail
+            // reaches two thirds of the way to its hocks.
+            //
+            // Laid back if it hangs, and let droop a little if it is carried
+            // out behind: the same turn that lays a horse's tail along the
+            // ground lifts a fox's brush into the air.
+            Gait::Still if lie > 0.0 && part.name.contains("tail") => {
+                // Which way it hangs is where its middle is from its joint:
+                // below it is hanging, behind it is carried out.
+                let joint = part.pivot.unwrap_or([part.at[1] + part.size[1] * 0.5, part.at[2]]);
+                let hanging = joint[0] - part.at[1] > (part.at[2] - joint[1]).abs();
+                let laid = if hanging { -TAIL_LIE } else { TAIL_DROOP };
+                secondary(part.name, age, phase, swing) * (1.0 - lie) + laid * lie
+            }
             // **Still, unless the model named it something that is not.** See
             // `secondary`: a tail and an ear are the two parts that move when
             // nothing else does, and the files already say which is which.
@@ -1026,6 +1365,28 @@ pub(crate) fn build_parts(
 
     if tack & (TACK_SADDLE | TACK_BAGS | TACK_HALTER) != 0 {
         append_tack(model, tack, centre, yaw, nod, pose, hurt, layers, light, vertices, indices);
+    }
+
+    // **What a fox has in its jaws** (`horse::TACK_CARRYING`): a bundle of
+    // feathers slung across the muzzle, hung from the head so it nods and
+    // turns with it. The grouse's own plumage, because the grouse is what a
+    // fox is seen carrying and a player has to know it for their bird.
+    if carrying {
+        if let Some(muzzle) = model.iter().find(|part| part.name == "muzzle") {
+            let kill = Part {
+                name: "kill",
+                at: [muzzle.at[0], muzzle.at[1] - muzzle.size[1] * 0.5 - 1.0, muzzle.at[2]],
+                size: [5.5, 2.4, 2.6],
+                skin: Skin::Hide,
+                gait: Gait::Head,
+                pivot: muzzle.pivot,
+                ..PART
+            };
+            append_part_posed(
+                &kill, Species::Fowl, centre, yaw, nod, pose, Dressing::Coat, hurt, layers, light,
+                vertices, indices,
+            );
+        }
     }
 }
 
@@ -2051,6 +2412,8 @@ pub(crate) fn resting_pose(model: &[Part], roll: f32, swing_of: impl Fn(usize) -
         pitch: 0.0,
         shift: Vec3::new((low.x + high.x) * 0.5, low.y - LIFT, (low.z + high.z) * 0.5),
         scale: 1.0,
+        glance: 0.0,
+        neck: 0.0,
     }
 }
 
@@ -2231,6 +2594,15 @@ pub(crate) struct Pose {
     /// shift, so a young animal lying down is placed exactly as an adult is,
     /// only smaller.
     pub(crate) scale: f32,
+    /// **Where the head is turned**, in radians, positive to the animal's
+    /// right: a turn about the upright through the neck's joint, applied to
+    /// the head's parts (`Gait::Head`) after their nod and before the body's
+    /// pitch and roll -- a neck turns on the shoulders it is carried by.
+    /// Nought on everything but a living animal. See `Motion::glance`.
+    pub(crate) glance: f32,
+    /// Where the head turns from, along the body, in sixteenths: the back of
+    /// the rearmost part that moves with the head (`neck_of`).
+    pub(crate) neck: f32,
 }
 
 /// A model with nothing done to it: what a standing, unhurt, straight-running
@@ -2241,7 +2613,7 @@ pub(crate) struct Pose {
 /// `append_part_posed` with a pose the frame computed, and this is what the
 /// geometry tests measure against.
 #[cfg(test)]
-const STANDING_POSE: Pose = Pose { roll: 0.0, pitch: 0.0, shift: Vec3::ZERO, scale: 1.0 };
+const STANDING_POSE: Pose = Pose { roll: 0.0, pitch: 0.0, shift: Vec3::ZERO, scale: 1.0, glance: 0.0, neck: 0.0 };
 
 // (`append_part`, which was this pair of lines with `STANDING_POSE` baked in,
 // is gone: a walking animal has a pose of its own now -- it leans into its
@@ -2273,6 +2645,34 @@ const STANDING_POSE: Pose = Pose { roll: 0.0, pitch: 0.0, shift: Vec3::ZERO, sca
 const SEAM_BITE: f32 = 0.02;
 
 fn posed_local(part: &Part, corner: [f32; 3], swing: f32, roll: f32, pitch: f32) -> Vec3 {
+    posed_local_glancing(part, corner, swing, roll, pitch, (0.0, 0.0))
+}
+
+/// Where a model's head turns from, in sixteenths along the body: the back
+/// of the rearmost part that moves with the head -- the base of the neck on a
+/// deer, the back of the skull on a hare, which has no neck to speak of.
+///
+/// **One point for the whole head**, because the head's parts each nod about
+/// a joint of their own (`Part::pivot`) and a turn about each part's own
+/// middle is every box of a face spinning in place while the head stays
+/// where it was.
+fn neck_of(model: &[Part]) -> f32 {
+    model
+        .iter()
+        .filter(|part| part.gait == Gait::Head)
+        .map(|part| part.at[2] + part.size[2] * 0.5)
+        .fold(f32::MIN, f32::max)
+        .max(f32::MIN / 2.0)
+}
+
+/// `posed_local`, with the head turned by `glance` (see `Pose::glance`).
+///
+/// **The turn is about the upright through the neck's joint at the middle of
+/// the animal** -- its across is nought, its along is the joint's -- so a
+/// head turns on its neck and not about its own middle, and an ear on the
+/// left of the skull comes round with the skull. Only a `Gait::Head` part
+/// turns; everything else ignores it.
+fn posed_local_glancing(part: &Part, corner: [f32; 3], swing: f32, roll: f32, pitch: f32, (glance, neck): (f32, f32)) -> Vec3 {
     let half = Vec3::from(part.size) * (0.5 * SCALE);
     let at = Vec3::from(part.at) * SCALE;
     // Its own top, unless the table names the joint it hangs from (see
@@ -2319,6 +2719,17 @@ fn posed_local(part: &Part, corner: [f32; 3], swing: f32, roll: f32, pitch: f32)
                 pivot.z + from_pivot.y * swing_sin + from_pivot.z * swing_cos,
             )
         }
+    };
+    // The head's turn on its neck, after its nod and before the body's pitch
+    // and roll: see `posed_local_glancing`. Positive turns the front (-Z)
+    // toward the right (+X).
+    let swung = if glance != 0.0 && part.gait == Gait::Head {
+        let (sin, cos) = glance.sin_cos();
+        let neck = neck * SCALE;
+        let (x, z) = (swung.x, swung.z - neck);
+        Vec3::new(x * cos - z * sin, swung.y, neck + x * sin + z * cos)
+    } else {
+        swung
     };
     // **Pitch before roll, about the animal's own middle.**
     //
@@ -2498,7 +2909,11 @@ pub(crate) fn push_posed_box(
 
     let (sky, block_light) = light;
 
-    let (turn_sin, turn_cos) = part.turn.sin_cos();
+    // A head turned on its neck (`Pose::glance`) is lit as turned: the part's
+    // own turn with the glance taken off it, because `world_face_of` turns the
+    // other way round (+X toward -Z) from the glance (-Z toward +X).
+    let turn = if part.gait == Gait::Head { part.turn - pose.glance } else { part.turn };
+    let (turn_sin, turn_cos) = turn.sin_cos();
     // A spread wing's beat is a roll about the length (`posed_local`), so
     // its faces are turned by the roll and not by the swing. The two are
     // turns about the same axis as the pose's roll, so they simply add --
@@ -2613,7 +3028,7 @@ fn corner_bits(corner: [f32; 3]) -> usize {
 fn placed_corners(part: &Part, swing: f32, pose: Pose) -> [Vec3; 8] {
     std::array::from_fn(|bits| {
         let corner = [(bits & 1) as f32, ((bits >> 1) & 1) as f32, ((bits >> 2) & 1) as f32];
-        (posed_local(part, corner, swing, pose.roll, pose.pitch) - pose.shift) * pose.scale
+        (posed_local_glancing(part, corner, swing, pose.roll, pose.pitch, (pose.glance, pose.neck)) - pose.shift) * pose.scale
     })
 }
 
@@ -2643,7 +3058,14 @@ mod tests {
             // and at a walk rather than a run -- a bird past
             // `AIRBORNE_SPEED` tucks its legs up and swings nothing.
             let standing = mesh(species, 0.0, 0.0, 0.0);
-            let striding = mesh(species, 0.0, 2.0, std::f32::consts::FRAC_PI_2 / STRIDE);
+            // **Three points of the stride, not one.** A trot has every leg
+            // at the end of its swing a quarter of the way round; a walk has
+            // two of the four at the middle of theirs there (`WALK_FEET`),
+            // where a leg swung about either end has moved nowhere at all.
+            let strides: Vec<_> = [0.5f32, 1.0, 1.5]
+                .into_iter()
+                .map(|quarter| mesh(species, 0.0, 2.0, quarter * std::f32::consts::FRAC_PI_2 / STRIDE))
+                .collect();
             // Vertices are in the order the parts were *drawn*, and a
             // folded wing or a spread one is left out of it.
             let mut index = 0;
@@ -2658,9 +3080,13 @@ mod tests {
                 }
                 legs += 1;
                 let index = drawn;
-                let (a, b) = (&standing[index * 24..index * 24 + 24], &striding[index * 24..index * 24 + 24]);
-                let sole = (face_middle(b, 1) - face_middle(a, 1)).length();
-                let top = (face_middle(b, 0) - face_middle(a, 0)).length();
+                let a = &standing[index * 24..index * 24 + 24];
+                let (mut sole, mut top) = (0.0f32, 0.0f32);
+                for striding in &strides {
+                    let b = &striding[index * 24..index * 24 + 24];
+                    sole = sole.max((face_middle(b, 1) - face_middle(a, 1)).length());
+                    top = top.max((face_middle(b, 0) - face_middle(a, 0)).length());
+                }
                 assert!(
                     sole > top + 1e-4,
                     "{}: {} moved its top {top:.4} and its sole {sole:.4} through a stride,                      which is a leg swinging about the wrong end",
@@ -2740,8 +3166,15 @@ mod tests {
             .iter()
             .position(|part| part.gait == Gait::LegFront)
             .expect("a deer has forelegs");
+        // Measured where this leg is furthest forward in a walk -- which is
+        // the gait everything up to a deer's walking pace is in -- so what
+        // is measured is how far it swings and not where in the four beats
+        // it happens to be (`leg_offset`).
+        let foot = parts(Species::Deer)[leg];
+        let at_the_end = std::f32::consts::FRAC_PI_2
+            - std::f32::consts::TAU * leg_offset(foot.at[2] < 0.0, foot.at[0] < 0.0, 0.0);
         let reach = |speed: f32| {
-            let v = mesh(Species::Deer, 0.0, speed, std::f32::consts::FRAC_PI_2 / STRIDE);
+            let v = mesh(Species::Deer, 0.0, speed, at_the_end.rem_euclid(std::f32::consts::TAU) / STRIDE);
             // Along the animal, which at a yaw of nought is the world's x:
             // the model faces -Z in its own frame and a yaw of nought puts
             // that on +X (see `push_posed_box`).
@@ -2782,7 +3215,7 @@ mod tests {
                 for swing in [0.0f32, 0.37, -0.8] {
                     for pose in [
                         STANDING_POSE,
-                        Pose { roll: 0.4, pitch: -0.25, shift: Vec3::new(0.1, -0.2, 0.3), scale: 1.0 },
+                        Pose { roll: 0.4, pitch: -0.25, shift: Vec3::new(0.1, -0.2, 0.3), scale: 1.0, glance: 0.0, neck: 0.0 },
                     ] {
                         let placed = placed_corners(part, swing, pose);
                         for face in crate::engine::mesh::faces() {
@@ -3204,8 +3637,9 @@ mod tests {
                         "the antelope's horns do not stand out of its crown"
                     );
                 }
-                Species::Deer => {
-                    assert_eq!(antlers, 4, "the deer's skeleton has lost its antlers");
+                // The elk's palm is its tine: two pieces a side, as a deer's.
+                Species::Deer | Species::Elk => {
+                    assert_eq!(antlers, 4, "the {}'s skeleton has lost its antlers", species.name());
                     assert!(
                         bones.iter().filter(|bone| bone.name == "antler").all(|bone| dorsal(bone) < crown),
                         "the deer's antlers do not stand out of its crown"
@@ -3225,7 +3659,7 @@ mod tests {
                 }
                 _ => {}
             }
-            if species != Species::Deer {
+            if !matches!(species, Species::Deer | Species::Elk) {
                 assert_eq!(antlers, 0, "{} grew antlers in death", species.name());
             }
             if species != Species::Boar {
@@ -3486,6 +3920,16 @@ mod tests {
     ///
     /// `speed` before `walked`, which is the order the tests read best
     /// in: how fast it is going, and then how far it has come.
+    /// `mesh`, in a gait fixed by the caller rather than worked out from the
+    /// speed: nought a walk, one a trot, two a gallop (`Motion::gait`).
+    fn mesh_in_gait(species: Species, speed: f32, walked: f32, gait: f32) -> Vec<crate::engine::mesh::Vertex> {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let motion = Motion { walked, speed, beat: walked, gait: Some(gait), ..Default::default() };
+        build(species, TEST_CENTRE, 0.0, motion, &FaceLayers::empty_for_test(), (15, 0), &mut vertices, &mut indices);
+        vertices
+    }
+
     fn mesh(species: Species, yaw: f32, speed: f32, walked: f32) -> Vec<crate::engine::mesh::Vertex> {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
@@ -3981,6 +4425,111 @@ mod tests {
     }
 
     #[test]
+    fn a_walk_a_trot_and_a_gallop_put_the_feet_down_in_three_different_orders() {
+        // Left fore, right fore, left hind, right hind, as `WALK_FEET`.
+        let feet = |gait: f32| {
+            [(true, true), (true, false), (false, true), (false, false)]
+                .map(|(fore, left)| leg_offset(fore, left, gait).rem_euclid(1.0))
+        };
+        let same = |a: f32, b: f32| (a - b).rem_euclid(1.0).min((b - a).rem_euclid(1.0)) < 0.02;
+        let [lf, rf, lh, rh] = feet(0.0);
+        // A walk: four beats, every foot on its own quarter.
+        for (i, a) in [lf, rf, lh, rh].iter().enumerate() {
+            for b in [lf, rf, lh, rh].iter().skip(i + 1) {
+                assert!(!same(*a, *b), "two feet land together in a walk");
+            }
+        }
+        // A trot: the diagonals together, half a cycle apart.
+        let [lf, rf, lh, rh] = feet(1.0);
+        assert!(same(lf, rh) && same(rf, lh), "a trot is not in diagonal pairs");
+        assert!(!same(lf, rf), "a trot has all four feet together");
+        // A gallop: the hinds nearly together, the fores nearly together, and
+        // the two pairs apart.
+        let [lf, rf, lh, rh] = feet(2.0);
+        let near = |a: f32, b: f32| (a - b).rem_euclid(1.0).min((b - a).rem_euclid(1.0)) < 0.15;
+        assert!(near(lh, rh) && near(lf, rf), "a gallop's pairs are not front and back");
+        assert!(!near(lh, lf), "a gallop lands all four at once");
+        // And the way from one to the next has no jump in it.
+        let mut before = feet(0.0);
+        for step in 1..=200 {
+            let now = feet(step as f32 * 0.01);
+            for (a, b) in before.iter().zip(&now) {
+                let moved = (a - b).rem_euclid(1.0).min((b - a).rem_euclid(1.0));
+                assert!(moved < 0.01, "a foot jumped {moved:.3} of a cycle between two gaits a hundredth apart");
+            }
+            before = now;
+        }
+    }
+
+    #[test]
+    fn a_deer_walks_to_the_water_trots_when_hurried_and_gallops_when_it_runs() {
+        let deer = Species::Deer;
+        assert_eq!(gait_of(deer, deer.walk_speed()), 0.0, "a walking deer is not walking");
+        assert!((gait_of(deer, (deer.walk_speed() * 1.1 + deer.run_speed()) * 0.5) - 1.0).abs() < 0.01);
+        assert_eq!(gait_of(deer, deer.run_speed()), 2.0, "a running deer is not galloping");
+        // By its own paces: at three blocks a second a sheep is running and a
+        // horse is walking.
+        assert!(gait_of(Species::Sheep, 3.0) > gait_of(Species::Horse, 3.0));
+        assert!(stride_factor(2.0) < stride_factor(0.0), "a gallop takes as many strides a block as a walk");
+    }
+
+    #[test]
+    fn a_lying_animal_is_drawn_low_with_its_legs_under_it() {
+        for species in [Species::Deer, Species::Elk, Species::Fox, Species::Horse, Species::Wolf] {
+            let standing = posed(species, Motion::default());
+            let lying = posed(species, Motion { lie: 1.0, ..Default::default() });
+            let top = |drawn: &[crate::engine::mesh::Vertex]| drawn.iter().map(|v| v.position[1]).fold(f32::MIN, f32::max);
+            let bottom = |drawn: &[crate::engine::mesh::Vertex]| drawn.iter().map(|v| v.position[1]).fold(f32::MAX, f32::min);
+            let dropped = top(&standing) - top(&lying);
+            assert!(
+                dropped > species.height() * 0.2,
+                "a lying {} is only {dropped:.2} lower than a standing one",
+                species.name()
+            );
+            // Nothing is pushed down through the ground it lies on.
+            assert!(
+                bottom(&lying) > bottom(&standing) - 0.12,
+                "a lying {}'s legs go {:.2} into the ground",
+                species.name(),
+                bottom(&standing) - bottom(&lying)
+            );
+        }
+    }
+
+    #[test]
+    fn a_head_turned_to_a_sound_turns_on_its_neck_and_the_body_stays_put() {
+        let straight = posed(Species::Deer, Motion::default());
+        let turned = posed(Species::Deer, Motion { glance: 0.8, ..Default::default() });
+        let head = parts(Species::Deer).iter().position(|part| part.name == "head").expect("a deer has a head");
+        let body = parts(Species::Deer).iter().position(|part| part.name == "body").expect("a deer has a body");
+        let middle = |drawn: &[crate::engine::mesh::Vertex], index: usize| {
+            drawn[index * 24..index * 24 + 24].iter().map(|v| Vec3::from_array(v.position)).sum::<Vec3>() / 24.0
+        };
+        // To its right: at a yaw of nought an animal faces +X and its right
+        // is +Z (`push_posed_box`).
+        assert!(
+            middle(&turned, head).z > middle(&straight, head).z + 0.1,
+            "a head turned right is no further right"
+        );
+        assert!((middle(&turned, body) - middle(&straight, body)).length() < 1e-4, "the body turned with the head");
+    }
+
+    #[test]
+    fn a_fox_with_a_kill_is_drawn_with_something_in_its_jaws() {
+        let empty = mesh(Species::Fox, 0.0, 0.0, 0.0);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let motion = Motion { tack: TACK_CARRYING, ..Default::default() };
+        build(Species::Fox, TEST_CENTRE, 0.0, motion, &FaceLayers::empty_for_test(), (15, 0), &mut vertices, &mut indices);
+        assert_eq!(vertices.len(), empty.len() + 24, "the fox carries nothing, or more than one thing");
+        // ...and a wolf with the same bit set carries nothing: it is the fox's.
+        let wolf = mesh(Species::Wolf, 0.0, 0.0, 0.0);
+        let mut vertices = Vec::new();
+        build(Species::Wolf, TEST_CENTRE, 0.0, motion, &FaceLayers::empty_for_test(), (15, 0), &mut vertices, &mut indices);
+        assert_eq!(vertices.len(), wolf.len());
+    }
+
+    #[test]
     fn the_legs_go_round_once_per_stride_of_ground_and_never_once_per_second() {
         // **The promise the whole gait rests on**, and the one a player reads
         // as skating when it is broken: the pose is a function of `walked`
@@ -3988,11 +4537,20 @@ mod tests {
         // crawl to a bolt -- the legs are in the same place, because it is
         // the ground that turns them. What speed decides is how *far* they
         // swing (`STANDING`, and the amplitude above it), never how fast.
-        let reference = mesh(Species::Deer, 0.0, 4.0, 3.0);
-        for speed in [4.0f32, 5.5, 7.0] {
-            let same = mesh(Species::Deer, 0.0, speed, 3.0);
-            for (a, b) in reference.iter().zip(&same) {
-                assert_eq!(a.position, b.position, "the same ground covered drew a different leg at {speed}");
+        //
+        // **...and which gait they are in** (`gait_of`): a walk and a gallop
+        // over the same ground are two drawings on purpose. So the promise is
+        // kept gait by gait -- within one, the ground covered is the whole of
+        // where the legs are, and the clock never reaches them. What changes
+        // the gait over time is eased on the client (`Entity::gait`), for the
+        // wingbeat's reason.
+        for gait in [0.0f32, 1.0, 2.0] {
+            let reference = mesh_in_gait(Species::Deer, 4.0, 3.0, gait);
+            for speed in [4.0f32, 5.5, 7.0] {
+                let same = mesh_in_gait(Species::Deer, speed, 3.0, gait);
+                for (a, b) in reference.iter().zip(&same) {
+                    assert_eq!(a.position, b.position, "the same ground covered drew a different leg at {speed} in gait {gait}");
+                }
             }
         }
         // ...and a whole stride on is the same pose again. `STRIDE` turns
@@ -4528,7 +5086,10 @@ mod tests {
             // ...nor on a fish, which hears through its skin.
             // ...nor on the crab, which has no head to put them on
             // (`is_shelled`).
-            let wanted = if species.flies() || species.swims() || is_shelled(species) { 0 } else { 2 };
+            // A frog's ear is a drum flush with the side of its head, and a
+            // box standing up there would be a frog with a hare's ears.
+            let earless = species.flies() || species.swims() || is_shelled(species) || species == Species::Frog;
+            let wanted = if earless { 0 } else { 2 };
             assert_eq!(ears.len(), wanted, "{} has {} ears", species.name(), ears.len());
             for e in ears {
                 assert_eq!(
@@ -4645,10 +5206,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_deer_carries_bone_on_its_head() {
+    fn only_the_deer_and_the_elk_carry_bone_on_their_heads() {
         for &species in Species::ALL {
             let antlers = parts(species).iter().filter(|p| p.skin == Skin::Antler).count();
-            let wanted = if species == Species::Deer { 4 } else { 0 };
+            // ...and the elk, whose beam and palm are the deer's beam and
+            // tine made broad: bone on the head is what the two of them are
+            // known by across a clearing, and nothing else here has it.
+            let wanted = if matches!(species, Species::Deer | Species::Elk) { 4 } else { 0 };
             assert_eq!(antlers, wanted, "{} has {antlers} antler parts", species.name());
         }
     }

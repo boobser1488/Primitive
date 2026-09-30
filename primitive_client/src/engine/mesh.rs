@@ -8680,6 +8680,63 @@ pub(crate) fn place_carried(
     indices.extend(model_indices.iter().map(|index| base + index));
 }
 
+/// **Small boxes of a block's own picture, added to a chunk's mesh**, for a
+/// photograph: `(chunk-local centre, half a side in blocks, texture layer)`.
+///
+/// For the scenarios' shots (`scenario::shots`), whose offscreen tool draws
+/// meshes and nothing else -- no particles, no entities -- so the float on
+/// the water, the ring a fish makes and the fish itself would be missing
+/// from exactly the pictures that are about them. Put in the solid pass's
+/// group of faces that look no one way, where the models already are, so
+/// the renderer's per-direction culling never throws one away.
+#[cfg(test)]
+pub(crate) fn add_geometry(buffers: &mut MeshBuffers, vertices: &[Vertex], indices: &[u32]) {
+    // Whatever else a scenario's picture has to show that is not the world:
+    // the animals, built by the entity list itself around this chunk's
+    // corner (`scenario::shots`). Into the same group the specks go in, for
+    // the same reason.
+    let base = buffers.vertices.len() as u32;
+    buffers.vertices.extend_from_slice(vertices);
+    let extra: Vec<u32> = indices.iter().map(|i| i + base).collect();
+    let added = extra.len() as u32;
+    let into = buffers.solid_groups[0] as usize;
+    buffers.indices.splice(into..into, extra);
+    for end in &mut buffers.solid_groups {
+        *end += added;
+    }
+    buffers.solid_index_count += added;
+    buffers.leaf_end += added;
+    buffers.sprite_end += added;
+    buffers.top = vertices.iter().fold(buffers.top, |top, v| top.max(v.position[1]));
+}
+
+/// Boxes, for a scenario's photograph: see `add_geometry` for the other thing
+/// a picture can be handed.
+#[cfg(test)]
+pub(crate) fn add_specks(buffers: &mut MeshBuffers, specks: &[([f32; 3], f32, u32)]) {
+    let mut extra = Vec::new();
+    for &(centre, half, layer) in specks {
+        let at = [centre[0].floor(), centre[1].floor(), centre[2].floor()];
+        let from = [
+            (centre[0] - at[0] - half) * 16.0,
+            (centre[1] - at[1] - half) * 16.0,
+            (centre[2] - at[2] - half) * 16.0,
+        ];
+        let to = [from[0] + half * 32.0, from[1] + half * 32.0, from[2] + half * 32.0];
+        push_box(at, from, to, 0, layer, false, 15, 0, &mut buffers.vertices, &mut extra);
+    }
+    let added = extra.len() as u32;
+    let into = buffers.solid_groups[0] as usize;
+    buffers.indices.splice(into..into, extra);
+    for end in &mut buffers.solid_groups {
+        *end += added;
+    }
+    buffers.solid_index_count += added;
+    buffers.leaf_end += added;
+    buffers.sprite_end += added;
+    buffers.top = specks.iter().fold(buffers.top, |top, &(centre, half, _)| top.max(centre[1] + half));
+}
+
 /// One axis-aligned box of a bespoke model, in sixteenths of a cell.
 ///
 /// `quarters` turns it about the middle of the cell, so a model is

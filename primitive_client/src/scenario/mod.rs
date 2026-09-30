@@ -208,6 +208,15 @@ pub struct Scenario {
     /// bank, a set-down with nowhere to set it down), so a scenario that
     /// asserted only on messages could not see them.
     pub notice: Option<(String, Instant)>,
+    /// **A line in the water**, as this client draws it: the float the
+    /// frame's own `line_frame` throws, and the `Line` arm of the socket
+    /// (`logic::fishing::told`) moves. The game's two halves of fishing,
+    /// played here as they are played there.
+    pub fishing_float: Option<crate::logic::fishing::Float>,
+    /// Where `line_frame` puts the float's specks and the rings. Nobody
+    /// draws them; they are here because the frame's function wants
+    /// somewhere to put them.
+    particles: crate::engine::particles::Particles,
     /// Everybody else, and everything that is not a block. Empty in most
     /// scenarios, and the frame's own types all the same, so the frame's
     /// own functions take them without a shim.
@@ -273,6 +282,12 @@ pub struct Scenario {
     pub horseback: Option<crate::logic::horseback::Horseback>,
     /// The latest snapshot of every entity the server has sent, by id.
     pub entities: HashMap<primitive_shared::protocol::EntityId, primitive_shared::protocol::EntityState>,
+    /// **What the last snapshot held, and nothing older**: what a picture
+    /// draws (`shots`). `entities` keeps every animal ever heard of, which is
+    /// what a test counting them wants and exactly what a photograph does not
+    /// -- a grouse a fox has already carried off was drawn hanging in the air
+    /// of the coop it was killed in.
+    pub(crate) in_view: Vec<primitive_shared::protocol::EntityState>,
 }
 
 /// **How far the world has got, in frames, and how many ticks that has
@@ -491,6 +506,8 @@ impl Scenario {
             meal: None,
             meal_sent: None,
             notice: None,
+            fishing_float: None,
+            particles: crate::engine::particles::Particles::new(),
             remote: RemotePlayers::default(),
             sim: crate::logic::entities::Entities::default(),
             death: DeathScreen::new(),
@@ -525,6 +542,7 @@ impl Scenario {
             jump_edge: false,
             horseback: None,
             entities: HashMap::new(),
+            in_view: Vec::new(),
         };
         // **A player in a world has the cursor.** The frame refuses to
         // mine without it (`can_mine`), which is right -- the click that
@@ -890,6 +908,7 @@ impl Scenario {
             // No pick on the ground: `run`'s `can_mine`.
             if self.body.downed.is_none() {
                 self.step_hands();
+                self.step_line();
             }
         }
 
@@ -1048,6 +1067,36 @@ impl Scenario {
         );
     }
 
+    /// **One frame of the line and the rod**, through the frame's own
+    /// (`frame::effects::line_frame`): the throw, the strike and the reel
+    /// off the use button, and the float and the rod in the hand moved by
+    /// what the server last said.
+    fn step_line(&mut self) {
+        crate::frame::effects::line_frame(
+            FRAME,
+            &self.settings,
+            &self.chunks,
+            &self.camera,
+            &self.input,
+            &self.inventory,
+            &self.audio,
+            &self.net,
+            &mut self.particles,
+            &mut self.hand,
+            &mut self.rod_hold,
+            &mut self.fishing_float,
+            &mut self.notice,
+            &mut self.debug,
+        );
+    }
+
+    /// The use button down or up, with the pointer the game's -- which is
+    /// what the rod reads (`logic::fishing::Hold`).
+    pub fn press_use(&mut self, down: bool) {
+        self.input.mouse_grabbed = true;
+        self.input.using = down;
+    }
+
     /// The arms of `drain_network` a scenario reads. See the module note.
     fn drain(&mut self) {
         while let Ok(incoming) = self.net.to_game.try_recv() {
@@ -1148,6 +1197,15 @@ impl Scenario {
                     }
                 }
                 ServerMessage::SetDownItem { x, y, z, item } => self.chunks.note_set_down((*x, *y, *z), *item),
+                // The line, through the one function the game's socket
+                // hands it to. What it says -- a catch, a parted line, a
+                // bait eaten -- is the game's to show; the scenario reads
+                // the float and the pack.
+                ServerMessage::Line { float, phase, strain, liveliness, run } => {
+                    let fish_now = self.inventory.count(primitive_shared::types::BLOCK_RAW_FISH);
+                    let slot = self.input.hotbar_slot;
+                    crate::logic::fishing::told(&mut self.fishing_float, *float, *phase, *strain, *liveliness, *run, fish_now, || slot);
+                }
                 ServerMessage::Trail { cells, marks, whole } => {
                     self.explored.trail_arrived(cells.clone(), marks.clone(), *whole);
                 }
@@ -1178,6 +1236,7 @@ impl Scenario {
                     for state in states {
                         self.entities.insert(state.id, *state);
                     }
+                    self.in_view = states.clone();
                     // Snapshots are twenty a second: not kept in `heard`.
                     continue;
                 }
@@ -1351,10 +1410,18 @@ impl Scenario {
     /// through the real renderer, when that variable is set. See the
     /// module note.
     pub fn shot(&self, name: &str) {
+        self.shot_with(name, &[]);
+    }
+
+    /// `shot`, with small things drawn into the picture that the offscreen
+    /// tool cannot draw itself: `(where, half a side, block whose picture it
+    /// wears)`. The float, the rings on the water, the fish under it -- see
+    /// `mesh::add_specks` for why they are boxes.
+    pub fn shot_with(&self, name: &str, specks: &[(DVec3, f32, BlockId)]) {
         let Ok(dir) = std::env::var("PRIMITIVE_SCENARIO_SHOTS") else {
             return;
         };
-        shots::write(self, std::path::Path::new(&dir), name);
+        shots::write(self, std::path::Path::new(&dir), name, specks);
     }
 }
 

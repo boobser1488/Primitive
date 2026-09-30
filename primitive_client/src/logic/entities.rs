@@ -149,6 +149,55 @@ const MAX_STRIDE: f32 = 3.0;
 /// gull's `DIVE_SPEED`) with room over it. See `Entity::rising`.
 const MAX_RISE: f32 = 16.0;
 
+/// How fast the legs change gait, in gaits a second: a walk to a gallop in
+/// a little over a second, which is how long an animal takes to get into
+/// its stride. See `Entity::gait`.
+const GAIT_RATE: f32 = 1.6;
+
+/// How fast an animal goes down to lie and gets up again, in lyings a
+/// second: most of a second either way. The server holds a lying animal
+/// still for `woods::RISING_SECONDS` when something makes it get up, and
+/// the body comes up over the same time.
+const LIE_RATE: f32 = 1.5;
+
+/// How fast a head comes round to what it heard, in radians a second: a
+/// deer's head turns before its body does, and quickly.
+const GLANCE_RATE: f32 = 4.0;
+
+/// How fast a body settles into the water or comes out of it, in swims a
+/// second.
+const SWIM_RATE: f32 = 2.5;
+
+/// How fast an animal settles on its feet after it stops, and unsettles when
+/// it moves, in settlings a second: see `animal_model::Motion::settled`.
+const SETTLE_RATE: f32 = 1.2;
+
+/// How fast a stride's reach comes in and goes out, in whole reaches a
+/// second: a full stride to a stand in a third of a second. See
+/// `Entity::reach`.
+const REACH_RATE: f32 = 3.0;
+
+/// The stride clock wraps after this many blocks of stride: a whole number
+/// of leg cycles (`animal_model::STRIDE` is two radians a block, so pi
+/// blocks is one cycle), for `animal_model::BEAT_WRAP`'s reason -- a float
+/// that only grows stops being able to tell one step from the next.
+const STRIDE_WRAP: f32 = std::f32::consts::PI * 64.0;
+
+/// An entity's id, scattered over nought to one: where its own clocks start.
+///
+/// A hash and not the id scaled, because ids come in runs -- a herd is
+/// spawned one after another -- and a run scaled is a run: animals that
+/// arrived together would keep time together (`Entity::age`). The mixer is
+/// the one the server spreads its per-animal phases with (`animals::spread`),
+/// so the two sides scatter a herd the same way.
+fn scatter(id: EntityId) -> f32 {
+    let mut h = id.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^= h >> 29;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 32;
+    (h % 10_000) as f32 / 10_000.0
+}
+
 struct Entity {
     kind: EntityKind,
     /// Where the previous snapshot put it, and where the latest one did.
@@ -271,6 +320,41 @@ struct Entity {
     /// integrated, a frame at a time, changes rate without moving. Nought
     /// and untouched for everything that does not fly.
     beat: f32,
+    /// **The legs' own clock**, in blocks of stride: what the model's
+    /// `walked` is handed.
+    ///
+    /// It was the distance walked, and a stride is a fixed length of ground
+    /// only while the gait is fixed -- a gallop covers more ground a stride
+    /// than a walk (`animal_model::stride_factor`). So the distance is
+    /// counted in here a frame at a time at the rate the gait allows, for the
+    /// wingbeat's reason (`beat`): a rate may only change a phase that is
+    /// integrated, or the legs jump to a new part of the stride the moment an
+    /// animal breaks into a run. Starts at a different place for every
+    /// animal, so a herd that sets off together is not in step.
+    strode: f32,
+    /// How far it had walked when `strode` was last counted.
+    walked_before: f32,
+    /// Which gait the legs are in, eased: see `animal_model::Motion::gait`.
+    gait: f32,
+    /// How far down it is lying, eased: see `animal_model::Motion::lie`.
+    lie: f32,
+    /// Where its head is turned, eased: see `animal_model::Motion::glance`.
+    glance: f32,
+    /// How far it is swimming, eased: see `animal_model::Motion::swim`.
+    swim: f32,
+    /// How settled it is on its feet, eased: see
+    /// `animal_model::Motion::settled`.
+    settled: f32,
+    /// **How far the legs reach**, eased: see `animal_model::reach_of`.
+    ///
+    /// The speed is one number a snapshot, and a leg's reach answers to it:
+    /// an animal pulling up from a gallop shortened its stride in steps of a
+    /// tenth of a radian twenty times a second -- a shudder down the legs --
+    /// and faded the last of it out in three frames. Eased at `REACH_RATE`,
+    /// the stride comes in and goes out as a stride does.
+    reach: f32,
+    /// Which hip it lies on: see `animal_model::Motion::hip`.
+    hip: f32,
     /// Seconds since the snapshot first said it was dying
     /// (`Attitude::Dying`), for the roll onto its side: see
     /// `animal_model::Motion::fallen`. Nought for everything alive.
@@ -393,13 +477,15 @@ impl Entity {
 
     /// What the model needs to know about how this animal is moving.
     fn motion(&self, now: Instant) -> crate::logic::animal_model::Motion {
-        let (walked, speed) = self.gait(now);
+        // The legs run on their own clock (`strode`), not on the ground
+        // covered; the speed is still the ground's.
+        let (_, speed) = self.gait(now);
         let (hurt, growth, tack) = match self.kind {
             EntityKind::Animal { hurt, growth, tack, .. } => ((hurt > 0.0).then_some(hurt), growth, tack),
             _ => (None, u8::MAX, 0),
         };
         crate::logic::animal_model::Motion {
-            walked,
+            walked: self.strode,
             speed,
             rise: self.rising(),
             beat: self.beat,
@@ -415,6 +501,13 @@ impl Entity {
             // nothing else: the client keeps no idea of its own about whose
             // horse is saddled.
             tack,
+            gait: Some(self.gait),
+            lie: self.lie,
+            glance: self.glance,
+            swim: self.swim,
+            settled: self.settled,
+            hip: self.hip,
+            reach: Some(self.reach),
         }
     }
 }
@@ -422,6 +515,9 @@ impl Entity {
 #[derive(Default)]
 pub struct Entities {
     entities: HashMap<EntityId, Entity>,
+    /// The world's clock as the sky last told it, in days: where a newly
+    /// seen animal's own clock starts (`Entity::age`). See `set_world_clock`.
+    world_clock: f32,
     /// The frame's clock, sampled once in `tick`, so every entity in one
     /// frame is drawn at the same instant.
     now: Option<Instant>,
@@ -667,6 +763,20 @@ impl Entities {
 
     /// The river's current under the rowed raft, for this frame's
     /// prediction. See `river`.
+    /// Tells the entities what time it is in the world, in days
+    /// (`Sky::world_days`), once a frame before `tick`.
+    ///
+    /// **What an animal's idle clock starts from.** A tail's swish, an ear's
+    /// flick and a standing animal's scratch all run on the animal's own
+    /// clock (`animal_model::Motion::age`), and that clock used to start at
+    /// nought -- give or take the id -- when this client first saw the animal:
+    /// every animal that came into view in one snapshot started its idle life
+    /// together. Started from the world's clock and the id, it is a place in
+    /// the world's day and the same place on every client that sees it.
+    pub fn set_world_clock(&mut self, world_days: f32) {
+        self.world_clock = world_days;
+    }
+
     pub fn set_river_current(&mut self, river: (f32, f32)) {
         self.river = river;
     }
@@ -996,6 +1106,7 @@ impl Entities {
         // ...and the same for what has just let go. Asked before the
         // entry below, which is what creates the row this is testing for.
         let mut fell: Vec<(DVec3, BlockId)> = Vec::new();
+        let world_clock = self.world_clock;
         for state in states {
             let current = DVec3::new(state.x, state.y, state.z);
             if let EntityKind::FallingBlock { block } = state.kind {
@@ -1125,8 +1236,38 @@ impl Entities {
                     // ...and from a different point of the swish than the one
                     // beside it, so a herd's tails do not keep time. The id is
                     // what every other per-animal phase in this game is spread
-                    // by (the server's `spread`), and it is all the client has.
-                    age: (state.id % 977) as f32 * 0.021,
+                    // by (the server's `spread`); the world's clock is where
+                    // the day is, so two clients that see the same deer see it
+                    // scratch at the same moment (`set_world_clock`).
+                    //
+                    // **Scattered, not stepped.** It was the id times a fiftieth,
+                    // and a herd is spawned with ids one apart: three deer that
+                    // came into view together swished their tails a fiftieth of
+                    // a second apart, which is together.
+                    age: scatter(state.id) * 600.0 + world_clock.fract() * 977.0,
+                    // ...and the legs from a different place in the stride, so
+                    // a herd that sets off together is not in step.
+                    strode: scatter(state.id ^ 0x5BD1_E995) * STRIDE_WRAP,
+                    walked_before: 0.0,
+                    // In the gait it is moving at, lying if it is lying, its
+                    // head where the server says, in the water if it is in it:
+                    // a newly seen animal is as it is, not easing into it.
+                    gait: 0.0,
+                    lie: match state.kind {
+                        EntityKind::Animal { attitude: primitive_shared::protocol::Attitude::Resting, .. } => 1.0,
+                        _ => 0.0,
+                    },
+                    glance: match state.kind {
+                        EntityKind::Animal { glance, .. } => f32::from(glance) / 100.0,
+                        _ => 0.0,
+                    },
+                    swim: match state.kind {
+                        EntityKind::Animal { attitude: primitive_shared::protocol::Attitude::Swimming, .. } => 1.0,
+                        _ => 0.0,
+                    },
+                    settled: 1.0,
+                    reach: 0.0,
+                    hip: if scatter(state.id ^ 0x2545_F491) < 0.5 { 1.0 } else { -1.0 },
                     // ...and from a different point of the wingbeat, for
                     // exactly the reason `age` is spread: a covey that came
                     // into view together and beat in unison would be one
@@ -1172,14 +1313,14 @@ impl Entities {
         std::mem::take(&mut self.gave_way)
     }
 
-    /// Every animal, as the soundscape and the small life round the player
-    /// need it: who, what, where it is drawn this frame, and how fast.
+    /// Every animal, as the soundscape needs it: who, what, where it is drawn
+    /// this frame, how fast, and what its body is doing.
     ///
     /// **Read off what was drawn, not what was sent**, so a gull's call comes
-    /// from the gull on the screen and a frog hushes at the wolf where the
-    /// player sees it -- and so a take-off is heard on the frame the wings
-    /// open (`animal_model::AIRBORNE_SPEED` and `soundscape::in_the_air`
-    /// read the same speed).
+    /// from the gull on the screen and a frog's croak from the frog on the
+    /// bank -- and so a take-off is heard on the frame the wings open
+    /// (`animal_model::AIRBORNE_SPEED` and `soundscape::in_the_air` read the
+    /// same speed).
     pub fn heard(&self) -> Vec<crate::audio::soundscape::Heard> {
         let now = self.now.unwrap_or_else(Instant::now);
         self.entities
@@ -1192,8 +1333,9 @@ impl Entities {
                     speed: entity.gait(now).1,
                     hurt,
                     // The body language the head is already drawn by
-                    // (`animal_model::head_carried`), heard as well.
-                    stalking: attitude == primitive_shared::protocol::Attitude::Stalking,
+                    // (`animal_model::head_carried`), heard as well: a
+                    // hunter on the ring, and a frog the server has hushed.
+                    attitude,
                 }),
                 _ => None,
             })
@@ -1235,7 +1377,12 @@ impl Entities {
     }
 
     pub fn tick(&mut self, dt: f32) {
-        let now = Instant::now();
+        self.tick_at(Instant::now(), dt);
+    }
+
+    /// `tick`, at a moment the caller names: a test drives frames on its own
+    /// clock against snapshots that land on another (`apply_snapshot_at`).
+    pub(crate) fn tick_at(&mut self, now: Instant, dt: f32) {
         self.now = Some(now);
         if let Some(last) = self.last_snapshot {
             if now.duration_since(last) >= STALE_AFTER {
@@ -1275,6 +1422,33 @@ impl Entities {
             }
             if matches!(entity.kind, EntityKind::Animal { attitude: primitive_shared::protocol::Attitude::Dying, .. }) {
                 entity.dying += dt;
+            }
+            // **The gait, the lying, the glance and the water, eased** --
+            // every one of them arrives on a snapshot as a step, and a body
+            // does not change gait, lie down or turn its head in a frame.
+            if let EntityKind::Animal { species, attitude, glance, .. } = entity.kind {
+                use primitive_shared::protocol::Attitude;
+                let (walked, speed) = entity.gait(now);
+                let moved = (walked - entity.walked_before).max(0.0);
+                entity.walked_before = walked;
+                entity.strode = (entity.strode + moved * crate::logic::animal_model::stride_factor(entity.gait))
+                    .rem_euclid(STRIDE_WRAP);
+                let gait = crate::logic::animal_model::gait_of(species, speed);
+                entity.gait += (gait - entity.gait).clamp(-GAIT_RATE * dt, GAIT_RATE * dt);
+                let lying = if attitude == Attitude::Resting { 1.0 } else { 0.0 };
+                entity.lie += (lying - entity.lie).clamp(-LIE_RATE * dt, LIE_RATE * dt);
+                let turned = f32::from(glance) / 100.0;
+                entity.glance += (turned - entity.glance).clamp(-GLANCE_RATE * dt, GLANCE_RATE * dt);
+                // A duck dabbling is on the water as much as one paddling.
+                let wet = attitude == Attitude::Swimming || (species == primitive_shared::animals::Species::Duck && attitude == Attitude::Feeding);
+                let wet = if wet { 1.0 } else { 0.0 };
+                entity.swim += (wet - entity.swim).clamp(-SWIM_RATE * dt, SWIM_RATE * dt);
+                let reach = crate::logic::animal_model::reach_of(speed);
+                entity.reach += (reach - entity.reach).clamp(-REACH_RATE * dt, REACH_RATE * dt);
+                // Settled: standing, at its ease -- not grazing, not alert.
+                let still = speed < crate::logic::animal_model::STANDING && attitude == Attitude::Easy;
+                let still = if still { 1.0 } else { 0.0 };
+                entity.settled += (still - entity.settled).clamp(-SETTLE_RATE * dt, SETTLE_RATE * dt);
             }
         }
     }
@@ -2160,6 +2334,7 @@ mod tests {
                     attitude: Attitude::Easy,
                     growth: u8::MAX,
                     tack: 0,
+                    glance: 0,
                 },
                 // Four blocks a second, along +X.
                 x: tick as f64 * 0.2,
@@ -2226,6 +2401,7 @@ mod tests {
                     attitude: Attitude::Easy,
                     growth: u8::MAX,
                     tack: 0,
+                    glance: 0,
                 },
                 x: tick as f64 * 0.2,
                 y: 20.0,
@@ -2286,6 +2462,7 @@ mod tests {
                         attitude: Attitude::Easy,
                         growth: u8::MAX,
                         tack: 0,
+                        glance: 0,
                     },
                     x,
                     y: 20.0,
@@ -2351,6 +2528,7 @@ mod tests {
                         attitude: Attitude::Easy,
                         growth: u8::MAX,
                         tack: 0,
+                        glance: 0,
                     },
                     x: 0.0,
                     y: 20.0,
@@ -2423,6 +2601,7 @@ mod tests {
                             attitude: Attitude::Easy,
                             growth: u8::MAX,
                             tack: 0,
+                            glance: 0,
                         },
                         x,
                         y: 20.0,
@@ -2514,7 +2693,7 @@ mod tests {
         let at = |yaw: f32| {
             vec![EntityState {
                 id: 1,
-                kind: EntityKind::Animal { species: Species::Deer, yaw, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0 },
+                kind: EntityKind::Animal { species: Species::Deer, yaw, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0, glance: 0 },
                 x: 0.0,
                 y: 20.0,
                 z: 0.0,
@@ -2539,7 +2718,7 @@ mod tests {
         use primitive_shared::animals::Species;
         vec![EntityState {
             id: 1,
-            kind: EntityKind::Animal { species: Species::Deer, yaw: 0.0, hurt, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0 },
+            kind: EntityKind::Animal { species: Species::Deer, yaw: 0.0, hurt, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0, glance: 0 },
             x: 4.0,
             y: 31.0,
             z: -2.0,
@@ -2823,6 +3002,7 @@ mod tests {
                 attitude,
                 growth: u8::MAX,
                 tack: 0,
+                glance: 0,
             },
         };
         let mut entities = Entities::default();
@@ -2886,6 +3066,7 @@ mod tests {
                 attitude: primitive_shared::protocol::Attitude::Easy,
                 growth: u8::MAX,
                 tack: 0,
+                glance: 0,
             },
         };
         entities.apply_snapshot(100, &[walked(0.0)]);
@@ -2986,6 +3167,7 @@ mod tests {
                 attitude: primitive_shared::protocol::Attitude::Easy,
                 growth: u8::MAX,
                 tack: 0,
+                glance: 0,
             },
         };
         entities.apply_snapshot(10, &[at(0.0)]);
@@ -3066,7 +3248,7 @@ mod tests {
             let mut entities = Entities::default();
             let at = |x: f64| {
                 vec![
-                    EntityState { id: 1, kind: EntityKind::Animal { species: primitive_shared::animals::Species::Deer, yaw: 0.4, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0 }, x: base.x + x, y: base.y + 21.0, z: base.z + 3.3 },
+                    EntityState { id: 1, kind: EntityKind::Animal { species: primitive_shared::animals::Species::Deer, yaw: 0.4, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0, glance: 0 }, x: base.x + x, y: base.y + 21.0, z: base.z + 3.3 },
                     EntityState { id: 2, kind: EntityKind::FallingBlock { block: BLOCK_SAND }, x: base.x + 5.0, y: base.y + 25.0 - x, z: base.z + 1.0 },
                 ]
             };
@@ -3223,6 +3405,7 @@ mod tests {
                 attitude: primitive_shared::protocol::Attitude::Easy,
                 growth: u8::MAX,
                 tack: 0,
+                glance: 0,
             },
             x: 1.0,
             y: 1.4,
@@ -3291,6 +3474,112 @@ mod tests {
         assert_eq!(indices.len(), 2 * 36);
     }
 
+    /// **Nothing about an animal jumps between two frames, whatever it is
+    /// doing** -- walking, breaking into a gallop, pulling up, turning its
+    /// head to a sound, lying down and getting up again. Every one of those
+    /// arrives on a snapshot as a step; what is drawn has to be a movement.
+    ///
+    /// Measured on the drawn vertices with the body's own travel taken off,
+    /// at sixty frames a second against snapshots landing at twenty, as the
+    /// **second difference** of every point: how much its movement this frame
+    /// differs from its movement last frame. A galloping foot legitimately
+    /// travels a tenth of a block a frame, so the distance moved says nothing
+    /// about a jerk; a smooth swing changes its movement by a hundredth or two
+    /// a frame, and a snap -- a leg thrown to a new place, a head turned in one
+    /// frame -- changes it by the whole of the snap.
+    #[test]
+    fn nothing_about_an_animal_jumps_between_two_frames_whatever_it_is_doing() {
+        use primitive_shared::animals::Species;
+        use primitive_shared::protocol::Attitude;
+        let mut entities = Entities::default();
+        entities.set_tick_rate(20.0);
+        let start = Instant::now();
+        let tick = Duration::from_millis(50);
+        // Where the deer is, how it holds itself and where it looks, a tick
+        // at a time: a walk, a run up to a gallop, a stop, a look round, a
+        // lie down, a start and up again.
+        let mut x = 0.0f64;
+        let mut script = Vec::new();
+        for n in 0..140u32 {
+            let t = n as f32 * 0.05;
+            let speed = match t {
+                t if t < 1.0 => 2.0,
+                t if t < 2.5 => 2.0 + (t - 1.0) / 1.5 * 5.2,
+                t if t < 3.5 => (7.2 - (t - 2.5) * 7.2).max(0.0),
+                _ => 0.0,
+            };
+            x += f64::from(speed) * 0.05;
+            let attitude = match t {
+                t if (4.0..5.5).contains(&t) => Attitude::Resting,
+                t if (5.5..6.0).contains(&t) => Attitude::Startled,
+                _ => Attitude::Easy,
+            };
+            let glance = if (3.6..4.6).contains(&t) { 100 } else { 0 };
+            script.push(EntityState {
+                id: 7,
+                kind: EntityKind::Animal { species: Species::Deer, yaw: 0.0, hurt: 0.0, attitude, growth: u8::MAX, tack: 0, glance },
+                x,
+                y: 20.0,
+                z: 0.0,
+            });
+        }
+        let layers = FaceLayers::empty_for_test();
+        let light = LightMap::new();
+        let mut before: Option<Vec<Vec3>> = None;
+        let mut before_that: Option<Vec<Vec3>> = None;
+        let (mut worst, mut worst_at) = (0.0f32, 0.0f32);
+        let mut frame = start;
+        let mut next = 0usize;
+        let mut last_frame = start;
+        while next < script.len() {
+            while next < script.len() && start + tick * (next as u32 + 1) <= frame {
+                entities.apply_snapshot_at(next as u64 + 1, &script[next..next + 1], start + tick * (next as u32 + 1));
+                next += 1;
+            }
+            entities.tick_at(frame, (frame - last_frame).as_secs_f32());
+            last_frame = frame;
+            if let Some(entity) = entities.entities.get(&7) {
+                let centre = entity.drawn(frame).as_vec3();
+                let (vertices, _) = entities.build_mesh(&layers, &light);
+                let here: Vec<Vec3> = vertices.iter().map(|v| Vec3::from_array(v.position) - centre).collect();
+                if let (Some(previous), Some(earlier)) = (&before, &before_that) {
+                    if previous.len() == here.len() && earlier.len() == here.len() && next > 2 {
+                        for ((a, b), c) in earlier.iter().zip(previous).zip(&here) {
+                            let jerk = (*c - *b - (*b - *a)).length();
+                            if jerk > worst {
+                                worst = jerk;
+                                worst_at = (frame - start).as_secs_f32();
+                            }
+                        }
+                    }
+                }
+                before_that = before.take();
+                before = Some(here);
+            }
+            frame += Duration::from_micros(16_667);
+        }
+        assert!(
+            worst < 0.05,
+            "a point of the deer changed its movement by {worst:.3} blocks between two frames at {worst_at:.2} s"
+        );
+    }
+
+    /// **A herd that sets off together is not in step.** Two deer seen for
+    /// the first time in the same snapshot, walking side by side at the same
+    /// pace: their legs are at different places in the stride, because each
+    /// starts its stride clock from its own id (`Entity::strode`), and their
+    /// idle clocks are apart too (`Entity::age`).
+    #[test]
+    fn two_deer_that_come_into_view_together_do_not_walk_in_step() {
+        let mut entities = Entities::default();
+        entities.apply_snapshot(1, &[animal(1, primitive_shared::animals::Species::Deer, 0.0), animal(2, primitive_shared::animals::Species::Deer, 3.0)]);
+        let (a, b) = (entities.entities.get(&1).expect("deer"), entities.entities.get(&2).expect("deer"));
+        let cycle = std::f32::consts::TAU / 2.0;
+        let apart = (a.strode - b.strode).rem_euclid(cycle);
+        assert!(apart > 0.1 && apart < cycle - 0.1, "two deer set off {apart:.2} blocks of stride apart: in step");
+        assert!((a.age - b.age).abs() > 0.5, "two deer share an idle clock");
+    }
+
     fn animal(id: EntityId, species: primitive_shared::animals::Species, x: f32) -> EntityState {
         EntityState {
             id,
@@ -3301,6 +3590,7 @@ mod tests {
                 attitude: primitive_shared::protocol::Attitude::Easy,
                 growth: u8::MAX,
                 tack: 0,
+                glance: 0,
             },
             x: f64::from(x),
             y: 20.0,
@@ -3439,8 +3729,9 @@ mod tests {
     ///
     /// Two lines, because the frame pays this table twice over: the geometry
     /// (`build_meshes_into`, at `DYNAMIC_REBUILD_HZ`), and `heard`, which the
-    /// frame loop asks at every frame rate -- once for the frogs' dangers and
-    /// once for the soundscape. No `tick`: it would forget the whole field if
+    /// frame loop asks at every frame rate, for the soundscape. (It asked
+    /// twice until the frogs were the server's: once more for the dangers a
+    /// client-side frog hushed at, `engine::critters`.) No `tick`: it would forget the whole field if
     /// a slow round outlasted `STALE_AFTER`, and every entity reads the same
     /// `Instant::now` without it.
     #[test]
@@ -3453,7 +3744,7 @@ mod tests {
                     let species = Species::ALL[i % Species::ALL.len()];
                     EntityState {
                         id: i as u64 + 1,
-                        kind: EntityKind::Animal { species, yaw: i as f32 * 0.4, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0 },
+                        kind: EntityKind::Animal { species, yaw: i as f32 * 0.4, hurt: 0.0, attitude: primitive_shared::protocol::Attitude::Easy, growth: u8::MAX, tack: 0, glance: 0 },
                         x: f64::from((i % 10) as f32 * 3.0 + shift),
                         y: f64::from(20.0 + species.height() * 0.5),
                         z: f64::from((i / 10) as f32 * 3.0),

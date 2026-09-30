@@ -44,7 +44,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use primitive_shared::fishing::{Strike, TRAP_HOLDS};
+use primitive_shared::animals::Species;
+use primitive_shared::fishing::{Size, Strike, TRAP_HOLDS};
 use primitive_shared::protocol::{BlockChange, PlayerId};
 use primitive_shared::types::{block_kind, trap_catch, trap_holding, BlockId, BLOCK_FISH_TRAP};
 use primitive_shared::{saltpan, snare};
@@ -94,18 +95,27 @@ pub const OWED_STEPS_MAX: u8 = 12;
 
 /// Where a line is in its life.
 ///
-/// **A line has four states and the player can only act in two of them**,
+/// **A line has six states and a strike hooks a fish in two of them**,
 /// which is what makes the strike a decision rather than a key to hold:
-/// striking in `Waiting` is striking at nothing and ends the cast, and
-/// reeling means something only in `Fighting`.
+/// striking while it waits or trembles is striking at nothing and ends the
+/// cast, striking on the dip or the take hooks the fish, and reeling means
+/// something only in `Fighting`. See `fishing::Bite` for why the bite is
+/// three movements and not the one dip it was.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Phase {
     /// The float is still landing. Seconds left of it.
     Settling(f32),
     /// On the water, waiting. `Cast::bite_in` is counting down.
     Waiting,
-    /// **Under.** Seconds left to strike (`fishing::STRIKE_SECONDS`).
+    /// **Trembling**: a fish is nosing the bait. Seconds left of it, and
+    /// whether it will come to nothing -- decided when it starts, so the
+    /// tremble a player watches is the tremble that was rolled.
+    Nibbling { left: f32, nothing: bool },
+    /// **Half under**: it has the bait. Seconds left of it.
     Dipping(f32),
+    /// **Under, and going**: it has turned with the bait. Seconds left
+    /// before it is eaten.
+    Taking(f32),
     /// On, and being fought.
     Fighting(primitive_shared::fishing::Fight),
 }
@@ -117,13 +127,26 @@ impl Phase {
     /// `Fight` -- five floats of server-side state that no client has any
     /// business seeing, and that would pin the fight's shape to the protocol
     /// version the day anybody tunes it.
+    ///
+    /// **The two new movements are new numbers, appended**, and the dip keeps
+    /// the byte it had: a client that knew one "under" reads the dip as
+    /// under, and an unknown byte is read as waiting
+    /// (`logic::fishing::Phase::of_code` in the client) -- a still float,
+    /// never a float that invites a strike at nothing.
     pub fn code(self) -> u8 {
         match self {
             Phase::Settling(_) => 0,
             Phase::Waiting => 1,
             Phase::Dipping(_) => 2,
             Phase::Fighting(_) => 3,
+            Phase::Nibbling { .. } => 4,
+            Phase::Taking(_) => 5,
         }
+    }
+
+    /// Is a fish holding the bait -- will a strike now hook it?
+    pub fn is_bitten(self) -> bool {
+        matches!(self, Phase::Dipping(_) | Phase::Taking(_))
     }
 }
 
@@ -145,10 +168,19 @@ pub struct Cast {
     /// What is on the hook, and the slot it came out of. `None` is a bare
     /// hook, which still fishes (`fishing::BARE_HOOK`).
     pub bait: Option<(usize, primitive_shared::fishing::Bait)>,
-    /// Which fish is on it, rolled when the bite comes rather than at the
-    /// cast: the roll has to see the bait that is on the hook *now*, and a
-    /// cast can outlive several baits.
-    pub hooked: Option<primitive_shared::animals::Species>,
+    /// Which fish is on it and how big, rolled when the bite comes rather
+    /// than at the cast: the roll has to see the bait that is on the hook
+    /// *now*, and a cast can outlive several baits.
+    pub hooked: Option<(primitive_shared::animals::Species, primitive_shared::fishing::Size)>,
+    /// What the water is, to a fish (`fishing::Habitat`), read when the
+    /// line went in: a property of the place, so once is enough.
+    pub habitat: primitive_shared::fishing::Habitat,
+    /// How fished-out the spot was when the line went in: what takes the
+    /// big fish first (`fishing::size_odds`).
+    pub taken: f32,
+    /// How much of the rod's life was left when it was cast, 0..1: where
+    /// its line parts (`fishing::line_limit`).
+    pub rod_left: f32,
     pub phase: Phase,
     /// Is the hand pulling? `protocol::ClientMessage::Reel`.
     pub reeling: bool,
@@ -163,20 +195,55 @@ pub struct Cast {
 /// What happened to a line in one step, for the server to act on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CastEvent {
-    /// The float went under: a fish has the bait and the strike window is
-    /// open.
+    /// The float has finished landing and is on the water, waiting.
+    ///
+    /// **Said, and it was not.** The line went from landing to waiting in
+    /// silence, so the client's float stayed "landing" until the first bite
+    /// -- and a landing float does not twitch, so the liveliness the server
+    /// sent with the cast, which is the whole of how a player reads a spot
+    /// before anything bites (`logic::fishing::TWITCHES_A_SECOND` in the
+    /// client), was never drawn at all.
+    Settled,
+    /// The float began to tremble: a fish is at the bait.
+    Nibbled,
+    /// The tremble came to nothing and the float is still again. Nothing
+    /// was eaten.
+    LeftIt,
+    /// The float went half under: a fish has the bait and the strike
+    /// window is open.
     Dipped,
+    /// ...and under and away: the last of the window.
+    Took,
     /// The window closed with no strike. **The bait is gone** -- something
     /// ate it -- and the line goes back to waiting.
     Missed,
-    /// The fish is at the bank.
-    Landed(primitive_shared::animals::Species),
-    /// The line parted or the hook pulled out.
-    Lost,
+    /// The fish is at the bank: which, and how big.
+    Landed(primitive_shared::animals::Species, primitive_shared::fishing::Size),
+    /// The line parted or the hook pulled out, with this on it.
+    Lost(primitive_shared::animals::Species, primitive_shared::fishing::Size),
     /// The fisher let go of it: another slot, a walk away, a drained pond.
     Ended,
     /// A fight is on and the strain has moved.
     Straining,
+}
+
+/// The rolls one line may need in one step. See `Fishing::step_casts`.
+#[derive(Debug, Clone, Copy)]
+struct Rolls {
+    wait: f32,
+    which: f32,
+    size: f32,
+    nibble: f32,
+    nothing: f32,
+}
+
+/// A fish breaking the surface: where (on the surface over it), what, and
+/// whether it came clean out. See `Fishing::rises`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rise {
+    pub at: (f32, f32, f32),
+    pub species: Species,
+    pub leap: bool,
 }
 
 /// Every trap and every line.
@@ -363,6 +430,21 @@ impl Fishing {
         self.casts.insert(player, cast);
     }
 
+    /// Ends the wait on `player`'s line, if it is waiting or still landing:
+    /// the next step brings a fish to the bait. For `Server::hurry_bite`.
+    pub fn hurry(&mut self, player: PlayerId) -> bool {
+        let Some(cast) = self.casts.get_mut(&player) else {
+            return false;
+        };
+        match cast.phase {
+            Phase::Waiting | Phase::Settling(_) => {
+                cast.bite_in = 0.0;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Takes the line out of the water, if there was one.
     pub fn reel_in(&mut self, player: PlayerId) -> Option<Cast> {
         self.casts.remove(&player)
@@ -415,20 +497,30 @@ impl Fishing {
             return Strike::NotFishing;
         };
         match cast.phase {
-            // Under: the hook goes in, and what is on it was decided when it
-            // took the bait.
-            Phase::Dipping(_) => {
-                let Some(hooked) = cast.hooked else {
+            // Down: the hook goes in, and what is on it was decided when it
+            // came to the bait. The dip and the take hook alike -- the take
+            // is not a better strike, only the last one there is.
+            Phase::Dipping(_) | Phase::Taking(_) => {
+                let Some((species, size)) = cast.hooked else {
                     cast.phase = Phase::Waiting;
                     return Strike::TooEarly;
                 };
-                cast.phase = Phase::Fighting(primitive_shared::fishing::Fight::new(hooked));
+                let limit = primitive_shared::fishing::line_limit(cast.rod_left);
+                cast.phase = Phase::Fighting(primitive_shared::fishing::Fight::sized(species, size, limit));
                 cast.reeling = false;
                 Strike::Hooked
             }
-            // Striking at nothing: the float comes out of the water and that
-            // cast is over. This is the cost that makes it a decision.
-            Phase::Waiting | Phase::Settling(_) => {
+            // **Striking at a tremble is pulling the bait out of the fish's
+            // mouth**: the fish is gone and the float comes out of the water,
+            // exactly as a strike at nothing does. The bait stays on the
+            // hook -- nothing ate it -- which is what makes the mistake cheap
+            // enough to learn from and dear enough to learn.
+            //
+            // Rejected: a strike on the tremble that hooks the fish some of
+            // the time. A strike that is sometimes right at the wrong moment
+            // teaches nothing; the float has three movements so that one of
+            // them is always wrong and two are always right.
+            Phase::Nibbling { .. } | Phase::Waiting | Phase::Settling(_) => {
                 self.casts.remove(&player);
                 Strike::TooEarly
             }
@@ -448,45 +540,63 @@ impl Fishing {
     /// fisher still there, still holding the rod, still near the float, is
     /// the float still on water -- and a line it says no to is gone.
     ///
-    /// `takes` is asked when a wait runs out: which fish took the bait, out
-    /// of the water as it is *now* (`fishing::rod_species`). `None` there
-    /// means nothing in this water wants what is on the hook, and the wait
-    /// starts again -- the float sits, which is the honest picture of a
-    /// berry on a hook in a sea of cod.
+    /// `takes` is asked when a wait runs out: which fish came to the bait
+    /// and how big, out of the water as it is *now*
+    /// (`fishing::rod_species`, `fishing::size_odds`), given a roll for each.
+    /// `None` there means nothing in this water wants what is on the hook,
+    /// and the wait starts again -- the float sits, which is the honest
+    /// picture of a berry on a hook in a sea of cod.
     ///
     /// Answers what happened to each line, for the caller to act on.
     pub fn step_casts(
         &mut self,
         dt: f32,
         mut holds: impl FnMut(PlayerId, &Cast) -> bool,
-        mut takes: impl FnMut(PlayerId, &Cast, f32) -> Option<primitive_shared::animals::Species>,
+        mut takes: impl FnMut(PlayerId, &Cast, f32, f32) -> Option<(Species, Size)>,
     ) -> Vec<(PlayerId, Cast, CastEvent)> {
-        use primitive_shared::fishing::{Fought, STRIKE_SECONDS};
+        use primitive_shared::fishing::{bite_of, Fought};
         let mut events = Vec::new();
-        // The waits a step might need, rolled before the map is walked: the
-        // random stream cannot be reached from inside `retain`, and one roll
-        // per line in a fixed order is a stream that does not depend on what
-        // order a hash map happens to be in.
+        // The rolls a step might need, drawn before the map is walked: the
+        // random stream cannot be reached from inside `retain`, and a fixed
+        // number of rolls per line in a fixed order is a stream that does
+        // not depend on what order a hash map happens to be in.
         //
-        // The same goes for the roll that decides *which* fish takes the
-        // bait: the caller answers that from the world (`rod_species`), and
-        // it cannot reach into this rng while this is borrowed.
-        let mut waits: HashMap<PlayerId, (f32, f32)> = HashMap::new();
+        // The same goes for the rolls that decide *which* fish and how big:
+        // the caller answers those from the world (`rod_species`), and it
+        // cannot reach into this rng while this is borrowed.
+        let mut rolls: HashMap<PlayerId, Rolls> = HashMap::new();
         let means: Vec<(PlayerId, f32)> = self.casts.iter().map(|(&player, cast)| (player, cast.mean)).collect();
         for (player, mean) in means {
-            let wait = self.roll_wait(mean);
-            let which = self.roll_unit();
-            waits.insert(player, (wait, which));
+            let rolled = Rolls {
+                wait: self.roll_wait(mean),
+                which: self.roll_unit(),
+                size: self.roll_unit(),
+                nibble: self.roll_unit(),
+                nothing: self.roll_unit(),
+            };
+            rolls.insert(player, rolled);
         }
         self.casts.retain(|&player, cast| {
             if !holds(player, cast) {
                 events.push((player, *cast, CastEvent::Ended));
                 return false;
             }
+            let rolled = rolls.get(&player).copied().unwrap_or(Rolls {
+                wait: cast.mean,
+                which: 0.5,
+                size: 0.5,
+                nibble: 0.5,
+                nothing: 1.0,
+            });
             match cast.phase {
                 Phase::Settling(left) => {
                     let left = left - dt;
-                    cast.phase = if left > 0.0 { Phase::Settling(left) } else { Phase::Waiting };
+                    if left > 0.0 {
+                        cast.phase = Phase::Settling(left);
+                    } else {
+                        cast.phase = Phase::Waiting;
+                        events.push((player, *cast, CastEvent::Settled));
+                    }
                     true
                 }
                 Phase::Waiting => {
@@ -494,16 +604,46 @@ impl Fishing {
                     if cast.bite_in > 0.0 {
                         return true;
                     }
-                    // Something has the bait. Which fish is decided now, and
-                    // the float only goes under if something will take it.
-                    let (wait, which) = waits.get(&player).copied().unwrap_or((cast.mean, 0.5));
-                    cast.hooked = takes(player, cast, which);
-                    if cast.hooked.is_none() {
-                        cast.bite_in = wait;
+                    // Something has come to the bait. Which fish is decided
+                    // now, and the float only trembles if something will
+                    // take it.
+                    cast.hooked = takes(player, cast, rolled.which, rolled.size);
+                    let Some((species, _)) = cast.hooked else {
+                        cast.bite_in = rolled.wait;
+                        return true;
+                    };
+                    let bite = bite_of(species);
+                    // **The tremble's length is rolled round the fish's
+                    // own**, a third either way, so it can be learned ("the
+                    // school pecks a long time") and cannot be counted ("two
+                    // seconds and strike").
+                    cast.phase = Phase::Nibbling {
+                        left: bite.nibble * (0.7 + 0.6 * rolled.nibble),
+                        nothing: rolled.nothing < bite.nothing,
+                    };
+                    events.push((player, *cast, CastEvent::Nibbled));
+                    true
+                }
+                Phase::Nibbling { left, nothing } => {
+                    let left = left - dt;
+                    if left > 0.0 {
+                        cast.phase = Phase::Nibbling { left, nothing };
                         return true;
                     }
-                    cast.phase = Phase::Dipping(STRIKE_SECONDS);
-                    events.push((player, *cast, CastEvent::Dipped));
+                    match cast.hooked.filter(|_| !nothing) {
+                        Some((species, _)) => {
+                            cast.phase = Phase::Dipping(bite_of(species).dip);
+                            events.push((player, *cast, CastEvent::Dipped));
+                        }
+                        // Nosed it and swam off. The bait is untouched and
+                        // the wait starts again.
+                        None => {
+                            cast.phase = Phase::Waiting;
+                            cast.hooked = None;
+                            cast.bite_in = rolled.wait;
+                            events.push((player, *cast, CastEvent::LeftIt));
+                        }
+                    }
                     true
                 }
                 Phase::Dipping(left) => {
@@ -512,29 +652,40 @@ impl Fishing {
                         cast.phase = Phase::Dipping(left);
                         return true;
                     }
+                    let take = cast.hooked.map_or(1.0, |(species, _)| bite_of(species).take);
+                    cast.phase = Phase::Taking(take);
+                    events.push((player, *cast, CastEvent::Took));
+                    true
+                }
+                Phase::Taking(left) => {
+                    let left = left - dt;
+                    if left > 0.0 {
+                        cast.phase = Phase::Taking(left);
+                        return true;
+                    }
                     // Too slow: it ate the bait and went. The line stays in
                     // the water and waits again.
                     cast.phase = Phase::Waiting;
                     cast.hooked = None;
-                    cast.bite_in = waits.get(&player).copied().map_or(cast.mean, |(wait, _)| wait);
+                    cast.bite_in = rolled.wait;
                     events.push((player, *cast, CastEvent::Missed));
                     true
                 }
                 Phase::Fighting(mut fight) => {
                     let fought = fight.step(dt, cast.reeling);
                     cast.phase = Phase::Fighting(fight);
+                    let (species, size) = cast.hooked.unwrap_or((Species::Fish, Size::Middling));
                     match fought {
                         Fought::On => {
                             events.push((player, *cast, CastEvent::Straining));
                             true
                         }
                         Fought::Landed => {
-                            let species = cast.hooked.unwrap_or(primitive_shared::animals::Species::Fish);
-                            events.push((player, *cast, CastEvent::Landed(species)));
+                            events.push((player, *cast, CastEvent::Landed(species, size)));
                             false
                         }
                         Fought::Lost => {
-                            events.push((player, *cast, CastEvent::Lost));
+                            events.push((player, *cast, CastEvent::Lost(species, size)));
                             false
                         }
                     }
@@ -542,6 +693,36 @@ impl Fishing {
             }
         });
         events
+    }
+
+    /// **Which of these fish break the surface in the next `dt`**, at this
+    /// moment: each one near enough the top rises at `fishing::rise_rate`,
+    /// and some of the rises are leaps (`fishing::leap_share`).
+    ///
+    /// `surface_over` answers where the top of the water is over a fish, or
+    /// `None` if it is further under than `fishing::RISE_DEPTH` -- a fish on
+    /// the bottom of a deep lake makes no ring. **Only fish that are there**:
+    /// the caller hands in the swimmers the server actually has, so a ring
+    /// on the water is a fish under it, and casting at it is casting at a
+    /// fish (`fishing::shoal_factor`).
+    pub fn rises(
+        &mut self,
+        dt: f32,
+        moment: primitive_shared::fishing::Moment,
+        fish: &[(Species, (f32, f32, f32))],
+        surface_over: impl Fn((f32, f32, f32)) -> Option<f32>,
+    ) -> Vec<Rise> {
+        let per_second = primitive_shared::fishing::rise_rate(moment) / 60.0;
+        let mut rises = Vec::new();
+        for &(species, at) in fish {
+            if !self.rng.chance(per_second * dt) {
+                continue;
+            }
+            let Some(top) = surface_over(at) else { continue };
+            let leap = self.rng.chance(primitive_shared::fishing::leap_share(species, moment));
+            rises.push(Rise { at: (at.0, top, at.2), species, leap });
+        }
+        rises
     }
 
     fn save_path(dir: &Path) -> PathBuf {
@@ -699,6 +880,9 @@ mod tests {
             mean: 30.0,
             bait: bait.map(|bait| (3, bait)),
             hooked: None,
+            habitat: primitive_shared::fishing::Habitat::plain(primitive_shared::body::Water::Standing),
+            taken: 0.0,
+            rod_left: 1.0,
             phase: Phase::Waiting,
             reeling: false,
             liveliness: 128,
@@ -706,19 +890,40 @@ mod tests {
         }
     }
 
-    /// Steps a line, with the fisher holding on and a trout on offer.
+    /// Steps a line, with the fisher holding on and a middling trout on
+    /// offer.
     fn step(fishing: &mut Fishing, dt: f32) -> Vec<(PlayerId, Cast, CastEvent)> {
-        fishing.step_casts(dt, |_, _| true, |_, _, _| Some(Species::Trout))
+        fishing.step_casts(dt, |_, _| true, |_, _, _, _| Some((Species::Trout, Size::Middling)))
+    }
+
+    /// Steps a line a twentieth of a second at a time until something in
+    /// `wanted` happens to it, and says what did; `None` after a minute of
+    /// nothing. Every event on the way is handed to `saw`.
+    fn until(
+        fishing: &mut Fishing,
+        wanted: impl Fn(&CastEvent) -> bool,
+        mut saw: impl FnMut(&CastEvent),
+    ) -> Option<CastEvent> {
+        for _ in 0..(20 * 600) {
+            for (_, _, event) in step(fishing, 0.05) {
+                saw(&event);
+                if wanted(&event) {
+                    return Some(event);
+                }
+            }
+        }
+        None
     }
 
     #[test]
-    fn a_float_goes_under_when_the_wait_is_up_and_not_before() {
+    fn a_float_trembles_when_the_wait_is_up_and_not_before() {
         let mut fishing = Fishing::seeded(5);
         fishing.cast(9, a_line(None, 10.0));
         assert!(step(&mut fishing, 9.0).is_empty(), "a bite before its time");
         let events = step(&mut fishing, 2.0);
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0].2, CastEvent::Dipped), "the wait ran out and nothing happened");
+        assert!(matches!(events[0].2, CastEvent::Nibbled), "the wait ran out and nothing happened");
+        assert!(matches!(events[0].1.phase, Phase::Nibbling { .. }));
         assert!(fishing.cast_of(9).is_some(), "the line came out of the water on a bite");
     }
 
@@ -726,7 +931,7 @@ mod tests {
     fn a_line_let_go_of_lands_nothing() {
         let mut fishing = Fishing::seeded(5);
         fishing.cast(4, a_line(None, 1.0));
-        let events = fishing.step_casts(5.0, |_, _| false, |_, _, _| Some(Species::Fish));
+        let events = fishing.step_casts(5.0, |_, _| false, |_, _, _, _| Some((Species::Fish, Size::Big)));
         assert!(
             events.iter().all(|(_, _, event)| matches!(event, CastEvent::Ended)),
             "a fish came up on a rod nobody held"
@@ -751,21 +956,72 @@ mod tests {
     }
 
     #[test]
-    fn a_strike_inside_the_dip_hooks_the_fish_and_one_after_it_does_not() {
+    fn a_strike_on_the_tremble_loses_the_fish_and_keeps_the_bait() {
         let mut fishing = Fishing::seeded(5);
         fishing.cast(1, a_line(Some(primitive_shared::fishing::Bait::Worm), 0.5));
-        assert!(matches!(step(&mut fishing, 1.0)[0].2, CastEvent::Dipped));
+        let mut spent = false;
+        let nibbled = until(&mut fishing, |e| matches!(e, CastEvent::Nibbled), |e| {
+            spent |= matches!(e, CastEvent::Missed | CastEvent::Landed(..) | CastEvent::Lost(..));
+        });
+        assert_eq!(nibbled, Some(CastEvent::Nibbled), "the float never trembled");
+        assert_eq!(fishing.strike(1), Strike::TooEarly, "a strike at a tremble hooked the fish");
+        assert!(fishing.cast_of(1).is_none(), "a strike at a tremble left the line in the water");
+        // Nothing said the bait went: the server spends it only on the
+        // events that mean a fish had it.
+        assert!(!spent, "the worm went on a fish that only nosed it");
+    }
+
+    #[test]
+    fn a_strike_on_the_dip_or_the_take_hooks_the_fish_and_one_after_it_does_not() {
+        // On the dip.
+        let mut fishing = Fishing::seeded(5);
+        fishing.cast(1, a_line(Some(primitive_shared::fishing::Bait::Worm), 0.5));
+        assert_eq!(until(&mut fishing, |e| matches!(e, CastEvent::Dipped), |_| {}), Some(CastEvent::Dipped));
         assert_eq!(fishing.strike(1), Strike::Hooked);
         assert!(matches!(fishing.cast_of(1).expect("on").phase, Phase::Fighting(_)));
 
-        // The same line, struck a second too late: the fish has the bait
-        // and the float is back on the water.
+        // On the take, the last moment there is.
         let mut late = Fishing::seeded(5);
         late.cast(1, a_line(Some(primitive_shared::fishing::Bait::Worm), 0.5));
-        assert!(matches!(step(&mut late, 1.0)[0].2, CastEvent::Dipped));
-        let missed = step(&mut late, primitive_shared::fishing::STRIKE_SECONDS + 0.1);
-        assert!(matches!(missed[0].2, CastEvent::Missed), "the dip never closed");
-        assert_eq!(late.strike(1), Strike::TooEarly, "a strike after the dip hooked a fish");
+        assert_eq!(until(&mut late, |e| matches!(e, CastEvent::Took), |_| {}), Some(CastEvent::Took));
+        assert_eq!(late.strike(1), Strike::Hooked, "a strike while the float was going under missed");
+
+        // Past it: the fish has the bait and the float is back on the water.
+        let mut too_late = Fishing::seeded(5);
+        too_late.cast(1, a_line(Some(primitive_shared::fishing::Bait::Worm), 0.5));
+        assert_eq!(until(&mut too_late, |e| matches!(e, CastEvent::Missed), |_| {}), Some(CastEvent::Missed));
+        assert!(matches!(too_late.cast_of(1).expect("still in").phase, Phase::Waiting));
+        assert_eq!(too_late.strike(1), Strike::TooEarly, "a strike after the take hooked a fish");
+    }
+
+    #[test]
+    fn a_tremble_sometimes_comes_to_nothing_and_costs_nothing() {
+        // Many bites, struck at none: some trembles lead nowhere, and those
+        // never take the bait.
+        let mut fishing = Fishing::seeded(77);
+        fishing.cast(1, a_line(Some(primitive_shared::fishing::Bait::Worm), 0.1));
+        let (mut left, mut dipped) = (0, 0);
+        let mut last = None;
+        for _ in 0..(20 * 60 * 30) {
+            for (_, cast, event) in step(&mut fishing, 0.05) {
+                match event {
+                    CastEvent::LeftIt => {
+                        left += 1;
+                        assert!(cast.hooked.is_none(), "a fish that swam off was still on the line");
+                    }
+                    CastEvent::Dipped => dipped += 1,
+                    // A bait eaten is only ever eaten after a dip.
+                    CastEvent::Missed => assert_eq!(last, Some(CastEvent::Took), "the bait went without a dip"),
+                    _ => {}
+                }
+                last = Some(event);
+            }
+            if left + dipped >= 40 {
+                break;
+            }
+        }
+        assert!(left > 0, "every tremble became a dip, so a count of two is a strategy");
+        assert!(dipped > left, "most trembles came to nothing: {left} against {dipped}");
     }
 
     #[test]
@@ -776,7 +1032,7 @@ mod tests {
         fishing.cast(1, a_line(Some(primitive_shared::fishing::Bait::Worm), 30.0));
         let quiet: Vec<CastEvent> = (0..60).flat_map(|_| step(&mut fishing, 0.25)).map(|(_, _, e)| e).collect();
         assert!(
-            !quiet.iter().any(|e| matches!(e, CastEvent::Missed | CastEvent::Landed(_) | CastEvent::Lost)),
+            !quiet.iter().any(|e| matches!(e, CastEvent::Missed | CastEvent::Landed(..) | CastEvent::Lost(..))),
             "a worm went missing off a line nothing had touched: {quiet:?}"
         );
         // ...and a line nothing in the water wants waits for ever without
@@ -784,7 +1040,7 @@ mod tests {
         let mut nobody = Fishing::seeded(7);
         nobody.cast(1, a_line(Some(primitive_shared::fishing::Bait::Berry), 0.1));
         let events: Vec<CastEvent> = (0..40)
-            .flat_map(|_| nobody.step_casts(0.5, |_, _| true, |_, _, _| None))
+            .flat_map(|_| nobody.step_casts(0.5, |_, _| true, |_, _, _, _| None))
             .map(|(_, _, e)| e)
             .collect();
         assert!(events.is_empty(), "a berry in a sea of cod cost the player something: {events:?}");
@@ -796,24 +1052,27 @@ mod tests {
         // first run.
         let mut hard = Fishing::seeded(5);
         let mut cast = a_line(Some(primitive_shared::fishing::Bait::Scrap), 0.0);
-        cast.hooked = Some(Species::Pike);
+        cast.hooked = Some((Species::Pike, Size::Middling));
         cast.phase = Phase::Fighting(primitive_shared::fishing::Fight::new(Species::Pike));
         cast.reeling = true;
         hard.cast(1, cast);
         let mut ending = None;
         for _ in 0..400 {
-            for (_, _, event) in hard.step_casts(0.05, |_, _| true, |_, _, _| None) {
-                if matches!(event, CastEvent::Lost | CastEvent::Landed(_)) {
+            for (_, _, event) in hard.step_casts(0.05, |_, _| true, |_, _, _, _| None) {
+                if matches!(event, CastEvent::Lost(..) | CastEvent::Landed(..)) {
                     ending = Some(event);
                 }
             }
         }
-        assert!(matches!(ending, Some(CastEvent::Lost)), "a pike hauled at without pause came in: {ending:?}");
+        assert!(
+            matches!(ending, Some(CastEvent::Lost(Species::Pike, Size::Middling))),
+            "a pike hauled at without pause came in: {ending:?}"
+        );
 
         // The same pike, given line whenever it runs.
         let mut careful = Fishing::seeded(5);
         let mut cast = a_line(Some(primitive_shared::fishing::Bait::Scrap), 0.0);
-        cast.hooked = Some(Species::Pike);
+        cast.hooked = Some((Species::Pike, Size::Middling));
         cast.phase = Phase::Fighting(primitive_shared::fishing::Fight::new(Species::Pike));
         careful.cast(1, cast);
         let mut ending = None;
@@ -823,16 +1082,53 @@ mod tests {
                 _ => false,
             };
             careful.reel(1, pulling);
-            for (_, _, event) in careful.step_casts(0.05, |_, _| true, |_, _, _| None) {
-                if matches!(event, CastEvent::Lost | CastEvent::Landed(_)) {
+            for (_, _, event) in careful.step_casts(0.05, |_, _| true, |_, _, _, _| None) {
+                if matches!(event, CastEvent::Lost(..) | CastEvent::Landed(..)) {
                     ending = Some(event);
                 }
             }
         }
         assert!(
-            matches!(ending, Some(CastEvent::Landed(Species::Pike))),
+            matches!(ending, Some(CastEvent::Landed(Species::Pike, Size::Middling))),
             "a pike played properly still got away: {ending:?}"
         );
+    }
+
+    #[test]
+    fn a_worn_rod_hooks_a_fish_on_a_line_that_parts_sooner() {
+        let mut fishing = Fishing::seeded(5);
+        let mut worn = a_line(Some(primitive_shared::fishing::Bait::Worm), 0.5);
+        worn.rod_left = 0.02;
+        fishing.cast(1, worn);
+        until(&mut fishing, |e| matches!(e, CastEvent::Dipped), |_| {});
+        assert_eq!(fishing.strike(1), Strike::Hooked);
+        match fishing.cast_of(1).map(|cast| cast.phase) {
+            Some(Phase::Fighting(fight)) => assert!(fight.limit < 0.85, "a rod on its last fish held at {}", fight.limit),
+            other => panic!("no fight: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fish_rise_only_where_there_are_fish_near_the_top() {
+        use primitive_shared::fishing::Moment;
+        use primitive_shared::weather::Weather;
+        let mut fishing = Fishing::seeded(11);
+        let dusk = Moment::plain(0.75, Weather::Clear, 16.0);
+        // One fish a block under a surface at 20, one down on the bottom.
+        let fish = [(Species::Trout, (3.5, 19.0, 3.5)), (Species::Pike, (30.5, 12.0, 30.5))];
+        let surface = |at: (f32, f32, f32)| (20.0 - at.1 <= primitive_shared::fishing::RISE_DEPTH).then_some(20.9);
+        let mut rises = Vec::new();
+        for _ in 0..(20 * 600) {
+            rises.extend(fishing.rises(0.05, dusk, &fish, surface));
+        }
+        assert!(!rises.is_empty(), "ten minutes of dusk and a trout under the surface never rose");
+        for rise in &rises {
+            assert_eq!(rise.species, Species::Trout, "a fish on the bottom broke the surface");
+            assert_eq!((rise.at.0, rise.at.2), (3.5, 3.5), "a ring where there was no fish");
+            assert_eq!(rise.at.1, 20.9, "a ring under the water");
+        }
+        // ...and an empty lake is a flat one.
+        assert!((0..2000).all(|_| fishing.rises(0.05, dusk, &[], surface).is_empty()));
     }
 
     #[test]

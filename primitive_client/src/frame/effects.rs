@@ -143,158 +143,24 @@ pub fn step(
     // what tells a player from the bank where not to
     // swim. See `WorldGen::river_current`.
     particles.rapids(chunks, player.position.as_vec3(), |x, y, z| worldgen.river_current(x, y, z), dt);
-    // ...and the float of a line in the water, until the
-    // line would be out of it or a fish comes up on it.
-    // The fish in the pack is the bite: a count higher
-    // than when the line went in. See `logic::fishing`.
-    if let Some(float) = fishing_float.as_mut() {
-        let landed = float.age == 0.0;
-        float.age += dt;
-        float.since += dt;
-        let block_at = |x, y, z| chunks.block_at(x, y, z);
-        let eye = (camera.position.x, camera.position.y, camera.position.z);
-        let at = float.position(block_at);
-        let at = glam::Vec3::new(at.0, at.1, at.2);
-        // **The float's own plop, where it came down**, on
-        // the first frame it is drawn -- which is the frame
-        // it appears on the water, so the eye and the ear
-        // agree. Up in pitch and down in level against the
-        // hand in a pool the same recording once was: this
-        // is a cork, a dozen blocks off. See `Sfx::FloatPlop`.
-        if landed {
-            audio.play_at(audio::Sfx::FloatPlop, at.as_dvec3(), 0.8, 1.35);
-        }
-        // The splash of the fish coming out is drawn
-        // where the float goes (`ServerMessage::Line`),
-        // which is the frame the pack has grown in.
-        if float.holds(primitive_shared::geometry::narrow(eye), input.hotbar_slot, inventory.block_in(input.hotbar_slot), block_at) {
-            particles.float(at, dt);
-            // The ring a fish makes taking the bait, and
-            // the water's own blip under it -- quieter
-            // than a splash, because the whole of the
-            // strike is noticing something small.
-            // Placed at the float, not in the player's
-            // head: it was the hand-in-water sound at full
-            // level, which said "you" about something a
-            // dozen blocks off. See `Sfx::FloatBite`.
-            if float.phase == logic::fishing::Phase::Dipping && float.since < dt * 1.5 {
-                particles.float_ring(at);
-                audio.play_at(audio::Sfx::FloatBite, at.as_dvec3(), 1.0, 1.0);
-            }
-            // ...and the water breaking over a fish that
-            // is on and running.
-            if float.phase == logic::fishing::Phase::Fighting && float.strain > 0.6 {
-                particles.float_ring(at);
-            }
-        } else {
-            *fishing_float = None;
-        }
-    }
-    // **The rod itself**: winding up, throwing, striking
-    // and reeling, all off one button. See
-    // `logic::fishing::Hold::step` for why this is state
-    // and not events.
-    {
-        let holding_rod = inventory
-            .block_in(input.hotbar_slot)
-            .map(primitive_shared::types::block_kind)
-            == Some(primitive_shared::types::BLOCK_FISHING_ROD);
-        let fighting = fishing_float
-            .is_some_and(|float| float.phase == logic::fishing::Phase::Fighting);
-        let giving_way = input.action_down(&settings.keybinds, keybinds::Action::Sprint);
-        // A screen up means the button's state has
-        // stopped arriving: the wind-up is dropped
-        // rather than let go of. See `Hold::cancel`.
-        if !input.mouse_grabbed {
-            rod_hold.cancel();
-        }
-        for order in rod_hold.step(
-            dt,
-            input.using && input.mouse_grabbed,
-            holding_rod,
-            fishing_float.is_some(),
-            fighting,
-            giving_way,
-        ) {
-            use logic::fishing::Order;
-            let message = match order {
-                Order::Cast(power) => {
-                    // Judged here first, in the player's
-                    // own language, against this side's
-                    // own chunks: a throw onto the bank
-                    // is never sent.
-                    let eye = (
-                        camera.position.x as f32,
-                        camera.position.y as f32,
-                        camera.position.z as f32,
-                    );
-                    let look = camera.forward();
-                    match logic::fishing::cast_along(
-                        eye,
-                        (look.x, look.y, look.z),
-                        power,
-                        |x, y, z| chunks.block_at(x, y, z),
-                    ) {
-                        Ok(at) => {
-                            *fishing_float = Some(logic::fishing::Float {
-                                at,
-                                slot: input.hotbar_slot,
-                                fish_before: inventory
-                                    .count(primitive_shared::types::BLOCK_RAW_FISH),
-                                age: 0.0,
-                                phase: logic::fishing::Phase::Settling,
-                                strain: 0.0,
-                                liveliness: 0.0,
-                                since: 0.0,
-                            });
-                            audio.play(audio::Sfx::Swing);
-                            // ...and the rod whips forward
-                            // from wherever it was drawn
-                            // back to. See `hand::Rod`.
-                            hand.cast_rod();
-                            Some(ClientMessage::CastLine { power })
-                        }
-                        Err(said) => {
-                            *notice = Some((
-                                settings.language.text(said.msg()).to_string(),
-                                Instant::now(),
-                            ));
-                            None
-                        }
-                    }
-                }
-                Order::Strike => {
-                    // **Said here, not by the server.**
-                    // This side knows whether the float
-                    // was under; the server refuses the
-                    // strike either way
-                    // (`Fishing::strike`), and what it
-                    // sends back is the float going.
-                    if fishing_float
-                        .is_some_and(|float| float.phase != logic::fishing::Phase::Dipping)
-                    {
-                        *notice = Some((
-                            settings
-                                .language
-                                .text(ui::lang::Msg::FishingStruckAtNothing)
-                                .to_string(),
-                            Instant::now(),
-                        ));
-                    }
-                    Some(ClientMessage::Strike)
-                }
-                Order::Reel(pulling) => Some(ClientMessage::Reel { pulling }),
-                Order::In => {
-                    *fishing_float = None;
-                    Some(ClientMessage::ReelIn)
-                }
-            };
-            if let Some(message) = message {
-                net.send(message);
-                debug_stats.network_messages_out_this_second += 1;
-            }
-        }
-    }
+    // ...and the float of a line in the water, and the rod
+    // that holds it. See `line_frame`.
+    line_frame(
+        dt,
+        settings,
+        chunks,
+        camera,
+        input,
+        inventory,
+        audio,
+        net,
+        particles,
+        hand,
+        rod_hold,
+        fishing_float,
+        notice,
+        debug_stats,
+    );
     // ...and blood wherever the server says an
     // animal was struck since the last frame. Here
     // rather than in `drain_network` because a
@@ -319,16 +185,9 @@ pub fn step(
         }
     }
     particles.update(chunks, dt);
-    // ...and the butterflies, fireflies and frogs. The
-    // wolves the frogs fall quiet for are the ones the
-    // last snapshot brought -- behind a hill or in the
-    // dark, but not unknown to the client.
-    let dangers: Vec<glam::Vec3> = entities
-        .heard()
-        .into_iter()
-        .filter(|animal| animal.species.is_hostile())
-        .map(|animal| animal.at.as_vec3())
-        .collect();
+    // ...and the butterflies, fireflies, bees and bats. The
+    // frogs are the server's now, and the soundscape hears
+    // them off the entities (`soundscape::calls`).
     let country = |gx: i32, gy: i32, gz: i32| {
         (
             worldgen.biome_at(gx, gz),
@@ -342,7 +201,6 @@ pub fn step(
             player: player.position.as_vec3(),
             world_time: sky.world_days(),
             wet: weather.is_wet(),
-            dangers: &dangers,
             country: &country,
             light,
             lantern: inventory
@@ -362,4 +220,189 @@ pub fn step(
         },
         dt,
     );
+}
+
+/// **One frame of the line**: the float drawn where the server says it is
+/// and doing what the server says it is doing, the sound of each movement
+/// of it, the rod in the hand feeling it -- and the rod itself, wound up,
+/// thrown, struck and reeled off one button.
+///
+/// Its own function, out of `step`, so a scenario can run it: the game's
+/// fishing is this and the `Line` arm of the socket (`logic::fishing::told`),
+/// and a scenario that fished with a copy of either would pass on a rod the
+/// game no longer has. See `scenario`.
+#[allow(clippy::too_many_arguments)]
+pub fn line_frame(
+    dt: f32,
+    settings: &ClientSettings,
+    chunks: &ChunkManager,
+    camera: &Camera,
+    input: &input::InputState,
+    inventory: &Inventory,
+    audio: &Audio,
+    net: &network::NetworkHandle,
+    particles: &mut particles::Particles,
+    hand: &mut hand::Hand,
+    rod_hold: &mut logic::fishing::Hold,
+    fishing_float: &mut Option<logic::fishing::Float>,
+    notice: &mut Option<(String, Instant)>,
+    debug_stats: &mut DebugStats,
+) {
+    use logic::fishing::Phase;
+    // The float of a line in the water, until the line would be out of it
+    // or a fish comes up on it. The fish in the pack is the catch: a count
+    // higher than when the line went in. See `logic::fishing`.
+    if let Some(float) = fishing_float.as_mut() {
+        let landed = float.age == 0.0;
+        let before = float.since;
+        float.age += dt;
+        float.since += dt;
+        let block_at = |x, y, z| chunks.block_at(x, y, z);
+        let eye = (camera.position.x, camera.position.y, camera.position.z);
+        let at = float.position(block_at);
+        let at = glam::Vec3::new(at.0, at.1, at.2);
+        // **The float's own plop, where it came down**, on the first frame
+        // it is drawn -- which is the frame it appears on the water, so the
+        // eye and the ear agree. Up in pitch and down in level against the
+        // hand in a pool the same recording once was: this is a cork, a
+        // dozen blocks off. See `Sfx::FloatPlop`.
+        if landed {
+            audio.play_at(audio::Sfx::FloatPlop, at.as_dvec3(), 0.8, 1.35);
+        }
+        // The splash of the fish coming out is drawn where the float goes
+        // (`ServerMessage::Line`), which is the frame the pack has grown in.
+        if float.holds(primitive_shared::geometry::narrow(eye), input.hotbar_slot, inventory.block_in(input.hotbar_slot), block_at) {
+            particles.float(at, dt);
+            // **Each movement of the bite has its own sound and its own
+            // mark on the water**, each quieter than the catch, because the
+            // whole of the strike is noticing something small -- and each
+            // placed at the float, never in the player's head.
+            //
+            // * The tremble: the float knocking against the surface, a tiny
+            //   lap every few tenths of a second, high and faint. A tick
+            //   that says "something is there", not "now".
+            // * The dip: the water's blip as the float goes half under, and
+            //   the ring it makes.
+            // * The take: the same blip lower and louder as it goes right
+            //   under, and the water opening where it went.
+            //
+            // Recordings the game already has, moved in pitch and level --
+            // a float and the water it sits in -- rather than three new
+            // sounds, and never a tone: a bite is a disturbed float, not a
+            // signal.
+            let entered = before == 0.0;
+            match float.phase {
+                Phase::Nibbling => {
+                    let every = 0.3;
+                    if (float.since / every).floor() != (before / every).floor() || entered {
+                        audio.play_at(audio::Sfx::FloatPlop, at.as_dvec3(), 0.22, 1.9);
+                        if entered {
+                            particles.float_ring(at);
+                        }
+                    }
+                }
+                Phase::Dipping if entered => {
+                    particles.float_ring(at);
+                    audio.play_at(audio::Sfx::FloatBite, at.as_dvec3(), 1.0, 1.0);
+                }
+                Phase::Taking if entered => {
+                    particles.float_ring(at);
+                    particles.rise_ring(at);
+                    audio.play_at(audio::Sfx::FloatBite, at.as_dvec3(), 1.3, 0.75);
+                }
+                // ...and the water breaking over a fish that is on and
+                // running.
+                Phase::Fighting if float.strain > 0.6 || float.run > 0.7 => particles.float_ring(at),
+                _ => {}
+            }
+        } else {
+            *fishing_float = None;
+        }
+    }
+    // The rod in the hand feels the line. See `hand::Line`.
+    hand.feel_line(fishing_float.as_ref());
+    // **The rod itself**: winding up, throwing, striking and reeling, all
+    // off one button. See `logic::fishing::Hold::step` for why this is
+    // state and not events.
+    let holding_rod = inventory.block_in(input.hotbar_slot).map(primitive_shared::types::block_kind)
+        == Some(primitive_shared::types::BLOCK_FISHING_ROD);
+    let fighting = fishing_float.is_some_and(|float| float.phase == Phase::Fighting);
+    let giving_way = input.action_down(&settings.keybinds, keybinds::Action::Sprint);
+    // A screen up means the button's state has stopped arriving: the
+    // wind-up is dropped rather than let go of. See `Hold::cancel`.
+    if !input.mouse_grabbed {
+        rod_hold.cancel();
+    }
+    for order in rod_hold.step(
+        dt,
+        input.using && input.mouse_grabbed,
+        holding_rod,
+        fishing_float.is_some(),
+        fighting,
+        giving_way,
+    ) {
+        use logic::fishing::Order;
+        let message = match order {
+            Order::Cast(power) => {
+                // Judged here first, in the player's own language, against
+                // this side's own chunks: a throw onto the bank is never
+                // sent.
+                let eye = (camera.position.x as f32, camera.position.y as f32, camera.position.z as f32);
+                let look = camera.forward();
+                match logic::fishing::cast_along(eye, (look.x, look.y, look.z), power, |x, y, z| chunks.block_at(x, y, z)) {
+                    Ok(at) => {
+                        *fishing_float = Some(logic::fishing::Float {
+                            at,
+                            slot: input.hotbar_slot,
+                            fish_before: inventory.count(primitive_shared::types::BLOCK_RAW_FISH),
+                            age: 0.0,
+                            phase: Phase::Settling,
+                            strain: 0.0,
+                            liveliness: 0.0,
+                            since: 0.0,
+                            run: 0.0,
+                        });
+                        audio.play(audio::Sfx::Swing);
+                        // ...and the rod whips forward from wherever it was
+                        // drawn back to. See `hand::Rod`.
+                        hand.cast_rod();
+                        Some(ClientMessage::CastLine { power })
+                    }
+                    Err(said) => {
+                        *notice = Some((settings.language.text(said.msg()).to_string(), Instant::now()));
+                        None
+                    }
+                }
+            }
+            Order::Strike => {
+                // The arm jerks up whatever comes of it: the hand struck.
+                hand.strike_rod();
+                // **Said here, not by the server.** This side knows what the
+                // float was doing; the server refuses the strike either way
+                // (`Fishing::strike`), and what it sends back is the float
+                // going. A strike at a tremble is told as what it was --
+                // too soon -- because that is the lesson, and "at nothing"
+                // would be a lie about a float that was plainly moving.
+                let phase = fishing_float.map(|float| float.phase);
+                let said = match phase {
+                    Some(Phase::Nibbling) => Some(ui::lang::Msg::FishingStruckTooSoon),
+                    Some(phase) if !phase.is_bitten() => Some(ui::lang::Msg::FishingStruckAtNothing),
+                    _ => None,
+                };
+                if let Some(msg) = said {
+                    *notice = Some((settings.language.text(msg).to_string(), Instant::now()));
+                }
+                Some(ClientMessage::Strike)
+            }
+            Order::Reel(pulling) => Some(ClientMessage::Reel { pulling }),
+            Order::In => {
+                *fishing_float = None;
+                Some(ClientMessage::ReelIn)
+            }
+        };
+        if let Some(message) = message {
+            net.send(message);
+            debug_stats.network_messages_out_this_second += 1;
+        }
+    }
 }

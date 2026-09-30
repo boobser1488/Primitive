@@ -4772,3 +4772,581 @@ fn a_tumbleweed_blown_into_a_player_ends_up_in_the_pack() {
     );
     no_corrections(&s);
 }
+
+// ---- fishing ----
+
+/// A pond nine blocks square and four deep, dug into the field in front of
+/// where the player will stand, a rod and a few worms in the pack, and the
+/// rod in hand. Answers the pond's near corner (x, z).
+///
+/// **Dug into the field rather than found**: the test world's water is
+/// wherever its plots put it, and a scenario about a float wants open water
+/// a throw away with nothing between it and the bank.
+fn at_the_pond(s: &mut Scenario) -> (i32, i32) {
+    let (x0, z0) = (FIELD.0, FIELD.1 + 3);
+    let g = GROUND;
+    s.stand_at(feet_on(x0 + 4, z0 - 3));
+    s.fill((x0, g - 3, z0), (x0 + 8, g, z0 + 8), t::BLOCK_WATER);
+    s.stand_at(feet_on(x0 + 4, z0 - 3));
+    s.give(t::BLOCK_FISHING_ROD, 1);
+    s.give(t::BLOCK_WORM, 4);
+    s.select(t::BLOCK_FISHING_ROD);
+    (x0, z0)
+}
+
+/// Looks at the middle of the pond and throws: the use button held for
+/// `held` seconds and let go, through the frame's own rod. Waits for the
+/// server to answer with a float of its own.
+fn cast_into(s: &mut Scenario, pond: (i32, i32), held: f32) {
+    let g = GROUND;
+    s.look_at(DVec3::new(pond.0 as f64 + 4.5, g as f64 + 0.9, pond.1 as f64 + 3.5));
+    s.press_use(true);
+    s.seconds(held);
+    s.press_use(false);
+    s.frames(2);
+    assert!(s.fishing_float.is_some(), "the throw never left the hand: {:?}", s.notice.as_ref().map(|n| &n.0));
+    let answered = s.until(5.0, |s| s.heard_any(|m| matches!(m, ServerMessage::Line { float: Some(_), .. })));
+    assert!(answered, "the server never put the float on the water");
+}
+
+/// Brings a fish to the bait and waits for the float to do `wanted`,
+/// hurrying another fish whenever one noses the bait and swims off -- which
+/// a tremble sometimes does (`fishing::Bite::nothing`).
+fn until_the_float(s: &mut Scenario, wanted: crate::logic::fishing::Phase) -> bool {
+    use crate::logic::fishing::Phase;
+    for _ in 0..12 {
+        let name = s.name.clone();
+        s.server().hurry_bite(&name);
+        let moved = s.until(8.0, |s| s.fishing_float.is_some_and(|f| f.phase == wanted || f.phase == Phase::Nibbling));
+        if !moved {
+            continue;
+        }
+        if s.fishing_float.is_some_and(|f| f.phase == wanted) {
+            return true;
+        }
+        // Trembling: wait for it to go down, or to go still again.
+        let next = s.until(6.0, |s| s.fishing_float.is_none_or(|f| f.phase != Phase::Nibbling));
+        if next && s.fishing_float.is_some_and(|f| f.phase == wanted) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The float and the water round it, as specks for a shot: the float, and
+/// a ring of foam round it while it is moving -- what the particles draw.
+fn float_specks(s: &Scenario) -> Vec<(DVec3, f32, BlockId)> {
+    let Some(float) = s.fishing_float else { return Vec::new() };
+    let at = float.position(|x, y, z| s.chunks.block_at(x, y, z));
+    let at = DVec3::new(f64::from(at.0), f64::from(at.1), f64::from(at.2));
+    let mut specks = vec![(at + DVec3::Y * 0.05, 0.08, t::BLOCK_BRICKS)];
+    if !matches!(float.phase, crate::logic::fishing::Phase::Waiting | crate::logic::fishing::Phase::Settling) {
+        let surface = (at.y + 0.3).floor() - 0.05;
+        for i in 0..12 {
+            let a = i as f64 / 12.0 * std::f64::consts::TAU;
+            specks.push((DVec3::new(at.x + a.cos() * 0.45, surface, at.z + a.sin() * 0.45), 0.035, t::BLOCK_SNOW));
+        }
+    }
+    specks
+}
+
+#[test]
+fn a_player_casts_waits_for_the_dip_strikes_and_plays_a_fish_to_the_bank() {
+    use crate::logic::fishing::Phase;
+    let mut s = Scenario::new();
+    let pond = at_the_pond(&mut s);
+    let (fish_before, worms_before) = (s.inventory.count(t::BLOCK_RAW_FISH), s.inventory.count(t::BLOCK_WORM));
+    cast_into(&mut s, pond, 0.6);
+    let float = s.fishing_float.expect("a float");
+    assert!(
+        (pond.0..=pond.0 + 8).contains(&float.at.0) && (pond.1..=pond.1 + 8).contains(&float.at.2),
+        "the float came down at {:?}, not in the pond",
+        float.at
+    );
+    // It lands, and then it is on the water -- and the client is told so,
+    // or the float never twitches with how lively the water is.
+    let settled = s.until(3.0, |s| s.fishing_float.is_some_and(|f| f.phase == Phase::Waiting));
+    assert!(settled, "the float was never on the water, only landing: {:?}", s.fishing_float.map(|f| f.phase));
+    s.shot_with("fishing/cast", &float_specks(&s));
+    // The bite, read: the tremble is waited through, and the strike comes
+    // on the dip.
+    assert!(until_the_float(&mut s, Phase::Dipping), "the float never went under");
+    s.frames(10);
+    s.shot_with("fishing/bite-dip", &float_specks(&s));
+    assert!(s.sounds().contains(&crate::audio::Sfx::FloatBite), "the float went under without a sound");
+    s.press_use(true);
+    s.frame();
+    s.press_use(false);
+    let hooked = s.until(2.0, |s| s.fishing_float.is_some_and(|f| f.phase == Phase::Fighting));
+    assert!(hooked, "a strike on the dip did not hook the fish: {:?}", s.fishing_float.map(|f| f.phase));
+    // Played by the gauge: pulled while the line is easy, given when it
+    // tightens -- the way a player with only the strain to go on would, a
+    // server tick and a frame late.
+    let mut reeling = false;
+    let mut photographed = false;
+    let mut frames = 0;
+    let mut tightest: f32 = 0.0;
+    while s.fishing_float.is_some() && frames < 60 * 120 {
+        let strain = s.fishing_float.map_or(0.0, |f| f.strain);
+        tightest = tightest.max(strain);
+        if reeling && strain >= 0.5 {
+            reeling = false;
+            s.press_use(false);
+        } else if !reeling && strain <= 0.25 {
+            reeling = true;
+            s.press_use(true);
+        }
+        if !photographed && strain > 0.3 {
+            s.shot_with("fishing/fight", &float_specks(&s));
+            photographed = true;
+        }
+        s.frame();
+        frames += 1;
+    }
+    s.press_use(false);
+    assert!(s.fishing_float.is_none(), "two minutes and the fish was still on");
+    let caught = s.until(3.0, |s| s.inventory.count(t::BLOCK_RAW_FISH) > fish_before);
+    assert!(caught, "the line came out of the water with no fish (tightest {tightest:.2}): {:?}", s.notice.as_ref().map(|n| &n.0));
+    assert!(s.heard_any(|m| matches!(m, ServerMessage::Caught { .. })), "a fish landed and nobody said which");
+    assert_eq!(s.inventory.count(t::BLOCK_WORM), worms_before - 1, "the worm the fish took was not the one spent");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_player_who_strikes_at_the_tremble_loses_the_fish_and_keeps_the_worm() {
+    use crate::logic::fishing::Phase;
+    let mut s = Scenario::new();
+    let pond = at_the_pond(&mut s);
+    let (fish_before, worms_before) = (s.inventory.count(t::BLOCK_RAW_FISH), s.inventory.count(t::BLOCK_WORM));
+    cast_into(&mut s, pond, 0.6);
+    assert!(until_the_float(&mut s, Phase::Nibbling), "the float never trembled");
+    s.frames(6);
+    s.shot_with("fishing/tremble", &float_specks(&s));
+    // Struck at once, on the tremble.
+    s.press_use(true);
+    s.frame();
+    s.press_use(false);
+    let gone = s.until(2.0, |s| {
+        s.fishing_float.is_none() && s.heard.last().is_some_and(|m| matches!(m, ServerMessage::Line { float: None, .. }))
+    });
+    assert!(gone, "a strike at a trembling float left the line in the water: {:?}", s.fishing_float.map(|f| f.phase));
+    let said = crate::settings::ClientSettings::default().language.text(crate::ui::lang::Msg::FishingStruckTooSoon).to_string();
+    assert_eq!(s.notice.as_ref().map(|n| n.0.clone()), Some(said), "the player was not told it was too soon");
+    s.seconds(1.0);
+    assert_eq!(s.inventory.count(t::BLOCK_WORM), worms_before, "a worm went on a fish that only nosed it");
+    assert_eq!(s.inventory.count(t::BLOCK_RAW_FISH), fish_before, "a fish came out on a strike at a tremble");
+    no_corrections(&s);
+}
+
+#[test]
+fn fish_near_the_top_of_a_pond_rise_where_they_are_and_nowhere_else() {
+    // Morning, so the fish are feeding; the pond is the one above, and a
+    // school is put in it a block under the surface.
+    let mut settings = scenario_settings();
+    settings.start_time_of_day = 0.3;
+    let mut s = Scenario::with(settings);
+    let pond = at_the_pond(&mut s);
+    let g = GROUND as f32;
+    let (cx, cz) = (pond.0 as f32 + 4.5, pond.1 as f32 + 4.5);
+    for i in 0..6 {
+        let a = i as f32 / 6.0 * std::f32::consts::TAU;
+        s.server().spawn_animal(primitive_shared::animals::Species::Fish, (cx + a.cos() * 1.5, g - 0.6, cz + a.sin() * 1.5));
+    }
+    // Looking out over the water, the rod put away.
+    s.look_at(DVec3::new(f64::from(cx), f64::from(g), f64::from(cz) + 1.0));
+    let rose = s.until(90.0, |s| s.heard_any(|m| matches!(m, ServerMessage::FishRise { .. })));
+    assert!(rose, "a school a block under a pond in the morning never broke the surface in a minute and a half");
+    // A little longer, for a picture with more than one ring in it.
+    s.until(20.0, |s| s.heard.iter().filter(|m| matches!(m, ServerMessage::FishRise { .. })).count() >= 4);
+    let rises: Vec<(f32, f32, f32, bool)> = s
+        .heard
+        .iter()
+        .filter_map(|m| match *m {
+            ServerMessage::FishRise { x, y, z, leap } => Some((x, y, z, leap)),
+            _ => None,
+        })
+        .collect();
+    for &(x, y, z, _) in &rises {
+        // On the pond's surface, never on the grass round it: a ring is a
+        // fish under it.
+        assert!(
+            (pond.0 as f32..pond.0 as f32 + 9.0).contains(&x) && (pond.1 as f32..pond.1 as f32 + 9.0).contains(&z),
+            "a fish rose at ({x}, {z}), outside the pond"
+        );
+        assert!((y - (g + 1.0)).abs() < 0.3, "a ring at height {y}, and the water's surface is {}", g + 1.0);
+    }
+    // The picture: the rings where they came up, and the school under the
+    // water where the server last said it was.
+    let mut specks = Vec::new();
+    for &(x, y, z, leap) in &rises {
+        for i in 0..14 {
+            let a = i as f64 / 14.0 * std::f64::consts::TAU;
+            let r = 0.6;
+            specks.push((DVec3::new(f64::from(x) + a.cos() * r, f64::from(y) - 0.04, f64::from(z) + a.sin() * r), 0.04, t::BLOCK_SNOW));
+        }
+        if leap {
+            specks.push((DVec3::new(f64::from(x), f64::from(y) + 0.6, f64::from(z)), 0.15, t::BLOCK_GRAVEL));
+        }
+    }
+    for state in s.entities.values() {
+        if let primitive_shared::protocol::EntityKind::Animal { species, .. } = state.kind {
+            if species.swims() {
+                specks.push((DVec3::new(state.x, state.y + 0.15, state.z), 0.12, t::BLOCK_GRAVEL));
+            }
+        }
+    }
+    s.shot_with("fishing/rises", &specks);
+    no_corrections(&s);
+}
+
+// ---------------------------------------------------------------- the woods' and the water's animals
+//
+// What each of the five is for, played end to end against the real server:
+// a hare runs, a bear at its hive in autumn comes at whoever walks up, a fox
+// carries a grouse out of a coop somebody left open, a cow elk stands over
+// her calf, a flock of ducks goes up off the pond, a frog goes quiet, and a
+// beaver goes under. See `primitive_shared::animals`, the module doc's
+// "woods' and water's five", and the server's `logic::animals::woods`.
+
+/// The client's own copy of an animal, as the last snapshot said it: where
+/// it is, what its body is doing, and its tack byte.
+fn seen_animal(s: &Scenario, id: primitive_shared::protocol::EntityId) -> Option<(DVec3, primitive_shared::protocol::Attitude, u8)> {
+    match s.entities.get(&id) {
+        Some(primitive_shared::protocol::EntityState {
+            kind: primitive_shared::protocol::EntityKind::Animal { attitude, tack, .. },
+            x,
+            y,
+            z,
+            ..
+        }) => Some((DVec3::new(*x, *y, *z), *attitude, *tack)),
+        _ => None,
+    }
+}
+
+/// A pond cut into the field, two deep, `along` by `across` cells from
+/// `(x, z)`: its surface level with the grass round it.
+fn dig_a_pond(s: &mut Scenario, x: i32, z: i32, across: i32, along: i32) {
+    s.fill((x, GROUND - 1, z), (x + along - 1, GROUND, z + across - 1), t::BLOCK_WATER);
+}
+
+fn apart_on_the_ground(a: DVec3, b: DVec3) -> f64 {
+    (a.x - b.x).hypot(a.z - b.z)
+}
+
+/// A picture taken from `from`, looking at `at`, with the player left where
+/// they stand: the camera is this client's alone and the server never hears
+/// of it, so a fox that will only come with the player twenty blocks off can
+/// still be photographed from four.
+fn photograph(s: &mut Scenario, from: DVec3, at: DVec3, name: &str) {
+    let kept = (s.camera.position, s.camera.yaw, s.camera.pitch);
+    let dir = (at - from).as_vec3().normalize();
+    s.camera.position = from;
+    s.camera.yaw = dir.z.atan2(dir.x);
+    s.camera.pitch = dir.y.asin();
+    s.shot(name);
+    (s.camera.position, s.camera.yaw, s.camera.pitch) = kept;
+}
+
+/// Where the server has an animal's feet, as a point.
+fn server_sees(s: &Scenario, id: primitive_shared::protocol::EntityId) -> Option<DVec3> {
+    s.server().animal_position(id).map(|p| DVec3::new(f64::from(p.0), f64::from(p.1), f64::from(p.2)))
+}
+
+#[test]
+fn a_hare_the_player_walks_at_bolts_and_is_not_caught() {
+    use primitive_shared::animals::Species;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(0.5);
+    let feet = s.feet();
+    let hare = s
+        .server()
+        .spawn_animal(Species::Hare, (feet.x as f32 + 9.0, feet.y as f32, feet.z as f32))
+        .expect("no hare would come");
+    s.seconds(1.0);
+    s.face(0.0);
+    s.hold(Action::Forward);
+    let fled = s.until(8.0, |s| server_sees(s, hare).is_some_and(|at| apart_on_the_ground(at, s.feet()) > 16.0));
+    s.release(Action::Forward);
+    assert!(fled, "a hare nine blocks off let a walking player close on it for eight seconds");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_bear_eating_at_a_wild_hive_in_autumn_comes_at_a_player_who_walks_up() {
+    use primitive_shared::animals::Species;
+    use primitive_shared::bees::{hive_holding, honey_in, HIVE_FULL};
+    let mut s = Scenario::new();
+    // Two days into the first autumn, at noon. Asked of the calendar rather
+    // than worked out from `SEASON_DAYS`, because the world does not open on
+    // the first day of spring (`season::WORLD_OPENS_ON_DAY`): two and a half
+    // seasons in was midwinter, and this bear slept through its scenario.
+    let autumn = (0..400)
+        .map(|q| q as f32 * 0.25)
+        .find(|&day| primitive_shared::season::Season::at(day) == primitive_shared::season::Season::Autumn)
+        .expect("a year with no autumn");
+    s.server().set_world_days(autumn + 2.5);
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    // A trunk twenty-two blocks off with a full hive on its near side.
+    let trunk = x0 + 22;
+    let hive = (trunk - 1, GROUND + 2, z);
+    s.build(&[
+        ((trunk, GROUND + 1, z), t::BLOCK_LOG),
+        ((trunk, GROUND + 2, z), t::BLOCK_LOG),
+        ((trunk, GROUND + 3, z), t::BLOCK_LOG),
+        (hive, hive_holding(HIVE_FULL)),
+    ]);
+    let bear = s
+        .server()
+        .spawn_animal(Species::Bear, (trunk as f32 - 4.5, (GROUND + 1) as f32, z as f32 + 0.5))
+        .expect("no bear would come");
+    // It finds the hive and eats: the comb goes down on this client's copy.
+    let ate = s.until(30.0, |s| s.block(hive).is_some_and(|b| honey_in(b) < HIVE_FULL));
+    assert!(ate, "a bear stood beside a full hive in autumn for half a minute and did not touch it");
+    let hive_side = DVec3::new(trunk as f64 - 1.5, (GROUND + 2) as f64, z as f64 + 0.5);
+    photograph(&mut s, hive_side + DVec3::new(-5.0, 1.5, 4.0), hive_side, "animals/bear_at_the_hive");
+    // Walking up to look: somewhere inside its guard, and it comes.
+    //
+    // **Came is "reached the player or struck them", over the walk and the
+    // wait both.** A bear quick off the mark charges while the player is
+    // still walking up, and a charge that lands knocks the player back: a
+    // check that only started counting once the walk was over, and only by
+    // distance, missed exactly the bear that did its job best -- which is
+    // how this went red once, with the machine loaded and the bear early.
+    let struck = |s: &Scenario| s.heard_any(|m| matches!(m, ServerMessage::Health { current, max } if current < max));
+    let reached = |s: &Scenario| server_sees(s, bear).is_some_and(|at| apart_on_the_ground(at, s.feet()) < 2.6);
+    s.face(0.0);
+    s.hold(Action::Forward);
+    let near = s.until(10.0, |s| {
+        reached(s) || struck(s) || server_sees(s, bear).is_some_and(|at| apart_on_the_ground(at, s.feet()) < 8.0)
+    });
+    s.release(Action::Forward);
+    assert!(near, "the player never got near the bear");
+    let came = s.until(8.0, |s| reached(s) || struck(s));
+    assert!(came, "a bear at its hive let a player stand eight blocks off");
+}
+
+#[test]
+fn a_fox_takes_a_grouse_out_of_a_coop_left_open_and_carries_it_off() {
+    use primitive_shared::animals::Species;
+    use primitive_shared::horse::TACK_CARRYING;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    // **A coop**: stone walls round a three-by-three floor, a roof two blocks
+    // up, and the door left open -- one cell wide, the full two high, on the
+    // side facing the fox. Low, because a hen house is: under a roof three up
+    // a grouse flutters at the rafters out of any fox's reach, and the first
+    // version of this scenario watched a fox pace under one for forty
+    // seconds.
+    let (cx, cz) = (x0 + 14, z - 2);
+    let mut cells = Vec::new();
+    for dx in 0..5 {
+        for dz in 0..5 {
+            let edge = dx == 0 || dx == 4 || dz == 0 || dz == 4;
+            for dy in 1..=2 {
+                let door = dx == 0 && dz == 2;
+                if edge && !door {
+                    cells.push(((cx + dx, GROUND + dy, cz + dz), t::BLOCK_COBBLESTONE));
+                }
+            }
+            cells.push(((cx + dx, GROUND + 3, cz + dz), t::BLOCK_PLANKS));
+        }
+    }
+    // The player well back, standing still: a fox does not come for a bird
+    // with somebody watching from close by.
+    s.stand_at(feet_on(cx - 24, cz + 2));
+    s.seconds(1.0);
+    s.build(&cells);
+    s.server()
+        .spawn_animal(Species::Fowl, (cx as f32 + 2.5, (GROUND + 1) as f32, cz as f32 + 2.5))
+        .expect("no grouse would come");
+    let fox = s
+        .server()
+        .spawn_animal(Species::Fox, (cx as f32 - 3.5, (GROUND + 1) as f32, cz as f32 + 2.5))
+        .expect("no fox would come");
+    let carried = s.until(40.0, |s| {
+        s.server().animals_of(Species::Fowl).is_empty() && seen_animal(s, fox).is_some_and(|(_, _, tack)| tack & TACK_CARRYING != 0)
+    });
+    assert!(carried, "a fox at the open door of a coop with a grouse in it came away with nothing");
+    // ...and it comes out with it: a kill is eaten where the fox was going,
+    // not in the coop. Out means off the coop's floor by a stride -- where it
+    // goes then is round the back, away from the player watching, which is
+    // what a fox would do.
+    let out = |at: DVec3| {
+        let (x, z) = (at.x - cx as f64, at.z - cz as f64);
+        !(-1.0..6.0).contains(&x) || !(-1.0..6.0).contains(&z)
+    };
+    let gone = s.until(12.0, |s| server_sees(s, fox).is_none_or(out));
+    assert!(gone, "the fox stayed in the coop with the grouse in its jaws");
+    // The picture once it is out in the open, the grouse still in its jaws.
+    if let Some((at, _, tack)) = seen_animal(&s, fox) {
+        assert!(tack & TACK_CARRYING != 0, "the fox dropped the grouse with nobody near it");
+        photograph(&mut s, at + DVec3::new(-2.2, 1.0, 2.0), at, "animals/fox_carrying_the_grouse");
+    }
+}
+
+#[test]
+fn a_cow_elk_with_her_calf_comes_at_a_player_who_walks_up_on_it() {
+    use primitive_shared::animals::Species;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(0.5);
+    let cow = s
+        .server()
+        .spawn_animal(Species::Elk, (x0 as f32 + 16.5, (GROUND + 1) as f32, z as f32 + 0.5))
+        .expect("no elk would come");
+    s.server().animal_gives_birth(cow).expect("the cow had no calf");
+    s.seconds(1.0);
+    if let Some((at, _, _)) = seen_animal(&s, cow) {
+        photograph(&mut s, at + DVec3::new(-5.5, 1.2, 3.5), at, "animals/elk_cow_and_calf");
+    }
+    s.face(0.0);
+    s.hold(Action::Forward);
+    let came = s.until(12.0, |s| server_sees(s, cow).is_some_and(|at| apart_on_the_ground(at, s.feet()) < 2.8));
+    s.release(Action::Forward);
+    assert!(came, "a cow elk let a player walk up on her calf");
+}
+
+#[test]
+fn a_flock_of_ducks_goes_up_off_the_pond_when_a_player_comes_down_the_bank() {
+    use primitive_shared::animals::Species;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(1.0);
+    dig_a_pond(&mut s, x0 + 12, z - 4, 9, 10);
+    let ducks: Vec<_> = (0..3)
+        .filter_map(|n| {
+            s.server()
+                .spawn_animal(Species::Duck, (x0 as f32 + 16.5 + n as f32, GROUND as f32 + 0.6, z as f32 + 0.5 + n as f32))
+        })
+        .collect();
+    assert_eq!(ducks.len(), 3, "the ducks would not come");
+    // **Until they are all sitting on it**, not after a fixed wait: the world
+    // goes on round a scenario, its spawner puts a fox or a wolf where it
+    // likes, and a flock put up by one of those is doing its job -- and comes
+    // back down on its own pond (`woods::duck`), which is what this waits for.
+    let on_the_water =
+        |s: &Scenario| ducks.iter().all(|&d| seen_animal(s, d).is_some_and(|(at, _, _)| (at.y - f64::from(GROUND)).abs() < 1.6));
+    assert!(s.until(15.0, on_the_water), "the ducks never settled on the pond");
+    let flock = DVec3::new(x0 as f64 + 17.5, GROUND as f64 + 0.8, z as f64 + 1.5);
+    photograph(&mut s, flock + DVec3::new(-4.0, 1.4, 2.5), flock, "animals/ducks_on_the_pond");
+    s.face(0.0);
+    s.hold(Action::Forward);
+    let up = s.until(10.0, |s| ducks.iter().any(|&d| seen_animal(s, d).is_some_and(|(at, _, _)| at.y > f64::from(GROUND) + 3.0)));
+    s.release(Action::Forward);
+    assert!(up, "a player walked down to the pond and the ducks sat on");
+}
+
+#[test]
+fn a_frog_at_the_marsh_goes_quiet_when_a_player_walks_up_at_night() {
+    use primitive_shared::animals::Species;
+    use primitive_shared::protocol::Attitude;
+    let mut s = Scenario::new();
+    s.server().set_time_of_day(0.9);
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(1.0);
+    dig_a_pond(&mut s, x0 + 20, z - 3, 7, 6);
+    let frog = s
+        .server()
+        .spawn_animal(Species::Frog, (x0 as f32 + 19.5, (GROUND + 1) as f32, z as f32 + 0.5))
+        .expect("no frog would come");
+    s.seconds(3.0);
+    assert!(
+        seen_animal(&s, frog).is_some_and(|(_, attitude, _)| attitude != Attitude::Alert),
+        "a frog alone at night is quiet already"
+    );
+    s.face(0.0);
+    s.hold(Action::Forward);
+    let hushed = s.until(8.0, |s| seen_animal(s, frog).is_some_and(|(_, attitude, _)| attitude == Attitude::Alert));
+    s.release(Action::Forward);
+    assert!(hushed, "a frog went on singing with a player walking up to it");
+    let distance = seen_animal(&s, frog).map_or(0.0, |(at, _, _)| apart_on_the_ground(at, s.feet()));
+    assert!(distance > 5.0, "the frog only went quiet with the player {distance:.1} blocks off, on top of it");
+}
+
+#[test]
+fn a_beaver_in_its_pond_goes_under_when_a_player_comes_along_the_bank() {
+    use primitive_shared::animals::Species;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(1.0);
+    dig_a_pond(&mut s, x0 + 12, z - 4, 9, 10);
+    let beaver = s
+        .server()
+        .spawn_animal(Species::Beaver, (x0 as f32 + 14.5, GROUND as f32 + 0.3, z as f32 + 0.5))
+        .expect("no beaver would come");
+    // **Swimming first**, as the client sees it: a beaver on its pond. It may
+    // have paddled to the bank in the meantime -- it lives on both -- and one
+    // on the bank makes for the water before it can go under it, which is a
+    // different scenario from this one.
+    use primitive_shared::protocol::Attitude;
+    let afloat = s.until(15.0, |s| seen_animal(s, beaver).is_some_and(|(_, attitude, _)| attitude == Attitude::Swimming));
+    assert!(afloat, "the beaver never swam on its pond");
+    let surface = f64::from(GROUND) + 1.0;
+    // **Walking at the beaver, wherever it has paddled to, and stopping on
+    // the bank**, turned a quarter of a second at a time -- what the name
+    // says a player does. The first version walked a straight line down the
+    // pond and on into it, and went red about one run in three. Most of that
+    // was the beaver's: frightened at the top of its bob it paddled off
+    // across the surface instead of diving (`woods::plunge`, and the test
+    // `a_beaver_frightened_at_the_top_of_its_bob_still_goes_under`). The
+    // rest was the walk: a player who wades in and sinks to the bed is not
+    // one on the bank, and the edge is a block and a half short of the water
+    // because a quarter of a second of walking is a block.
+    let edge = f64::from(x0 + 12) - 1.5;
+    let mut under = false;
+    for _ in 0..48 {
+        if s.feet().x < edge {
+            if let Some(at) = server_sees(&s, beaver) {
+                let to = at - s.feet();
+                s.face(to.z.atan2(to.x) as f32);
+            }
+            s.hold(Action::Forward);
+        } else {
+            s.release(Action::Forward);
+        }
+        under = s.until(0.25, |s| seen_animal(s, beaver).is_some_and(|(at, _, _)| at.y < surface - 0.45));
+        if under {
+            break;
+        }
+    }
+    s.release(Action::Forward);
+    assert!(under, "a beaver on its pond let a player walk up the bank to it");
+}
+
+#[test]
+fn the_woods_and_the_waters_five_stand_for_their_picture() {
+    use primitive_shared::animals::Species;
+    // **Not a test of anything but the drawing**: every new animal in one
+    // frame through the real renderer, standing about at noon by a pond, so
+    // the models, the coats and the poses can be looked at in the light they
+    // live in. Asserts only that the five came.
+    let mut s = Scenario::new();
+    s.server().set_time_of_day(0.45);
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(1.0);
+    dig_a_pond(&mut s, x0 + 14, z - 1, 6, 5);
+    let at = |dx: f32, dz: f32, y: f32| (x0 as f32 + dx, y, z as f32 + dz);
+    let ground = (GROUND + 1) as f32;
+    let five = [
+        (Species::Fox, at(10.5, -2.5, ground)),
+        (Species::Elk, at(12.5, 5.5, ground)),
+        (Species::Beaver, at(13.5, 1.5, ground)),
+        (Species::Duck, at(16.5, 1.5, GROUND as f32 + 0.6)),
+        (Species::Frog, at(13.5, -0.5, ground)),
+    ];
+    for (species, spot) in five {
+        s.server().spawn_animal(species, spot).unwrap_or_else(|| panic!("no {} would come", species.name()));
+    }
+    s.seconds(0.6);
+    let middle = DVec3::new(x0 as f64 + 13.5, GROUND as f64 + 1.1, z as f64 + 1.5);
+    photograph(&mut s, middle + DVec3::new(-6.5, 1.6, 1.0), middle, "animals/the_five");
+    assert!(s.entities.len() >= 5, "only {} of the five were ever seen", s.entities.len());
+}

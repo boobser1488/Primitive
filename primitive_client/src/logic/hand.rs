@@ -684,6 +684,9 @@ pub struct Hand {
     /// The rod: how far it is drawn back, and the throw under way. See
     /// [`Hand::wind_rod`].
     rod: Rod,
+    /// What the line is telling the hand: the float's phase and the fish on
+    /// it, and the strike under way. See [`Hand::feel_line`].
+    line: Line,
     /// The heft of a blow whose head arrived this frame, waiting to be
     /// taken -- see [`Hand::take_landed`].
     landed: Option<f32>,
@@ -715,6 +718,52 @@ struct Rod {
     /// seconds into it.
     whip: Option<(f32, f32)>,
 }
+
+/// **What the line does to the rod in the hand, once it is in the water.**
+///
+/// The throw was the only thing the rod ever did: from the moment the float
+/// landed the rod sat in the corner of the screen like a stick in a stand,
+/// through the bite, the strike and the fight -- all of which were drawn on
+/// the float a dozen blocks away and on a gauge under the crosshair. A rod
+/// is what a fisher *feels* a bite through, and the hand is the one place on
+/// the screen a player's eye always passes. So:
+///
+/// * **a tremble** of the tip while the float is nosed -- small and quick,
+///   so it reads as "something" and not as "now";
+/// * **the tip nodding down** on the dip, and further on the take, towards
+///   the water;
+/// * **a jerk up** when the player strikes, whatever the server says -- the
+///   hand struck, and the arm moving is the hand's own news;
+/// * **the rod raised and bowed** while a fish is on: held up to play it,
+///   the tip hauled down by the strain, shaking with it, and pulled aside
+///   when the fish runs -- which is the run made visible a moment before the
+///   gauge climbs (`ServerMessage::Line::run`).
+///
+/// **Still a turn of the whole grip, never a bend** -- the argument on
+/// [`Rod`] holds: a curved rod would be a second model of it. Bowed is the
+/// tip pitched down against a raised grip, which at the size a rod is drawn
+/// reads as the rod taking the weight.
+#[derive(Clone, Copy, Debug, Default)]
+struct Line {
+    phase: Option<crate::logic::fishing::Phase>,
+    /// Seconds in the float's phase, and in the whole cast.
+    since: f32,
+    age: f32,
+    strain: f32,
+    run: f32,
+    /// A strike under way: seconds into it.
+    jerk: Option<f32>,
+}
+
+/// How long the strike's jerk is, up and back, in seconds.
+pub const ROD_STRIKE_SECONDS: f32 = 0.4;
+/// How far the strike lifts the rod, in radians.
+const ROD_STRIKE_PITCH: f32 = 0.5;
+/// How high a rod is held while a fish is played, before the strain bows
+/// it back down, in radians.
+const ROD_PLAYING_PITCH: f32 = 0.35;
+/// How far a line at the edge of parting hauls the tip down, in radians.
+const ROD_BOW_PITCH: f32 = 0.3;
 
 /// How far a full wind-up takes the rod back over the shoulder, in radians.
 /// Enough to put the tip out of the top of the frame -- a rod drawn back is a
@@ -811,6 +860,70 @@ impl Hand {
         self.rod.wound = 0.0;
     }
 
+    /// **What the line is doing, once a frame**: the float as the server
+    /// last described it, or `None` with no line in the water. See [`Line`].
+    pub fn feel_line(&mut self, float: Option<&crate::logic::fishing::Float>) {
+        match float {
+            Some(float) => {
+                self.line.phase = Some(float.phase);
+                self.line.since = float.since;
+                self.line.age = float.age;
+                self.line.strain = float.strain;
+                self.line.run = float.run;
+            }
+            None => self.line.phase = None,
+        }
+    }
+
+    /// The hand struck: the rod jerks up. See [`Line`].
+    pub fn strike_rod(&mut self) {
+        self.line.jerk = Some(0.0);
+    }
+
+    /// How far the line turns the rod this frame, in radians about the
+    /// shoulder -- up positive -- on top of [`Hand::rod_pitch`]. See [`Line`].
+    pub fn line_pitch(&self) -> f32 {
+        use crate::logic::fishing::Phase;
+        let line = &self.line;
+        let held = match line.phase {
+            // Two waves that do not divide, as the float's own tremble:
+            // a shiver, not a beat.
+            Some(Phase::Nibbling) => {
+                0.012 * ((line.since * 29.0).sin() * 0.6 + (line.since * 43.0 + 0.7).sin() * 0.4)
+            }
+            Some(Phase::Dipping) => -0.06 * (line.since * 6.0).min(1.0),
+            Some(Phase::Taking) => -0.06 - 0.08 * (line.since * 3.0).min(1.0) + 0.01 * (line.since * 21.0).sin(),
+            Some(Phase::Fighting) => {
+                ROD_PLAYING_PITCH - ROD_BOW_PITCH * line.strain
+                    + 0.035 * line.strain * (line.age * 17.0).sin()
+                    + 0.03 * line.run * (line.age * 7.0).sin()
+            }
+            _ => 0.0,
+        };
+        let jerk = line.jerk.map_or(0.0, |t| {
+            let k = (t / ROD_STRIKE_SECONDS).clamp(0.0, 1.0);
+            // Snapped up in the first fifth, eased home over the rest.
+            if k < 0.2 {
+                ROD_STRIKE_PITCH * (k / 0.2)
+            } else {
+                let back = (k - 0.2) / 0.8;
+                ROD_STRIKE_PITCH * (1.0 - back * back * (3.0 - 2.0 * back))
+            }
+        });
+        held + jerk
+    }
+
+    /// How far a running fish pulls the rod aside, in radians about the
+    /// line of sight. Nought with no fish on.
+    pub fn line_sway(&self) -> f32 {
+        match self.line.phase {
+            Some(crate::logic::fishing::Phase::Fighting) => {
+                0.12 * self.line.run * (self.line.age * 0.9).sin().signum()
+            }
+            _ => 0.0,
+        }
+    }
+
     /// How far the rod is turned back over the shoulder this frame, in
     /// radians; negative while a throw carries it past level.
     pub fn rod_pitch(&self) -> f32 {
@@ -902,6 +1015,10 @@ impl Hand {
         self.rod.whip = self.rod.whip.and_then(|(from, elapsed)| {
             let elapsed = elapsed + dt;
             (elapsed < ROD_WHIP_SECONDS).then_some((from, elapsed))
+        });
+        self.line.jerk = self.line.jerk.and_then(|elapsed| {
+            let elapsed = elapsed + dt;
+            (elapsed < ROD_STRIKE_SECONDS).then_some(elapsed)
         });
 
         let target = if grounded && speed > 0.1 { 1.0 } else { 0.0 };
@@ -1270,7 +1387,8 @@ impl Hand {
             // The rod turns about the same shoulder a blow does, on top of
             // everything else the arm is doing. See `Rod`.
             Mat4::from_translation(SHOULDER)
-                * Mat4::from_rotation_x(self.rod_pitch())
+                * Mat4::from_rotation_x(self.rod_pitch() + self.line_pitch())
+                * Mat4::from_rotation_z(self.line_sway())
                 * Mat4::from_translation(-SHOULDER)
                 * self.group()
         } else {
@@ -3290,5 +3408,69 @@ mod tests {
         wound.wind_rod(Some(1.0), 1.0);
         let stone = primitive_shared::types::BLOCK_STONE;
         assert_eq!(wound.pose(stone), Hand::new().pose(stone), "a stone in hand was drawn back like a rod");
+    }
+
+    /// A float in `phase`, `since` seconds into it.
+    fn float_in(phase: crate::logic::fishing::Phase, since: f32, strain: f32, run: f32) -> crate::logic::fishing::Float {
+        crate::logic::fishing::Float {
+            at: (0, 20, 0),
+            slot: 0,
+            fish_before: 0,
+            age: since,
+            phase,
+            strain,
+            liveliness: 0.5,
+            since,
+            run,
+        }
+    }
+
+    #[test]
+    fn the_rod_in_the_hand_trembles_nods_strikes_and_bows_with_the_line() {
+        use crate::logic::fishing::Phase;
+        let rod = primitive_shared::types::BLOCK_FISHING_ROD;
+        let tip = |hand: &Hand| hand.pose(rod).transform_point3(ITEM_CENTRE);
+        let rest = tip(&Hand::new());
+        let mut hand = Hand::new();
+        // The tremble is small and never still: it moves the tip, and less
+        // than anything that means "strike".
+        let mut widest: f32 = 0.0;
+        let mut t = 0.0;
+        while t < 1.0 {
+            hand.feel_line(Some(&float_in(Phase::Nibbling, t, 0.0, 0.0)));
+            widest = widest.max(hand.line_pitch().abs());
+            t += 1.0 / 60.0;
+        }
+        assert!(widest > 0.004 && widest < 0.03, "the tremble turned the rod {widest}");
+        // The dip nods the tip down, and the take further.
+        hand.feel_line(Some(&float_in(Phase::Dipping, 0.5, 0.0, 0.0)));
+        let dip = hand.line_pitch();
+        hand.feel_line(Some(&float_in(Phase::Taking, 0.5, 0.0, 0.0)));
+        let take = hand.line_pitch();
+        assert!(dip < -widest && take < dip, "the tip did not go down with the float: dip {dip}, take {take}");
+        assert!(tip(&hand).y < rest.y, "the take did not pull the tip towards the water");
+        // A strike jerks it up, and it comes back.
+        hand.feel_line(None);
+        hand.strike_rod();
+        let mut highest: f32 = 0.0;
+        for _ in 0..40 {
+            hand.update(1.0 / 60.0, false, 0.0, true, Some(rod));
+            highest = highest.max(hand.line_pitch());
+        }
+        assert!(highest > 0.3, "the strike lifted the rod {highest}");
+        assert!(hand.line_pitch().abs() < 1e-4, "the rod did not come back down after the strike");
+        // Playing a fish: raised, and the harder the strain the further the
+        // tip is hauled back down -- the rod bowing -- and a run pulls it aside.
+        hand.feel_line(Some(&float_in(Phase::Fighting, 0.0, 0.1, 0.0)));
+        let slack = hand.line_pitch();
+        hand.feel_line(Some(&float_in(Phase::Fighting, 0.0, 0.9, 0.0)));
+        let taut = hand.line_pitch();
+        assert!(slack > 0.2, "a fish on and the rod not raised: {slack}");
+        assert!(taut < slack - 0.15, "the strain did not bow the rod: {slack} slack, {taut} taut");
+        hand.feel_line(Some(&float_in(Phase::Fighting, 1.0, 0.5, 1.0)));
+        assert!(hand.line_sway().abs() > 0.05, "a running fish did not pull the rod aside");
+        // Nothing but a rod feels the line.
+        let stone = primitive_shared::types::BLOCK_STONE;
+        assert_eq!(hand.pose(stone), Hand::new().pose(stone), "a stone in hand bowed to a fish");
     }
 }

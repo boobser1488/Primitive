@@ -10704,7 +10704,7 @@ pub(crate) mod offscreen_repro {
         for &species in Species::ALL {
             let centre = Vec3::new(8.5, 2.0 + species.height() * 0.5, 8.5);
             let run = species.run_speed().max(1.0);
-            let poses: [(&str, f32, Motion); 4] = [
+            let poses: [(&str, f32, Motion); 10] = [
                 ("standing", 0.0, Motion::default()),
                 (
                     "walking",
@@ -10723,6 +10723,17 @@ pub(crate) mod offscreen_repro {
                     0.0,
                     Motion { speed: run, walked: quarter / 2.0, turning: -2.5, ..Default::default() },
                 ),
+                // **The gaits and the rest** (`animal_model::gait_of`,
+                // `Motion::lie`, `Motion::glance`, `Motion::swim`): a trot and a
+                // gallop a quarter into the stride, lying down, the head turned
+                // to a sound on its right, halfway down the death fall, and
+                // swimming.
+                ("trotting", 0.0, Motion { speed: run * 0.6, walked: quarter / 2.0, gait: Some(1.0), ..Default::default() }),
+                ("galloping", 0.0, Motion { speed: run, walked: quarter / 2.0, gait: Some(2.0), ..Default::default() }),
+                ("lying", 0.0, Motion { lie: 1.0, ..Default::default() }),
+                ("glancing", 0.0, Motion { glance: 0.9, ..Default::default() }),
+                ("falling", 0.0, Motion { fallen: 0.45, ..Default::default() }),
+                ("swimming", 0.0, Motion { swim: 1.0, ..Default::default() }),
             ];
             for (name, yaw, motion) in poses {
                 let (mut vertices, mut indices) = (ground.0.clone(), ground.1.clone());
@@ -18476,7 +18487,6 @@ pub(crate) mod offscreen_repro {
                         player,
                         world_time: summer(hour),
                         wet: false,
-                        dangers: &[],
                         country: &warm_swamp,
                         light: &primitive_shared::lighting::LightMap::new(),
                         lantern: false,
@@ -18492,9 +18502,9 @@ pub(crate) mod offscreen_repro {
             (critters.len(), v, i)
         };
         let pond_views = [
-            // Noon: butterflies over the flowers, frogs on the bank.
+            // Noon: butterflies over the flowers. (The frogs on the bank that
+            // had a picture here are the server's now: `engine::critters`.)
             ("meadow_noon", 0.5, Vec3::new(8.0, 4.0, 8.0), Vec3::new(10.5, 5.6, 10.5), Vec3::new(21.0, 4.2, 21.0)),
-            ("frogs_at_the_bank", 0.5, Vec3::new(9.0, 4.0, 21.5), Vec3::new(15.2, 4.8, 21.5), Vec3::new(18.0, 4.1, 21.5)),
             // Dusk: the fireflies, lit by the game's own sky for the hour.
             ("pond_at_dusk", 0.86, Vec3::new(12.0, 4.0, 12.0), Vec3::new(12.0, 5.6, 12.0), Vec3::new(22.0, 4.8, 22.0)),
         ];
@@ -25108,6 +25118,7 @@ mod raft_repro {
                     attitude: primitive_shared::protocol::Attitude::Easy,
                     growth: u8::MAX,
                     tack,
+                    glance: 0,
                 },
                 x: f64::from(x),
                 y: f64::from(ground + species.height() * 0.5),

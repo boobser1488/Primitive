@@ -58,6 +58,31 @@
 //! **Where each lives is a biome and not a guess from the ground** -- see
 //! `lives_in` for why the savanna could not be read off the blocks the
 //! way a wood is.
+//!
+//! ## The woods' and the water's five
+//!
+//! The north and the fresh water had the deer, the wolf and the bear, and a
+//! lake was a thing to drink from and walk round. Five animals were added
+//! there, and each was kept only if it put a question to a player that
+//! nothing else already asked:
+//!
+//! * the **fox** -- *is it worth more to you alive?* It takes the rats and
+//!   it takes the grouse you were stalking and the meat you left out, and
+//!   it is too quick to chase;
+//! * the **elk** -- *which way is the wind?* The biggest meal in the world,
+//!   short-sighted and with the best nose alive, and the one animal whose
+//!   mother fights;
+//! * the **beaver** -- *do you want that pond?* It dams the stream, and the
+//!   water does the rest;
+//! * the **duck** -- *can you get to the water's edge unseen?* And if the
+//!   flock goes up with nobody near it, what did it see?
+//! * the **frog** -- *bait, or a sentry?* Its chorus stops when something
+//!   is near the marsh; a frog on the hook is the pike's.
+//!
+//! Four of the five go into the water of their own accord
+//! (`takes_to_water`), which is the one rule every animal before them kept,
+//! and the reason is the same each time: the water is where they are, and a
+//! player is slow in it.
 
 use serde::{Deserialize, Serialize};
 
@@ -398,6 +423,92 @@ pub enum Species {
     /// **Out in numbers after dark** (`spawn_weight_in`), so a beach walked
     /// at noon and the same beach walked at midnight are two places.
     Crab,
+    /// **The thief that takes what was left out, and the rat-catcher that
+    /// does it.** Appended, for `Species::Zebra`'s reason.
+    ///
+    /// A fox hunts what is small -- the hare, the grouse, the rat, the duck,
+    /// the frog (`hunts`) -- and it carries a kill away rather than eating it
+    /// where it fell: the grouse goes off in its jaws toward the wood, and a
+    /// player who strikes it on the way drops the bird at its feet (the
+    /// server's `carried`). What it takes from *people* is what they left in
+    /// the open: meat on the ground and a carcass nobody came back for
+    /// (`scavenges`). A chest is safe from it; that is the rat's door, and the
+    /// fox does not use doors.
+    ///
+    /// **The decision is that it is useful alive.** A fox about the house is
+    /// a fox that takes the rats (`hunts`), and the same fox takes the bird a
+    /// player was stalking and the haunch they left on the rack of their
+    /// camp. So a fox at the edge of the firelight -- it will not come into it
+    /// (`shies_from_fire`) -- is a question with two honest answers: kill it
+    /// for its pelt, which is the warmest small skin in the world, or keep
+    /// your meat covered and let it keep your storeroom clear. It is faster
+    /// than a sprint (`run_speed`), so the one way to kill it is to be still
+    /// where it is coming.
+    Fox,
+    /// **The biggest animal in the world, and the hunt that is decided by the
+    /// wind.** Appended, for `Species::Zebra`'s reason.
+    ///
+    /// Taller than a horse, and more meat and hide than anything else that
+    /// can be killed (`butchering`). It sees badly (`awareness`) and smells
+    /// better than anything alive (`nose`): upwind at forty blocks it is gone,
+    /// downwind at twelve a player standing still is not there. It is faster
+    /// than a sprint and has the longest wind of anything but the bear, so a
+    /// chase is never the answer -- the answer is the edge of the bog at dawn,
+    /// where it comes to stand in the water (`takes_to_water`), with the wind
+    /// in your face.
+    ///
+    /// **And it is the one animal of its kind that fights**, which is not a
+    /// grudge but a mother: a cow with a calf beside her stands and then
+    /// comes at whoever walks up on the calf (the server's `defends`), and
+    /// that kick is the second hardest blow in the world (`damage`). A calf
+    /// alone in the willows is a calf with its mother somewhere near.
+    Elk,
+    /// **The animal that changes the water.** Appended, for
+    /// `Species::Zebra`'s reason.
+    ///
+    /// A beaver lives on a stream under trees and it builds: a cell at a time
+    /// it lays sticks and mud across the running water (`types::
+    /// BLOCK_BEAVER_DAM`), and the water simulation does the rest -- the
+    /// stream backs up into a pond behind the dam and runs thin below it.
+    /// **It is the only animal here that adds anything to the world**, which
+    /// the server's module doc forbids to everything else, and the reason is
+    /// the reason the rule exists turned round: an animal that could wreck a
+    /// house is a punishment; a pond that appears on a stream over a few days
+    /// is a *place* -- fish, a crossing, water for the herds -- and a player
+    /// who wanted the meadow below it dry knows exactly which animal to go and
+    /// see, and what taking its dam apart with an axe will do.
+    ///
+    /// On land it is slower than a walking player (`run_speed`); in the water
+    /// it dives (`dives`) and is gone. So a beaver is taken on the bank, by
+    /// somebody who came along the stream quietly, and what it gives is the
+    /// second warm pelt in the world and fat. Its tail on the water is the
+    /// alarm every beaver on the pond dives at -- a loud one.
+    Beaver,
+    /// **The fresh water's bird**: a flock on a pond, dabbling tail-up.
+    /// Appended, for `Species::Zebra`'s reason.
+    ///
+    /// The gull said on fresh water, with the difference that it *sits on it*
+    /// (`takes_to_water`) and goes up off it all at once when anything comes
+    /// down the bank, and it is gone for the winter (the server's `in_season`).
+    /// What a flock is worth is two things: a light meal and feathers for the
+    /// one who got close -- crawling, through the reeds, with the wind right --
+    /// and a warning for everybody else, because ducks going up off a lake
+    /// that nobody walked up to are ducks that saw something.
+    Duck,
+    /// **The marsh's voice.** Appended, for `Species::Zebra`'s reason.
+    ///
+    /// Frogs sit at the edge of still water and in the reeds, and after dark
+    /// they sing -- and they stop the moment something moves near them (the
+    /// server's `hush`, heard by the client as the chorus dropping out). So a
+    /// camp beside a marsh has a sentry nobody has to feed: the night going
+    /// quiet on one side is something on that side. That is what a frog is
+    /// worth alive.
+    ///
+    /// Dead, it is the best bait there is for a pike (`fishing::Bait::Frog`),
+    /// caught by hand before it jumps (`run_speed`). Every frog a player takes
+    /// for the hook is a voice out of the chorus -- a small trade, and a real
+    /// one. Gone in winter, into the mud.
+    Frog,
 }
 
 /// How much commoner a wolf (by day) and a bear are in a wood than
@@ -463,6 +574,14 @@ impl Species {
         // apiece, still, and twelve of the fourth bones block's room left.
         Species::Monkey,
         Species::Crab,
+        // ...and the woods' and the water's five, the twenty-first to the
+        // twenty-fifth: one line apiece, as promised, and seven of the fourth
+        // bones block's room left (`types::SKELETON_ROOM`).
+        Species::Fox,
+        Species::Elk,
+        Species::Beaver,
+        Species::Duck,
+        Species::Frog,
     ];
 
     /// What to call it. Not translated, for the same reason block names
@@ -490,6 +609,11 @@ impl Species {
             Species::Horse => "horse",
             Species::Monkey => "monkey",
             Species::Crab => "crab",
+            Species::Fox => "fox",
+            Species::Elk => "elk",
+            Species::Beaver => "beaver",
+            Species::Duck => "duck",
+            Species::Frog => "frog",
         }
     }
 
@@ -542,6 +666,12 @@ impl Species {
             // crab sharing the catch-all would make every animal death in
             // the world a crab's.
             Species::Crab => "was nipped by a crab",
+            // **The one animal of the five that can kill**, and only when it is
+            // defending something: a cow with her calf, or a bull cornered and
+            // hurt. See `Species::Elk` and the server's `defends`.
+            Species::Elk => "was trampled by an elk",
+            // Nothing else of the five lands a blow: see `damage`.
+            Species::Fox | Species::Beaver | Species::Duck | Species::Frog => "was killed by an animal",
         }
     }
 
@@ -623,6 +753,19 @@ impl Species {
             // actually sees over the sand. See `width`: a crab is the one
             // animal here that is wider than it is long.
             Species::Crab => 0.34,
+            // Knee-high to a person, and most of it is legs and ears.
+            Species::Fox => 0.55,
+            // **Taller at the shoulder than anything else alive**, and the head is
+            // carried over it: a player looks up at an elk the way they look up at
+            // a horse, and it is the silhouette above the willows that gives one
+            // away across a bog.
+            Species::Elk => 2.0,
+            // Low and heavy: a beaver on land is a sack on short legs.
+            Species::Beaver => 0.4,
+            // Sitting on the water or standing on a bank, head up.
+            Species::Duck => 0.42,
+            // A hand's height crouched, and it is always crouched.
+            Species::Frog => 0.18,
         }
     }
 
@@ -665,6 +808,14 @@ impl Species {
             // a shell with the legs down the sides, and it goes the way it
             // is wide (`sidles`).
             Species::Crab => 0.58,
+            Species::Fox => 0.4,
+            // Under a block, like everything else that walks -- see the bear's row.
+            Species::Elk => 0.95,
+            Species::Beaver => 0.45,
+            Species::Duck => 0.3,
+            // The hind legs splayed out either side: a frog is as wide as it is
+            // long, nearly.
+            Species::Frog => 0.32,
         }
     }
 
@@ -713,6 +864,15 @@ impl Species {
             // is walked as, and the hit box is what the tail is in.
             Species::Monkey => 0.7,
             Species::Crab => 0.35,
+            // Body and head; the brush is in the hit box, not the walk.
+            Species::Fox => 0.9,
+            Species::Elk => 2.2,
+            // Body and head: the tail is a paddle behind it and is counted in
+            // the hit box for the rat's reason.
+            Species::Beaver => 0.8,
+            Species::Duck => 0.55,
+            // Nose to the heels of the folded hind legs.
+            Species::Frog => 0.36,
         }
     }
 
@@ -811,6 +971,13 @@ impl Species {
             // out, which is the whole silhouette of a crab and therefore the
             // whole of what a hand comes down on.
             Species::Crab => (0.2875, 0.1688, 0.1688),
+            // Measured off `animals/{fox,elk,beaver,duck,frog}.bbmodel`, as every
+            // row here is: see `animal_model::the_shared_hit_box_is_the_model_that_is_drawn`.
+            Species::Fox => (0.125, 0.525, 0.8125),
+            Species::Elk => (0.375, 1.2375, 1.8125),
+            Species::Beaver => (0.1875, 0.2, 0.7188),
+            Species::Duck => (0.1531, 0.3275, 0.4875),
+            Species::Frog => (0.1625, 0.09, 0.275),
         }
     }
 
@@ -869,6 +1036,19 @@ impl Species {
             // A crab on the sand is not going anywhere in particular, and it
             // is the slowest walk in the world.
             Species::Crab => 0.9,
+            // A trot, head low, going somewhere: a fox is never strolling.
+            Species::Fox => 2.0,
+            // A long, slow stride through the willows -- slower than a person,
+            // which is how a stalk on one works at all.
+            Species::Elk => 1.9,
+            // **A waddle.** On land a beaver is slower than anything but the crab,
+            // and it knows it: see `run_speed`.
+            Species::Beaver => 1.1,
+            // A duck on a bank goes nowhere; on the water it paddles at this.
+            Species::Duck => 1.0,
+            // A frog does not walk. This is how far its hops carry it in a second
+            // when it is not frightened, which is not far.
+            Species::Frog => 0.7,
         }
     }
 
@@ -1017,6 +1197,25 @@ impl Species {
             // you can reach down, and it has about two seconds of it in
             // (`stamina_seconds`).
             Species::Crab => 3.6,
+            // **Over a sprint**, and it is the hare's rule rather than the bear's: a
+            // fox is never run down, it is waited for. What it cannot do is outrun
+            // a spear it has not seen, which is the whole case for sitting still
+            // downwind of a grouse's nest at dusk.
+            Species::Fox => 6.9,
+            // Over a sprint, and it keeps it up (`stamina_seconds`): an elk that has
+            // seen you is an elk you will not catch, so the hunt is decided before
+            // it starts -- by the wind and by where you waited.
+            Species::Elk => 7.2,
+            // **Under a walking player, on land.** A beaver caught on the bank is
+            // caught; one that reaches the water is gone, because it dives
+            // (`dives`) and it is quicker under the surface than anybody on it.
+            // The whole animal is that line along the bank.
+            Species::Beaver => 3.0,
+            // Up and away: this is its flight, not its legs. See the fowl.
+            Species::Duck => 6.8,
+            // Two blocks and a splash. Nobody chases a frog; they reach for one
+            // before it jumps.
+            Species::Frog => 2.8,
         }
     }
 
@@ -1115,6 +1314,16 @@ impl Species {
             // The shortest wind of anything alive. A crab's escape is the
             // rock, not the distance.
             Species::Crab => 2.0,
+            Species::Fox => 6.0,
+            // **The longest wind of anything that walks but the bear**, and a
+            // breath under it so the bear keeps its promise. A wounded elk goes
+            // a long way before it stops, which is the price of a bad throw: a
+            // follow through two valleys, or the meat left for the wolves.
+            Species::Elk => 19.0,
+            Species::Beaver => 5.0,
+            // A duck flies until it is somewhere else.
+            Species::Duck => 14.0,
+            Species::Frog => 3.0,
         }
     }
 
@@ -1185,6 +1394,13 @@ impl Species {
             Species::Horse => 16.0,
             Species::Monkey => 6.0,
             Species::Crab => 3.0,
+            Species::Fox => 5.0,
+            // Most of a bear, in a hide a third as thick: the biggest meal in the
+            // world and a long job with a spear.
+            Species::Elk => 30.0,
+            Species::Beaver => 7.0,
+            Species::Duck => 2.5,
+            Species::Frog => 1.0,
         }
     }
 
@@ -1229,6 +1445,11 @@ impl Species {
             // -- and `death_cause`, which has to name it because a blow this
             // small can still be the last one somebody takes.
             Species::Crab => 0.5,
+            // **Only when it is defending something**: see `death_cause`. The kick
+            // of a cow with a calf behind her is the second hardest blow in the
+            // world, and it is a blow a player walked into.
+            Species::Elk => 7.0,
+            Species::Fox | Species::Beaver | Species::Duck | Species::Frog => 0.0,
             Species::Boar => 4.0,
             // **Between a boar and a bear.** Four bites is a dead player,
             // which makes a lion something you do not stand and trade blows
@@ -1298,7 +1519,13 @@ impl Species {
             // herd outlasts a pack (`stamina_seconds`), so what a wolf takes is
             // the horse left tied at home through the night -- and the answer
             // to that is the stable wall, the same one the sheep needed.
-            Species::Wolf => matches!(other, Species::Hare | Species::Deer | Species::Sheep | Species::Horse),
+            Species::Wolf => matches!(other, Species::Hare | Species::Deer | Species::Sheep | Species::Horse | Species::Elk),
+            // **Everything small, and nothing a player keeps.** The fox's list
+            // is the reason it is two animals at once: the rat is on it, so a
+            // fox about the house is a rat-catcher, and the grouse and the duck
+            // are on it, so the same fox is the thing that took the bird you
+            // were stalking. See `Species::Fox`.
+            Species::Fox => matches!(other, Species::Hare | Species::Rat | Species::Fowl | Species::Duck | Species::Frog),
             // The savanna's grazers and nothing from the woods: the two
             // never share ground (`lives_in`), and a rule about a deer that
             // strayed over a border is a rule nobody ever sees working. Not
@@ -1373,6 +1600,13 @@ impl Species {
             // it, which is what `hide_armour`'s own table is careful not to
             // be.
             | Species::Crab => 0.0,
+            // A duck and a frog are the gull and the crab again; a fox's coat is
+            // fur and a beaver's is fur over fat, and neither stops a knife.
+            Species::Duck | Species::Frog => 0.0,
+            Species::Fox => 0.2,
+            Species::Beaver => 0.3,
+            // A deer's hide, twice as thick -- still a hide a spear goes through.
+            Species::Elk => 0.8,
             // A deer's coat turns a graze and no more.
             Species::Deer | Species::Sheep | Species::Zebra | Species::Horse => 0.4,
             // A mane and a thick hide over the shoulders, under a boar's
@@ -1443,7 +1677,7 @@ impl Species {
     /// `== Fowl` -- see `soars` for what separates the two.
     #[inline]
     pub fn flies(self) -> bool {
-        matches!(self, Species::Fowl | Species::Gull)
+        matches!(self, Species::Fowl | Species::Gull | Species::Duck)
     }
 
     /// Does it keep a stretch of sky over the shore, rather than a nest?
@@ -1535,6 +1769,23 @@ impl Species {
             // The sand and the shallows off it. A crab is found where the
             // water meets the land, which is these two biomes and no other.
             Species::Crab => matches!(biome, Biome::Beach | Biome::Ocean),
+            // **The fox is everywhere a hare is that is not hot**: the woods, the
+            // meadows, the steppe and the cold -- because what it follows is its
+            // food, and its food is everywhere.
+            Species::Fox => !matches!(biome, Biome::Savanna | Biome::Desert | Biome::Beach | Biome::Ocean | Biome::SnowyPeaks),
+            // The north and the wet: the taiga, the birch wood, the bog and the
+            // marsh, where there is water to stand in and willow to eat.
+            Species::Elk => matches!(biome, Biome::Taiga | Biome::BirchForest | Biome::Bog | Biome::Swamp | Biome::Tundra | Biome::Forest),
+            // **Running water under trees**: a river through wooded country, and
+            // the streams of the marsh. The bank is asked by the spawner
+            // (`populate_banks`), which is where a beaver actually is.
+            Species::Beaver => matches!(biome, Biome::River | Biome::Forest | Biome::BirchForest | Biome::Taiga | Biome::Swamp | Biome::Bog),
+            // Fresh water anywhere it is not frozen or salt: the season keeps it
+            // out of the winter (`in_season`), and the sea is the gull's.
+            Species::Duck => matches!(biome, Biome::Swamp | Biome::Bog | Biome::River | Biome::Plains | Biome::Forest | Biome::BirchForest | Biome::Taiga | Biome::Steppe | Biome::Hills),
+            // Still, warm, weedy water: the marsh above all, and the edges of the
+            // meadow lakes and the forest ponds.
+            Species::Frog => matches!(biome, Biome::Swamp | Biome::Bog | Biome::River | Biome::Plains | Biome::Forest | Biome::BirchForest),
             Species::Deer | Species::Boar | Species::Wolf | Species::Sheep | Species::Bear => {
                 biome != Biome::Savanna
             }
@@ -1745,7 +1996,11 @@ impl Species {
     /// the bear, which are not night animals and whose rule is distance.
     #[inline]
     pub fn shies_from_fire(self) -> bool {
-        matches!(self, Species::Wolf | Species::Lion)
+        // ...and the fox, which is the reason a camp's meat is safest beside
+        // the fire it was cooked on. It comes to the edge of the light and
+        // no further, and that is the whole of the answer to it for anybody
+        // who stays up (`Species::Fox`).
+        matches!(self, Species::Wolf | Species::Lion | Species::Fox)
     }
 
     /// When it is losing, does it fall back and keep you in sight rather
@@ -1773,7 +2028,37 @@ impl Species {
     pub fn scavenges(self) -> bool {
         // The lion as well: a kill left lying on the savanna is the lion's
         // dinner the way one in a meadow is the pack's.
-        matches!(self, Species::Wolf | Species::Lion)
+        // ...and the fox, whose whole trade with people is this: what was
+        // left lying is what it takes. See `Species::Fox`.
+        matches!(self, Species::Wolf | Species::Lion | Species::Fox)
+    }
+
+    /// Does it go into the water of its own accord?
+    ///
+    /// **Four animals, and the rule they break is on the server's module doc:
+    /// nothing walks into a lake voluntarily.** That rule is there because an
+    /// animal floating out to the middle of a lake is an animal nobody can
+    /// reach, and for a deer that is exactly the wrong thing. For these four
+    /// the water is where they *are*: an elk stands in it to feed and to lose
+    /// the flies, a beaver lives in it, a duck sits on it and a frog jumps
+    /// into it -- so what a player has to work out is how to reach an animal
+    /// that is somewhere a player is slow, which is the decision these four
+    /// are for. Asked by the server's `walk` (the bank is not a cliff to
+    /// them) and by its `think` (the shore is not where they are hurrying).
+    #[inline]
+    pub fn takes_to_water(self) -> bool {
+        matches!(self, Species::Elk | Species::Beaver | Species::Duck | Species::Frog)
+    }
+
+    /// Does it go *under* when it is frightened in the water?
+    ///
+    /// The beaver and the frog. Everything else that takes to the water
+    /// floats on it -- a duck flies off it and an elk wades out of it -- and a
+    /// diving animal is out of reach of a spear for as long as it holds its
+    /// breath, which is the reason reaching it on the bank is the hunt.
+    #[inline]
+    pub fn dives(self) -> bool {
+        matches!(self, Species::Beaver | Species::Frog)
     }
 
     /// How long a kill keeps it fed, in seconds.
@@ -1791,6 +2076,9 @@ impl Species {
             // under a tree -- which is what keeps a pair from clearing the
             // grass of the only animals a savanna has to eat.
             Species::Lion => 300.0,
+            // A fox that has eaten is a fox curled up in its den for five
+            // minutes, which is the other reason the rats come back.
+            Species::Fox => 300.0,
             _ => 0.0,
         }
     }
@@ -1817,6 +2105,10 @@ impl Species {
             // the hand that closes on it (the server's `pinch`), which is a
             // defence and not a charge.
             | Species::Crab => 0.0,
+            // A fox is no more a fight than a hare is -- its danger is to the
+            // larder -- and an elk's temper is the server's `defends`, which asks
+            // what it is standing over rather than how near a player is.
+            Species::Fox | Species::Elk | Species::Beaver | Species::Duck | Species::Frog => 0.0,
             Species::Boar => 3.0,
             // Between the bear's four and a half and the wolf's six, and
             // unlike the wolf's it means what it says: a lion does not wait
@@ -1866,6 +2158,10 @@ impl Species {
             | Species::Rat
             | Species::Horse
             | Species::Crab => 0.0,
+            Species::Fox | Species::Beaver | Species::Duck | Species::Frog => 0.0,
+            // Less than the boar: an elk that has driven you off her calf does
+            // not follow you into the next wood.
+            Species::Elk => 15.0,
             // **A troop remembers, and it is the one thing here that holds a
             // grudge without ever fighting.** Two minutes is long enough
             // that a stone thrown at a monkey buys a quiet afternoon, and
@@ -1979,6 +2275,12 @@ impl Species {
             // The claws and the body of one crab: a mouthful, and one that
             // has to see a fire (`food::sickness_seconds`).
             Species::Crab => &[(crate::types::BLOCK_CRAB_MEAT, 1)],
+            Species::Fox => &[(BLOCK_PELT, 2)],
+            Species::Elk => &[(BLOCK_RAW_MEAT, 6), (BLOCK_HIDE, 3)],
+            Species::Beaver => &[(BLOCK_PELT, 2), (BLOCK_FAT, 1)],
+            // The gull's drops, on the gull's terms: see `carcass`.
+            Species::Duck => &[(BLOCK_FOWL_MEAT, 1), (BLOCK_FEATHER, 3)],
+            Species::Frog => &[(crate::types::BLOCK_FROG, 1)],
         }
     }
 
@@ -2006,6 +2308,12 @@ impl Species {
             Species::Antelope => BLOCK_CARCASS_ANTELOPE,
             Species::Lion => BLOCK_CARCASS_LION,
             Species::Horse => crate::types::BLOCK_CARCASS_HORSE,
+            Species::Elk => crate::types::BLOCK_CARCASS_ELK,
+            Species::Fox => crate::types::BLOCK_CARCASS_FOX,
+            Species::Beaver => crate::types::BLOCK_CARCASS_BEAVER,
+            // A duck is a gull on fresh water and falls as one does; a frog is
+            // the thing itself, picked up whole (`BLOCK_FROG`).
+            Species::Duck | Species::Frog => return None,
             // **Neither of the shore's two leaves a body**, for the gull's
             // reason: a carcass is a thing you kneel at with a knife and
             // there is nothing on a monkey or a crab worth the kneeling.
@@ -2140,6 +2448,23 @@ impl Species {
             // No carcass, so no cuts: see `carcass`.
             Species::Fish | Species::Cod | Species::Trout | Species::Pike | Species::Herring | Species::Gull
             | Species::Rat | Species::Monkey | Species::Crab => &[],
+            Species::Duck | Species::Frog => &[],
+            // Almost all pelt: a fox is skinned for its coat and nothing else.
+            // The meat is the wolf's -- lean and strong -- and there is one
+            // mouthful of it: a fox is skinned for its coat.
+            Species::Fox => &[(BLOCK_PELT, 2), (BLOCK_SINEW, 1), (BLOCK_BONE, 1), (BLOCK_WOLF_MEAT, 1)],
+            // **The biggest body in the world, and the order of it is the
+            // deer's**: the hide first, the fat and the sinew, the bone, and the
+            // meat last -- more of every one of them.
+            Species::Elk => &[
+                (BLOCK_HIDE, 3),
+                (BLOCK_FAT, 2),
+                (BLOCK_SINEW, 4),
+                (BLOCK_BONE, 3),
+                (BLOCK_RAW_MEAT, 6),
+            ],
+            // The pelt and the fat under it: the one small animal worth the knife.
+            Species::Beaver => &[(BLOCK_PELT, 2), (BLOCK_FAT, 1), (BLOCK_SINEW, 1), (BLOCK_BONE, 1), (BLOCK_RAW_MEAT, 1)],
         }
     }
 
@@ -2253,6 +2578,15 @@ impl Species {
             // Stalked eyes: they see all round (`view_cone`) and not far. A
             // crab is watching the yard of sand it can reach a stone from.
             Species::Crab => 6.0,
+            Species::Fox => 14.0,
+            // **Short-sighted**: an elk sees less than a deer does. What it has
+            // instead is the nose and the ears (see below), so a player standing
+            // still downwind at twelve blocks is invisible to it and the same
+            // player upwind at forty is not.
+            Species::Elk => 10.0,
+            Species::Beaver => 7.0,
+            Species::Duck => 13.0,
+            Species::Frog => 5.0,
         }
     }
 
@@ -2333,6 +2667,14 @@ impl Species {
             // which comes to the same number and is why a crab is under a
             // stone before you are in reach of it.
             Species::Crab => 7.0,
+            // The best ears in the wood: a fox hunts voles under snow by sound.
+            Species::Fox => 16.0,
+            Species::Elk => 16.0,
+            Species::Beaver => 12.0,
+            Species::Duck => 9.0,
+            // The chorus is the frog's ears as much as its voice: see the server's
+            // `hush`, which is what a frog does about something it heard.
+            Species::Frog => 7.0,
         }
     }
 
@@ -2390,6 +2732,12 @@ impl Species {
             // A monkey lives by fruit and finds it the way a bear finds
             // honey, at a fraction of the distance.
             Species::Monkey => 10.0,
+            Species::Fox => 20.0,
+            // **The best nose in the world**, and it is the animal: the wind
+            // decides an elk hunt before the spear does. See `Species::Elk`.
+            Species::Elk => 30.0,
+            Species::Beaver => 14.0,
+            Species::Duck | Species::Frog => 0.0,
             // Birds and fish go by their eyes.
             // ...and a crab by the water on its gills.
             Species::Crab
@@ -2426,6 +2774,10 @@ impl Species {
             // no behind it, which is why creeping up on one does not work
             // and reaching quickly does.
             | Species::Crab => -1.0,
+            Species::Duck | Species::Frog => -0.9,
+            Species::Fox => -0.3,
+            Species::Elk => -0.75,
+            Species::Beaver => -0.75,
             // A monkey's eyes face forward -- it is judging the gap to the
             // next branch -- but its head is never still, and what a player
             // can use is the same as for every other prey animal: it has a
@@ -2453,6 +2805,10 @@ impl Species {
             // is exactly what `Loose` means.
             Species::Hare | Species::Fowl | Species::Boar | Species::Gull | Species::Rat
             | Species::Crab => Grouping::Loose,
+            // A cow and her calf, a young bull or two: a herd of three at most.
+            Species::Elk => Grouping::Herd,
+            Species::Fox => Grouping::Alone,
+            Species::Beaver | Species::Duck | Species::Frog => Grouping::Loose,
             Species::Bear => Grouping::Alone,
             Species::Fish | Species::Cod | Species::Trout | Species::Herring => Grouping::School,
             // **The one swimmer that is not a school.** A cod is alone too
@@ -2487,7 +2843,7 @@ impl Species {
         // which is every part of the animal except the one that matters.
         matches!(
             self,
-            Species::Hare | Species::Deer | Species::Fowl | Species::Crab | Species::Monkey
+            Species::Hare | Species::Deer | Species::Fowl | Species::Crab | Species::Monkey | Species::Fox | Species::Elk
         )
     }
 
@@ -2657,6 +3013,20 @@ impl Species {
             // midnight is crawling.
             (Species::Crab, false) => 2,
             (Species::Crab, true) => 8,
+            // **Mostly at night and at the ends of the day**, which is when a
+            // grouse is on the ground and a hare is out.
+            (Species::Fox, false) => 1,
+            (Species::Fox, true) => 3,
+            (Species::Elk, _) => 2,
+            // The three that live by the water are put there by their own spawner
+            // (`populate_banks` on the server); these weights are what it draws
+            // with, and the meadow's spawner never asks for one.
+            (Species::Beaver, false) => 2,
+            (Species::Beaver, true) => 3,
+            (Species::Duck, false) => 3,
+            (Species::Duck, true) => 1,
+            (Species::Frog, false) => 2,
+            (Species::Frog, true) => 6,
         }
     }
 }
@@ -2808,6 +3178,11 @@ pub const fn group_size(species: Species) -> (u32, u32) {
         // would arrive in a ring like a herd rather than being found one at
         // a time under different stones.
         Species::Crab => (1, 4),
+        Species::Fox => (1, 1),
+        Species::Elk => (1, 3),
+        Species::Beaver => (1, 2),
+        Species::Duck => (2, 5),
+        Species::Frog => (2, 4),
     }
 }
 
@@ -3841,7 +4216,11 @@ mod tests {
         for &species in Species::ALL {
             assert_eq!(
                 species.run_speed() > NOMINAL_WALK,
-                !matches!(species, Species::Sheep | Species::Rat | Species::Crab),
+                // ...and the beaver and the frog, which are slow on land and
+                // are never on land for long: what saves them is the water a
+                // step away (`Species::dives`), so the chase is decided by
+                // whether a player got between them and it, not by legs.
+                !matches!(species, Species::Sheep | Species::Rat | Species::Crab | Species::Beaver | Species::Frog),
                 "{} runs at {:.1} against a walk of {NOMINAL_WALK:.1}",
                 species.name(),
                 species.run_speed(),
@@ -3934,13 +4313,14 @@ mod tests {
         // ...and the crab is the fifth, and the shortest-winded thing
         // alive: two seconds, which is the width of a beach between one
         // stone and the next.
-        for burst in [Species::Hare, Species::Fowl, Species::Pike, Species::Rat, Species::Crab] {
+        // ...and the frog is the sixth: two hops and a splash.
+        for burst in [Species::Hare, Species::Fowl, Species::Pike, Species::Rat, Species::Crab, Species::Frog] {
             assert!(
                 Species::ALL
                     .iter()
                     .filter(|s| !matches!(
                         s,
-                        Species::Hare | Species::Fowl | Species::Pike | Species::Rat | Species::Crab
+                        Species::Hare | Species::Fowl | Species::Pike | Species::Rat | Species::Crab | Species::Frog
                     ))
                     .all(|s| s.stamina_seconds() > burst.stamina_seconds()),
                 "a {} has as much wind as something that has to be run down",
@@ -3992,7 +4372,7 @@ mod tests {
             // end of the scale.
             let expected = !(species.flies()
                 || species.swims()
-                || matches!(species, Species::Sheep | Species::Rat | Species::Monkey | Species::Crab));
+                || matches!(species, Species::Sheep | Species::Rat | Species::Monkey | Species::Crab | Species::Frog));
             assert_eq!(
                 skin,
                 expected,
@@ -4018,12 +4398,18 @@ mod tests {
         // horse nobody rides home, and taming one costs a week of feeding;
         // nobody hunts the plains' best mount for leather while there are
         // deer, and anybody who does has made the decision the horse is for.
+        //
+        // **Five, and the fifth is the elk**, which prices the rule the other
+        // way: three hides from one animal, and the animal is the hardest in
+        // the world to get close to (`Species::Elk`) and lives only in the
+        // north and the bog. A player who wants leather in bulk goes where the
+        // elk are and learns the wind, which is a journey and not a chore.
         let full_hide: Vec<&str> = Species::ALL
             .iter()
             .filter(|s| s.drops().iter().any(|&(b, _)| b == BLOCK_HIDE))
             .map(|s| s.name())
             .collect();
-        assert_eq!(full_hide, ["deer", "boar", "zebra", "horse"]);
+        assert_eq!(full_hide, ["deer", "boar", "zebra", "horse", "elk"]);
     }
 
     #[test]
@@ -4037,7 +4423,7 @@ mod tests {
             .collect();
         // One hunter per country: the wolf in the woods and meadows, the
         // lion on the savanna.
-        assert_eq!(predators, ["wolf", "lion"]);
+        assert_eq!(predators, ["wolf", "lion", "fox"]);
         let hunted: Vec<&str> = Species::ALL
             .iter()
             .filter(|&&s| Species::ALL.iter().any(|p| p.hunts(s)))
@@ -4045,7 +4431,10 @@ mod tests {
             .collect();
         // ...and the horse, by both: the pack on the plain and the lion at
         // the savanna's edge (`lives_in`).
-        assert_eq!(hunted, ["hare", "deer", "sheep", "zebra", "antelope", "horse"]);
+        assert_eq!(
+            hunted,
+            ["hare", "deer", "sheep", "fowl", "zebra", "antelope", "rat", "horse", "elk", "duck", "frog"]
+        );
         // Nothing hunts itself, and the ones that fight back are left out
         // of each other's business.
         for &species in Species::ALL {
@@ -4062,7 +4451,10 @@ mod tests {
         // it.
         for &hunter in Species::ALL {
             for &prey in Species::ALL {
-                if hunter.hunts(prey) {
+                // The rat lives in houses and nowhere on the biome map
+                // (`Species::Rat`): the fox meets it where people are, which
+                // is the whole of why a fox is a rat-catcher.
+                if hunter.hunts(prey) && prey != Species::Rat {
                     assert!(
                         crate::worldgen::Biome::ALL
                             .iter()
@@ -4217,7 +4609,10 @@ mod tests {
         // plains' own, grazing out onto the straw (`Species::Horse`'s
         // `lives_in` row, and `spawn_weight_in` for how rarely).
         assert_eq!(living_in(Biome::Savanna), ["hare", "fowl", "zebra", "antelope", "lion", "horse"]);
-        assert_eq!(living_in(Biome::Plains), ["hare", "deer", "boar", "wolf", "sheep", "bear", "fowl", "horse"]);
+        assert_eq!(
+            living_in(Biome::Plains),
+            ["hare", "deer", "boar", "wolf", "sheep", "bear", "fowl", "horse", "fox", "duck", "frog"]
+        );
         // ...and the shore has two animals that are nowhere else at all. The
         // beach is not a *closed* country the way the savanna is -- a deer
         // walks down to the sand and a wolf follows it -- but nothing walks
@@ -4289,7 +4684,8 @@ mod tests {
         // **The lion's manners: the wolf's where they are the night's, its
         // own where they are the pack's.** Short lists on purpose; each
         // name on them is a branch of the server's `think_hunter`.
-        assert_eq!(names(Species::shies_from_fire), ["wolf", "lion"]);
+        // ...and the fox, whose meat-thieving is answered by the same fire.
+        assert_eq!(names(Species::shies_from_fire), ["wolf", "lion", "fox"]);
         assert_eq!(names(Species::flanks), ["wolf", "lion"]);
         assert_eq!(names(Species::needs_company), ["wolf"]);
         assert_eq!(names(Species::falls_back_when_hurt), ["wolf"]);
@@ -4410,7 +4806,10 @@ mod tests {
             if species.swims() {
                 continue;
             }
-            if species.is_hostile() {
+            // A hunter is a hunter whether or not it will come at a person:
+            // the fox's eyes are in front of its head for the vole it is
+            // about to pounce on.
+            if species.is_hostile() || species.is_predator() {
                 assert!(species.view_cone() >= -0.5, "a {} sees behind itself", species.name());
             } else {
                 assert!(species.view_cone() <= -0.75, "a {} has a blind half", species.name());

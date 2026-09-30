@@ -1,6 +1,6 @@
 //! The small life round a player: butterflies over the flowers by day,
-//! fireflies on a warm evening, frogs at the edge of fresh water, bees
-//! round a wild hive, and bats in the dark under the ground.
+//! fireflies on a warm evening, bees round a wild hive, and bats in the
+//! dark under the ground.
 //!
 //! ## Why these are the client's, and the gull is the server's
 //!
@@ -16,9 +16,9 @@
 //!   butterfly is none of those things. Forty fireflies on a summer night
 //!   as server animals would be forty entity updates a tick, for light.
 //! * **A particle** (`engine::particles`) has no mind: it is thrown and it
-//!   falls. A frog that hops into the pond when a wolf comes near has to
-//!   know where the pond is and where the wolf is, and a butterfly that
-//!   comes back to *its* flower has to remember the flower.
+//!   falls. A bat that goes up round a torch has to know where the torch is,
+//!   and a butterfly that comes back to *its* flower has to remember the
+//!   flower.
 //! * **This**: a small pool beside the particles with a mind per critter,
 //!   drawn into the particle buffer, costing no network, no save and no
 //!   server time. What it gives up is that two players see different
@@ -26,10 +26,33 @@
 //!   anywhere in particular. The day one of these becomes something a
 //!   player can catch or eat, it moves to the server.
 //!
+//! ## Where the frog went
+//!
+//! **That day came for the frog.** It lived here -- a pool of frogs at the
+//! bank of any fresh water, hopping in when a wolf came near, falling silent
+//! round anything that meant harm -- until a frog became something a player
+//! catches by hand and puts on a hook for a pike (`Species::Frog`,
+//! `fishing::Bait::Frog`). Then there were two frogs at every pond, and they
+//! disagreed: the one that could be caught was the server's, and the one
+//! that sang was this one, which hushed for a wolf the server's frog did not
+//! know about, kept singing when a player had taken every real frog off the
+//! bank for bait, and went quiet for one player and not for the friend
+//! beside them. A mechanic two people hear differently is not a mechanic.
+//!
+//! So it went, all of it: the spawner at the water, the hop, the hush, the
+//! drawing. The server's frog hushes now (its `frog`, `HUSH_SECONDS`), for a
+//! player heard at their own loudness and for a hunter it has seen, and the
+//! quiet reaches every client as `Attitude::Alert`; the chorus is sung by
+//! the frogs the server sent (`soundscape::calls`), in their hours and in
+//! warm air -- the eight degrees that were learned here, "лягушки
+//! игнорируют температуру и сезон", went with it (`soundscape::CHORUS_WARMTH_C`). What
+//! stayed is the air: `air_here` is still asked here, once a frame, and the
+//! crickets and the frogs both sing by it.
+//!
 //! ## What each is for
 //!
 //! **A mechanic should create a decision, not a chore**, and scenery is
-//! neither -- so each of the three carries one small true thing:
+//! neither -- so each of them carries one small true thing:
 //!
 //! * a **butterfly** says the ground here is in flower, and it keeps its
 //!   distance from anybody who runs at it, so walking up on one is slower
@@ -48,11 +71,10 @@
 //!   erupts in wings is a cave with a hollow in it big enough to roost in.
 //!   And at dusk they pour out of the mouth of a cave into the open
 //!   (`bat_dusk`): a stream of bats over a hillside at sunset is a cave the
-//!   player has not found yet, and it is shown where it is;
-//! * **frogs** are the one that is information. A chorus falls silent round
-//!   anything that means harm (`HUSH_RADIUS`), and the frogs at the bank go
-//!   into the water: a pond that has gone quiet in the dark with nobody near
-//!   it is a wolf the player has not seen yet (`Surroundings::dangers`).
+//!   player has not found yet, and it is shown where it is.
+//!
+//! (The frogs were the fifth, and the one that was information; see above
+//! for where they went.)
 //!
 //! ## What was rejected, and why
 //!
@@ -79,7 +101,7 @@
 use glam::Vec3;
 
 use primitive_shared::lighting::LightMap;
-use primitive_shared::types::{self, BlockId, BLOCK_REEDS, BLOCK_TALL_GRASS};
+use primitive_shared::types::{self, BlockId, BLOCK_REEDS};
 use primitive_shared::worldgen::Biome;
 
 use crate::engine::mesh::pack_light;
@@ -96,10 +118,6 @@ pub const MAX_BUTTERFLIES: usize = 8;
 
 /// The most fireflies. Thirty-six is a ditch lit up; each is two quads.
 pub const MAX_FIREFLIES: usize = 36;
-
-/// The most frogs. Eight is a pond's edge -- enough for a chorus to have
-/// a *shape*, so that the part of it that has gone quiet can be heard.
-pub const MAX_FROGS: usize = 8;
 
 /// The most bees round one player, over every hive in reach.
 ///
@@ -169,69 +187,25 @@ const RUNNING: f32 = 5.0;
 
 /// How much further off a running player is noticed.
 ///
-/// **The one interaction the butterflies and the frogs share**, and the
-/// reason walking up to either is different from running at it: a player
-/// who wants to see a frog sits still at a pond's edge, and one who
-/// sprints along the bank sees a row of splashes.
+/// **The reason walking up to a butterfly is different from running at it**:
+/// a player who wants to see one stands still in the meadow, and one who
+/// sprints through it sees wings going up. The frogs shared it once; the
+/// server's frog hears a player by their gait (`Gait::loudness`) instead.
 const RUNNING_WARINESS: f32 = 1.8;
 
 /// How near a walking player comes before a butterfly takes flight, in
 /// blocks.
 const BUTTERFLY_WARY: f32 = 2.2;
 
-/// How near a walking player comes before a frog goes into the water.
-const FROG_WARY: f32 = 3.5;
-
-/// How near a hostile animal comes before a frog goes into the water.
-/// Further than a person, because a wolf is quieter and lower.
-const FROG_WARY_OF_BEASTS: f32 = 6.0;
-
-/// How far a chorus falls silent round something that means harm, in
-/// blocks.
-///
-/// **This is the mechanic**, so the number is argued. Twelve is well past
-/// the frogs that go into the water (`FROG_WARY_OF_BEASTS`): the silence is
-/// wider than the fright, which is how it reads at night -- the near part of
-/// the pond stops first and the quiet travels with whatever is moving. It is
-/// under a wolf's own awareness (eighteen), so a player who hears the frogs
-/// stop has a few seconds before the wolf has them.
-const HUSH_RADIUS: f32 = 12.0;
-
-/// ...and round a person, which is much less: a chorus you could never get
-/// near would be a chorus nobody hears, and a frog near your feet does go
-/// quiet.
-const HUSH_RADIUS_PLAYER: f32 = 4.0;
-
-/// How long a hushed frog stays quiet after the last thing that hushed it.
-const HUSH_SECONDS: f32 = 8.0;
-
 /// Degrees over freezing each needs before it is out at all.
 ///
 /// Measured against the climate, the season *and the hour* (`warmth_now`),
 /// so a swamp in winter is as empty as a tundra in summer and a cold spring
-/// night is silent. Frogs first, because a frog in a cold spring is still a
-/// frog; fireflies last, because they are the height of summer and nothing
-/// else.
-///
-/// **Eight for a frog, and it was four**, measured against the day's warmth
-/// alone and only on the frame a frog appeared. "лягушки игнорируют
-/// температуру и сезон": a chorus that came out on a mild autumn afternoon
-/// sang on through the frost that night, because nothing asked again, and
-/// four degrees over the day's peak is a night well under freezing. Frogs
-/// wake at about eight; below that they are in the mud.
-const FROG_WARMTH_C: f32 = 8.0;
+/// night is silent. Fireflies last, because they are the height of summer
+/// and nothing else. (The frogs' eight, and the story of how it was learned,
+/// went to the soundscape with them: `soundscape::CHORUS_WARMTH_C`.)
 const BUTTERFLY_WARMTH_C: f32 = 10.0;
 const FIREFLY_WARMTH_C: f32 = 14.0;
-
-/// How hard a frog pushes off, up and across, in blocks a second -- and
-/// what brings it down.
-///
-/// Worked through: 4.2 up against 18 of gravity is half a second in the
-/// air, and 2.4 across in that time is a block and a fifth, which is the
-/// distance from the bank cell to the middle of the water cell beside it.
-const HOP_UP: f32 = 4.2;
-const HOP_ACROSS: f32 = 2.4;
-const FROG_GRAVITY: f32 = 18.0;
 
 /// The most bats round one player: two small colonies, or one and the
 /// stream leaving a cave mouth. Each is a box and two wings.
@@ -333,7 +307,6 @@ const BAT_STREAM_EVERY: (f32, f32) = (4.0, 9.0);
 pub enum Kind {
     Butterfly,
     Firefly,
-    Frog,
     Bee,
     Bat,
 }
@@ -341,16 +314,12 @@ pub enum Kind {
 /// What it is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
-    /// On its flower, or sitting on the bank.
+    /// On its flower, or hanging from the roof of its cave.
     Resting,
     /// Flying about its flower, or drifting.
     Flying,
     /// Getting away from somebody.
     Fleeing,
-    /// A frog in the air.
-    Hopping,
-    /// A frog under the water: not drawn, and gone when its time is up.
-    Under,
     /// A bat on its way out of a cave at dusk: to the mouth (`via`), then
     /// out to `home` over the open, then hunting round it.
     Emerging,
@@ -358,13 +327,13 @@ enum State {
 
 #[derive(Debug, Clone, Copy)]
 struct Critter {
-    /// For tests, which have to follow one frog through a `retain`.
+    /// For tests, which have to follow one critter through a `retain`.
     id: u32,
     kind: Kind,
     position: glam::DVec3,
     velocity: Vec3,
-    /// The flower, the patch of air over the grass, or -- for a frog --
-    /// the middle of the water it goes into.
+    /// The flower, the patch of air over the grass, the hive, or the
+    /// point over the open a bat hunts round.
     home: Vec3,
     /// Where a flight is aimed.
     target: Vec3,
@@ -383,10 +352,9 @@ struct Critter {
     fade: f32,
     /// Its hour is over and it is going.
     leaving: bool,
-    /// A frog that is calling.
+    /// A bee from a robbed hive, out for whoever comes near; a bat that
+    /// has reached the open and is hunting.
     calling: bool,
-    /// Seconds a frog stays quiet for.
-    hushed: f32,
     /// The mouth of the cave an emerging bat is making for.
     via: Vec3,
 }
@@ -403,13 +371,6 @@ pub struct Surroundings<'a> {
     pub world_time: f32,
     /// Raining or snowing.
     pub wet: bool,
-    /// Where the hostile animals near the player are.
-    ///
-    /// **The client already knows** -- they came in the snapshot -- which is
-    /// the whole reason a frog can hear a wolf the player cannot see: the
-    /// wolf is behind a hill or in the dark, not outside the interest
-    /// radius.
-    pub dangers: &'a [Vec3],
     /// The biome of a column, its climate temperature (the generator's 0..1)
     /// and its share of the year's swing (`season::seasonal_swing`), at a
     /// cell. A closure so the tests can say "a warm swamp" without a
@@ -453,7 +414,7 @@ impl Default for Critters {
 impl Critters {
     pub fn new() -> Self {
         Self {
-            live: Vec::with_capacity(MAX_BUTTERFLIES + MAX_FIREFLIES + MAX_FROGS + MAX_BEES + MAX_BATS),
+            live: Vec::with_capacity(MAX_BUTTERFLIES + MAX_FIREFLIES + MAX_BEES + MAX_BATS),
             seed: 0x51A5_F00D,
             next_id: 0,
             look_in: 0.0,
@@ -481,20 +442,11 @@ impl Critters {
     }
 
     /// The country under the player and how warm the air is there now, in
-    /// degrees over freezing -- for the crickets (`soundscape::cricket_chorus`),
-    /// which sing by the same air the frogs do. `None` before the first
-    /// frame in a world.
+    /// degrees over freezing -- for the crickets (`soundscape::cricket_chorus`)
+    /// and the frogs (`soundscape::calls`), which sing by the same air. `None`
+    /// before the first frame in a world.
     pub fn air_here(&self) -> Option<(Biome, f32)> {
         self.biome_here.map(|biome| (biome, self.warm_here))
-    }
-
-    /// Where the frogs that are calling are, for the soundscape.
-    pub fn croaking(&self) -> Vec<Vec3> {
-        self.live
-            .iter()
-            .filter(|c| c.kind == Kind::Frog && c.calling)
-            .map(|c| c.position.as_vec3())
-            .collect()
     }
 
     /// Where the bats on the wing are, for the soundscape's wingbeats.
@@ -526,7 +478,7 @@ impl Critters {
     /// One frame: look for somewhere to put something, then let everything
     /// alive do what it does.
     pub fn update(&mut self, around: &Surroundings<'_>, dt: f32) {
-        // A hitch of a whole second must not throw a frog through the bank.
+        // A hitch of a whole second must not throw a bat through the rock.
         let dt = dt.clamp(0.0, 0.1);
         let running = match self.last_player {
             Some(last) if dt > 0.0 => (around.player - last).length() / dt > RUNNING,
@@ -573,7 +525,6 @@ impl Critters {
                 match critter.kind {
                     Kind::Butterfly => self.butterfly(&mut critter, around, hour, wariness, dt),
                     Kind::Firefly => self.firefly(&mut critter, around, hour, dt),
-                    Kind::Frog => self.frog(&mut critter, around, hour, wariness, dt),
                     Kind::Bee => self.bee(&mut critter, around, hour, dt),
                     Kind::Bat => self.bat(&mut critter, around, hour, dt),
                 }
@@ -603,29 +554,6 @@ impl Critters {
         let (biome, temperature, swing) = (around.country)(x, spot.ground_y, z);
         let warm = warmth_now(temperature, around.world_time, swing);
         let top = Vec3::new(x as f32 + 0.5, spot.ground_y as f32 + 1.0, z as f32 + 0.5);
-
-        // **A frog is where fresh water meets a bank**, and nowhere else:
-        // the sea is salt, and a frog in a dry meadow is a frog that is
-        // going to die in it.
-        if let Some((wx, wz)) = spot.water {
-            let fresh = !matches!(biome, Biome::Ocean | Biome::Beach);
-            let bank = spot.plant.is_none_or(|p| matches!(types::block_kind(p), BLOCK_TALL_GRASS | BLOCK_REEDS));
-            if fresh && bank && warm >= FROG_WARMTH_C && self.count(Kind::Frog) < MAX_FROGS {
-                let water = Vec3::new(wx as f32 + 0.5, spot.ground_y as f32 + 0.85, wz as f32 + 0.5);
-                let toward = (water - top).with_y(0.0).normalize_or_zero();
-                let hushed = self.between(0.0, 2.0);
-                self.add(Critter {
-                    kind: Kind::Frog,
-                    position: (top + toward * 0.3).as_dvec3(),
-                    home: water,
-                    facing: toward.z.atan2(toward.x),
-                    state: State::Resting,
-                    hushed,
-                    ..self.blank(top)
-                });
-                return;
-            }
-        }
 
         // Every flower, the four new ones too (`types::is_flower`): a
         // butterfly over a drift of poppies is the steppe in May.
@@ -784,7 +712,6 @@ impl Critters {
             fade: 1.0,
             leaving: false,
             calling: false,
-            hushed: 0.0,
             via: at,
         }
     }
@@ -1235,74 +1162,13 @@ impl Critters {
         true
     }
 
-    fn frog(&mut self, c: &mut Critter, around: &Surroundings<'_>, hour: f32, wariness: f32, dt: f32) -> bool {
-        match c.state {
-            State::Under => {
-                c.calling = false;
-                c.timer -= dt;
-                c.timer > 0.0
-            }
-            State::Hopping => {
-                c.calling = false;
-                c.velocity.y -= FROG_GRAVITY * dt;
-                let next = c.position + (c.velocity * dt).as_dvec3();
-                let cell = around.chunks.block_at(next.x.floor() as i32, next.y.floor() as i32, next.z.floor() as i32);
-                if cell.is_some_and(types::is_liquid) && c.velocity.y < 0.0 {
-                    c.position = next;
-                    c.state = State::Under;
-                    c.timer = self.between(12.0, 25.0);
-                } else if cell.is_some_and(types::is_collidable) {
-                    // Landed short, on the bank: it sits where it came down.
-                    c.position.y = next.y.floor() + 1.0;
-                    c.velocity = Vec3::ZERO;
-                    c.state = State::Resting;
-                } else {
-                    c.position = next;
-                }
-                // Never further down than the water it was making for.
-                if c.position.y < f64::from(c.home.y - 3.0) {
-                    c.state = State::Under;
-                    c.timer = 1.0;
-                }
-                true
-            }
-            _ => {
-                // **Cold sends a frog into the water, and it does not come
-                // back up.** The one frame a frog appeared used to be the only
-                // time anything asked about the air.
-                if self.warm_here < FROG_WARMTH_C {
-                    c.calling = false;
-                    c.state = State::Under;
-                    c.timer = self.between(0.5, 2.0);
-                    return true;
-                }
-                let (from_player, _) = nearest(c.position.as_vec3(), std::slice::from_ref(&around.player));
-                let (from_beast, _) = nearest(c.position.as_vec3(), around.dangers);
-                if from_player < FROG_WARY * wariness || from_beast < FROG_WARY_OF_BEASTS {
-                    let toward = (c.home - c.position.as_vec3()).with_y(0.0).normalize_or_zero();
-                    c.velocity = toward * HOP_ACROSS + Vec3::new(0.0, HOP_UP, 0.0);
-                    c.state = State::Hopping;
-                    c.calling = false;
-                    c.hushed = HUSH_SECONDS;
-                    return true;
-                }
-                if from_beast < HUSH_RADIUS || from_player < HUSH_RADIUS_PLAYER * wariness {
-                    c.hushed = HUSH_SECONDS;
-                }
-                c.hushed = (c.hushed - dt).max(0.0);
-                c.calling = (chorus_hour(hour) || around.wet) && c.hushed <= 0.0 && self.warm_here >= FROG_WARMTH_C;
-                true
-            }
-        }
-    }
-
     /// Everything alive, into the particle buffer.
     ///
     /// Measured from the render origin, as `Particles::build_into` is --
     /// `view_proj` is built about it, and a critter written in world
     /// coordinates is drawn the player's own altitude up in the sky.
     ///
-    /// `light` is the world's light map, and a frog and a butterfly are lit
+    /// `light` is the world's light map, and everything but a firefly is lit
     /// from it -- see the note over `lit`.
     #[allow(clippy::too_many_arguments)]
     pub fn build_into(
@@ -1440,19 +1306,6 @@ impl Critters {
                         );
                     }
                 }
-                Kind::Frog => {
-                    if c.state == State::Under {
-                        continue;
-                    }
-                    let forward = Vec3::new(c.facing.cos(), 0.0, c.facing.sin());
-                    let side = Vec3::new(-forward.z, 0.0, forward.x);
-                    let body = at + Vec3::new(0.0, 0.05, 0.0);
-                    push_box(vertices, indices, body, [0.08, 0.05, 0.1], forward, side, FROG_BODY, flat, blob, lit);
-                    for sign in [1.0f32, -1.0] {
-                        let eye = body + forward * 0.06 + side * (sign * 0.05) + Vec3::new(0.0, 0.055, 0.0);
-                        push_box(vertices, indices, eye, [0.022, 0.022, 0.022], forward, side, FROG_EYE, flat, blob, lit);
-                    }
-                }
             }
         }
     }
@@ -1474,10 +1327,6 @@ const BEE_BODY: [f32; 3] = [0.52, 0.38, 0.08];
 const BAT_BODY: [f32; 3] = [0.17, 0.14, 0.13];
 const BAT_WING: [f32; 3] = [0.24, 0.19, 0.17];
 
-/// A pond frog's back, and the gold of its eye.
-const FROG_BODY: [f32; 3] = [0.36, 0.50, 0.20];
-const FROG_EYE: [f32; 3] = [0.80, 0.72, 0.30];
-
 /// Degrees over freezing, here and now: the climate, and the season scaled
 /// to the latitude's share of it -- the same scaling the snow line takes
 /// (`season::falls_as_snow_with_swing`), so a firefly is never out on a
@@ -1493,11 +1342,13 @@ fn warmth(climate_temperature: f32, world_time: f32, swing: f32) -> f32 {
 /// humidity to between seven and seventeen; the client is not told the
 /// humidity of a column, so it takes twelve, the middle. A number of its own
 /// rather than a shared one because the server's also carries shelter and a
-/// pre-dawn chill that a frog at a pond has no use for -- this only has to
-/// put the silence on the right side of a cold night.
+/// pre-dawn chill that a firefly over a ditch has no use for -- this only has
+/// to put the silence on the right side of a cold night.
 const NIGHT_COOLING_C: f32 = 12.0;
 
-/// `warmth`, with the night taken off it: what a frog at a pond feels now.
+/// `warmth`, with the night taken off it: what anything cold-blooded out in
+/// the open feels now -- a firefly here, and a frog or a cricket in the
+/// soundscape (`air_here`).
 fn warmth_now(climate_temperature: f32, world_time: f32, swing: f32) -> f32 {
     let hour = world_time.rem_euclid(1.0);
     // 1 at noon, 0 at midnight -- the server's own curve.
@@ -1518,11 +1369,6 @@ fn butterfly_hour(hour: f32) -> bool {
 /// From dusk until well into the night. The server's night is from 0.75.
 fn firefly_hour(hour: f32) -> bool {
     !(0.2..0.74).contains(&hour)
-}
-
-/// When the frogs call: from the evening to the small hours.
-fn chorus_hour(hour: f32) -> bool {
-    !(0.27..0.7).contains(&hour)
 }
 
 /// When a colony pours out of its cave: from sunset into the first of the
@@ -1801,7 +1647,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run(critters: &mut Critters, chunks: &ChunkManager, player: Vec3, time: f32, dangers: &[Vec3], temperature: f32, seconds: f32, mut each: impl FnMut(&Critters)) {
+    fn run(critters: &mut Critters, chunks: &ChunkManager, player: Vec3, time: f32, temperature: f32, seconds: f32, mut each: impl FnMut(&Critters)) {
         let country = move |_: i32, _: i32, _: i32| (Biome::Swamp, temperature, 1.0);
         let frames = (seconds * 30.0) as usize;
         for frame in 0..frames {
@@ -1810,7 +1656,6 @@ mod tests {
                 player,
                 world_time: time + frame as f32 / 30.0 / 1200.0,
                 wet: false,
-                dangers,
                 country: &country,
                 light: &LightMap::new(),
                 lantern: false,
@@ -1818,58 +1663,6 @@ mod tests {
             critters.update(&around, 1.0 / 30.0);
             each(critters);
         }
-    }
-
-    fn beside_water(chunks: &ChunkManager, at: Vec3) -> bool {
-        let (x, y, z) = (at.x.floor() as i32, at.y.floor() as i32 - 1, at.z.floor() as i32);
-        [(1, 0), (-1, 0), (0, 1), (0, -1)]
-            .into_iter()
-            .any(|(dx, dz)| chunks.block_at(x + dx, y, z + dz).is_some_and(types::is_liquid))
-    }
-
-    #[test]
-    fn frogs_only_live_near_water() {
-        // At a pond's edge, and never out in a dry meadow however long it
-        // is watched -- a frog in a field is a frog that came from nowhere.
-        let pond = meadow(true, false);
-        let mut critters = Critters::new();
-        let mut frogs = 0;
-        run(&mut critters, &pond, Vec3::new(14.0, 11.0, 2.0), summer(0.9), &[], warm(), 60.0, |c| {
-            for frog in c.live.iter().filter(|f| f.kind == Kind::Frog && f.state == State::Resting) {
-                assert!(beside_water(&pond, frog.position.as_vec3()), "a frog sits at {:?}, away from the water", frog.position.as_vec3());
-            }
-            frogs = frogs.max(c.count(Kind::Frog));
-        });
-        assert!(frogs > 0, "a warm pond at night had no frogs at all");
-
-        let dry = meadow(false, false);
-        let mut critters = Critters::new();
-        run(&mut critters, &dry, Vec3::new(2.0, 11.0, 2.0), summer(0.9), &[], warm(), 60.0, |c| {
-            assert_eq!(c.count(Kind::Frog), 0, "a frog in a meadow with no water in it");
-        });
-    }
-
-    #[test]
-    fn a_frost_sends_the_chorus_into_the_water_and_a_winter_pond_has_no_frogs() {
-        // Out on a warm night, and then the same pond turns cold: every frog
-        // goes quiet and under within seconds rather than singing on.
-        let pond = meadow(true, false);
-        let player = Vec3::new(14.0, 11.0, 2.0);
-        let mut critters = Critters::new();
-        let mut frogs = 0;
-        run(&mut critters, &pond, player, summer(0.9), &[], warm(), 60.0, |c| frogs = frogs.max(c.count(Kind::Frog)));
-        assert!(frogs > 0, "a warm pond at night had no frogs to silence");
-        let cold = primitive_shared::worldgen::CLIMATE_FREEZING;
-        run(&mut critters, &pond, player, summer(0.9), &[], cold, 10.0, |_| {});
-        assert!(critters.croaking().is_empty(), "frogs sang on at freezing");
-        assert_eq!(critters.count(Kind::Frog), 0, "a frog stayed out in the cold");
-
-        // ...and midwinter, in a climate that is warm in summer, grows none.
-        let winter = summer(0.9) + primitive_shared::season::YEAR_DAYS * 0.5;
-        let mut critters = Critters::new();
-        run(&mut critters, &pond, player, winter, &[], warm() - 0.2, 60.0, |c| {
-            assert_eq!(c.count(Kind::Frog), 0, "a frog at a midwinter pond");
-        });
     }
 
     #[test]
@@ -1881,7 +1674,7 @@ mod tests {
             let world = meadow_with(false, false, &[(trunk, types::BLOCK_LOG), ((9, 13, 8), hive_holding(honey))]);
             let mut critters = Critters::new();
             let mut most = 0;
-            run(&mut critters, &world, player, summer(hour), &[], temperature, 20.0, |c| {
+            run(&mut critters, &world, player, summer(hour), temperature, 20.0, |c| {
                 for bee in c.live.iter().filter(|b| b.kind == Kind::Bee && !b.leaving) {
                     assert!(
                         (bee.position.as_vec3() - bee.home).length() < 3.5,
@@ -1906,46 +1699,10 @@ mod tests {
         let world = meadow(true, true);
         let mut critters = Critters::new();
         for hour in [0.5, 0.85, 0.1] {
-            run(&mut critters, &world, Vec3::new(8.0, 11.0, 8.0), summer(hour), &[], warm(), 40.0, |c| {
+            run(&mut critters, &world, Vec3::new(8.0, 11.0, 8.0), summer(hour), warm(), 40.0, |c| {
                 assert!(c.count(Kind::Butterfly) <= MAX_BUTTERFLIES);
                 assert!(c.count(Kind::Firefly) <= MAX_FIREFLIES);
-                assert!(c.count(Kind::Frog) <= MAX_FROGS);
             });
-        }
-    }
-
-    #[test]
-    fn a_frog_goes_quiet_and_into_the_water_when_a_wolf_comes_near() {
-        // **The warning, stated as what the player hears and sees.** A
-        // calling frog at the bank, a wolf coming along it: the frog stops
-        // and goes in, and so does every frog within earshot of the wolf.
-        let pond = meadow(true, false);
-        let mut critters = Critters::new();
-        let player = Vec3::new(16.0, 11.0, 2.0);
-        run(&mut critters, &pond, player, summer(0.9), &[], warm(), 30.0, |_| {});
-        let caller = critters
-            .live
-            .iter()
-            .find(|c| c.kind == Kind::Frog && c.calling)
-            .copied()
-            .expect("nothing calling at a warm pond after half a minute of dark");
-        let wolf = [caller.position.as_vec3() + Vec3::new(0.0, 0.0, -3.0)];
-        run(&mut critters, &pond, player, summer(0.9), &wolf, warm(), 1.0, |_| {});
-        match critters.live.iter().find(|c| c.id == caller.id) {
-            // Gone under and its time up is a frog that went in, too.
-            None => {}
-            Some(frog) => {
-                assert!(!frog.calling, "a frog went on calling with a wolf three blocks off");
-                assert!(
-                    matches!(frog.state, State::Hopping | State::Under),
-                    "a frog sat on the bank with a wolf three blocks off"
-                );
-            }
-        }
-        for frog in critters.live.iter().filter(|c| c.kind == Kind::Frog) {
-            if (frog.position.as_vec3() - wolf[0]).length() < HUSH_RADIUS {
-                assert!(!frog.calling, "a frog {:.1} blocks from the wolf is still calling", (frog.position.as_vec3() - wolf[0]).length());
-            }
         }
     }
 
@@ -1955,7 +1712,7 @@ mod tests {
         let mut critters = Critters::new();
         let player = Vec3::new(8.0, 11.0, 8.0);
         let mut seen = 0;
-        run(&mut critters, &world, player, summer(0.5), &[], warm(), 30.0, |c| {
+        run(&mut critters, &world, player, summer(0.5), warm(), 30.0, |c| {
             for b in c.live.iter().filter(|b| b.kind == Kind::Butterfly && b.state != State::Fleeing && !b.leaving) {
                 let flower = b.home;
                 assert!(
@@ -1967,7 +1724,7 @@ mod tests {
             seen = seen.max(c.count(Kind::Butterfly));
         });
         assert!(seen > 0, "a meadow in flower at noon in summer had no butterflies");
-        run(&mut critters, &world, player, summer(0.9), &[], warm(), 8.0, |_| {});
+        run(&mut critters, &world, player, summer(0.9), warm(), 8.0, |_| {});
         assert_eq!(critters.count(Kind::Butterfly), 0, "butterflies stayed out after dark");
     }
 
@@ -1978,7 +1735,7 @@ mod tests {
         let count = |time: f32, temperature: f32| {
             let mut critters = Critters::new();
             let mut most = 0;
-            run(&mut critters, &world, player, time, &[], temperature, 20.0, |c| most = most.max(c.count(Kind::Firefly)));
+            run(&mut critters, &world, player, time, temperature, 20.0, |c| most = most.max(c.count(Kind::Firefly)));
             most
         };
         assert!(count(summer(0.85), warm()) > 0, "no fireflies over a warm swamp at dusk");
@@ -1991,7 +1748,7 @@ mod tests {
     fn a_butterfly_keeps_its_distance_from_someone_who_runs_at_it() {
         let world = meadow(false, true);
         let mut critters = Critters::new();
-        run(&mut critters, &world, Vec3::new(8.0, 11.0, 8.0), summer(0.5), &[], warm(), 20.0, |_| {});
+        run(&mut critters, &world, Vec3::new(8.0, 11.0, 8.0), summer(0.5), warm(), 20.0, |_| {});
         let target = critters
             .live
             .iter()
@@ -2009,7 +1766,6 @@ mod tests {
                 player,
                 world_time: summer(0.5),
                 wet: false,
-                dangers: &[],
                 country: &country,
                 light: &LightMap::new(),
                 lantern: false,
@@ -2041,8 +1797,7 @@ mod tests {
                     player,
                     world_time: summer(0.85) + frame as f32 / 30.0 / 1200.0,
                     wet: false,
-                    dangers: &[],
-                    country: &country,
+                        country: &country,
                     light: &LightMap::new(),
                     lantern: false,
                 };
@@ -2057,11 +1812,13 @@ mod tests {
     }
 
     #[test]
-    fn a_frog_in_a_dark_cell_is_drawn_dark_and_one_in_the_open_is_not() {
+    fn a_butterfly_in_a_dark_cell_is_drawn_dark_and_one_in_the_open_is_not() {
         // "лягушки игнорируют освещение": every critter was drawn with a
-        // constant full-sky light word. One frog on the open bank and one
-        // in a sealed pocket in the rock under it, each built alone; the
-        // light word is the low sixteen bits of `packed`, the layer the rest.
+        // constant full-sky light word. The frogs that found it are the
+        // server's now, and the rule is everybody's: one butterfly resting
+        // in the open and one in a sealed pocket in the rock under it, each
+        // built alone; the light word is the low sixteen bits of `packed`,
+        // the layer the rest.
         let mut world = meadow(false, false);
         let mut chunk = world.get(ChunkPos::new(0, 0)).unwrap().clone();
         chunk.set(3, 5, 3, BLOCK_AIR);
@@ -2074,21 +1831,21 @@ mod tests {
         }
         let words = |at: Vec3| {
             let mut critters = Critters::new();
-            let frog = Critter { kind: Kind::Frog, state: State::Resting, ..critters.blank(at) };
-            critters.add(frog);
+            let butterfly = Critter { kind: Kind::Butterfly, state: State::Resting, ..critters.blank(at) };
+            critters.add(butterfly);
             let (mut vertices, mut indices) = (Vec::new(), Vec::new());
             let layers = FaceLayers::empty_for_test();
             critters.build_into(Vec3::ZERO, Vec3::X, Vec3::Y, &layers, &light, &mut vertices, &mut indices);
-            assert!(!vertices.is_empty(), "no frog drawn at {at:?}");
+            assert!(!vertices.is_empty(), "no butterfly drawn at {at:?}");
             vertices.iter().map(|v| v.packed & 0xFFFF).collect::<Vec<u32>>()
         };
         let dark = pack_light(0, 0, 3, 0);
         for word in words(Vec3::new(3.5, 5.0, 3.5)) {
-            assert_eq!(word, dark, "a frog shut in the rock was drawn with light word {word:#x}");
+            assert_eq!(word, dark, "a butterfly shut in the rock was drawn with light word {word:#x}");
         }
         let open = pack_light(15, 0, 3, 0);
         for word in words(Vec3::new(8.5, 11.0, 8.5)) {
-            assert_eq!(word, open, "a frog on the open bank was drawn with light word {word:#x}");
+            assert_eq!(word, open, "a butterfly in the open was drawn with light word {word:#x}");
         }
     }
 
@@ -2103,7 +1860,7 @@ mod tests {
         let world = meadow(true, true);
         let mut critters = Critters::new();
         let player = Vec3::new(8.0, 11.0, 8.0);
-        run(&mut critters, &world, player, summer(0.85), &[], warm(), 60.0, |_| {});
+        run(&mut critters, &world, player, summer(0.85), warm(), 60.0, |_| {});
         let layers = FaceLayers::empty_for_test();
         let light = LightMap::new();
         let (mut vertices, mut indices) = (Vec::new(), Vec::new());
@@ -2111,7 +1868,7 @@ mod tests {
         let started = std::time::Instant::now();
         const FRAMES: u32 = 600;
         for _ in 0..FRAMES {
-            let around = Surroundings { chunks: &world, player, world_time: summer(0.85), wet: false, dangers: &[], country: &country, light: &light, lantern: false };
+            let around = Surroundings { chunks: &world, player, world_time: summer(0.85), wet: false, country: &country, light: &light, lantern: false };
             critters.update(&around, 1.0 / 60.0);
             vertices.clear();
             indices.clear();
@@ -2156,7 +1913,6 @@ mod tests {
                 player,
                 world_time: time + frame as f32 / 30.0 / 1200.0,
                 wet: false,
-                dangers: &[],
                 country: &country,
                 light,
                 lantern,

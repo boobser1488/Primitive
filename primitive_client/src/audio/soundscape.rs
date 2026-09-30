@@ -34,7 +34,7 @@ use primitive_shared::animals::Species;
 use primitive_shared::horse::Gait;
 use primitive_shared::worldgen::Biome;
 use primitive_shared::raft;
-use primitive_shared::protocol::EntityId;
+use primitive_shared::protocol::{Attitude, EntityId};
 use primitive_shared::types::{self, BlockId, CHUNK_SIZE_Y};
 use primitive_shared::weather::Weather;
 
@@ -157,10 +157,29 @@ pub struct Heard {
     /// The flash of a blow, as the server sends it: above zero for a
     /// moment after every hit. What a wound is heard from -- see [`Voices`].
     pub hurt: f32,
-    /// Low and circling: a hunter walking the ring round somebody, or round
-    /// the edge of a fire's light (`protocol::Attitude::Stalking`). What
-    /// makes a night hunter howl close -- see [`STALKING_HOWL`].
-    pub stalking: bool,
+    /// What the body is doing, as the server says and the head is drawn by
+    /// (`animal_model::head_carried`). Two things are heard off it:
+    ///
+    /// * `Stalking` -- low and circling, a hunter walking the ring round
+    ///   somebody or round the edge of a fire's light -- is what makes a
+    ///   night hunter howl close ([`STALKING_HOWL`]);
+    /// * `Alert` on a frog is the server's hush (its `frog`, `HUSH_SECONDS`):
+    ///   a frog that heard something near and has stopped, and a frog that
+    ///   has stopped does not sing ([`calls`]).
+    ///
+    /// **The byte as it came, rather than a flag for each**, because it is
+    /// the one thing about an animal's mind the wire already carries, and
+    /// every question the soundscape asks of it is a question about the same
+    /// body. A `stalking: bool` was here first; a `hushed: bool` beside it
+    /// would have been a second copy of one byte, drifting.
+    pub attitude: Attitude,
+}
+
+impl Heard {
+    /// Low and circling. See `attitude`.
+    pub fn stalking(&self) -> bool {
+        self.attitude == Attitude::Stalking
+    }
 }
 
 /// Is a bird in the air, from its speed and whether it was a moment ago?
@@ -874,9 +893,11 @@ impl Soundscape {
     ///   in there now too, as a gull's calm voice;
     /// * **something pushing through a bush** is heard from wherever it is,
     ///   by the same measure as the player's own (`Brush`);
-    /// * **the frogs** call from wherever `Critters` says one is calling --
-    ///   which is nowhere within earshot of a wolf. The silence is decided
-    ///   there, not here;
+    /// * **the frogs** call from wherever a frog the server sent is sitting
+    ///   at ease on a warm evening ([`calls`]) -- and a frog the server has
+    ///   hushed, because something moved near it, is a gap in the chorus.
+    ///   The silence is decided there, for every player at the pond alike,
+    ///   and only heard here;
     /// * **bees** hum from wherever one is flying round a hive. A clip of
     ///   swarm laid over itself a little before the last one ends, from a
     ///   bee picked at random, so the hum is where the cloud is and a robbed
@@ -886,7 +907,8 @@ impl Soundscape {
     ///   chorus is -- which is not within a few steps of a player who is
     ///   moving (`cricket_chorus`, `cricket_hush`). `air` is the country
     ///   under the player and how warm it is now, from `Critters`, which
-    ///   already asks the generator for the frogs;
+    ///   already asks the generator for its own small life -- and the frogs
+    ///   sing by the same number;
     /// * **hooves** drum under every horse that is going somewhere, ridden
     ///   or not ([`Hoofbeats`]).
     ///
@@ -900,7 +922,6 @@ impl Soundscape {
         dt: f32,
         chunks: &ChunkManager,
         animals: &[Heard],
-        croaking: &[Vec3],
         buzzing: &[Vec3],
         flapping: &[Vec3],
         air: Option<(Biome, f32)>,
@@ -919,7 +940,9 @@ impl Soundscape {
         self.aloft = aloft;
 
         for cry in self.voices.hear(dt, animals, self.ear, self.night, &mut self.rng) {
-            let pitch = self.jitter(0.05);
+            // The size first and the jitter on it, as the rustle below does:
+            // a fox is a fox a few per cent either way, never a wolf.
+            let pitch = cry.pitch * self.jitter(0.05);
             audio.play_at(cry.sfx, cry.at, cry.gain, pitch);
         }
 
@@ -953,12 +976,27 @@ impl Soundscape {
         }
         self.brushes = brushes;
 
+        // ---- the chorus ----
+        //
+        // **One croak at a time from a frog picked among the singers**, as
+        // it was when the frogs were the client's own: a chorus is many
+        // small calls, and the part of the pond that has gone quiet is heard
+        // as the calls coming only from the other side.
         self.frog_left -= dt;
         if self.frog_left <= 0.0 {
             self.frog_left = self.rng.range(0.3, 1.1);
-            if !croaking.is_empty() {
-                let at = croaking[self.rng.below(croaking.len())];
-                audio.play_at(Sfx::FrogCroak, at.as_dvec3(), 0.45, self.jitter(0.12));
+            let hour = self.world_days.rem_euclid(1.0);
+            let warmth = air.map(|(_, warmth)| warmth);
+            let ear = self.ear;
+            let singing: Vec<glam::DVec3> = animals
+                .iter()
+                .filter(|frog| (frog.at - ear).length() < f64::from(crate::audio::HEARING))
+                .filter(|frog| calls(frog, hour, self.wet, warmth))
+                .map(|frog| frog.at)
+                .collect();
+            if !singing.is_empty() {
+                let at = singing[self.rng.below(singing.len())];
+                audio.play_at(Sfx::FrogCroak, at, 0.45, self.jitter(0.12));
             }
         }
 
@@ -1833,13 +1871,49 @@ fn idle_chance(species: Species, night: bool) -> f32 {
         // troop in the crowns chatters at each other all day about nothing,
         // and a player who has learned the sound knows there is a grove over
         // the dune before they can see one. What it *also* means -- because
-        // the same voice is the alarm (`cry_of`) -- is that a troop going
+        // the same voice is the alarm (`bank::voice_of`) -- is that a troop going
         // off all at once is something under the trees that is not you, and
         // there is no other warning of that on a coast with no wolves.
         Species::Monkey => 0.6,
+        // **A flock on a pond talks the whole time it is feeding**, and it is
+        // how a player finds water in a wood before they see it -- and a
+        // pond gone quiet with the ducks still on it is a flock that is
+        // watching something.
+        Species::Duck => {
+            if night {
+                0.15
+            } else {
+                0.45
+            }
+        }
+        // The bark of a fox at night -- a short string of them from the
+        // dark, a few times a night and never by day. The wolf's bark,
+        // higher (`bank::throat_of`, where the scream is argued out).
+        Species::Fox => {
+            if night {
+                0.08
+            } else {
+                0.0
+            }
+        }
+        // A grunt now and then from the willows. The rut's bellow is the
+        // autumn's, and the soundscape does not know the season -- so the
+        // calm voice is the quiet one.
+        Species::Elk => 0.05,
+        // **The frog's calm voice is the chorus, and only the chorus.** A
+        // frog is the loudest thing in a marsh after dark, and what makes it a
+        // mechanic rather than an ambience is that it stops (`Attitude::Alert`
+        // on the wire, from the server's hush) -- which is `calls`, fed to the
+        // chorus in `wildlife`. A chance here as well would voice every frog
+        // twice, once through a slot it does not have (`voice_of` gives it no
+        // idle) and once as the croak.
+        Species::Frog
         // A crab says nothing, ever. It has no voice at all, and what a
         // beach at night sounds like is the surf.
-        Species::Crab
+        | Species::Crab
+        // A beaver has no calm voice a player hears over the water: what it
+        // has is the tail, and that is its alarm (`bank::voice_of`).
+        | Species::Beaver
         | Species::Hare
         | Species::Fish
         | Species::Cod
@@ -1855,6 +1929,10 @@ pub struct Utterance {
     pub sfx: Sfx,
     pub at: glam::DVec3,
     pub gain: f32,
+    /// The playback rate the cry is asked at before the jitter: a borrowed
+    /// throat at the animal's own size (`bank::voice_pitch`), and one for
+    /// every animal that has recordings of its own.
+    pub pitch: f32,
 }
 
 /// What the soundscape remembers about one animal between frames.
@@ -1875,7 +1953,7 @@ struct Known {
     cried_until: f32,
     /// Within a few steps of the ears. See `snorts_at_company`.
     near: bool,
-    /// As it was last drawn: see `Heard::stalking`.
+    /// As it was last drawn: see `Heard::attitude`.
     stalking: bool,
 }
 
@@ -1952,7 +2030,7 @@ impl Voices {
                 quiet_until: clock + rng.range(0.0, 4.0),
                 cried_until: clock,
                 near: false,
-                stalking: animal.stalking,
+                stalking: animal.stalking(),
             });
 
             // ---- a wound ----
@@ -1961,7 +2039,8 @@ impl Voices {
                     // Not twice for one blow arriving over two snapshots.
                     if clock - before.wounded_at > 0.3 {
                         if let Some(sfx) = voice_of(animal.species, Cry::Hurt) {
-                            said.push(Utterance { sfx, at: animal.at, gain: 0.85 });
+                            let pitch = bank::voice_pitch(animal.species, Cry::Hurt);
+                            said.push(Utterance { sfx, at: animal.at, gain: 0.85, pitch });
                         }
                     }
                     now.wounded_at = clock;
@@ -1990,7 +2069,8 @@ impl Voices {
                 if clock >= now.cried_until && !herd_spoke && (animal.at - ear).length() < f64::from(crate::audio::HEARING) && self.spend() {
                     if let Some(sfx) = voice_of(animal.species, cry) {
                         let gain = if cry == Cry::Threat { 0.9 } else { 0.7 };
-                        said.push(Utterance { sfx, at: animal.at, gain });
+                        let pitch = bank::voice_pitch(animal.species, cry);
+                        said.push(Utterance { sfx, at: animal.at, gain, pitch });
                         now.cried_until = clock + 2.5;
                         now.quiet_until = now.quiet_until.max(clock + 2.5);
                         if cry == Cry::Alarm {
@@ -2020,7 +2100,8 @@ impl Voices {
                 && self.spend()
             {
                 if let Some(sfx) = voice_of(animal.species, Cry::Idle) {
-                    said.push(Utterance { sfx, at: animal.at, gain: 0.6 });
+                    let pitch = bank::voice_pitch(animal.species, Cry::Idle);
+                    said.push(Utterance { sfx, at: animal.at, gain: 0.6, pitch });
                     now.quiet_until = now.quiet_until.max(clock + 6.0);
                 }
             }
@@ -2029,7 +2110,7 @@ impl Voices {
             now.running = running;
             now.at = animal.at;
             now.hurt = animal.hurt;
-            now.stalking = animal.stalking;
+            now.stalking = animal.stalking();
             known.push(now);
         }
 
@@ -2040,7 +2121,8 @@ impl Voices {
             }
             if clock - gone.wounded_at < DEATH_WINDOW && (gone.at - ear).length() < f64::from(crate::audio::HEARING) {
                 if let Some(sfx) = voice_of(gone.species, Cry::Death) {
-                    said.push(Utterance { sfx, at: gone.at, gain: 0.9 });
+                    let pitch = bank::voice_pitch(gone.species, Cry::Death);
+                    said.push(Utterance { sfx, at: gone.at, gain: 0.9, pitch });
                 }
             }
         }
@@ -2077,7 +2159,8 @@ impl Voices {
                 if rng.chance(chance) && self.spend() {
                     if let Some(sfx) = voice_of(species, Cry::Idle) {
                         let gain = if ringing { 0.75 } else { 0.55 };
-                        said.push(Utterance { sfx, at: self.known[i].at, gain });
+                        let pitch = bank::voice_pitch(species, Cry::Idle);
+                        said.push(Utterance { sfx, at: self.known[i].at, gain, pitch });
                         self.known[i].quiet_until = clock + if ringing { rng.range(3.0, 6.0) } else { rng.range(5.0, 12.0) };
                     }
                 }
@@ -2085,6 +2168,69 @@ impl Voices {
         }
         said
     }
+}
+
+// ------------------------------------------------------------ the frogs
+
+/// Degrees over freezing the air has to be for a frog to sing.
+///
+/// **Eight, and it was four**, measured against the day's warmth alone and
+/// only on the frame a frog appeared, when the frogs were the client's own
+/// (`engine::critters`). "лягушки игнорируют температуру и сезон": a chorus
+/// that came out on a mild autumn afternoon sang on through the frost that
+/// night, because nothing asked again, and four degrees over the day's peak
+/// is a night well under freezing. Frogs wake at about eight; below that
+/// they are in the mud. Asked of the air *now*, every call, with the
+/// night's cooling taken off (`Critters::air_here`).
+///
+/// The server keeps a frog out of the world for the winter (its
+/// `in_season`), but a frog alive on a cold spring night is still silent,
+/// and that is this.
+const CHORUS_WARMTH_C: f32 = 8.0;
+
+/// When the frogs call: from the evening to the small hours.
+///
+/// **By the hour, where the crickets go by the sun**, because it is the
+/// hour the frogs always went by and a chorus starting while the sun is
+/// still up over the reeds is what a marsh sounds like -- a frog does not
+/// wait for the dark the way a cricket's wing waits for the cool.
+fn chorus_hour(hour: f32) -> bool {
+    !(0.27..0.7).contains(&hour)
+}
+
+/// Is this animal a frog singing in the chorus now?
+///
+/// **A frog the server sent, at ease, in its hour, in warm air.** The
+/// server's frog goes quiet for a quarter of a minute when anything moves
+/// near it -- a player heard at their own loudness, a hunter it has seen --
+/// and the quiet reaches this side as `Attitude::Alert`. So the silence on
+/// one side of a marsh at night is the *server's* hush, and every player at
+/// that pond hears the same gap in the same place: a friend by the fire
+/// hears the frogs stop where you are creeping, and nobody hears them stop
+/// for a wolf the other one cannot see.
+///
+/// A frog running is a frog going into the water, and that is its alarm
+/// (`bank::voice_of`, the plop), not a song. **Everything but the three
+/// that mean something is wrong is at ease** -- `Alert` (hushed), `Startled`
+/// (the freeze before a bolt) and `Dying` -- rather than a list of the calm
+/// ones, because a frog sitting in the water (`Swimming`) or resting sings,
+/// and an attitude the server grows later for some other animal should not
+/// silence every marsh in the world.
+///
+/// Rain calls them out at any hour, as it always did.
+///
+/// Rejected: keeping the client's own pond of decorative frogs beside the
+/// server's. The day a frog became something a player can catch and put on
+/// a hook, two frogs sat at every pond -- one that could be caught and one
+/// that sang -- and they disagreed: the singer hushed for a wolf the
+/// catchable one ignored, and a player who took every frog off the bank
+/// for bait still had a full chorus. See `engine::critters`' module doc.
+pub fn calls(frog: &Heard, hour: f32, wet: bool, warmth: Option<f32>) -> bool {
+    frog.species == Species::Frog
+        && !matches!(frog.attitude, Attitude::Alert | Attitude::Startled | Attitude::Dying)
+        && frog.speed <= Species::Frog.walk_speed() * 1.6
+        && (chorus_hour(hour) || wet)
+        && warmth.is_some_and(|warmth| warmth >= CHORUS_WARMTH_C)
 }
 
 // ------------------------------------------------------------ crickets
@@ -2111,7 +2257,7 @@ pub struct Night {
 /// a cricket is cold-blooded and its song slows and stops with the air it
 /// is in, so a mild autumn afternoon followed by a frost is a chorus that
 /// thins through the evening and is gone by midnight. The frogs learned
-/// this the hard way (`critters::FROG_WARMTH_C`, "лягушки игнорируют
+/// this the hard way (`CHORUS_WARMTH_C`, "лягушки игнорируют
 /// температуру"), and the floor is theirs: below eight the grass is silent.
 const CRICKET_COLD: f32 = 8.0;
 const CRICKET_WARM: f32 = 16.0;
@@ -3042,7 +3188,7 @@ mod tests {
     }
 
     fn animal(id: u32, species: Species, at: Vec3, speed: f32, hurt: f32) -> Heard {
-        Heard { id: id as EntityId, species, at: at.as_dvec3(), speed, hurt, stalking: false }
+        Heard { id: id as EntityId, species, at: at.as_dvec3(), speed, hurt, attitude: Attitude::Easy }
     }
 
     /// Runs `frames` of listening with the same animals, and gathers what
@@ -3166,7 +3312,10 @@ mod tests {
         let pack = |stalking: bool| -> Vec<Heard> {
             [(0, 10.0), (1, 11.0), (2, 35.0), (3, 36.0)]
                 .iter()
-                .map(|&(i, x)| Heard { stalking, ..animal(i, Species::Wolf, Vec3::new(x, 0.0, i as f32), 0.3, 0.0) })
+                .map(|&(i, x)| Heard {
+                    attitude: if stalking { Attitude::Stalking } else { Attitude::Easy },
+                    ..animal(i, Species::Wolf, Vec3::new(x, 0.0, i as f32), 0.3, 0.0)
+                })
                 .collect()
         };
         let howls = |stalking: bool| -> (usize, usize) {
@@ -3201,6 +3350,74 @@ mod tests {
         };
         assert_eq!(howls(false), 0, "a wolf howled in daylight");
         assert!(howls(true) > 0, "a pack was silent for two minutes of night");
+    }
+
+    fn frog(attitude: Attitude) -> Heard {
+        Heard { attitude, ..animal(1, Species::Frog, Vec3::new(6.0, 0.0, 0.0), 0.0, 0.0) }
+    }
+
+    /// **The hush is the server's, and it is heard**: a frog the server has
+    /// quietened because something moved near it (`Attitude::Alert`) is a
+    /// gap in the chorus, and the same frog at ease on a warm night sings.
+    #[test]
+    fn a_frog_the_server_has_hushed_does_not_sing_and_one_at_ease_at_night_does() {
+        let (night, warm) = (0.9, Some(15.0));
+        assert!(calls(&frog(Attitude::Easy), night, false, warm), "a frog at ease on a warm night is silent");
+        assert!(calls(&frog(Attitude::Swimming), night, false, warm), "a frog sitting in the water is silent");
+        assert!(!calls(&frog(Attitude::Alert), night, false, warm), "a hushed frog sang");
+        assert!(!calls(&frog(Attitude::Startled), night, false, warm), "a frog frozen by something near sang");
+        // Off for the water is the plop, not the song.
+        let going = Heard { speed: Species::Frog.run_speed(), ..frog(Attitude::Easy) };
+        assert!(!calls(&going, night, false, warm), "a frog sang on its way into the water");
+        // By day it is quiet unless it rains.
+        assert!(!calls(&frog(Attitude::Easy), 0.5, false, warm), "a frog sang at noon");
+        assert!(calls(&frog(Attitude::Easy), 0.5, true, warm), "a frog was silent in the rain");
+        // And nothing else sings in its place.
+        let deer = Heard { species: Species::Deer, ..frog(Attitude::Easy) };
+        assert!(!calls(&deer, night, false, warm), "a deer croaked");
+    }
+
+    /// **Below eight degrees the marsh is silent**, the night's cooling
+    /// taken off, whatever the hour -- and before there is any air to ask
+    /// about there is no chorus either.
+    #[test]
+    fn no_frog_sings_in_the_cold() {
+        for hour in [0.0, 0.8, 0.95] {
+            assert!(!calls(&frog(Attitude::Easy), hour, false, Some(CHORUS_WARMTH_C - 3.0)), "a frog sang at {hour} in a frost");
+            assert!(!calls(&frog(Attitude::Easy), hour, true, Some(2.0)), "a frog sang in a cold rain at {hour}");
+            assert!(calls(&frog(Attitude::Easy), hour, false, Some(CHORUS_WARMTH_C + 1.0)), "a frog was silent at {hour} on a mild night");
+        }
+        assert!(!calls(&frog(Attitude::Easy), 0.9, false, None), "a frog sang with no air under the player");
+    }
+
+    /// **A frog is voiced once**: its song is the chorus (`calls`), and a
+    /// night of frogs at ease says nothing through `Voices` -- no idle, no
+    /// croak on top of the croak.
+    #[test]
+    fn a_frog_at_ease_says_nothing_through_the_voices_because_the_chorus_sings_it() {
+        let frogs: Vec<Heard> = (0..4).map(|i| animal(i, Species::Frog, Vec3::new(6.0, 0.0, i as f32), 0.0, 0.0)).collect();
+        let mut voices = Voices::new();
+        let mut rng = Rng::new(9);
+        let said = listen(&mut voices, 60 * 120, &frogs, true, &mut rng);
+        assert!(said.is_empty(), "calm frogs said {:?}", said.iter().map(|c| c.sfx.file_name()).collect::<Vec<_>>());
+    }
+
+    /// **Every animal the woods and the water gained is heard at its own
+    /// size**: the cry `Voices` hands out carries the pitch `bank::voice_pitch`
+    /// gives it, so a fox's yelp is not the wolf's.
+    #[test]
+    fn a_wounded_fox_cries_higher_than_a_wounded_wolf() {
+        let cry = |species: Species| {
+            let mut voices = Voices::new();
+            let mut rng = Rng::new(4);
+            let at = Vec3::new(8.0, 0.0, 0.0);
+            listen(&mut voices, 10, &[animal(1, species, at, 0.0, 0.0)], false, &mut rng);
+            let said = listen(&mut voices, 2, &[animal(1, species, at, 0.0, 1.0)], false, &mut rng);
+            *said.iter().find(|c| c.gain > 0.8).expect("no wound cry")
+        };
+        let (fox, wolf) = (cry(Species::Fox), cry(Species::Wolf));
+        assert_eq!(fox.sfx, wolf.sfx, "a fox borrows the wolf's throat");
+        assert!(fox.pitch > wolf.pitch * 1.1, "a fox at {:.2} against a wolf at {:.2}", fox.pitch, wolf.pitch);
     }
 
     /// A squall is gusts that leave no room between them. Scaling only

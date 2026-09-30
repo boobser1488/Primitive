@@ -35,14 +35,53 @@
 //!   ([`rod_wait_seconds`]). The rod wants the opposite water to the trap --
 //!   **deep, wide, and best of all the sea** -- and it wants it **at
 //!   dawn or dusk, under rain**: noon is slow, midnight slower, a storm
-//!   puts the fish down and cold water is slow water. A bite is a *dip*
-//!   ([`STRIKE_SECONDS`]) and not a catch: strike inside it and the fish is
-//!   hooked, and then it has to be fought up ([`Fight`]).
+//!   puts the fish down and cold water is slow water. A bite is a float
+//!   that trembles, dips and goes ([`Bite`]) and not a catch: strike on the
+//!   dip and the fish is hooked, and then it has to be fought up
+//!   ([`Fight`]).
 //!
 //! So a player with both is planning: the traps in the river shallows by
 //! camp, checked on the way out; the rod carried to the lake at dusk, or
 //! down to the sea on a wet morning. Neither has one right answer, which is
 //! the test a mechanic in this game has to pass.
+//!
+//! ## What the rod asks, one question at a time
+//!
+//! The rod used to answer "how long until a bite" and "which fish" from the
+//! biome and the depth, and a player who had learned that dusk is good and
+//! a worm is fine had learned the rod. What it asks now, each question
+//! argued where it is answered:
+//!
+//! * **Which water** ([`Habitat`]). The water already has a climate -- how
+//!   cold, and what is in it: peat, nothing, rock flour
+//!   (`worldgen::water_climate_of`) -- and the fish read it. A trout wants
+//!   cold clear water and runs from a brown bog; a pike wants a warm weedy
+//!   lake and does not mind the peat; the school is everywhere and thins in
+//!   the milky melt under a glacier. So a tarn, a marsh and a meadow lake a
+//!   day's walk apart are three different answers from one rod.
+//! * **How big** ([`Size`]). Every catch is small, middling or big, and the
+//!   size is the count in the pack and the weight of the fight. Big fish
+//!   want room (a deep wide lake, the sea), are stunted by a marsh, are the
+//!   first to go from a fished bank, and take a big bait -- so a scrap of
+//!   meat is fewer bites and heavier fish, and a grub is a busy float of
+//!   small ones. Still one fish item: see "Species with names" below.
+//! * **When** ([`Moment`], [`appetite`]). Dawn and dusk; worse under a
+//!   clear noon sun in shallow water ([`glare_factor`]); poor in winter; and
+//!   best of all **in the last minutes before rain** ([`front_factor`]),
+//!   which the server knows because the sky rolls its next spell when this
+//!   one begins. A player cannot read the forecast. They can read the fish
+//!   jumping ([`rise_rate`] is the same appetite), which is how anybody
+//!   who fishes has always known.
+//! * **What the float says** ([`Bite`]). It trembles (a fish nosing the
+//!   bait), dips half under (it has it), and goes under and away (it is
+//!   running with it). A strike on the tremble is too early -- the fish is
+//!   gone and so is the cast, the bait kept; no strike by the end of the
+//!   run is too late -- the bait is eaten. A tremble sometimes comes to
+//!   nothing, which is what teaches a player to wait for the dip.
+//! * **Whether the tackle holds** ([`Fight`], [`snap_shock`]). A line that
+//!   parts under a heavy fish jars the rod, and a worn rod does not survive
+//!   a big one: a reason to play the fish, and to carry a spare to the lake
+//!   where the pike are.
 //!
 //! ## What was weighed and left out
 //!
@@ -69,7 +108,8 @@
 //!   strike reflex rather than decision, which is only true if striking is
 //!   free: a strike at nothing pulls the float back out and costs the cast
 //!   ([`Strike::TooEarly`]), so the decision is whether that twitch was the
-//!   fish. And it worried about the message, which is one message
+//!   fish -- and since the float trembles before it dips ([`Bite`]), that
+//!   decision is one a player gets to make on every bite. And it worried about the message, which is one message
 //!   (`protocol::ServerMessage::Line`) rather than the two it feared: the
 //!   float, its phase and the strain on the line travel together because
 //!   they are one picture.
@@ -92,7 +132,7 @@
 //!   `animals::Species` now -- a trout in cold running water, a pike in a
 //!   warm lake, a herring in the shallow sea, the cod where it always was
 //!   -- and what comes out of the water still goes into the pack as fish,
-//!   in the amount that fish is worth ([`rod_species`], `Species::drops`).
+//!   in the amount that fish is worth ([`rod_species`], [`catch_count`]).
 //!   Three pictures and three shapes; no new items and no new recipes.
 //!
 //! ## Why this is shared
@@ -246,6 +286,12 @@ pub struct Spot {
     /// planks of a jetty. Shade is the other thing a fish holds under, and
     /// the other thing a player can see before casting.
     pub shade: bool,
+    /// Surveyed cells of water with ice lying on them: the lake under a
+    /// winter lid, seen from the hole the float went down.
+    ///
+    /// Counted so that the hole can be worth cutting ([`ice_factor`]); the
+    /// rest of the survey does not care, because water under ice is water.
+    pub iced: u16,
 }
 
 /// How far above the surface a survey looks for something to be shaded by.
@@ -299,6 +345,7 @@ pub fn survey(block_at: impl Fn(i32, i32, i32) -> Option<BlockId>, at: (i32, i32
         block_at(at.0, top + up, at.2).is_some_and(|block| !is_liquid(block) && block != crate::types::BLOCK_AIR)
     });
     let mut weeds: u16 = 0;
+    let mut iced: u16 = 0;
     let mut seen = std::collections::HashSet::new();
     let mut queue = std::collections::VecDeque::new();
     seen.insert(start);
@@ -309,6 +356,11 @@ pub fn survey(block_at: impl Fn(i32, i32, i32) -> Option<BlockId>, at: (i32, i32
         // reedbed on the other side of a spit is not this float's cover.
         if is_weed(&block_at, (x, y, z)) {
             weeds = weeds.saturating_add(1);
+        }
+        // ...and so is the ice: the lid over *this* water, not over a
+        // frozen puddle beside it.
+        if block_at(x, y + 1, z).is_some_and(|above| crate::types::block_kind(above) == crate::types::BLOCK_ICE) {
+            iced = iced.saturating_add(1);
         }
         if seen.len() >= SURVEY_CAP {
             break;
@@ -333,6 +385,7 @@ pub fn survey(block_at: impl Fn(i32, i32, i32) -> Option<BlockId>, at: (i32, i32
         depth,
         weeds,
         shade,
+        iced,
     })
 }
 
@@ -538,6 +591,174 @@ pub fn spot_key(float: (i32, i32, i32)) -> (i32, i32, i32) {
     )
 }
 
+/// **When a line goes in**: everything about the hour and the sky that a
+/// fish feeds by, as one value.
+///
+/// One value and not five arguments, because two things read it and must
+/// read it the same way: the rod's wait ([`rod_wait_seconds`]) and the fish
+/// seen rising ([`rise_rate`]). A rise that did not follow the bite would be
+/// decoration, and the whole reason the water shows its fish is that a
+/// player can read the bite off it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Moment {
+    /// The server's clock: 0 at midnight, 0.5 at noon.
+    pub time_of_day: f32,
+    pub weather: Weather,
+    /// What the sky does next, and in how many seconds -- the server's
+    /// `Sky::coming`. `None` where nobody knows: a sky an operator is
+    /// holding has no next spell.
+    pub coming: Option<(Weather, f32)>,
+    /// The air at the water, standing in for the water ([`cold_factor`]).
+    pub water_c: f32,
+    pub season: Season,
+}
+
+impl Moment {
+    /// An ordinary spring hour under a clear sky with nothing coming: what a
+    /// test holds still when it is asking about something else.
+    pub fn plain(time_of_day: f32, weather: Weather, water_c: f32) -> Moment {
+        Moment { time_of_day, weather, coming: None, water_c, season: Season::Spring }
+    }
+}
+
+/// **How hungry the fish are at this moment**, 1 for an ordinary one: the
+/// hour, the sky, the sky that is coming, the cold and the season,
+/// multiplied.
+///
+/// The place is not in it: a deep lake and a puddle are equally hungry at
+/// dusk, and differ in how many fish there are to be hungry. That split is
+/// what lets the rising fish ([`rise_rate`]) carry this number and nothing
+/// about the place -- a fish rises where a fish is.
+pub fn appetite(moment: Moment) -> f32 {
+    hour_factor(moment.time_of_day)
+        * weather_factor(moment.weather)
+        * front_factor(moment.weather, moment.coming)
+        * cold_factor(moment.water_c)
+        * season_factor(moment.season)
+}
+
+/// **How long before the rain the fish know it is coming**: four minutes.
+///
+/// A spell of weather is five to twenty minutes (`weather::SPELL_SECONDS`),
+/// so four is the tail of a clear spell rather than most of it -- the
+/// window is something a player catches or misses, and a player who sees
+/// the fish start jumping has time to walk to the water and cast into it.
+pub const FRONT_SECONDS: f32 = 240.0;
+
+/// How much better the fish take in the last of those minutes: 1.7, against
+/// the rain's own 1.35.
+///
+/// **Better than the rain itself, on purpose.** It is what anybody who
+/// fishes will say, and it is what makes the forecast worth reading: if the
+/// best bite were *in* the rain, the thing to do would be to wait for it,
+/// and the jumping fish would be telling a player nothing they could use.
+pub const FRONT_BEST: f32 = 1.7;
+
+/// The bite before the rain: 1 under any sky with no rain coming, rising
+/// smoothly to [`FRONT_BEST`] as a wet spell's start comes within
+/// [`FRONT_SECONDS`].
+///
+/// **Only out of a dry sky.** Rain before more rain is not a front; and the
+/// sky never goes wet to wet anyway (`Sky::roll`), so this is also the rule
+/// that it cannot be counted twice.
+///
+/// **A ramp and not a switch**, for the hour's reason ([`hour_factor`]): a
+/// minute of the afternoon where casting a second later is half again as
+/// good is a thing to game rather than a thing to plan.
+///
+/// The forecast was not knowable when this was first wanted: the sky rolled
+/// its next spell only when the last one ended. It is rolled when a spell
+/// *begins* now (the server's `weather::Sky`), from the same odds, so the
+/// weather a player gets is drawn exactly as it always was and is merely
+/// decided a spell sooner.
+pub fn front_factor(now: Weather, coming: Option<(Weather, f32)>) -> f32 {
+    let Some((next, in_seconds)) = coming else {
+        return 1.0;
+    };
+    if now.is_wet() || !next.is_wet() {
+        return 1.0;
+    }
+    let near = 1.0 - (in_seconds / FRONT_SECONDS).clamp(0.0, 1.0);
+    let eased = near * near * (3.0 - 2.0 * near);
+    1.0 + (FRONT_BEST - 1.0) * eased
+}
+
+/// How much a bright sun overhead puts the fish off, 1 for none, down to
+/// [`GLARE_WORST`] for shallow open water under a clear noon.
+///
+/// **Noon was an ordinary hour, and the owner asked for it to be a poor
+/// one.** It is made poor *here*, as the light on the water, rather than as
+/// a dip in [`hour_factor`], because a fish in the sun goes somewhere --
+/// deep, or under something -- and that makes noon a question about where
+/// to stand rather than a time to stop: the deep hole and the bank under
+/// the willow still fish at midday. A dip in the hour would have said "go
+/// home until four", which is a chore and not a decision.
+///
+/// Overcast takes most of it away and a storm all of it: there is no glare
+/// under a sky that has none.
+pub fn glare_factor(time_of_day: f32, weather: Weather, depth: u8, shade: bool) -> f32 {
+    let sun = -(std::f32::consts::TAU * time_of_day).cos();
+    // Nothing until the sun is well up, and all of it at noon.
+    let high = ((sun - 0.4) / 0.6).clamp(0.0, 1.0);
+    let bright = match weather {
+        Weather::Clear => 1.0,
+        Weather::Rain => 0.3,
+        Weather::Storm => 0.0,
+    };
+    // Six blocks down is out of it; two is in it.
+    let exposed = (1.0 - f32::from(depth.saturating_sub(2)) / 4.0).clamp(0.2, 1.0);
+    let covered = if shade { 0.35 } else { 1.0 };
+    1.0 - (1.0 - GLARE_WORST) * high * high * bright * exposed * covered
+}
+
+/// The worst the sun does: a bite half as often.
+pub const GLARE_WORST: f32 = 0.5;
+
+/// **A hole in the ice draws the fish**: half again as many bites where the
+/// water the float went down into lies under a lid.
+///
+/// The fish under the ice come to where the light and the air are, which is
+/// why people cut holes in lakes at all -- and it is what makes a winter
+/// lake a decision rather than a closed door. Winter is the slowest season
+/// there is ([`season_factor`]) and cold water slower still; a hole in the
+/// middle of a frozen lake gives back some of it, where the open river mouth
+/// beside it does not. The hole itself is the player's: the float goes down
+/// one with a line lowered rather than thrown ([`cast_target`]).
+pub fn ice_factor(spot: Spot) -> f32 {
+    if spot.iced >= ICED_LID {
+        1.5
+    } else {
+        1.0
+    }
+}
+
+/// How many of the surveyed cells must lie under ice before it is a lid and
+/// not a sliver at the shore: eight, a little more than the ring round a
+/// hole one block across.
+pub const ICED_LID: u16 = 8;
+
+/// **Fish the player can see are fish the player can catch**: up to half
+/// again as many bites with a shoal swimming within [`SHOAL_REACH`] of the
+/// float.
+///
+/// The one term here that is about the fish that are actually *there* -- the
+/// ones the server has swimming, which a player sees as shapes in the
+/// shallows and as rings on the water ([`rise_rate`]). Without it, casting
+/// at the rise would be a superstition: the rod reads the place, and the
+/// rise would be a picture of the same place. With it, the eye is worth
+/// something, and what it is worth is capped below the hour's, for the
+/// reason [`cover_factor`] gives -- a shoal at noon does not beat open water
+/// at dusk.
+pub fn shoal_factor(fish_near: usize) -> f32 {
+    1.0 + 0.5 * (fish_near.min(SHOAL_FULL) as f32 / SHOAL_FULL as f32)
+}
+
+/// How far from the float a fish counts as at it, in blocks.
+pub const SHOAL_REACH: f32 = 6.0;
+
+/// How many fish at the float are a shoal; more are not more bites.
+pub const SHOAL_FULL: usize = 4;
+
 /// The average wait for a bite, in seconds, or `None` where nothing will
 /// ever bite -- the puddle, the float on the bottom, dry land.
 ///
@@ -547,21 +768,20 @@ pub fn spot_key(float: (i32, i32, i32)) -> (i32, i32, i32) {
 ///
 /// **Everything the place is, multiplied.** The water itself
 /// ([`rod_place_factor`]: how much, how deep, salt or fresh or still), what
-/// grows in it ([`cover_factor`]), the hour, the sky, the season, the cold,
-/// how hard it has been fished lately ([`pressure_factor`]) and what is on
-/// the hook ([`Bait::appeal`]). Multiplied rather than added because they
-/// are independent reasons a fish is or is not feeding, and because a sum
-/// lets one good term carry six bad ones: a puddle at dusk in spring in the
-/// rain is still a puddle.
-#[allow(clippy::too_many_arguments)]
+/// grows in it ([`cover_factor`]), what the sun is doing to it
+/// ([`glare_factor`]), whether it is under ice ([`ice_factor`]), how hungry
+/// the fish are ([`appetite`]), how hard it has been fished lately
+/// ([`pressure_factor`]), whether a shoal is at the float ([`shoal_factor`])
+/// and what is on the hook ([`Bait::appeal`]). Multiplied rather than added
+/// because they are independent reasons a fish is or is not feeding, and
+/// because a sum lets one good term carry six bad ones: a puddle at dusk in
+/// spring in the rain is still a puddle.
 pub fn rod_wait_seconds(
     spot: Spot,
     kind: Water,
-    time_of_day: f32,
-    weather: Weather,
-    water_c: f32,
-    season: Season,
+    moment: Moment,
     taken: f32,
+    fish_near: usize,
     bait: Option<Bait>,
 ) -> Option<f32> {
     let place = rod_place_factor(spot, kind);
@@ -570,11 +790,11 @@ pub fn rod_wait_seconds(
     }
     let pace = place
         * cover_factor(spot)
-        * hour_factor(time_of_day)
-        * weather_factor(weather)
-        * cold_factor(water_c)
-        * season_factor(season)
+        * glare_factor(moment.time_of_day, moment.weather, spot.depth, spot.shade)
+        * ice_factor(spot)
+        * appetite(moment)
         * pressure_factor(taken)
+        * shoal_factor(fish_near)
         * bait.map_or(BARE_HOOK, Bait::appeal);
     Some((ROD_TYPICAL_SECONDS / pace).min(ROD_LONGEST_SECONDS))
 }
@@ -618,11 +838,19 @@ pub enum Bait {
     /// Feather and cord, tied to look alive. Not eaten -- see
     /// [`Bait::keeps`].
     Fly,
+    /// **A frog, whole and alive when it went on.** Appended. The pike's
+    /// bait above all others (`tempts`), and the fewest bites of anything but
+    /// a berry (`appeal`) -- what it brings is the biggest fish in the water
+    /// (`size_odds`). Caught by hand at the marsh's edge
+    /// (`animals::Species::Frog`), and every one taken for the hook is a
+    /// voice out of the chorus that tells a camp by the marsh what is moving
+    /// in the dark.
+    Frog,
 }
 
 impl Bait {
     /// Every bait, in the order a hook meets them.
-    pub const ALL: [Bait; 6] = [Bait::Worm, Bait::Grub, Bait::Berry, Bait::Bread, Bait::Scrap, Bait::Fly];
+    pub const ALL: [Bait; 7] = [Bait::Worm, Bait::Grub, Bait::Berry, Bait::Bread, Bait::Scrap, Bait::Fly, Bait::Frog];
 
     /// The item this bait is, in the pack.
     pub fn block(self) -> BlockId {
@@ -634,6 +862,7 @@ impl Bait {
             Bait::Bread => BLOCK_BREAD,
             Bait::Scrap => BLOCK_RAW_MEAT,
             Bait::Fly => BLOCK_FISHING_FLY,
+            Bait::Frog => crate::types::BLOCK_FROG,
         }
     }
 
@@ -685,6 +914,9 @@ impl Bait {
             // ones -- see `tempts`.
             Bait::Scrap => 0.7,
             Bait::Fly => 0.9,
+            // A frog on a hook kicks, and it is not the school's food: little
+            // comes, and what comes is big.
+            Bait::Frog => 0.55,
         }
     }
 
@@ -698,6 +930,15 @@ impl Bait {
     /// put on the hook" has a different answer at the river, at the lake and
     /// at the sea, which is the same question the rod already asks about
     /// *where* -- asked again in the pack.
+    ///
+    /// **Read again when the water began to decide the fish** (`Habitat`),
+    /// and left as it was, on purpose. The water now says which fish are
+    /// *there* and this says which of them *take*; the two multiply
+    /// (`rod_odds`), so a grub in a cold clear stream is a trout almost
+    /// every time and a grub in a warm brown pond is the school -- the
+    /// combination is the decision, and a table that tried to fold the
+    /// water in as well would be saying one thing twice. What bait says
+    /// about the *size* of what comes is its own table (`size_odds`).
     ///
     /// A species nobody wrote a line for (one added after this table) is
     /// taken as an ordinary fish: it eats what the school eats. **A
@@ -745,6 +986,14 @@ impl Bait {
             (Bait::Fly, Species::Fish) => 0.6,
             (Bait::Fly, Species::Pike) => 0.3,
             (Bait::Fly, Species::Cod) => 0.2,
+            // **The pike's, above everything**: it lies in the weed of the
+            // same still water the frog sings in, and a frog is what it eats.
+            (Bait::Frog, Species::Pike) => 2.6,
+            (Bait::Frog, Species::Trout) => 0.5,
+            (Bait::Frog, Species::Cod) => 0.3,
+            (Bait::Frog, Species::Fish) => 0.1,
+            // The sea's small fish will not look at it.
+            (Bait::Frog, _) => 0.0,
             // Anything the spawner grew since this table was written.
             (_, _) => 0.6,
         }
@@ -767,20 +1016,111 @@ pub fn wants_depth(species: Species) -> u8 {
     }
 }
 
+/// **What the water is, to a fish**: salt, running or still, how cold, and
+/// what is suspended in it.
+///
+/// `chill` and `silt` are `worldgen::water_climate_of`'s -- the two numbers
+/// the water is *coloured* by -- read here rather than a second climate
+/// invented for the fish, so **the colour of the water is the forecast of
+/// the catch**: the milky turquoise of a glacier tarn, the brown of a bog
+/// and the clear blue of a meadow lake are three different rods, and a
+/// player learns it by looking before they cast.
+///
+/// Three ways this was weighed:
+///
+/// * *The biome alone*, which is what there was: `Species::lives_in` says a
+///   trout is in the taiga and a pike in the plains. That is still the gate
+///   -- the rod must never land a fish the spawner could not have put there
+///   -- and it is a line across a map: a lake on the border reads as one
+///   country or the other, and a tarn high in the plains is warm.
+/// * *The air temperature at the float* (`climate::Ambient`), which the
+///   cold already reads ([`cold_factor`]). It moves with the hour and the
+///   season, and a trout that left the lake every afternoon would make the
+///   catch a clock rather than a place.
+/// * *This*: the water's own climate, which is a property of the place, is
+///   smooth across a border, and is already on the screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Habitat {
+    pub kind: Water,
+    /// 0 warm, 1 as cold as water gets. See `worldgen::water_climate_of`.
+    pub chill: f32,
+    /// 0 peat, a half clear, 1 rock flour.
+    pub silt: f32,
+}
+
+impl Habitat {
+    /// Clear water, neither warm nor cold: what a test holds still.
+    pub fn plain(kind: Water) -> Habitat {
+        Habitat { kind, chill: 0.5, silt: 0.5 }
+    }
+
+    /// How brown it is, 0..1: 1 is a bog.
+    pub fn peat(self) -> f32 {
+        ((0.5 - self.silt) / 0.5).clamp(0.0, 1.0)
+    }
+
+    /// How milky it is, 0..1: 1 is melt straight off a glacier.
+    pub fn flour(self) -> f32 {
+        ((self.silt - 0.5) / 0.5).clamp(0.0, 1.0)
+    }
+}
+
+/// How much more or less of this fish there is in this water than its
+/// country alone would say: a multiplier on the spawner's weight.
+///
+/// **A weight and never a gate.** Nothing here is nought, so a fish that
+/// lives in a country is catchable in every water of it -- a trout in a warm
+/// brown pond is rare, not impossible. Gates are `Species::lives_in` and
+/// the depth ([`wants_depth`]), which the spawner reads as well; a gate here
+/// would be a fish the player can see swimming and never hook.
+///
+/// The rows are the natural history of the four fish, as far as it
+/// changes a decision:
+///
+/// * **The school** is everywhere and likes it warm and a little brown --
+///   the roach of a reedy pond -- and thins in the milk off a glacier, where
+///   there is little to eat.
+/// * **The trout** is cold, clear, running water: the colder the more of
+///   it, the browner the less. Rock flour does not trouble it -- a glacier
+///   stream is a trout stream.
+/// * **The pike** is the other corner: warm, still, and at home in the
+///   peat of a marsh, where it lies in the weed.
+/// * **The herring and the cod** are the cold sea's: the further north the
+///   coast, the more of them.
+pub fn habitat_weight(species: Species, habitat: Habitat) -> f32 {
+    let (chill, peat, flour) = (habitat.chill.clamp(0.0, 1.0), habitat.peat(), habitat.flour());
+    let still = habitat.kind == Water::Standing;
+    match species {
+        Species::Fish => (1.0 - 0.4 * chill) * (1.0 + 0.3 * peat) * (1.0 - 0.5 * flour),
+        Species::Trout => {
+            (0.2 + 1.4 * chill) * (1.0 - 0.8 * peat) * (1.0 + 0.3 * flour) * if still { 0.8 } else { 1.2 }
+        }
+        Species::Pike => (1.4 - 1.0 * chill) * (1.0 + 0.5 * peat) * (1.0 - 0.7 * flour) * if still { 1.2 } else { 0.9 },
+        Species::Herring => 0.6 + 0.8 * chill,
+        Species::Cod => 0.4 + 1.2 * chill,
+        // A fish added after this table: as its country says, no more.
+        _ => 1.0,
+    }
+}
+
 /// Every fish that could be in this water, and how much of the catch each
 /// one is, given what is on the hook.
 ///
 /// The weight is the spawner's own (`Species::spawn_weight`) times how much
-/// that fish wants the bait, so **the rod agrees with the water**: what is
-/// on the end of the line is drawn from the same fish the swimmers in that
-/// lake are drawn from, biased by the hook. A fish that will not take this
-/// bait weighs nothing and cannot be caught at all.
-pub fn rod_odds(biome: Biome, spot: Spot, bait: Option<Bait>) -> Vec<(Species, f32)> {
+/// that fish likes this water ([`habitat_weight`]) times how much it wants
+/// the bait, so **the rod agrees with the water**: what is on the end of the
+/// line is drawn from the same fish the swimmers in that lake are drawn
+/// from, biased by the water's climate and by the hook. A fish that will not
+/// take this bait weighs nothing and cannot be caught at all.
+pub fn rod_odds(biome: Biome, spot: Spot, habitat: Habitat, bait: Option<Bait>) -> Vec<(Species, f32)> {
     Species::ALL
         .iter()
         .copied()
         .filter(|&species| species.swims() && species.lives_in(biome) && wants_depth(species) <= spot.depth)
-        .map(|species| (species, species.spawn_weight(false) as f32 * Bait::tempts(bait, species)))
+        .map(|species| {
+            let weight = species.spawn_weight(false) as f32 * habitat_weight(species, habitat) * Bait::tempts(bait, species);
+            (species, weight)
+        })
         .filter(|&(_, weight)| weight > 0.0)
         .collect()
 }
@@ -788,11 +1128,10 @@ pub fn rod_odds(biome: Biome, spot: Spot, bait: Option<Bait>) -> Vec<(Species, f
 /// Which fish took the hook, given a roll in `0..1`: `None` where nothing in
 /// this water wants what is on it.
 ///
-/// What it lands is `Species::drops` -- one raw fish for the school and the
-/// herring, two for a trout, three for a pike or a cod -- so the size of the
-/// catch is the fish's own and not a second table to keep in step.
-pub fn rod_species(biome: Biome, spot: Spot, bait: Option<Bait>, roll: f32) -> Option<Species> {
-    let odds = rod_odds(biome, spot, bait);
+/// How much it is worth is [`catch_count`]: the fish's own `Species::drops`,
+/// moved by its [`Size`].
+pub fn rod_species(biome: Biome, spot: Spot, habitat: Habitat, bait: Option<Bait>, roll: f32) -> Option<Species> {
+    let odds = rod_odds(biome, spot, habitat, bait);
     let total: f32 = odds.iter().map(|&(_, weight)| weight).sum();
     if total <= 0.0 {
         return None;
@@ -809,13 +1148,150 @@ pub fn rod_species(biome: Biome, spot: Spot, bait: Option<Bait>, roll: f32) -> O
     last
 }
 
+/// **How big the fish on the hook is.** Three sizes and not a length in
+/// centimetres, because what a size has to do is change two things a player
+/// feels -- how many fish go into the pack ([`catch_count`]) and how hard
+/// it fights ([`Size::pull`], [`Size::heft`]) -- and three steps of each are
+/// steps a player can tell apart. A continuous length would be a number the
+/// game has nowhere to show.
+///
+/// **Rejected: a size item** (a "big pike" in the pack). The module note's
+/// argument against species as items is the same argument, doubled: every
+/// size of every fish would want its cooked, salted and dried row. The size
+/// is how *many* fish, which the salt barrel already understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Size {
+    Small,
+    Middling,
+    Big,
+}
+
+impl Size {
+    pub const ALL: [Size; 3] = [Size::Small, Size::Middling, Size::Big];
+
+    /// The byte on the wire (`protocol::ServerMessage::Caught`).
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// A byte off the wire. Anything unknown is middling: a newer server's
+    /// size read as the ordinary one is a sentence slightly wrong, never a
+    /// fish that is not there.
+    pub fn of_code(code: u8) -> Size {
+        match code {
+            0 => Size::Small,
+            2 => Size::Big,
+            _ => Size::Middling,
+        }
+    }
+
+    /// How much harder the line takes it, against the species' own pull.
+    pub fn pull(self) -> f32 {
+        match self {
+            Size::Small => 0.8,
+            Size::Middling => 1.0,
+            Size::Big => 1.3,
+        }
+    }
+
+    /// How much longer it takes to bring in.
+    ///
+    /// **Heft is most of what size costs, and pull the least of it.** A big
+    /// fish that broke lines three times as readily as a middling one would
+    /// make the big ones a matter of luck -- the careful player loses them as
+    /// often as the careless one -- where a big fish that takes twice as
+    /// long gives the careful player twice as many runs to get right, which
+    /// is where the skill is.
+    pub fn heft(self) -> f32 {
+        match self {
+            Size::Small => 0.75,
+            Size::Middling => 1.0,
+            Size::Big => 1.5,
+        }
+    }
+}
+
+/// How likely each size is, small to big, for a fish taking in this water.
+///
+/// **Four things make a fish big, and each is a thing a player chooses:**
+///
+/// * *Room.* A deep wide water grows big fish and a dug pond does not
+///   ([`Spot::size_factor`], depth). The lake is a walk; the pond is home.
+/// * *Peat stunts.* A bog is full of small fish (the brown of
+///   [`Habitat::peat`]): quick bites, little meat.
+/// * *The big ones go first.* A fished bank loses its big fish before it
+///   loses its bites ([`pressure_factor`] on the big share), so moving on
+///   is a decision about *what* is caught as well as how soon.
+/// * *A big bait turns small fish away.* Meat halves the small ones and
+///   doubles the big; a grub or a berry is the other way round. With
+///   [`Bait::appeal`] that is the whole trade: a scrap on the hook is fewer
+///   bites of heavier fish.
+pub fn size_odds(spot: Spot, habitat: Habitat, taken: f32, bait: Option<Bait>) -> [f32; 3] {
+    let room = ((spot.size_factor() - 0.35) / 0.65).clamp(0.0, 1.0) * (f32::from(spot.depth.min(5)) / 5.0);
+    let peat = habitat.peat();
+    let mut small = 0.35 * (1.4 - 0.6 * room) * (1.0 + 0.9 * peat);
+    let middling = 0.5;
+    let mut big = 0.15 * (0.4 + 1.6 * room) * (1.0 - 0.65 * peat) * pressure_factor(taken);
+    let (small_bait, big_bait) = match bait {
+        Some(Bait::Scrap) => (0.35, 2.2),
+        // The biggest bait there is turns more small fish away than meat
+        // does, and brings more of the big ones.
+        Some(Bait::Frog) => (0.2, 2.8),
+        Some(Bait::Grub) | Some(Bait::Berry) => (1.3, 0.5),
+        Some(Bait::Fly) => (1.0, 0.8),
+        Some(Bait::Worm) | Some(Bait::Bread) => (1.0, 1.0),
+        // A bare hook: whatever small thing grabs at something shiny.
+        None => (1.3, 0.4),
+    };
+    small *= small_bait;
+    big *= big_bait;
+    let total = small + middling + big;
+    [small / total, middling / total, big / total]
+}
+
+/// Which size came up, from [`size_odds`] and a roll in `0..1`.
+pub fn roll_size(odds: [f32; 3], roll: f32) -> Size {
+    let roll = roll.clamp(0.0, 1.0);
+    if roll < odds[0] {
+        Size::Small
+    } else if roll < odds[0] + odds[1] {
+        Size::Middling
+    } else {
+        Size::Big
+    }
+}
+
+/// How many raw fish a fish of this kind and size is.
+///
+/// Off `Species::drops` -- one for the school and the herring, two for a
+/// trout, three for a pike or a cod -- so the species' own worth stays in
+/// one table, and the size moves it: a small one is one less (never
+/// nothing), a big one half as much again. A big pike is five fish, which
+/// is a day's food and the best thing a rod does.
+pub fn catch_count(species: Species, size: Size) -> u32 {
+    let base: u32 = species
+        .drops()
+        .iter()
+        .filter(|&&(block, _)| block == crate::types::BLOCK_RAW_FISH)
+        .map(|&(_, n)| n)
+        .sum::<u32>()
+        .max(1);
+    match size {
+        Size::Small => base.saturating_sub(1).max(1),
+        Size::Middling => base,
+        Size::Big => base + base.div_ceil(2),
+    }
+}
+
 // **What `rod_catch` was, and why it is gone.** It answered "how many raw
 // fish" from the water alone -- three off a deep sea, three from a deep
 // still lake, two from a river -- because nothing then chose a *species*
 // for a catch. `rod_species` chooses one now, out of the same fish the
 // spawner puts in that water, and the count is that fish's own
-// `Species::drops`. One table instead of two that had to be kept saying
-// the same thing.
+// `Species::drops`, moved by its size (`catch_count`). One table instead
+// of two that had to be kept saying the same thing; the water that once
+// set the count sets the size now (`size_odds`), which is the same idea
+// said about the fish instead of about the pack.
 
 // ---------------------------------------------------------------------------
 // The throw
@@ -889,13 +1365,23 @@ const ARC_STEP: f32 = 1.0 / 6.0;
 /// also means a player cannot get a longer cast by looking up, and does not
 /// have to keep a strange angle to get a short one.
 ///
-/// Straight up or straight down has no bearing at all, and is no cast.
+/// Straight up has no bearing at all, and is no cast.
+///
+/// **Looking steeply down is a line lowered, not thrown** ([`lowered_line`]):
+/// the float goes into the water the eye is on, within [`LOWER_REACH`], or
+/// nowhere. That is how a hole in the ice is fished, and a jetty, and the
+/// side of a raft -- every place where the water is at the player's feet
+/// and a throw at twenty degrees would carry the float over it.
 pub fn cast_target(
     eye: (f32, f32, f32),
     dir: (f32, f32, f32),
     power: f32,
     block_at: impl Fn(i32, i32, i32) -> Option<BlockId>,
 ) -> Option<(i32, i32, i32)> {
+    let length = (dir.0 * dir.0 + dir.1 * dir.1 + dir.2 * dir.2).sqrt();
+    if length > 1e-6 && dir.1 / length < -LOWER_BELOW {
+        return lowered_line(eye, (dir.0 / length, dir.1 / length, dir.2 / length), &block_at);
+    }
     let flat = (dir.0 * dir.0 + dir.2 * dir.2).sqrt();
     if flat < 1e-3 {
         return None;
@@ -948,6 +1434,55 @@ pub fn cast_target(
     None
 }
 
+/// How steeply down a player must be looking for a cast to be a line
+/// lowered: the sine of fifty-five degrees below level.
+///
+/// Steep enough that nobody lowers a line by accident while aiming a throw
+/// at the near bank (a throw at the water three blocks out from a bank is
+/// looked at twenty or thirty degrees down), and shallow enough that a hole
+/// in the ice a pace in front of the feet is reached without staring at
+/// one's boots.
+pub const LOWER_BELOW: f32 = 0.82;
+
+/// How far a lowered line reaches from the eye, in blocks: the length of
+/// the rod and an arm, which is the hole at your feet and the water under a
+/// jetty one block down.
+pub const LOWER_REACH: f32 = 4.5;
+
+/// The water under the eye, along the look, within [`LOWER_REACH`] -- or
+/// `None` if anything solid, or nothing loaded, is met first.
+///
+/// **A ray and not an arc**, because nothing is thrown: the float goes down
+/// the line of sight on the end of the rod. Air and whatever a line hangs
+/// through (a tuft of grass, a lily's leaf) is passed; a wall is not, and
+/// ice is a wall -- the hole is the point.
+pub fn lowered_line(
+    eye: (f32, f32, f32),
+    dir: (f32, f32, f32),
+    block_at: impl Fn(i32, i32, i32) -> Option<BlockId>,
+) -> Option<(i32, i32, i32)> {
+    let steps = (LOWER_REACH / ARC_STEP) as i32;
+    let mut cell = (eye.0.floor() as i32, eye.1.floor() as i32, eye.2.floor() as i32);
+    for step in 1..=steps {
+        let t = step as f32 * ARC_STEP;
+        let next = (
+            (eye.0 + dir.0 * t).floor() as i32,
+            (eye.1 + dir.1 * t).floor() as i32,
+            (eye.2 + dir.2 * t).floor() as i32,
+        );
+        if next == cell {
+            continue;
+        }
+        cell = next;
+        match block_at(cell.0, cell.1, cell.2) {
+            Some(block) if is_liquid(block) => return Some(cell),
+            Some(block) if !crate::types::is_collidable(block) => continue,
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// The world's own gravity, in blocks a second squared: what the arc falls
 /// at.
 const GRAVITY: f32 = 18.0;
@@ -964,16 +1499,74 @@ const CAST_ELEVATION: f32 = 0.35;
 // The bite, the strike and the fight
 // ---------------------------------------------------------------------------
 
-/// How long the float is under before the fish spits the bait: nine tenths
-/// of a second.
+/// **How a fish takes the bait**, as the float shows it: three movements, in
+/// order, each with its own length in seconds.
 ///
-/// **The whole of the reflex, and it is the only reflex in the mechanic.**
-/// Long enough to be fair with a hundred milliseconds of network between the
-/// dip and the hand -- the dip is drawn when the message arrives, so the
-/// window a player sees is the window they get -- and short enough that it
-/// is a moment rather than a pause. What it is *not* is where the difficulty
-/// lives: the fight is.
-pub const STRIKE_SECONDS: f32 = 0.9;
+/// * `nibble` -- **the float trembles**: a fish is nosing the bait and has
+///   not got it. A strike now pulls the bait out of its mouth
+///   ([`Strike::TooEarly`]): the fish is gone and the cast with it.
+/// * `dip` -- **half under**: it has the bait in its mouth.
+/// * `take` -- **under, and moving off**: it has turned with it. After this
+///   the bait is eaten and the fish gone.
+///
+/// A strike in the dip or the take hooks the fish; the window is the two
+/// together ([`Bite::window`]).
+///
+/// **Why three and not the one dip there was.** One dip of nine tenths of a
+/// second made the strike a reflex -- the float goes, the hand goes -- and a
+/// reflex is the same for everybody who has one. Three movements make it a
+/// *reading*: the tremble is information (something is here, get ready),
+/// the dip is the answer, and the one mistake a patient player never makes
+/// is the one an impatient player always does. That is the owner's
+/// "читаемо и справедливо".
+///
+/// **Why the window is long.** A dip and a take together are never under
+/// one and a half seconds (`the_strike_window_is_fair_for_every_fish`),
+/// which is a hundred and fifty milliseconds of network and a slow hand with
+/// a second to spare -- the float is drawn when the message arrives, so the
+/// window a player sees is the window they get. The difficulty is not in
+/// the hand, and never was: it is in not striking at the tremble, and then
+/// in the fight.
+///
+/// **Different for each fish, so the float says what is down there.** The
+/// school pecks for a long time and takes quickly; a trout is all at once; a
+/// pike barely touches it and then goes, and keeps going. A player who has
+/// watched a float for an evening knows a pike before the strike.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bite {
+    pub nibble: f32,
+    pub dip: f32,
+    pub take: f32,
+    /// The chance a tremble comes to nothing: the fish noses the bait and
+    /// swims off, and the float goes still again.
+    ///
+    /// **This is what makes the tremble worth reading.** If every tremble
+    /// became a dip, a player could strike on a count of two from the first
+    /// shiver; with a third of them leading nowhere, the only safe strike is
+    /// at the dip, which is the sentence the float was written to say.
+    pub nothing: f32,
+}
+
+impl Bite {
+    /// How long a strike hooks the fish for: the dip and the take.
+    pub fn window(self) -> f32 {
+        self.dip + self.take
+    }
+}
+
+/// How this fish takes a bait. See [`Bite`].
+pub fn bite_of(species: Species) -> Bite {
+    match species {
+        // The school pecks and pecks, and then it is quick.
+        Species::Fish | Species::Herring => Bite { nibble: 2.2, dip: 0.8, take: 0.9, nothing: 0.4 },
+        // A trout rises to it and has it: little warning, a short take.
+        Species::Trout => Bite { nibble: 0.9, dip: 0.6, take: 0.9, nothing: 0.25 },
+        // A pike hardly touches it, then runs with it for a long time.
+        Species::Pike => Bite { nibble: 0.7, dip: 1.0, take: 1.6, nothing: 0.15 },
+        Species::Cod => Bite { nibble: 1.3, dip: 0.9, take: 1.2, nothing: 0.2 },
+        _ => Bite { nibble: 1.5, dip: 0.8, take: 1.0, nothing: 0.3 },
+    }
+}
 
 /// How long the float rides after it lands before anything can take it:
 /// three quarters of a second of it settling.
@@ -988,9 +1581,10 @@ pub const SETTLE_SECONDS: f32 = 0.75;
 pub enum Strike {
     /// The float was down and the hook went in. The fight starts.
     Hooked,
-    /// Nothing was there. The line comes out of the water and the cast is
-    /// over -- **which is the cost that makes the strike a decision** and
-    /// not a key to hold down. The bait is not lost: nothing ate it.
+    /// Nothing had the bait -- the float was still, or only trembling. The
+    /// line comes out of the water and the cast is over, **which is the
+    /// cost that makes the strike a decision** and not a key to hold down.
+    /// The bait is not lost: nothing ate it.
     TooEarly,
     /// The line was not in the water at all, or the fight is already on.
     /// Nothing happens and nothing is said; a doubled tap is not a mistake
@@ -1028,19 +1622,28 @@ pub fn fight_strength(species: Species) -> f32 {
 /// the actual skill in the actual thing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Fight {
-    /// How hard this one pulls ([`fight_strength`]).
+    /// How hard its kind pulls ([`fight_strength`]).
     pub strength: f32,
+    /// How much harder this one pulls for its size ([`Size::pull`]).
+    pub pull: f32,
+    /// How long it takes to bring in, against a middling fish of its kind
+    /// ([`Size::heft`]).
+    pub heft: f32,
+    /// The strain at which the line parts: 1 on a sound rod, less on a worn
+    /// one ([`line_limit`]).
+    pub limit: f32,
     /// 0 when it is out at the float, 1 when it is at the bank.
     pub gained: f32,
-    /// 0 for a slack line, 1 for one about to part.
+    /// 0 for a slack line, [`Fight::limit`] for one parting.
     pub strain: f32,
     /// Seconds into the fight: what the runs are timed off.
     pub age: f32,
 }
 
-/// How long a fish of middling strength takes to bring in with a hand that
-/// never lets the strain get away: about six seconds.
-const GAIN_PER_SECOND: f32 = 0.22;
+/// How fast a fish of middling strength comes in on a reeling hand: about
+/// four seconds of reeling, which with the pauses a run asks for is a trout
+/// in eight and a middling pike in fifteen.
+const GAIN_PER_SECOND: f32 = 0.26;
 
 /// How fast the strain sheds on a slack line.
 const SLACK_PER_SECOND: f32 = 0.85;
@@ -1057,13 +1660,29 @@ pub enum Fought {
 }
 
 impl Fight {
+    /// A middling fish of this kind on a sound rod.
     pub fn new(species: Species) -> Fight {
+        Fight::sized(species, Size::Middling, 1.0)
+    }
+
+    /// A fish of this kind and size, on a rod whose line parts at `limit`.
+    pub fn sized(species: Species, size: Size, limit: f32) -> Fight {
         Fight {
             strength: fight_strength(species),
+            pull: size.pull(),
+            heft: size.heft(),
+            limit: limit.clamp(0.5, 1.0),
             gained: 0.0,
             strain: 0.25,
             age: 0.0,
         }
+    }
+
+    /// The strain as a share of what parts the line, 0..1: what the gauge
+    /// draws, so a worn rod's gauge fills sooner rather than lying about how
+    /// near the line is to going.
+    pub fn tension(&self) -> f32 {
+        (self.strain / self.limit).clamp(0.0, 1.0)
     }
 
     /// **Is the fish running right now?** A sum of two waves whose periods
@@ -1093,18 +1712,29 @@ impl Fight {
             // this looked like before the test below went red): the first
             // fish anybody hooks has to come in on a heavy hand, and the
             // pike has to be played.
-            self.strain += dt * self.strength * self.strength * (0.25 + 1.3 * run);
-            self.gained += dt * GAIN_PER_SECOND / self.strength.max(0.2);
+            //
+            // **The kind squared and the size once.** Squared again for size
+            // was tried first, and a big cod put 4.4 of strain a second on
+            // the line at the top of a run: three server ticks from slack to
+            // parted, which no hand reading a gauge can answer. A big fish
+            // is mostly *longer* (`Size::heft`), and the strain it adds is
+            // the size's share on top of the kind's.
+            self.strain += dt * self.strength * self.strength * self.pull * (0.25 + 1.3 * run);
+            self.gained += dt * GAIN_PER_SECOND / (self.strength.max(0.2) * self.heft);
         } else {
             self.strain -= dt * SLACK_PER_SECOND;
             // A fish given line takes some back, and a fish that is running
             // takes more. Never all of it: a player who stands there doing
             // nothing loses slowly, not instantly.
-            self.gained -= dt * 0.08 * (0.3 + run);
+            //
+            // **And less of it than it once took**: at 0.08 a second a big
+            // pike given line took back as much as the reeling between its
+            // runs won, and a fight played perfectly never ended.
+            self.gained -= dt * 0.05 * (0.2 + run);
         }
         self.strain = self.strain.clamp(0.0, 1.5);
         self.gained = self.gained.clamp(0.0, 1.0);
-        if self.strain >= 1.0 {
+        if self.strain >= self.limit {
             return Fought::Lost;
         }
         if self.gained >= 1.0 {
@@ -1112,6 +1742,95 @@ impl Fight {
         }
         Fought::On
     }
+}
+
+/// **Where a worn rod's line parts**: at full strain on a rod with a quarter
+/// of its life or more left, and at down to four fifths of it on one about
+/// to go. `left` is the share of the rod's life remaining, 0..1.
+///
+/// Rejected: a worn rod that fishes exactly like a new one until the fish
+/// it breaks on. Wear that is invisible until it is fatal is a trap; a rod
+/// whose gauge fills sooner ([`Fight::tension`]) is a rod telling its owner
+/// to make another before they go after the pike.
+pub fn line_limit(left: f32) -> f32 {
+    let left = left.clamp(0.0, 1.0);
+    if left >= 0.25 {
+        1.0
+    } else {
+        0.8 + 0.2 * left / 0.25
+    }
+}
+
+/// **What a parted line costs the rod**, in fish of its life
+/// (`BlockDef::durability` counts fish landed).
+///
+/// A line that parts under a fish jars the whole rod, and the heavier the
+/// fish the harder: two fish' worth off a small one, seven off a middling
+/// pike, ten off a big cod. So a rod with little life left does not survive
+/// losing a big fish -- it breaks in the hand -- and the decision it makes is
+/// the one the owner asked for: **play the fish, and carry a spare** to the
+/// water where the big ones are.
+///
+/// Rejected: a chance of breaking on every run. A rod that might snap at
+/// any moment of any fight is a dice roll the player cannot influence; a rod
+/// that pays for a lost fish is paying for a thing the player did.
+pub fn snap_shock(species: Species, size: Size) -> u32 {
+    ((fight_strength(species) * size.pull() * 6.0).round() as u32).max(1)
+}
+
+// ---------------------------------------------------------------------------
+// The water seen from the bank
+// ---------------------------------------------------------------------------
+
+/// **How often a fish near the top breaks the surface**, per minute: 1.5
+/// for a fish at an ordinary hour, times [`appetite`].
+///
+/// **The same appetite the rod reads**, so the water's surface is the bite
+/// made visible: rings everywhere at dusk before rain, a flat glassy lake at
+/// a clear noon in winter. A rise the player could not trust would teach
+/// them to ignore the water; this one teaches them to read it.
+///
+/// Rejected: rises drawn by the client from the time of day alone. The
+/// client does not know the sky that is coming, and cannot know where the
+/// fish are -- which are the two things a rise is worth watching for.
+pub fn rise_rate(moment: Moment) -> f32 {
+    RISES_A_MINUTE
+        * appetite(moment)
+        // The sun on the surface puts them down as it does the bite, read
+        // for open water two deep: a rise is a fish at the top.
+        * glare_factor(moment.time_of_day, moment.weather, 2, false)
+}
+
+/// See [`rise_rate`].
+pub const RISES_A_MINUTE: f32 = 1.5;
+
+/// How far under the surface a fish can be and still be seen to rise, in
+/// blocks.
+pub const RISE_DEPTH: f32 = 2.5;
+
+/// How far from somebody a rise is worth telling them about, in blocks:
+/// about as far as a ring on the water can be told from the light on it.
+pub const RISE_SEEN: f32 = 40.0;
+
+/// **What share of rises are a fish clean out of the water**, rather than a
+/// ring: by kind, and more of them as rain comes.
+///
+/// A trout leaps, a pike swirls, the school dimples: the shape of the rise
+/// says what made it, which is worth knowing before choosing a bait. And the
+/// share goes up with the front ([`front_factor`]), so **a lake where the
+/// fish are jumping is a lake telling you it is about to rain** -- the
+/// forecast a player can read, in the only place the server keeps one.
+pub fn leap_share(species: Species, moment: Moment) -> f32 {
+    let base = match species {
+        Species::Trout => 0.35,
+        Species::Pike => 0.12,
+        Species::Cod => 0.08,
+        Species::Herring => 0.15,
+        Species::Fish => 0.1,
+        _ => 0.1,
+    };
+    let front = (front_factor(moment.weather, moment.coming) - 1.0) / (FRONT_BEST - 1.0);
+    (base * (1.0 + 2.5 * front)).clamp(0.0, 0.9)
 }
 
 /// Is a cast still a cast? The player's eye within [`CAST_HOLDS`] of the
@@ -1183,7 +1902,7 @@ mod tests {
     /// hook: the shape most of these tests ask about, with the three new
     /// terms held still.
     fn wait(spot: Spot, kind: Water, time_of_day: f32, weather: Weather, water_c: f32) -> Option<f32> {
-        rod_wait_seconds(spot, kind, time_of_day, weather, water_c, Season::Spring, 0.0, None)
+        rod_wait_seconds(spot, kind, Moment::plain(time_of_day, weather, water_c), 0.0, 0, None)
     }
 
     #[test]
@@ -1295,7 +2014,7 @@ mod tests {
         // held still. A bare hook would narrow it to the school and the
         // herring (`Bait::tempts`), which is the test below.
         let here = |biome, spot| -> Vec<&'static str> {
-            rod_odds(biome, spot, Some(Bait::Worm)).into_iter().map(|(species, _)| species.name()).collect()
+            rod_odds(biome, spot, Habitat::plain(Water::Fresh), Some(Bait::Worm)).into_iter().map(|(species, _)| species.name()).collect()
         };
         let deep_sea = spot(&Pond::dug(9, 9, 9), (4, 20, 4)).expect("water");
         let shallow = spot(&Pond::dug(9, 9, 2), (4, 20, 4)).expect("water");
@@ -1320,7 +2039,7 @@ mod tests {
 
     /// Every fish that could take this hook, in this water, with this on it.
     fn could_take(biome: Biome, spot: Spot, bait: Option<Bait>) -> Vec<Species> {
-        rod_odds(biome, spot, bait).into_iter().map(|(species, _)| species).collect()
+        rod_odds(biome, spot, Habitat::plain(Water::Fresh), bait).into_iter().map(|(species, _)| species).collect()
     }
 
     #[test]
@@ -1344,7 +2063,7 @@ mod tests {
         // nothing in it.
         for roll in 0..20 {
             let roll = roll as f32 / 20.0;
-            let caught = rod_species(Biome::River, deep_sea, Some(Bait::Scrap), roll);
+            let caught = rod_species(Biome::River, deep_sea, Habitat::plain(Water::Fresh), Some(Bait::Scrap), roll);
             assert!(caught != Some(Species::Cod) && caught != Some(Species::Pike), "{caught:?} came up a river");
         }
     }
@@ -1381,7 +2100,7 @@ mod tests {
         assert!(!bare.contains(&Species::Cod), "a bare hook took a cod");
         let slow = wait(sea, Water::Salt, 0.5, Weather::Clear, 20.0).expect("a bite");
         let baited =
-            rod_wait_seconds(sea, Water::Salt, 0.5, Weather::Clear, 20.0, Season::Spring, 0.0, Some(Bait::Worm))
+            rod_wait_seconds(sea, Water::Salt, Moment::plain(0.5, Weather::Clear, 20.0), 0.0, 0, Some(Bait::Worm))
                 .expect("a bite");
         assert!(baited < slow, "a worm ({baited} s) was no faster than a bare hook ({slow} s)");
         // ...and the fly is the one that is not eaten.
@@ -1400,17 +2119,8 @@ mod tests {
     fn a_spot_fished_out_bites_slower_and_comes_back_on_its_own() {
         let lake = spot(&Pond::dug(12, 12, 5), (6, 20, 6)).expect("water");
         let rested = wait(lake, Water::Standing, 0.5, Weather::Clear, 20.0).expect("a bite");
-        let spent = rod_wait_seconds(
-            lake,
-            Water::Standing,
-            0.5,
-            Weather::Clear,
-            20.0,
-            Season::Spring,
-            SPOT_HOLDS,
-            None,
-        )
-        .expect("a bite");
+        let spent = rod_wait_seconds(lake, Water::Standing, Moment::plain(0.5, Weather::Clear, 20.0), SPOT_HOLDS, 0, None)
+            .expect("a bite");
         assert!(spent > rested * 3.0, "a fished-out lake ({spent} s) fishes like a rested one ({rested} s)");
         assert!(spent <= ROD_LONGEST_SECONDS, "a spot said \"not here\" in {spent} s, which reads as a broken rod");
         // Never dead, though: the float still goes under eventually, because
@@ -1456,7 +2166,8 @@ mod tests {
         // and a cold one in spring does too.
         let lake = spot(&Pond::dug(12, 12, 5), (6, 20, 6)).expect("water");
         let one = |season, water_c| {
-            rod_wait_seconds(lake, Water::Standing, 0.5, Weather::Clear, water_c, season, 0.0, None).expect("a bite")
+            let moment = Moment { time_of_day: 0.5, weather: Weather::Clear, coming: None, water_c, season };
+            rod_wait_seconds(lake, Water::Standing, moment, 0.0, 0, None).expect("a bite")
         };
         assert!(one(Season::Winter, 18.0) > one(Season::Spring, 18.0), "winter fished as well as spring");
         assert!(one(Season::Spring, 0.0) > one(Season::Spring, 18.0), "an ice hole fished as well as May");
@@ -1588,5 +2299,346 @@ mod tests {
     fn a_cast_ends_when_the_fisher_walks_away() {
         assert!(cast_holds((0.5, 21.6, 0.5), (3, 20, 0)));
         assert!(!cast_holds((20.5, 21.6, 0.5), (3, 20, 0)));
+    }
+
+    // ---- the water decides the fish ----
+
+    /// The share of every catch this fish is, in this water.
+    fn share(biome: Biome, spot: Spot, habitat: Habitat, bait: Option<Bait>, species: Species) -> f32 {
+        let odds = rod_odds(biome, spot, habitat, bait);
+        let total: f32 = odds.iter().map(|&(_, w)| w).sum();
+        odds.iter().filter(|&&(s, _)| s == species).map(|&(_, w)| w).sum::<f32>() / total.max(1e-6)
+    }
+
+    #[test]
+    fn the_colour_of_the_water_decides_which_fish_takes() {
+        let river = spot(&Pond::dug(9, 9, 4), (4, 20, 4)).expect("water");
+        // A cold clear stream and a warm brown one, in the same country.
+        let cold = Habitat { kind: Water::Fresh, chill: 0.9, silt: 0.6 };
+        let brown = Habitat { kind: Water::Fresh, chill: 0.15, silt: 0.05 };
+        let trout = |h| share(Biome::River, river, h, Some(Bait::Worm), Species::Trout);
+        assert!(
+            trout(cold) > trout(brown) * 2.0,
+            "a cold clear river is {} trout and a warm brown one {}",
+            trout(cold),
+            trout(brown)
+        );
+        // ...and the pike is the other corner: the warm marsh, not the milk
+        // off a glacier.
+        let marsh = Habitat { kind: Water::Standing, chill: 0.1, silt: 0.05 };
+        let glacier = Habitat { kind: Water::Standing, chill: 0.9, silt: 0.95 };
+        let lake = spot(&Pond::dug(12, 12, 5), (6, 20, 6)).expect("water");
+        let pike = |h| share(Biome::Swamp, lake, h, Some(Bait::Scrap), Species::Pike);
+        assert!(pike(marsh) > pike(glacier) * 1.5, "a marsh {} pike, a glacier lake {}", pike(marsh), pike(glacier));
+        // A weight and never a gate: the rare fish is rare, not gone.
+        assert!(trout(brown) > 0.0, "a trout was ruled out of a river by its colour");
+        for species in Species::ALL.iter().copied().filter(|s| s.swims()) {
+            for h in [cold, brown, marsh, glacier] {
+                assert!(habitat_weight(species, h) > 0.0, "{species:?} cannot live in {h:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_marsh_gives_small_fish_and_a_deep_clear_lake_big_ones() {
+        let lake = spot(&Pond::dug(12, 12, 6), (6, 20, 6)).expect("water");
+        let bog = spot(&Pond::dug(4, 4, 2), (1, 20, 1)).expect("water");
+        let clear = Habitat { kind: Water::Standing, chill: 0.4, silt: 0.5 };
+        let peat = Habitat { kind: Water::Standing, chill: 0.3, silt: 0.05 };
+        let [lake_small, _, lake_big] = size_odds(lake, clear, 0.0, Some(Bait::Worm));
+        let [bog_small, _, bog_big] = size_odds(bog, peat, 0.0, Some(Bait::Worm));
+        assert!(lake_big > bog_big * 3.0, "a deep lake is {lake_big} big fish, a bog {bog_big}");
+        assert!(bog_small > lake_small * 1.5, "a bog is {bog_small} small fish, a deep lake {lake_small}");
+        for odds in [size_odds(lake, clear, 0.0, None), size_odds(bog, peat, SPOT_HOLDS, Some(Bait::Scrap))] {
+            assert!((odds.iter().sum::<f32>() - 1.0).abs() < 1e-4, "{odds:?} are not odds");
+        }
+    }
+
+    #[test]
+    fn meat_on_the_hook_is_fewer_bites_of_bigger_fish() {
+        let lake = spot(&Pond::dug(12, 12, 5), (6, 20, 6)).expect("water");
+        let water = Habitat::plain(Water::Standing);
+        let big = |bait| size_odds(lake, water, 0.0, bait)[2];
+        assert!(big(Some(Bait::Scrap)) > big(Some(Bait::Worm)) * 1.5, "meat took no bigger fish than a worm");
+        assert!(big(Some(Bait::Worm)) > big(Some(Bait::Grub)), "a grub took bigger fish than a worm");
+        assert!(Bait::Scrap.appeal() < Bait::Worm.appeal(), "meat brought bites as often as a worm");
+    }
+
+    #[test]
+    fn a_frog_on_the_hook_is_for_the_pike_and_brings_the_biggest_fish() {
+        // The frog's whole case as bait: the pike wants it more than it wants
+        // anything else, the sea's small fish will not have it, and what it
+        // brings is bigger than meat brings -- for fewer bites than a worm.
+        for bait in Bait::ALL.into_iter().filter(|&b| b != Bait::Frog) {
+            assert!(
+                Bait::tempts(Some(Bait::Frog), Species::Pike) > Bait::tempts(Some(bait), Species::Pike),
+                "a pike wants {bait:?} as much as a frog"
+            );
+        }
+        assert_eq!(Bait::tempts(Some(Bait::Frog), Species::Herring), 0.0, "a herring took a frog");
+        let lake = spot(&Pond::dug(12, 12, 5), (6, 20, 6)).expect("water");
+        let water = Habitat::plain(Water::Standing);
+        let big = |bait| size_odds(lake, water, 0.0, bait)[2];
+        assert!(big(Some(Bait::Frog)) > big(Some(Bait::Scrap)), "a frog took no bigger fish than meat");
+        assert!(Bait::Frog.appeal() < Bait::Worm.appeal(), "a frog brought bites as often as a worm");
+        assert_eq!(Bait::of_block(crate::types::BLOCK_FROG), Some(Bait::Frog));
+        assert!(!Bait::Frog.keeps(), "a frog stayed on the hook after the pike took it");
+    }
+
+    #[test]
+    fn a_fished_bank_loses_its_big_fish_before_it_loses_its_bites() {
+        let lake = spot(&Pond::dug(12, 12, 5), (6, 20, 6)).expect("water");
+        let water = Habitat::plain(Water::Standing);
+        let rested = size_odds(lake, water, 0.0, Some(Bait::Worm))[2];
+        let tired = size_odds(lake, water, SPOT_HOLDS * 0.5, Some(Bait::Worm))[2];
+        let moment = Moment::plain(0.25, Weather::Clear, 18.0);
+        let wait = |taken| rod_wait_seconds(lake, Water::Standing, moment, taken, 0, Some(Bait::Worm)).expect("a bite");
+        // Half fished: the big fish much fewer, the bites only slower.
+        assert!(tired < rested * 0.75, "big fish {rested} rested and {tired} half fished out");
+        assert!(wait(SPOT_HOLDS * 0.5) < wait(0.0) * 2.0, "half a bank fished stopped the bites");
+    }
+
+    #[test]
+    fn a_big_fish_is_more_fish_and_a_small_one_is_never_nothing() {
+        for species in Species::ALL.iter().copied().filter(|s| s.swims()) {
+            let [small, middling, big] = Size::ALL.map(|size| catch_count(species, size));
+            assert!(small >= 1, "a small {species:?} was no fish at all");
+            assert!(small <= middling && middling < big, "{species:?}: {small} {middling} {big}");
+        }
+        assert_eq!(catch_count(Species::Pike, Size::Big), 5, "a big pike is a day's food");
+        assert_eq!(catch_count(Species::Fish, Size::Middling), 1);
+        for size in Size::ALL {
+            assert_eq!(Size::of_code(size.code()), size, "{size:?} did not survive the wire");
+        }
+    }
+
+    // ---- the hour and the sky ----
+
+    #[test]
+    fn the_last_minutes_before_rain_are_the_best_bite_there_is() {
+        let soon = Some((Weather::Rain, 20.0));
+        assert!(front_factor(Weather::Clear, soon) > weather_factor(Weather::Rain), "the rain itself beat the front");
+        assert!(front_factor(Weather::Clear, Some((Weather::Storm, 20.0))) > 1.5, "a storm coming is no front");
+        // Too far off, dry to dry, and wet to dry are nothing; nobody
+        // knowing is nothing.
+        assert_eq!(front_factor(Weather::Clear, Some((Weather::Rain, FRONT_SECONDS + 60.0))), 1.0);
+        assert_eq!(front_factor(Weather::Clear, Some((Weather::Clear, 5.0))), 1.0);
+        assert_eq!(front_factor(Weather::Rain, Some((Weather::Clear, 5.0))), 1.0);
+        assert_eq!(front_factor(Weather::Clear, None), 1.0);
+        // No cliff: a second nearer is never much better.
+        let mut t = FRONT_SECONDS + 10.0;
+        while t > 0.0 {
+            let a = front_factor(Weather::Clear, Some((Weather::Rain, t)));
+            let b = front_factor(Weather::Clear, Some((Weather::Rain, t - 1.0)));
+            assert!(b >= a && b - a < 0.02, "a step in the front at {t} s: {a} then {b}");
+            t -= 1.0;
+        }
+        // ...and it is a bite the rod gives, not only a number.
+        let lake = spot(&Pond::dug(12, 12, 5), (6, 20, 6)).expect("water");
+        let calm = Moment::plain(0.4, Weather::Clear, 18.0);
+        let coming = Moment { coming: soon, ..calm };
+        let wait = |m| rod_wait_seconds(lake, Water::Standing, m, 0.0, 0, Some(Bait::Worm)).expect("a bite");
+        assert!(wait(coming) < wait(calm) * 0.7, "rain coming made the wait {} against {}", wait(coming), wait(calm));
+    }
+
+    #[test]
+    fn a_clear_noon_puts_the_fish_off_the_shallows_and_not_off_the_deep_hole() {
+        let shallow_noon = glare_factor(0.5, Weather::Clear, 2, false);
+        assert!(shallow_noon <= 0.55, "a clear noon over two blocks of water is {shallow_noon}");
+        assert!(glare_factor(0.5, Weather::Clear, 6, true) > 0.9, "the deep hole under the willow is off at noon");
+        assert!(glare_factor(0.5, Weather::Rain, 2, false) > 0.8, "an overcast noon was as bright as a clear one");
+        for dusk in [0.25, 0.75, 0.0] {
+            assert!((glare_factor(dusk, Weather::Clear, 2, false) - 1.0).abs() < 1e-4, "glare at {dusk}");
+        }
+        // So noon is the worst hour of the daylight in the shallows, and not
+        // in the deep water.
+        let day = |t: f32, depth| hour_factor(t) * glare_factor(t, Weather::Clear, depth, false);
+        assert!(day(0.5, 2) < day(0.35, 2) * 0.7, "noon fished the shallows as well as the morning");
+        assert!(day(0.5, 7) > day(0.35, 7) * 0.8, "noon put the deep water off as badly as the shallows");
+    }
+
+    #[test]
+    fn winter_is_slow_and_a_hole_in_the_ice_gives_some_of_it_back() {
+        // A lake under a lid of ice, with one hole cut in it.
+        let mut lake = Pond::dug(9, 9, 4);
+        let mut ice = HashSet::new();
+        for x in 0..9 {
+            for z in 0..9 {
+                if (x, z) != (4, 4) {
+                    lake.water.remove(&(x, 20, z));
+                    ice.insert((x, 20, z));
+                }
+            }
+        }
+        let world = |x: i32, y: i32, z: i32| {
+            if ice.contains(&(x, y, z)) {
+                Some(crate::types::BLOCK_ICE)
+            } else {
+                lake.block(x, y, z)
+            }
+        };
+        let hole = survey(world, (4, 20, 4)).expect("the hole is water");
+        assert!(hole.iced >= ICED_LID, "a lake under ice read as open water: {} iced", hole.iced);
+        assert!(hole.holds_fish() && hole.depth >= MIN_ROD_DEPTH);
+        // A throw at the ice meets the ice. A line lowered into the hole
+        // goes down it.
+        let eye = (4.5, 22.6, 3.3);
+        assert_eq!(cast_target(eye, (0.0, -0.06, 1.0), 0.5, world), None, "a throw went through the ice");
+        let down = (0.0, -2.1, 1.2);
+        assert_eq!(cast_target(eye, down, 0.0, world), Some((4, 20, 4)), "a line lowered missed the hole");
+        // ...and the hole draws the fish: slower than spring, faster than
+        // the same winter water with no ice on it.
+        let open = spot(&Pond::dug(9, 9, 4), (4, 20, 4)).expect("water");
+        let winter = Moment { season: Season::Winter, ..Moment::plain(0.3, Weather::Clear, 1.0) };
+        let spring = Moment::plain(0.3, Weather::Clear, 14.0);
+        let wait = |s, m| rod_wait_seconds(s, Water::Standing, m, 0.0, 0, Some(Bait::Worm)).expect("a bite");
+        assert!(wait(hole, winter) < wait(open, winter) * 0.75, "the hole was no better than open winter water");
+        assert!(wait(hole, winter) > wait(open, spring), "a hole in the ice fished like May");
+        // A line lowered into stone is no line.
+        assert_eq!(lowered_line(eye, (0.0, -1.0, 0.0), |_, _, _| Some(BLOCK_STONE)), None, "a line was lowered into stone");
+    }
+
+    #[test]
+    fn a_shoal_at_the_float_is_worth_walking_to_and_never_worth_more_than_the_hour() {
+        assert_eq!(shoal_factor(0), 1.0);
+        assert!(shoal_factor(SHOAL_FULL) > shoal_factor(1));
+        assert_eq!(shoal_factor(SHOAL_FULL), shoal_factor(SHOAL_FULL * 5), "more fish than a shoal kept paying");
+        assert!(hour_factor(0.25) / hour_factor(0.5) > shoal_factor(SHOAL_FULL), "a shoal at noon beats dusk");
+    }
+
+    // ---- the float ----
+
+    #[test]
+    fn the_strike_window_is_fair_for_every_fish() {
+        for species in Species::ALL.iter().copied().filter(|s| s.swims()) {
+            let bite = bite_of(species);
+            // A second and a half: a slow hand and a slow line with a second
+            // to spare.
+            assert!(bite.window() >= 1.5, "{species:?} gives {} s to strike", bite.window());
+            // A tremble long enough to be seen, and a dip that is its own
+            // movement rather than a flicker.
+            assert!(bite.nibble >= 0.6 && bite.dip >= 0.5, "{species:?}: {bite:?}");
+            // Some trembles come to nothing, and most do not.
+            assert!(bite.nothing > 0.0 && bite.nothing < 0.5, "{species:?}: {bite:?}");
+        }
+        // The float says what is down there: the school pecks longest, the
+        // pike runs longest.
+        assert!(bite_of(Species::Fish).nibble > bite_of(Species::Pike).nibble);
+        assert!(bite_of(Species::Pike).take > bite_of(Species::Fish).take);
+    }
+
+    // ---- the fight and the rod ----
+
+    /// Plays a fight with a hand that reads only the gauge, a tenth of a
+    /// second late: reels until it reads `high`, gives line until `low`.
+    fn by_the_gauge(mut fight: Fight, low: f32, high: f32) -> (Fought, f32) {
+        let mut reeling = true;
+        let mut seen = std::collections::VecDeque::from([fight.tension(), fight.tension()]);
+        for _ in 0..6000 {
+            let late = seen.pop_front().unwrap_or(0.0);
+            if reeling && late >= high {
+                reeling = false;
+            } else if !reeling && late <= low {
+                reeling = true;
+            }
+            let out = fight.step(0.05, reeling);
+            seen.push_back(fight.tension());
+            if out != Fought::On {
+                return (out, fight.age);
+            }
+        }
+        (Fought::On, fight.age)
+    }
+
+    /// Plays one with a hand that also watches the rod: never reels into a
+    /// run.
+    fn by_the_run(mut fight: Fight) -> Fought {
+        for _ in 0..6000 {
+            let reeling = fight.running() < 0.45 && fight.tension() < 0.7;
+            let out = fight.step(0.05, reeling);
+            if out != Fought::On {
+                return out;
+            }
+        }
+        Fought::On
+    }
+
+    #[test]
+    fn every_fish_of_every_size_comes_in_to_a_player_who_gives_line_when_it_runs() {
+        for species in Species::ALL.iter().copied().filter(|s| s.swims()) {
+            for size in Size::ALL {
+                let out = by_the_run(Fight::sized(species, size, 1.0));
+                assert_eq!(out, Fought::Landed, "a {size:?} {species:?} played well got away");
+            }
+        }
+        // Reading the gauge alone brings in everything but the heaviest sea
+        // fish, which is the deep sea's prize and wants the rod watched too.
+        for species in [Species::Fish, Species::Trout, Species::Pike, Species::Herring] {
+            for size in Size::ALL {
+                let (out, age) = by_the_gauge(Fight::sized(species, size, 1.0), 0.3, 0.6);
+                assert_eq!(out, Fought::Landed, "a {size:?} {species:?} on the gauge alone: {out:?} at {age} s");
+            }
+        }
+        // And a big fish is a longer fight, not a shorter one.
+        let (_, middling) = by_the_gauge(Fight::sized(Species::Pike, Size::Middling, 1.0), 0.3, 0.6);
+        let (_, big) = by_the_gauge(Fight::sized(Species::Pike, Size::Big, 1.0), 0.3, 0.6);
+        assert!(big > middling * 1.5, "a big pike took {big} s and a middling one {middling} s");
+    }
+
+    #[test]
+    fn a_worn_rod_parts_its_line_sooner_and_a_lost_big_fish_can_break_it() {
+        assert_eq!(line_limit(1.0), 1.0);
+        assert_eq!(line_limit(0.3), 1.0, "a rod with most of its life left was already weak");
+        assert!(line_limit(0.05) < 0.85, "a rod on its last fish held like a new one");
+        // The gauge says so: the same strain reads nearer parting.
+        let mut worn = Fight::sized(Species::Pike, Size::Middling, line_limit(0.0));
+        let mut sound = Fight::sized(Species::Pike, Size::Middling, 1.0);
+        worn.strain = 0.6;
+        sound.strain = 0.6;
+        assert!(worn.tension() > sound.tension());
+        // ...and it parts sooner: the same pike hauled at the same way goes
+        // earlier on the worn rod.
+        let parted = |limit| {
+            let mut fight = Fight::sized(Species::Pike, Size::Middling, limit);
+            while fight.step(0.01, true) == Fought::On {}
+            fight.age
+        };
+        assert!(parted(line_limit(0.0)) < parted(1.0) * 0.9, "a worn rod held as long as a sound one");
+        // What a parted line costs: a lot more for a heavy fish -- more
+        // than a worn rod has left -- and never a new rod at one go.
+        let durability = crate::types::tool_durability(crate::types::BLOCK_FISHING_ROD).expect("a rod wears");
+        assert!(snap_shock(Species::Cod, Size::Big) >= 8, "a big cod lost cost the rod {}", snap_shock(Species::Cod, Size::Big));
+        assert!(snap_shock(Species::Fish, Size::Small) <= 2);
+        assert!(snap_shock(Species::Cod, Size::Big) < durability / 4, "one lost fish breaks a new rod");
+    }
+
+    // ---- the water seen from the bank ----
+
+    #[test]
+    fn fish_rise_most_at_dusk_before_rain_and_least_at_a_clear_winter_noon() {
+        let dusk_before_rain = Moment { coming: Some((Weather::Rain, 30.0)), ..Moment::plain(0.75, Weather::Clear, 16.0) };
+        let winter_noon = Moment { season: Season::Winter, ..Moment::plain(0.5, Weather::Clear, 1.0) };
+        let ordinary = Moment::plain(0.4, Weather::Clear, 16.0);
+        assert!(rise_rate(dusk_before_rain) > rise_rate(ordinary) * 2.0);
+        assert!(rise_rate(winter_noon) < rise_rate(ordinary) * 0.3, "a winter noon rose {}", rise_rate(winter_noon));
+        // The rise *is* the bite: what makes the fish bite makes them rise.
+        let lake = spot(&Pond::dug(12, 12, 5), (6, 20, 6)).expect("water");
+        let bite = |m| 1.0 / rod_wait_seconds(lake, Water::Standing, m, 0.0, 0, Some(Bait::Worm)).expect("a bite");
+        assert!(
+            (rise_rate(dusk_before_rain) / rise_rate(ordinary)) > 0.5 * (bite(dusk_before_rain) / bite(ordinary)),
+            "the water rose less than the fish bit"
+        );
+    }
+
+    #[test]
+    fn fish_jumping_is_a_forecast_of_rain() {
+        let calm = Moment::plain(0.3, Weather::Clear, 16.0);
+        let coming = Moment { coming: Some((Weather::Rain, 15.0)), ..calm };
+        for species in Species::ALL.iter().copied().filter(|s| s.swims()) {
+            assert!(leap_share(species, coming) > leap_share(species, calm) * 2.0, "{species:?} did not jump more before rain");
+            assert!(leap_share(species, coming) < 1.0, "every rise of a {species:?} was a leap");
+        }
+        // The trout is the one that leaps; the school dimples.
+        assert!(leap_share(Species::Trout, calm) > leap_share(Species::Fish, calm));
     }
 }
