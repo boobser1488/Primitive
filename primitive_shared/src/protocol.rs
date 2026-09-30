@@ -568,7 +568,14 @@ pub type PlayerId = u64;
 /// `ForgetMark` out, `Trail` back, all appended, and blocks at ids 695-696
 /// (`types::BLOCK_MAP`, `types::BLOCK_BLAZE`) with one row at the end of
 /// `RECIPES`. 57 still, which no release speaks.
-pub const PROTOCOL_VERSION: u32 = 57;
+///
+/// **58: the bite read off the float.** `ServerMessage::Line` grew `run`
+/// (how hard a hooked fish is running, for the rod to bow by) and two new
+/// phase bytes (the tremble and the take), `ServerMessage::Caught` grew the
+/// fish's `size`, and `ServerMessage::FishRise` was appended. A field added
+/// in the middle of a message moves every byte after it, so 57 was released
+/// and this is a number of its own.
+pub const PROTOCOL_VERSION: u32 = 58;
 
 /// What kind of container a screen is showing.
 ///
@@ -2643,10 +2650,21 @@ pub enum ServerMessage {
         float: Option<(i32, i32, i32)>,
         /// `fishing::Phase`, as a byte: see `logic::fishing::Phase::code`.
         phase: u8,
-        /// How near the line is to parting, 0 to 255.
+        /// How near the line is to parting, 0 to 255: the strain as a share
+        /// of what parts *this* rod's line (`fishing::Fight::tension`), so a
+        /// worn rod's gauge fills sooner.
         strain: u8,
         /// How well this water is fishing, 0 to 255.
         liveliness: u8,
+        /// **How hard the fish is running**, 0 to 255, while one is on.
+        ///
+        /// The strain says how near the line is to going; the run says why,
+        /// and a moment sooner -- the rod bows and the float is dragged
+        /// before the gauge climbs. Without it the one thing a careful
+        /// player watches for (`fishing::Fight::running`) was a number only
+        /// the server had, and the heaviest fish could only be played by
+        /// luck.
+        run: u8,
     },
     /// **Somebody has this chest open**, or nobody has any more.
     ///
@@ -2696,6 +2714,9 @@ pub enum ServerMessage {
     /// Appended, so it rides fifty-seven's bump.
     Caught {
         species: crate::animals::Species,
+        /// How big it was, `fishing::Size::code`: the count in the pack
+        /// already says it, and this is so the words can too.
+        size: u8,
     },
     /// A body, a player's or an animal's, driven onto sharpened stakes
     /// (`spikes`) at `at` -- told to everybody near, the victim included,
@@ -2858,6 +2879,23 @@ pub enum ServerMessage {
         cells: Vec<(i32, i32)>,
         marks: Vec<crate::trail::Mark>,
         whole: bool,
+    },
+    /// **A fish broke the surface here**: a ring, or -- `leap` -- a fish
+    /// clean out of the water. To everybody near enough to see it.
+    ///
+    /// **The server's and not the client's**, for two reasons a client
+    /// cannot answer: where the fish are (the swimmers are the server's,
+    /// and a ring over empty water would teach a player to cast at
+    /// nothing), and what the sky is about to do -- the fish rise more and
+    /// jump more before rain (`fishing::rise_rate`, `fishing::leap_share`),
+    /// and the next spell is known only to the server's sky. A few a minute
+    /// at the busiest dusk, which is less than one chunk's worth of bytes an
+    /// hour. Appended, on fifty-eight.
+    FishRise {
+        x: f32,
+        y: f32,
+        z: f32,
+        leap: bool,
     },
 }
 
@@ -3180,7 +3218,7 @@ mod entity_tests {
             other => panic!("wrong message: {other:?}"),
         }
         // Appended last, so no message that shipped before it changed tag.
-        let caught = bincode::serialize(&ServerMessage::Caught { species: crate::animals::Species::Deer }).unwrap();
+        let caught = bincode::serialize(&ServerMessage::Caught { species: crate::animals::Species::Deer, size: 1 }).unwrap();
         let tag = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
         assert_eq!(tag(&bytes), tag(&caught) + 1, "Staked is not the message after Caught");
     }

@@ -5428,79 +5428,56 @@ fn drain_network(
 
             // ---- the line in the water ----
             //
-            // **The float is the server's**, phase and all: the dip is a
-            // moment the player has under a second to answer, and a client
-            // that worked it out for itself would be answering its own
-            // guess. What this side keeps is how it is *drawn* -- the bob,
-            // the twitches, the splash -- see `logic::fishing`.
+            // **The float is the server's**, phase and all: the bite is a
+            // moment the player has a second and a half to answer, and a
+            // client that worked it out for itself would be answering its
+            // own guess. What this side keeps is how it is *drawn* -- the
+            // bob, the tremble, the splash -- see `logic::fishing`, whose
+            // `told` is also what a scenario hears.
             ServerMessage::Line {
                 float,
                 phase,
                 strain,
                 liveliness,
-            } => match float {
-                Some(at) => {
-                    let phase = logic::fishing::Phase::of_code(phase);
-                    let strain = f32::from(strain) / 255.0;
-                    let liveliness = f32::from(liveliness) / 255.0;
-                    match fishing_float.as_mut() {
-                        // The same line, further along: only the phase's own
-                        // clock restarts, so the bob and the twitches do not
-                        // jump every time the strain moves.
-                        Some(old) if old.at == at => {
-                            if old.phase != phase {
-                                old.since = 0.0;
-                            }
-                            old.phase = phase;
-                            old.strain = strain;
-                            old.liveliness = liveliness;
-                        }
-                        _ => {
-                            *fishing_float = Some(logic::fishing::Float {
-                                at,
-                                // The slot the rod is in, found by
-                                // looking: this side normally set the
-                                // float itself when it threw, and this is
-                                // the other case -- a line the server is
-                                // describing that this client did not
-                                // draw, after a reconnect.
-                                slot: (0..primitive_shared::inventory::HOTBAR_SLOTS)
-                                    .find(|&slot| {
-                                        inventory.block_in(slot).map(primitive_shared::types::block_kind)
-                                            == Some(primitive_shared::types::BLOCK_FISHING_ROD)
-                                    })
-                                    .unwrap_or(0),
-                                fish_before: inventory.count(primitive_shared::types::BLOCK_RAW_FISH),
-                                age: 0.0,
-                                phase,
-                                strain,
-                                liveliness,
-                                since: 0.0,
-                            });
-                        }
-                    }
-                }
-                // **Out of the water, however it came out** -- and this is
-                // where a catch is told from a loss, because it is the only
-                // place both facts are in hand at once. A fish in the pack
-                // is what a catch *is* (the inventory arrives before this
-                // message does, so the count is already the new one); a line
-                // that was fighting and came back with nothing is a line
-                // that parted, and that is said here in the player's
-                // language rather than sent from the server in English.
-                None => {
-                    if let Some(gone) = fishing_float.take() {
+                run,
+            } => {
+                let fish_now = inventory.count(primitive_shared::types::BLOCK_RAW_FISH);
+                let rod_slot = || {
+                    (0..primitive_shared::inventory::HOTBAR_SLOTS)
+                        .find(|&slot| {
+                            inventory.block_in(slot).map(primitive_shared::types::block_kind)
+                                == Some(primitive_shared::types::BLOCK_FISHING_ROD)
+                        })
+                        .unwrap_or(0)
+                };
+                let said = |msg| Some((language.text(msg).to_string(), Instant::now()));
+                match logic::fishing::told(fishing_float, float, phase, strain, liveliness, run, fish_now, rod_slot) {
+                    logic::fishing::Told::Nothing => {}
+                    logic::fishing::Told::Landed(gone) => {
                         let at = gone.position(|x, y, z| chunks.block_at(x, y, z));
                         let at = glam::Vec3::new(at.0, at.1, at.2);
-                        if inventory.count(primitive_shared::types::BLOCK_RAW_FISH) > gone.fish_before {
-                            particles.catch_splash(at);
-                            audio.play(audio::Sfx::Splash);
-                        } else if gone.phase == logic::fishing::Phase::Fighting {
-                            *notice = Some((language.text(ui::lang::Msg::FishingLineGone).to_string(), Instant::now()));
-                        }
+                        particles.catch_splash(at);
+                        audio.play(audio::Sfx::Splash);
                     }
+                    logic::fishing::Told::Parted(_) => *notice = said(ui::lang::Msg::FishingLineGone),
+                    logic::fishing::Told::BaitEaten => *notice = said(ui::lang::Msg::FishingBaitTaken),
                 }
-            },
+            }
+
+            // **A fish broke the surface** somewhere this player can see:
+            // a ring, or a fish in the air and the splash it falls back
+            // into, and the small sound of either where it happened. See
+            // `ServerMessage::FishRise` for why this is the server's to say.
+            ServerMessage::FishRise { x, y, z, leap } => {
+                let at = glam::Vec3::new(x, y, z);
+                if leap {
+                    particles.leap(at);
+                    audio.play_at(audio::Sfx::Splash, at.as_dvec3(), 0.35, 1.3);
+                } else {
+                    particles.rise_ring(at);
+                    audio.play_at(audio::Sfx::FloatPlop, at.as_dvec3(), 0.3, 0.8);
+                }
+            }
 
             ServerMessage::ChestState {
                 global_x,
@@ -5614,13 +5591,16 @@ fn drain_network(
             // A fish on the bank, by name, in the player's words. The splash
             // and the count in the pack are the `Line` message's; this is only
             // the telling. See `ServerMessage::Caught`.
-            ServerMessage::Caught { species } => {
+            ServerMessage::Caught { species, size } => {
+                // The size as the label in front of the name, never as an
+                // adjective on it: see `Msg::FishingCaughtBig`.
+                let label = match primitive_shared::fishing::Size::of_code(size) {
+                    primitive_shared::fishing::Size::Small => ui::lang::Msg::FishingCaughtSmall,
+                    primitive_shared::fishing::Size::Middling => ui::lang::Msg::FishingCaught,
+                    primitive_shared::fishing::Size::Big => ui::lang::Msg::FishingCaughtBig,
+                };
                 *notice = Some((
-                    format!(
-                        "{}: {}",
-                        language.text(ui::lang::Msg::FishingCaught),
-                        ui::names::animal(species, language)
-                    ),
+                    format!("{}: {}", language.text(label), ui::names::animal(species, language)),
                     Instant::now(),
                 ));
             }

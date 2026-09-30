@@ -2721,6 +2721,8 @@ async fn tick_loop(ctx: Arc<Context>) {
 
             // ...and the lines in the water. See `step_fishing`.
             step_fishing(&ctx, dt);
+            // ...and the fish seen from the bank. See `step_rises`.
+            step_rises(&ctx, dt);
 
             // ...and what the hearths set alight, the smoke they fill a
             // room with and the soot they lay on its ceiling. See
@@ -12144,7 +12146,7 @@ fn water_c_at(ctx: &Arc<Context>, at: (i32, i32, i32), weather: primitive_shared
 /// somewhere its own arc did not.
 fn cast_line(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, power: f32) {
     use primitive_shared::fishing;
-    let (eye, look, slot, bait) = {
+    let (eye, look, slot, bait, rod_left) = {
         let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
         let slot = state.selected_slot;
         // The rod has to be in hand. A `CastLine` from a player holding a
@@ -12168,7 +12170,11 @@ fn cast_line(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, power: f32
             state.pitch.sin(),
             state.yaw.sin() * state.pitch.cos(),
         );
-        (eye, look, slot, bait_for(&state.inventory, slot))
+        // How much of the rod is left, for where its line parts
+        // (`fishing::line_limit`). Read at the cast: a rod does not wear
+        // while it waits.
+        let rod_left = state.inventory.slots().get(slot).copied().flatten().map_or(1.0, |stack| stack.condition());
+        (eye, look, slot, bait_for(&state.inventory, slot), rod_left)
     };
     // **Every way out of here sends the float back as gone.** The client
     // drew a float the moment it threw, from its own copy of the arc; if
@@ -12194,22 +12200,17 @@ fn cast_line(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, power: f32
         return;
     };
     let kind = water_kind(ctx, at, block);
-    let weather = ctx.sky.lock().unwrap_or_else(|e| e.into_inner()).weather();
-    let water_c = water_c_at(ctx, at, weather);
-    let season = primitive_shared::season::Season::at(ctx.clock.world_days());
+    let habitat = habitat_at(ctx, at, kind);
+    let moment = fishing_moment(ctx, at);
+    // The fish the server has swimming near the float: what a player saw
+    // rise there, and what makes casting at the rise worth it
+    // (`fishing::shoal_factor`). Counted before the fishing lock is taken,
+    // for the lock order `step_fishing` keeps.
+    let fish_near = swimmers_near(ctx, (at.0 as f32 + 0.5, at.1 as f32 + 0.5, at.2 as f32 + 0.5), fishing::SHOAL_REACH).len();
     let now = Instant::now();
     let mut fishing_state = ctx.fishing.lock().unwrap_or_else(|e| e.into_inner());
     let taken = fishing_state.pressure_at(at, now);
-    let Some(mean) = fishing::rod_wait_seconds(
-        spot,
-        kind,
-        ctx.clock.time_of_day(),
-        weather,
-        water_c,
-        season,
-        taken,
-        bait.map(|(_, bait)| bait),
-    ) else {
+    let Some(mean) = fishing::rod_wait_seconds(spot, kind, moment, taken, fish_near, bait.map(|(_, bait)| bait)) else {
         let why = if spot.holds_fish() {
             primitive_shared::notice::Notice::TooShallowToFish
         } else {
@@ -12230,6 +12231,9 @@ fn cast_line(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, power: f32
             mean,
             bait,
             hooked: None,
+            habitat,
+            taken,
+            rod_left,
             phase: crate::logic::fishing::Phase::Settling(fishing::SETTLE_SECONDS),
             reeling: false,
             liveliness,
@@ -12251,6 +12255,65 @@ fn cast_line(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, power: f32
     if let Some(cast) = cast {
         send_line(handle, Some(&cast));
     }
+}
+
+/// **What the water at `at` is, to a fish** (`fishing::Habitat`): its kind,
+/// and the cold and the silt its colour is drawn from
+/// (`worldgen::water_climate_of`) -- read off the column the float is in, at
+/// the surface of the water there, so the fish follow the colour the player
+/// is looking at.
+fn habitat_at(
+    ctx: &Arc<Context>,
+    at: (i32, i32, i32),
+    kind: primitive_shared::body::Water,
+) -> primitive_shared::fishing::Habitat {
+    // The surface of the column: the survey counted the depth down from it.
+    let mut top = at.1;
+    while top - at.1 < 32
+        && ctx.world.cached_block(at.0, top + 1, at.2).is_some_and(primitive_shared::types::is_liquid)
+    {
+        top += 1;
+    }
+    let (chill, silt) = ctx.world.water_climate(at.0, at.2, top);
+    primitive_shared::fishing::Habitat { kind, chill, silt }
+}
+
+/// **The hour and the sky at `at`, as a fish feels them**
+/// (`fishing::Moment`): the clock, the weather and the weather that is
+/// coming, the air at the water and the season.
+///
+/// One function for the rod and the rising fish, so the two can never read
+/// the sky differently -- which is the whole promise of a rise.
+fn fishing_moment(ctx: &Arc<Context>, at: (i32, i32, i32)) -> primitive_shared::fishing::Moment {
+    let (weather, coming) = {
+        let sky = ctx.sky.lock().unwrap_or_else(|e| e.into_inner());
+        (sky.weather(), sky.coming())
+    };
+    primitive_shared::fishing::Moment {
+        time_of_day: ctx.clock.time_of_day(),
+        weather,
+        coming,
+        water_c: water_c_at(ctx, at, weather),
+        season: primitive_shared::season::Season::at(ctx.clock.world_days()),
+    }
+}
+
+/// Every swimmer within `reach` of `at`, as the server has them.
+fn swimmers_near(
+    ctx: &Arc<Context>,
+    at: (f32, f32, f32),
+    reach: f32,
+) -> Vec<(primitive_shared::animals::Species, (f32, f32, f32))> {
+    let animals = ctx.animals.lock().unwrap_or_else(|e| e.into_inner());
+    primitive_shared::animals::Species::ALL
+        .iter()
+        .filter(|species| species.swims())
+        .flat_map(|&species| animals.positions_of(species).into_iter().map(move |p| (species, p)))
+        .filter(|&(_, p)| {
+            let (dx, dy, dz) = (p.0 - at.0, p.1 - at.1, p.2 - at.2);
+            dx * dx + dy * dy + dz * dz <= reach * reach
+        })
+        .collect()
 }
 
 /// **How good this water looks, as a byte**, for the float to twitch by.
@@ -12291,21 +12354,26 @@ fn bait_for(
 
 /// What the line is doing, to the hand holding it.
 fn send_line(handle: &Arc<players::PlayerHandle>, cast: Option<&crate::logic::fishing::Cast>) {
-    let (float, phase, strain, liveliness) = match cast {
+    let (float, phase, strain, liveliness, run) = match cast {
         Some(cast) => {
-            let strain = match cast.phase {
-                crate::logic::fishing::Phase::Fighting(fight) => (fight.strain.clamp(0.0, 1.0) * 255.0) as u8,
-                _ => 0,
+            // The strain as a share of what parts *this* line, so a worn
+            // rod's gauge fills sooner (`fishing::Fight::tension`).
+            let (strain, run) = match cast.phase {
+                crate::logic::fishing::Phase::Fighting(fight) => {
+                    ((fight.tension() * 255.0) as u8, (fight.running() * 255.0) as u8)
+                }
+                _ => (0, 0),
             };
-            (Some(cast.float), cast.phase.code(), strain, cast.liveliness)
+            (Some(cast.float), cast.phase.code(), strain, cast.liveliness, run)
         }
-        None => (None, 0, 0, 0),
+        None => (None, 0, 0, 0, 0),
     };
     handle.send(ServerMessage::Line {
         float,
         phase,
         strain,
         liveliness,
+        run,
     });
 }
 
@@ -12675,32 +12743,51 @@ pub(crate) fn step_fishing(ctx: &Arc<Context>, dt: f32) {
                     && primitive_shared::fishing::cast_holds(primitive_shared::geometry::narrow(eye), cast.float)
                     && ctx.world.cached_block(cast.float.0, cast.float.1, cast.float.2).is_some_and(is_liquid)
             },
-            |_, cast, roll| {
+            |_, cast, which, size| {
                 let spot = primitive_shared::fishing::survey(|x, y, z| ctx.world.cached_block(x, y, z), cast.float)?;
                 let biome = ctx.world.biome_at(cast.float.0, cast.float.2);
-                primitive_shared::fishing::rod_species(biome, spot, cast.bait.map(|(_, bait)| bait), roll)
+                let bait = cast.bait.map(|(_, bait)| bait);
+                let species = primitive_shared::fishing::rod_species(biome, spot, cast.habitat, bait, which)?;
+                let odds = primitive_shared::fishing::size_odds(spot, cast.habitat, cast.taken, bait);
+                Some((species, primitive_shared::fishing::roll_size(odds, size)))
             },
         )
     };
     for (player, cast, event) in events {
         let Some(handle) = ctx.registry.get(player) else { continue };
         match event {
-            // A fish has the bait: the float goes under, and the player has
-            // `fishing::STRIKE_SECONDS` to say so.
-            CastEvent::Dipped | CastEvent::Straining => send_line(&handle, Some(&cast)),
+            // The float moving -- a tremble, a dip, the take, a tremble
+            // that came to nothing -- and the strain on a fish that is on:
+            // each is only the picture changing, and the picture is `Line`.
+            // The player has the dip and the take (`fishing::Bite::window`)
+            // to strike in.
+            CastEvent::Nibbled
+            | CastEvent::LeftIt
+            | CastEvent::Dipped
+            | CastEvent::Took
+            | CastEvent::Straining => send_line(&handle, Some(&cast)),
             // The window closed: something ate the bait and went. The line
             // fishes on, barer than it was.
             CastEvent::Missed => {
                 spend_bait(ctx, &handle, &cast, false);
                 send_line(&handle, Some(&cast));
             }
-            CastEvent::Landed(species) => {
+            CastEvent::Landed(species, size) => {
+                // **The fish, in the amount its size is worth**
+                // (`fishing::catch_count`), and whatever else it gives -- a
+                // fish that one day drops more than meat keeps its other
+                // drops whatever its size.
                 for &(block, count) in species.drops() {
+                    let count = if block == primitive_shared::types::BLOCK_RAW_FISH {
+                        primitive_shared::fishing::catch_count(species, size)
+                    } else {
+                        count
+                    };
                     land_catch(ctx, &handle, block, count);
                 }
                 // ...and what it was, for the client to say in the player's
                 // own words. See `ServerMessage::Caught`.
-                handle.send(ServerMessage::Caught { species });
+                handle.send(ServerMessage::Caught { species, size: size.code() });
                 // The bait went with the fish, and the spot is that much
                 // more fished out.
                 spend_bait(ctx, &handle, &cast, false);
@@ -12708,7 +12795,7 @@ pub(crate) fn step_fishing(ctx: &Arc<Context>, dt: f32) {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .fish_taken(cast.float, Instant::now());
-                wear_rod(ctx, &handle, cast.slot);
+                wear_rod(ctx, &handle, cast.slot, 1);
                 send_line(&handle, None);
             }
             // **The line parted.** The fish, the bait and (if it was a fly)
@@ -12720,12 +12807,108 @@ pub(crate) fn step_fishing(ctx: &Arc<Context>, dt: f32) {
             // (`Msg::FishingLineGone`); an English sentence from the server
             // as well would be the same news twice, in the wrong language
             // second.
-            CastEvent::Lost => {
+            //
+            // **...and the rod takes the jolt** (`fishing::snap_shock`): a
+            // heavy fish lost is several fish of the rod's life, and a rod
+            // that had fewer than that left breaks in the hand -- which
+            // `wear_rod` says with the rod's own notice.
+            CastEvent::Lost(species, size) => {
                 spend_bait(ctx, &handle, &cast, true);
-                wear_rod(ctx, &handle, cast.slot);
+                wear_rod(ctx, &handle, cast.slot, primitive_shared::fishing::snap_shock(species, size));
                 send_line(&handle, None);
             }
             CastEvent::Ended => send_line(&handle, None),
+        }
+    }
+}
+
+/// **The fish breaking the surface**, once a tick, near whoever is there to
+/// see it: a ring over a swimmer near the top, now and then a fish clean out
+/// of the water, told to everybody within `fishing::RISE_SEEN`.
+///
+/// Off the swimmers the server has, at the rate the rod's own appetite
+/// gives (`logic::fishing::Fishing::rises`), so the water a player reads is
+/// the water the rod fishes. Per player, because the hour is everybody's
+/// but the cold is the water's: a lake in the snow and a lake in the valley
+/// at the same dusk rise differently, as they bite differently.
+pub(crate) fn step_rises(ctx: &Arc<Context>, dt: f32) {
+    use primitive_shared::fishing::{RISE_DEPTH, RISE_SEEN};
+    let watchers: Vec<(f32, f32, f32)> = ctx
+        .registry
+        .handles()
+        .iter()
+        .map(|handle| {
+            let at = handle.state.lock().unwrap_or_else(|e| e.into_inner()).position;
+            (at.0 as f32, at.1 as f32, at.2 as f32)
+        })
+        .collect();
+    if watchers.is_empty() {
+        return;
+    }
+    let swimmers: Vec<(primitive_shared::animals::Species, (f32, f32, f32))> = {
+        let animals = ctx.animals.lock().unwrap_or_else(|e| e.into_inner());
+        primitive_shared::animals::Species::ALL
+            .iter()
+            .filter(|species| species.swims())
+            .flat_map(|&species| animals.positions_of(species).into_iter().map(move |p| (species, p)))
+            .collect()
+    };
+    if swimmers.is_empty() {
+        return;
+    }
+    let near = |a: (f32, f32, f32), b: (f32, f32, f32), reach: f32| {
+        let (dx, dz) = (a.0 - b.0, a.2 - b.2);
+        dx * dx + dz * dz <= reach * reach
+    };
+    // Where the top of the water is over a fish, if it is near enough the
+    // top to break it: the column climbed while it is water, and the top
+    // cell's own surface.
+    let surface_over = |at: (f32, f32, f32)| -> Option<f32> {
+        let (x, z) = (at.0.floor() as i32, at.2.floor() as i32);
+        let mut y = at.1.floor() as i32;
+        let mut top = None;
+        while (y as f32) < at.1 + RISE_DEPTH + 1.0 {
+            match ctx.world.cached_block(x, y, z) {
+                Some(block) if primitive_shared::types::is_liquid(block) => {
+                    top = Some(y as f32 + primitive_shared::fluid::surface_height(block));
+                    y += 1;
+                }
+                _ => break,
+            }
+        }
+        // Water all the way up past the reach is a fish too deep to rise;
+        // anything but air over the top is ice, or a jetty, and no ring.
+        let top = top?;
+        let open = ctx.world.cached_block(x, y, z).is_some_and(|block| block == primitive_shared::types::BLOCK_AIR);
+        (open && top - at.1 <= RISE_DEPTH).then_some(top)
+    };
+    let mut rises = Vec::new();
+    let mut counted = vec![false; swimmers.len()];
+    for &watcher in &watchers {
+        // Each fish is rolled once a tick however many people are near it,
+        // with the moment of the first of them: two players at one lake must
+        // not make its fish rise twice as often.
+        let mut mine = Vec::new();
+        for (i, &fish) in swimmers.iter().enumerate() {
+            if !counted[i] && near(fish.1, watcher, RISE_SEEN) {
+                counted[i] = true;
+                mine.push(fish);
+            }
+        }
+        if mine.is_empty() {
+            continue;
+        }
+        let cell = (watcher.0.floor() as i32, watcher.1.floor() as i32, watcher.2.floor() as i32);
+        let moment = fishing_moment(ctx, cell);
+        let rolled = ctx.fishing.lock().unwrap_or_else(|e| e.into_inner()).rises(dt, moment, &mine, surface_over);
+        rises.extend(rolled);
+    }
+    for rise in rises {
+        for handle in ctx.registry.handles() {
+            let at = handle.state.lock().unwrap_or_else(|e| e.into_inner()).position;
+            if near((at.0 as f32, at.1 as f32, at.2 as f32), rise.at, RISE_SEEN) {
+                handle.send(ServerMessage::FishRise { x: rise.at.0, y: rise.at.1, z: rise.at.2, leap: rise.leap });
+            }
         }
     }
 }
@@ -12765,10 +12948,21 @@ fn spend_bait(
 
 /// **A fish landed is what wears a rod**, and so is a line that parted: a
 /// cast that came to nothing has cost the line nothing.
-fn wear_rod(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, slot: usize) {
+///
+/// `times` fish of its life: one for a landing, more for the jolt of a line
+/// parting under a heavy fish (`fishing::snap_shock`). Stopped at the break:
+/// a rod that is gone is not worn further, and the slot it left is not the
+/// next tool's to pay for.
+fn wear_rod(ctx: &Arc<Context>, handle: &Arc<players::PlayerHandle>, slot: usize, times: u32) {
     let wear = {
         let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-        let wear = state.inventory.wear_tool(slot);
+        let mut wear = primitive_shared::inventory::Wear::None;
+        for _ in 0..times.max(1) {
+            wear = state.inventory.wear_tool(slot);
+            if !matches!(wear, primitive_shared::inventory::Wear::Worn) {
+                break;
+            }
+        }
         state.inventory_dirty |= !matches!(wear, primitive_shared::inventory::Wear::None);
         wear
     };

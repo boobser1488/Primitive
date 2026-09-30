@@ -380,6 +380,15 @@ impl World {
         self.gen.climate_at(gx, gy, gz)
     }
 
+    /// The water at a column, as its colour is drawn: how cold, and what is
+    /// in it (`worldgen::water_climate_of`). Fishing reads it -- the fish
+    /// follow the water's colour (`fishing::Habitat`) -- and it is the
+    /// generator's pure function, so the server and the client's mesher
+    /// agree about every pond.
+    pub fn water_climate(&self, gx: i32, gz: i32, surface_y: i32) -> (f32, f32) {
+        self.gen.water_climate(gx, gz, surface_y)
+    }
+
     /// The latitude of a row of this world, which is how much of a winter
     /// it gets. See `WorldGen::latitude_degrees`, `season::seasonal_swing`.
     pub fn latitude_degrees(&self, gz: i32) -> Option<f32> {
