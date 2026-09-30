@@ -3682,6 +3682,9 @@ fn place_cursor(
     } else if chest_screen.is_open() {
         chest_screen.set_cursor(into(chest_screen.grow_by(layout)));
     } else if inventory_screen.open {
+        // The pack's rail follows the window, and a click has to be read
+        // off the rail it will be drawn on. See `inventory_screen::Rail`.
+        inventory_screen::lay_out_for(layout);
         inventory_screen.set_cursor(into(inventory_screen::grow_by(layout)));
     }
 }

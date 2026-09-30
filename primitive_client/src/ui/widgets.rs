@@ -1499,8 +1499,14 @@ pub fn screen_growth(layout: Layout) -> f32 {
 
 /// What [`screen_growth`] is measured against: the pack's width and a
 /// chest's height, whichever of the two is the larger each way.
+///
+/// **The pack without its rail.** The rail is the pack's alone, and when
+/// it was measured here a window too narrow for it drew every screen in
+/// the game eight percent smaller -- the chest shrinking to make room for
+/// tabs it does not have. The pack gives way on its own now; see
+/// `inventory_screen::Rail`.
 pub fn screen_extent() -> (f32, f32) {
-    let pack = crate::ui::inventory_screen::extent();
+    let pack = crate::ui::inventory_screen::content_extent();
     let chest = crate::ui::chest_screen::chest_extent();
     (pack.0.max(chest.0), pack.1.max(chest.1))
 }
@@ -1697,6 +1703,36 @@ impl Layout {
     }
 
     /// As big as asked, capped by the glass.
+    /// `wanted`, or as much less as a screen of this extent needs to stay
+    /// on the glass -- **with no floor under it.**
+    ///
+    /// For the one screen that may be drawn under its authored size: the
+    /// pack, on a window too narrow for it and its rail (see
+    /// `inventory_screen::grow_by` for why that is the pack alone, and
+    /// why never on a touch screen). The margin every screen keeps is
+    /// kept while that costs nothing under 1.0 -- exactly the room
+    /// [`fit`](Self::fit) would have left -- and given up before the pack
+    /// is: a screen at its authored size is allowed into the margin by
+    /// `fit`'s own floor, and a pack shrunk further than the glass needs
+    /// would be smaller than the rule it is keeping.
+    pub fn shrink_to_fit(&self, wanted: f32, extent: (f32, f32)) -> f32 {
+        let (across, down) = (extent.0.max(0.001), extent.1.max(0.001));
+        let kept = wanted
+            .min((self.aspect - SCREEN_MARGIN).max(0.001) / across)
+            .min((1.0 - SCREEN_MARGIN).max(0.001) / down);
+        if kept >= 1.0 {
+            return kept;
+        }
+        let glass = wanted.min(self.aspect / across).min(1.0 / down);
+        kept.max(glass.min(1.0))
+    }
+
+    /// Whether a screen of this extent is drawn whole at `growth` --
+    /// [`shrink_to_fit`](Self::shrink_to_fit) has nothing to take off it.
+    pub fn holds(&self, extent: (f32, f32), growth: f32) -> bool {
+        self.shrink_to_fit(growth, extent) >= growth - 1e-5
+    }
+
     fn fit_wanted(&self, wanted: f32, extent: (f32, f32)) -> f32 {
         let room_x = (self.aspect - SCREEN_MARGIN).max(0.001);
         let room_y = (1.0 - SCREEN_MARGIN).max(0.001);

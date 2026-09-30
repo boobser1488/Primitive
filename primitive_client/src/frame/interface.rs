@@ -475,6 +475,11 @@ pub fn build(
             // seconds at a time is an allocation nobody
             // asked for.
             let from = ui_vertices.len();
+            // The rail this window gets, before a single rectangle of the
+            // pack is asked for -- the same call `place_cursor` makes, so
+            // the pack is drawn and clicked on one rail. See
+            // `inventory_screen::Rail`.
+            inventory_screen::lay_out_for(layout);
             inventory_screen.build_into(
                 graphics.textures.font,
                 face_layers,

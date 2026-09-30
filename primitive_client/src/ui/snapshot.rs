@@ -115,6 +115,13 @@ fn snapshot_skin() -> u32 {
 /// one binary, which is the only kind whose difference is the change --
 /// the same argument `PRIMITIVE_GRAIN=0` carries for the ground.
 fn wear_the_skin() {
+    // ...and lay the pack out for the window the picture is of, which is
+    // what the frame loop does before it draws one: the pack's rail is
+    // worded or bare by the window's shape (`inventory_screen::Rail`), and
+    // a picture of a 1024x1024 window drawn with a 1920x1080 window's rail
+    // would be a picture of a screen nobody sees. Every tool here starts
+    // with this call, which is why it rides on it.
+    crate::ui::inventory_screen::lay_out_for(snapshot_layout());
     if std::env::var("UI_SNAPSHOT_SKIN").as_deref() == Ok("0") {
         return;
     }

@@ -960,7 +960,7 @@ impl InventoryScreen {
         //
         // Across the page, not the panel: the rail runs up beside the
         // title rather than under it. See `page_rect`.
-        p.panel_header(page_rect(), language.text(Msg::Inventory), HEADER_HEIGHT, 0.0);
+        p.panel_header(page_rect(), language.text(self.title()), HEADER_HEIGHT, 0.0);
         tab_rail(&mut p, layers, self.tab, self.cursor, inventory.backpack_open(), language);
 
         // ---- the health page, which shares nothing below this ----
@@ -973,6 +973,7 @@ impl InventoryScreen {
         // the drawing code.
         if self.tab == Tab::Health {
             health_page(&mut p, vitals, injuries, language);
+            self.rail_note(&mut p, language);
             *out = p.into_vertices();
             return;
         }
@@ -981,6 +982,7 @@ impl InventoryScreen {
         // one thing under this line.
         if self.tab == Tab::Learn {
             self.path.paint(&mut p, layers, learning, self.cursor, language);
+            self.rail_note(&mut p, language);
             *out = p.into_vertices();
             return;
         }
@@ -1246,8 +1248,58 @@ impl InventoryScreen {
                 ),
             }
         }
+        self.rail_note(&mut p, language);
 
         *out = p.into_vertices();
+    }
+
+    /// What the heading says: `INVENTORY`, or on a bare rail the name of
+    /// the page that is showing.
+    ///
+    /// **A bare tab has to be told apart without its word, and this is
+    /// half of how.** Two answers were on the table and both are taken,
+    /// because they answer different questions:
+    ///
+    /// * *Where am I?* -- the heading. On a bare rail it is the page's own
+    ///   name, `ПОЖИТКИ` or `ТЕЛО`, so a player who pressed a picture they
+    ///   did not know is told what they opened, at the size titles are
+    ///   written and without doing anything. `INVENTORY` over a rail of
+    ///   four unnamed pictures says the one thing the player already
+    ///   knows. On a worded rail the showing tab says it, and the heading
+    ///   stays what it always was.
+    /// * *What is that?* -- the note under the pointer (`rail_note`).
+    ///
+    /// Rejected: the note alone. A phone has no pointer until a finger is
+    /// down, and a tap on a tab turns the page at once -- it is harmless,
+    /// so it should -- which leaves the heading as the only thing a phone
+    /// player reads; making a tab's first tap read its name and the
+    /// second turn the page, the way the recipe grid does, would be two
+    /// taps for the gesture made on every visit, to spare a player one
+    /// harmless look at the wrong page.
+    fn title(&self) -> Msg {
+        match rail() {
+            Rail::Worded => Msg::Inventory,
+            Rail::Bare => self.tab.label(),
+        }
+    }
+
+    /// On a bare rail, the name of the tab under the pointer, in the note
+    /// every other thing on this screen is explained in.
+    ///
+    /// Last, so it is over the page; held to `note_bounds`, which starts
+    /// right of the rail, so the name of one tab is never drawn over
+    /// another. Not while a stack is in hand, for the tooltip's reason:
+    /// the two would sit on each other. On a phone it is there for as long
+    /// as the finger that pressed the tab is, which is the moment it is
+    /// wanted.
+    fn rail_note(&self, p: &mut Painter, language: Language) {
+        if rail() != Rail::Bare || self.held.is_some() {
+            return;
+        }
+        let Some(cursor) = self.cursor else { return };
+        if let Some(index) = tab_at(cursor) {
+            hover_note(p, cursor, language.text(ALL_TABS[index].label()), note_bounds());
+        }
     }
 }
 
@@ -1693,7 +1745,12 @@ fn tab_rail(
     // The recess first: the dark strip of the sketch, a well the tabs
     // stand in, the whole height of the panel.
     p.well(rail_rect(), widgets::WELL);
-    let (scale, words) = rail_label(language);
+    // No words on a bare rail: the page's name is in the title instead,
+    // and a tab's name comes up under the pointer. See `rail_note`.
+    let (scale, words) = match rail() {
+        Rail::Worded => rail_label(language),
+        Rail::Bare => (widgets::size::NOTE, Default::default()),
+    };
     for (index, tab) in ALL_TABS.iter().copied().enumerate() {
         let rect = tab_rect(index);
         // The rucksack page exists only while a rucksack is worn. Drawn
@@ -2756,7 +2813,7 @@ fn grid_left() -> f32 {
     // rail left of the body is the same argument once more.
     -(grid_width + COLUMN_GAP + recipe_grid_width()) / 2.0
         + body_column_width() / 2.0
-        + RAIL_SHARE / 2.0
+        + rail_share() / 2.0
 }
 
 /// How much the body takes up: the figure, the four squares beside it,
@@ -2904,15 +2961,15 @@ fn panel_rect() -> Rect {
     Rect::new(
         // Past the rail, which is past the body column: the figure and
         // the squares are inside the panel, and the rail is beside them
-        // inside it too. See `RAIL_SHARE`.
-        grid_left() - body_column_width() - RAIL_SHARE - PANEL_PAD,
+        // inside it too. See `rail_share`.
+        grid_left() - body_column_width() - rail_share() - PANEL_PAD,
         -content_top() - FOOTER_HEIGHT,
         recipe_left() + recipe_grid_width() + PANEL_PAD,
         // **A title and nothing else over the page.** There was a band of
         // tabs here, between the title and the trays, a finger tall on a
         // phone; the tabs are down the side now, and the panel is that
         // much shorter -- which is where the rail's width was paid back,
-        // see `RAIL_SHARE`.
+        // see `rail_share`.
         content_top() + HEADER_HEIGHT,
     )
 }
@@ -2953,31 +3010,150 @@ fn content_left() -> f32 {
 //   the icon is what an eye finds before it reads.
 // * **It costs width, and the panel had height to give.** The strip was
 //   a finger tall on a phone -- 0.178 of a panel 0.87 tall -- and it is
-//   gone; the rail takes `RAIL_SHARE` across instead. See there for
-//   what that does to a square window.
+//   gone; the rail takes `rail_share` across instead. See `Rail` for
+//   what the pack does on a window too narrow to pay it.
 //
 // Every tab the same size, whatever its label, for the strip's old
 // reason: a control whose place depends on its word is in a different
 // place in Polish.
 
+/// The two shapes the rail comes in.
+///
+/// **Worded** is the rail as it was drawn first: a picture and the page's
+/// name under it, a tab wide enough for `RUCKSACK`. **Bare** is the same
+/// four tabs with the pictures alone, a finger wide and no wider -- what
+/// the pack falls back to on a window that cannot hold the words.
+///
+/// ## Why there are two
+///
+/// The worded rail costs the panel 0.204 of width, and the pack is the
+/// widest screen in the game: it fitted a square window with four
+/// thousandths to spare before it had a rail. With one rail at one width
+/// that price was paid everywhere the pack is the thing that stops the
+/// interface growing -- a 4:3 or 5:4 monitor; on a phone it is the chest's
+/// height that stops it, and the phone always has the words -- and since
+/// every centred screen grows by one shared number
+/// measured against the pack (`widgets::screen_growth`), *every* screen
+/// came out eight percent smaller there, the chest included, for a rail
+/// the chest does not have.
+///
+/// So the shared number is measured without the rail now
+/// ([`content_extent`]), and the rail gives way instead:
+///
+/// 1. the worded rail, if the whole pack fits the window at the shared
+///    growth with it;
+/// 2. otherwise the bare rail -- 0.03 narrower -- and the pack at the
+///    shared growth if that fits;
+/// 3. otherwise the bare rail and the pack alone drawn a little smaller,
+///    as small as the window needs and never smaller than that. See
+///    [`grow_by`].
+///
+/// **The bare rail buys less than it looks.** A tab has to be a finger
+/// across on glass ([`widgets::FINGER_SIDE`], 0.15) and the words only
+/// needed 0.18, so the narrowing is 0.03 of the rail's 0.204: it rescues a
+/// sliver of window shapes by itself, and everywhere else it is the third
+/// step that does the work. Measured, not guessed, at an interface size
+/// of 1.0: a 16:9 monitor has the words and the shared 1.30; a square
+/// window the pictures and 0.924 (the pack filled a square window's glass
+/// before it had a rail at all); 5:4 the pictures and 1.10 against 1.196;
+/// 4:3 the pictures and 1.177 against 1.28. The properties are held by
+/// `the_rail_is_worded_or_bare_on_every_window_and_nothing_leaves_it`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rail {
+    Worded,
+    Bare,
+}
+
+thread_local! {
+    /// Which rail the pack is laid out with *on this thread*: the frame
+    /// loop's, or a test's.
+    ///
+    /// **Ambient rather than a parameter, and the argument is the one
+    /// `widgets::touch_layout` already makes.** Every rectangle on this
+    /// screen hangs off `grid_left`, and the rail moves `grid_left` (the
+    /// pack is centred with its rail); threading a `Rail` through the
+    /// fifty functions that draw *and* hit-test the pack is fifty chances
+    /// for the drawing half and the hit-testing half to be handed
+    /// different answers -- which is the one failure this screen is not
+    /// allowed. One value, set from the window before either half runs
+    /// ([`lay_out_for`]), cannot disagree with itself. A thread-local and
+    /// not a global so `cargo test`'s threads cannot lay out each other's
+    /// packs.
+    static RAIL: std::cell::Cell<Rail> = const { std::cell::Cell::new(Rail::Worded) };
+}
+
+/// The rail the pack is being laid out with.
+fn rail() -> Rail {
+    RAIL.with(std::cell::Cell::get)
+}
+
+/// Runs `body` with the pack laid out on `rail`, and puts back whatever
+/// was there -- even if `body` panics, so a failing assertion cannot leave
+/// the rest of a test thread measuring the wrong rail.
+pub fn under<T>(rail: Rail, body: impl FnOnce() -> T) -> T {
+    struct Restore(Rail);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            RAIL.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(RAIL.with(|cell| cell.replace(rail)));
+    body()
+}
+
+/// Lays the pack out for this window: what the frame loop calls before it
+/// draws the pack and before it hands the pack a cursor, so the two halves
+/// of every inverse pair are read off the same rail.
+///
+/// **A pure function of the window**, which is what keeps the rail from
+/// flickering on a window dragged across the boundary: the same width and
+/// the same interface size give the same rail every time, with no memory
+/// of the frame before, and the worded rail is chosen on exactly the
+/// windows wide enough for it -- a set that only grows as the window does
+/// (`a_window_that_widens_changes_its_rail_at_most_once`).
+pub fn lay_out_for(layout: crate::ui::widgets::Layout) {
+    RAIL.with(|cell| cell.set(rail_for(layout)));
+}
+
+/// Which rail this window gets: the worded one wherever the whole pack
+/// fits at the growth every other screen is drawn at, the bare one
+/// everywhere else. See [`Rail`].
+pub fn rail_for(layout: crate::ui::widgets::Layout) -> Rail {
+    let shared = crate::ui::widgets::screen_growth(layout);
+    if layout.holds(under(Rail::Worded, extent), shared) {
+        Rail::Worded
+    } else {
+        Rail::Bare
+    }
+}
+
 /// How wide one tab is, and so the rail.
 ///
-/// **One width on both pointers, and it is the phone's that decides
-/// it.** A tab in a rail is pressed across its width as much as down
-/// its height, so on glass it has to be a finger wide
-/// ([`widgets::FINGER_SIDE`], 0.15) as well as a finger tall -- and a
-/// rail that was narrower on a desktop would be a page that moved
-/// sideways between the two. The rest over the finger is the room
+/// **Worded: 0.18, on both pointers.** A tab in a rail is pressed across
+/// its width as much as down its height, so on glass it has to be a
+/// finger wide ([`widgets::FINGER_SIDE`], 0.15) as well as a finger tall
+/// -- and a rail that was narrower on a desktop would be a page that
+/// moved sideways between the two. The rest over the finger is the room
 /// `RUCKSACK` needs on one line at [`RAIL_TEXT_FLOOR`] and a hair more;
 /// `every_word_on_the_rail_fits_its_tab_in_every_language` measures it.
-const RAIL_TAB_WIDTH: f32 = 0.180;
+///
+/// **Bare: a finger, on both pointers**, which is as narrow as a tab may
+/// be and what the bare rail is for.
+fn rail_tab_width() -> f32 {
+    match rail() {
+        Rail::Worded => 0.180,
+        Rail::Bare => widgets::FINGER_SIDE,
+    }
+}
 
 /// Air between the rail's own lip and the tabs in it, on the left and at
 /// both ends. The right has none: see [`tab_rect`].
 const RAIL_INSET: f32 = 0.008;
 
 /// The rail, lip included.
-const RAIL_WIDTH: f32 = RAIL_TAB_WIDTH + RAIL_INSET;
+fn rail_width() -> f32 {
+    rail_tab_width() + RAIL_INSET
+}
 
 /// Air between the rail and the page's first column.
 ///
@@ -2986,16 +3162,11 @@ const RAIL_WIDTH: f32 = RAIL_TAB_WIDTH + RAIL_INSET;
 /// beside it, and a hair of hide between them is what says so.
 const RAIL_GAP: f32 = 0.016;
 
-/// How much wider the panel is for having a rail.
+/// How much wider the panel is for having a rail: 0.204 worded, 0.174
+/// bare.
 ///
-/// **0.204, and that is the price of the rail, paid in width.** The pack
-/// was 1.99 across and fitted a square window with four thousandths to
-/// spare; with the rail it is 2.19, which fits a 5:4 window -- the
-/// squarest monitor sold, 1280x1024 -- and a 4:3 tablet with room over
-/// (`the_whole_screen_fits_the_squarest_window_anyone_plays_in`).
-///
-/// Paid for, rather than found, because the two places it could have
-/// been found were both worse:
+/// Paid for, rather than found inside the pack, because the two places it
+/// could have been found were both worse:
 ///
 /// * **Three columns of recipes instead of four** buys 0.107 -- half of
 ///   it -- and costs every player five of the twenty recipes on screen.
@@ -3003,13 +3174,11 @@ const RAIL_GAP: f32 = 0.016;
 ///   two thirds of a slot is a bandage aimed with a thumb landing on the
 ///   tray beside it (see `MANNEQUIN_WIDTH`).
 ///
-/// What the width does cost: every centred screen grows by one shared
-/// number (`widgets::screen_growth`), measured against the pack, so on a
-/// window narrow enough that the pack is what stops the growing -- a
-/// 4:3 monitor, or a phone past the INTERFACE SIZE it starts at --
-/// every screen now stops about eight percent sooner. At the phone's own
-/// 1.5 the pack is still not the limit, and nothing is smaller.
-const RAIL_SHARE: f32 = RAIL_WIDTH + RAIL_GAP;
+/// Who pays is the pack alone and only where the window is too narrow for
+/// it: see [`Rail`] for the order it gives way in.
+fn rail_share() -> f32 {
+    rail_width() + RAIL_GAP
+}
 
 /// The gap between two tabs: narrow, because they are four faces of one
 /// thing rather than four buttons that happen to be in a column.
@@ -3020,7 +3189,7 @@ const TAB_GAP: f32 = 0.008;
 fn rail_rect() -> Rect {
     let panel = panel_rect();
     let left = panel.x0 + PANEL_PAD;
-    Rect::new(left, panel.y0 + PANEL_PAD, left + RAIL_WIDTH, panel.y1 - PANEL_PAD)
+    Rect::new(left, panel.y0 + PANEL_PAD, left + rail_width(), panel.y1 - PANEL_PAD)
 }
 
 /// Where one tab is drawn.
@@ -3074,8 +3243,15 @@ fn tab_icon(tab: Tab) -> primitive_shared::types::BlockId {
 }
 
 /// How big the picture on a tab is: a slot's icon, a little smaller,
-/// because the word under it needs the height.
-const RAIL_ICON: f32 = 0.056;
+/// because the word under it needs the height -- and, on a bare tab, a
+/// slot's icon and a little larger, because the picture is all the tab
+/// has to say itself with.
+fn rail_icon() -> f32 {
+    match rail() {
+        Rail::Worded => 0.056,
+        Rail::Bare => 0.080,
+    }
+}
 /// Air between the picture and the word under it.
 const RAIL_ICON_AIR: f32 = 0.008;
 /// Air at the top and bottom of a tab, inside its lip.
@@ -3116,8 +3292,8 @@ const RAIL_TEXT_FLOOR: f32 = 0.50;
 ///   three short lines), and only the length of the longest single word
 ///   in a language decides how small that is.
 fn rail_label(language: Language) -> (f32, [Vec<String>; 4]) {
-    let room_across = RAIL_TAB_WIDTH - RAIL_TEXT_PAD * 2.0;
-    let room_down = tab_rect(0).height() - RAIL_PAD_Y * 2.0 - RAIL_ICON - RAIL_ICON_AIR;
+    let room_across = rail_tab_width() - RAIL_TEXT_PAD * 2.0;
+    let room_down = tab_rect(0).height() - RAIL_PAD_Y * 2.0 - rail_icon() - RAIL_ICON_AIR;
     let lay_out = |scale: f32| -> Option<[Vec<String>; 4]> {
         let mut out: [Vec<String>; 4] = Default::default();
         for (slot, tab) in out.iter_mut().zip(ALL_TABS) {
@@ -3173,18 +3349,20 @@ fn wrap_to(text: &str, scale: f32, room: f32) -> Option<Vec<String>> {
 /// leaves its tab, so the two cannot measure different words.
 fn tab_contents(index: usize, scale: f32, lines: &[String]) -> (Rect, Vec<(f32, f32)>) {
     let tab = tab_rect(index);
-    let words = lines.len() as f32 * widgets::cell_height(scale)
-        + (lines.len() as f32 - 1.0).max(0.0) * RAIL_LINE_AIR;
-    let group = RAIL_ICON + RAIL_ICON_AIR + words;
+    let side = rail_icon();
+    let words = if lines.is_empty() {
+        0.0
+    } else {
+        RAIL_ICON_AIR
+            + lines.len() as f32 * widgets::cell_height(scale)
+            + (lines.len() as f32 - 1.0) * RAIL_LINE_AIR
+    };
+    let group = side + words;
     // The picture and the word centred together, so a one-line tab and a
-    // three-line one have their middles level with their tab's.
+    // three-line one have their middles level with their tab's -- and a
+    // bare tab's picture sits in the middle of it.
     let top = tab.centre_y() + group / 2.0;
-    let icon = Rect::new(
-        tab.centre_x() - RAIL_ICON / 2.0,
-        top - RAIL_ICON,
-        tab.centre_x() + RAIL_ICON / 2.0,
-        top,
-    );
+    let icon = Rect::new(tab.centre_x() - side / 2.0, top - side, tab.centre_x() + side / 2.0, top);
     let first = icon.y0 - RAIL_ICON_AIR;
     let pens = lines
         .iter()
@@ -3220,20 +3398,49 @@ fn tab_contents(index: usize, scale: f32, lines: &[String]) -> (Rect, Vec<(f32, 
 /// the pack up to meet that made every setting below 1.5 draw the same
 /// pack. See `Layout::finger`, which is a floor under a widget and not
 /// under a screen.
+///
+/// **The shared number, unless the pack cannot be drawn at it.** Not the
+/// pack's own answer: the pack is wide and low and had room to grow half
+/// again past the chest, which is what made it look like a different
+/// game's screen (see `widgets::screen_growth`). But the shared number is
+/// measured without the rail ([`content_extent`]), so on a window too
+/// narrow for pack and rail together the pack alone comes down to what
+/// the window holds -- the third of [`Rail`]'s three steps, and the only
+/// place a screen in this game is drawn under its shared size.
+///
+/// **It may come out under 1.0, and only here.** A square desktop window
+/// cannot hold the pack and a finger-wide rail at the size they were
+/// authored (`the_whole_screen_fits_a_square_window`), and what the
+/// floor under every other screen protects is a finger: a widget authored
+/// a finger tall stays one. No touch device is that shape -- a phone is
+/// twice as wide as it is tall and a tablet held sideways is 4:3, where
+/// the pack is still drawn at more than its authored size -- and
+/// `a_touch_screen_never_draws_the_pack_under_its_authored_size` holds
+/// that.
 pub fn grow_by(layout: crate::ui::widgets::Layout) -> f32 {
-    // The shared number, not the pack's own answer: the pack is wide and
-    // low and had room to grow half again past the chest, which is what
-    // made it look like a different game's screen. See
-    // `widgets::screen_growth`.
-    crate::ui::widgets::screen_growth(layout)
+    let shared = crate::ui::widgets::screen_growth(layout);
+    layout.shrink_to_fit(shared, under(rail_for(layout), extent))
 }
 
+/// The pack's half-extents with the rail it is laid out with.
 pub fn extent() -> (f32, f32) {
     let panel = panel_rect();
     (
         panel.width() / 2.0,
         panel.y1.abs().max(panel.y0.abs()),
     )
+}
+
+/// The pack's half-extents without its rail: what the growth every
+/// centred screen shares is measured against (`widgets::screen_extent`).
+///
+/// **Without the rail, and that is the fix for the eight percent.** With
+/// it, a rail only the pack has made every screen smaller wherever the
+/// pack was the widest thing -- see [`Rail`]. The same number whichever
+/// rail is laid out, because the rail is taken off whole.
+pub fn content_extent() -> (f32, f32) {
+    let (half_width, half_height) = extent();
+    (half_width - rail_share() / 2.0, half_height)
 }
 
 /// Which recipe a point is over, as an index into `RECIPES`.
@@ -4014,27 +4221,48 @@ mod tests {
     }
 
     #[test]
-    fn the_whole_screen_fits_the_squarest_window_anyone_plays_in() {
-        // Authored against a 5:4 window -- 1280x1024, the squarest
-        // monitor sold -- where x runs -1.25..+1.25. It was a square
-        // window until the rail arrived: the pack fitted one with four
-        // thousandths to spare, and a rail a finger wide could only come
-        // out of the recipes or the figure's arm. See `RAIL_SHARE` for
-        // that argument and what the width costs instead.
+    fn the_whole_screen_fits_a_square_window() {
+        // The worst case the aspect divide produces that anybody plays in:
+        // x runs -1..+1.
+        //
+        // **As drawn, not as authored**, and that is the rail. Authored,
+        // the pack with a finger-wide rail is 2.16 across and no square
+        // window holds it at its own size; so on one it gets the bare
+        // rail and is drawn smaller (`grow_by`), and what has to be on
+        // the glass is the product. Every interface size, because the
+        // setting is what moves the pack towards the edge.
         //
         // Regression: the recipe column used to hang off the right of a
         // centred grid, putting the panel's right edge at x = 1.47. On
         // anything narrower than about 3:2 the crafting menu was off the
         // screen entirely, and on 16:9 the whole thing sat visibly to
         // one side.
-        const FIVE_BY_FOUR: f32 = 1.25;
+        for touch in [false, true] {
+            widgets::with_touch(touch, || {
+                for size in [0.5, 1.0, 1.5, 2.0, 3.0, 4.0] {
+                    let square = widgets::Layout::for_screen(1.0, size);
+                    lay_out_for(square);
+                    assert_eq!(rail(), Rail::Bare, "a square window at {size} kept the worded rail");
+                    let drawn = grow_by(square);
+                    let (across, down) = extent();
+                    assert!(
+                        across * drawn <= 1.0 + 1e-4 && down * drawn <= 1.0 + 1e-4,
+                        "at {size} the pack is drawn {:.3} by {:.3} on a square window",
+                        across * drawn,
+                        down * drawn,
+                    );
+                }
+            });
+        }
+        // ...and everything is inside the panel it is drawn in, on both
+        // rails.
+        for shape in [Rail::Worded, Rail::Bare] {
+            under(shape, everything_is_inside_the_panel);
+        }
+    }
+
+    fn everything_is_inside_the_panel() {
         let panel = panel_rect();
-        assert!(
-            panel.x0 > -FIVE_BY_FOUR && panel.x1 < FIVE_BY_FOUR,
-            "the panel runs from {} to {}, off a 5:4 window",
-            panel.x0,
-            panel.x1
-        );
         assert!(panel.y0 > -1.0 && panel.y1 < 1.0);
 
         for slot in 0..SLOTS {
@@ -4217,31 +4445,37 @@ mod tests {
     #[test]
     fn the_pack_screens_buttons_are_at_least_a_finger_under_a_thumb() {
         widgets::as_a_phone(|| {
-            let phone = widgets::Layout::for_screen(2712.0 / 1220.0, 1.65);
-            let drawn = grow_by(phone);
-            const SLACK: f32 = 1e-4;
-            let panel = panel_rect();
-            // **The four tabs**, which are the control a phone player
-            // uses on every visit. **Both ways now.** Across was not
-            // checked while the tabs were a strip -- a quarter of the
-            // panel is far wider than a finger -- and it is the tight
-            // one in a rail: a thumb pressing a tab in a column misses
-            // sideways as easily as up and down.
-            let rail = rail_rect();
-            for index in 0..ALL_TABS.len() {
-                let tab = tab_rect(index);
-                for (side, across) in [("down", tab.height()), ("across", tab.width())] {
+            // At the size a phone starts at, at the one the complaint was
+            // made at, and past both -- which is where the rail goes bare
+            // and the pack is drawn under the shared growth.
+            for size in [1.0, 1.5, 1.65, 2.5, 4.0] {
+                let phone = widgets::Layout::for_screen(2712.0 / 1220.0, size);
+                lay_out_for(phone);
+                let drawn = grow_by(phone);
+                const SLACK: f32 = 1e-4;
+                let panel = panel_rect();
+                // **The four tabs**, which are the control a phone player
+                // uses on every visit. **Both ways now.** Across was not
+                // checked while the tabs were a strip -- a quarter of the
+                // panel is far wider than a finger -- and it is the tight
+                // one in a rail: a thumb pressing a tab in a column misses
+                // sideways as easily as up and down.
+                let rail = rail_rect();
+                for index in 0..ALL_TABS.len() {
+                    let tab = tab_rect(index);
+                    for (side, across) in [("down", tab.height()), ("across", tab.width())] {
+                        assert!(
+                            across >= widgets::FINGER_SIDE - SLACK
+                                && across * drawn >= widgets::FINGER_SIDE - SLACK,
+                            "at {size} tab {index} is {:.0} device pixels {side}, against a finger of 91",
+                            across * drawn * 610.0,
+                        );
+                    }
                     assert!(
-                        across >= widgets::FINGER_SIDE - SLACK
-                            && across * drawn >= widgets::FINGER_SIDE - SLACK,
-                        "tab {index} is {:.0} device pixels {side}, against a finger of 91",
-                        across * drawn * 610.0,
+                        widgets::holds(rail, tab, SLACK) && widgets::holds(panel, rail, SLACK),
+                        "at {size} tab {index} has grown out of its rail",
                     );
                 }
-                assert!(
-                    widgets::holds(rail, tab, SLACK) && widgets::holds(panel, rail, SLACK),
-                    "tab {index} has grown out of its rail",
-                );
             }
         });
     }
@@ -4790,6 +5024,10 @@ mod tests {
         language: Language,
         /// Whether this page was laid out for a finger.
         touch: bool,
+        /// Which rail it was laid out with: every guard runs on both,
+        /// because the bare rail is a different panel and a different
+        /// page left edge.
+        rail: Rail,
         /// **The panel as it was while this page was drawn**, and the
         /// controls with it. Not `panel_rect()` asked again at assertion
         /// time: the panel is a different height under a finger, so a
@@ -4807,10 +5045,11 @@ mod tests {
         /// What a failure says it was looking at.
         fn where_(&self) -> String {
             format!(
-                "{:?}/{:?}/{}",
+                "{:?}/{:?}/{}/{:?}",
                 self.tab,
                 self.language,
-                if self.touch { "phone" } else { "desktop" }
+                if self.touch { "phone" } else { "desktop" },
+                self.rail,
             )
         }
 
@@ -4862,8 +5101,11 @@ mod tests {
             },
         };
         let mut pages = Vec::new();
-        for touch in [false, true] {
-            crate::ui::widgets::with_touch(touch, || {
+        for (shape, touch) in [Rail::Worded, Rail::Bare]
+            .into_iter()
+            .flat_map(|shape| [(shape, false), (shape, true)])
+        {
+            under(shape, || crate::ui::widgets::with_touch(touch, || {
                 for &language in Language::ALL {
                     for tab in ALL_TABS {
                         let mut screen = InventoryScreen::new();
@@ -4909,6 +5151,7 @@ mod tests {
                             tab,
                             language,
                             touch,
+                            rail: shape,
                             panel: panel_rect(),
                             controls: pack_controls(),
                             lines,
@@ -4916,7 +5159,7 @@ mod tests {
                         });
                     }
                 }
-            });
+            }));
         }
         // The same, for the furniture: only the grids have cells, so it
         // is asked across the pages rather than on each.
@@ -4959,8 +5202,9 @@ mod tests {
             // Only the rows' own labels, which are the lines that begin
             // exactly at the column the marks leave -- the title and the
             // tabs are over this page too and neither is a row of it.
-            let words_left =
-                grid_left() - body_column_width() + VITAL_MARK + VITAL_MARK_GAP;
+            let words_left = under(page.rail, || grid_left() - body_column_width())
+                + VITAL_MARK
+                + VITAL_MARK_GAP;
             for line in &page.lines {
                 if (line.rect.x0 - words_left).abs() > 1e-4 {
                     continue;
@@ -4993,15 +5237,20 @@ mod tests {
         // path page are pages of writing with no slot on them at all,
         // and measuring their text against a grid that is not there
         // would fail on `22%` sitting where a slot would have been.
-        let squares: Vec<Rect> = (0..SLOTS)
-            .map(slot_rect)
-            .chain((0..primitive_shared::equipment::SLOTS).map(equipment_rect))
-            .chain((0..visible_recipes()).map(|place| recipe_rect(place, 0)))
-            .collect();
+        // On the rail the page was drawn with: the bare rail moves every
+        // square of the pack a little to the left.
+        let squares = || -> Vec<Rect> {
+            (0..SLOTS)
+                .map(slot_rect)
+                .chain((0..primitive_shared::equipment::SLOTS).map(equipment_rect))
+                .chain((0..visible_recipes()).map(|place| recipe_rect(place, 0)))
+                .collect()
+        };
         for page in every_page_drawn() {
             if matches!(page.tab, Tab::Health | Tab::Learn) {
                 continue;
             }
+            let squares = under(page.rail, squares);
             for line in &page.lines {
                 for square in &squares {
                     assert!(
@@ -5098,12 +5347,13 @@ mod tests {
             }
         }
         // The pack scores exactly one rule -- the one under its title --
-        // on every page, in every language, under either pointer. A
+        // on every page, in every language, under either pointer, on
+        // either rail. A
         // recorder that saw none would make the whole of the above pass
         // by looking at nothing.
         assert_eq!(
             seen,
-            ALL_TABS.len() * Language::ALL.len() * 2,
+            ALL_TABS.len() * Language::ALL.len() * 2 * 2,
             "the recorder did not see the rule under the title on every page",
         );
     }
@@ -5357,7 +5607,32 @@ mod tests {
         // a hit test written independently of the drawing is a strip
         // that looks right and answers in the wrong place. `tab_rect` is
         // what draws and `tab_at` is what answers, and this is the line
-        // that says they are the same rectangles.
+        // that says they are the same rectangles -- on both rails, and
+        // through the growing the frame loop does: a window that gets the
+        // bare rail is a window where the pack is drawn at its own size
+        // rather than the shared one, and a click divided by the shared
+        // one would land a tab away.
+        for (shape, window) in [(Rail::Worded, 1920.0 / 1080.0), (Rail::Bare, 1.0)] {
+            let layout = widgets::Layout::for_screen(window, 1.0);
+            lay_out_for(layout);
+            assert_eq!(rail(), shape, "a {window:.2} window did not get the {shape:?} rail");
+            let growth = grow_by(layout);
+            for index in 0..ALL_TABS.len() {
+                let rect = tab_rect(index);
+                // Where the frame loop draws its middle, and where a click
+                // there comes back to.
+                let drawn = (rect.centre_x() * growth, rect.centre_y() * growth);
+                assert_eq!(
+                    tab_at(layout.hit(drawn, growth)),
+                    Some(index),
+                    "{shape:?}: tab {index} does not answer where it is drawn",
+                );
+            }
+            tabs_answer_where_they_are_drawn();
+        }
+    }
+
+    fn tabs_answer_where_they_are_drawn() {
         let (pack, _) = with_a_rucksack();
         for (index, tab) in ALL_TABS.iter().copied().enumerate() {
             let rect = tab_rect(index);
@@ -5474,7 +5749,14 @@ mod tests {
         // Every corner of the content band is tried, and with a long
         // line as well as a short one -- the failure needs a note wide
         // or tall enough to be pushed somewhere, and a one-word note
-        // fits wherever it is put.
+        // fits wherever it is put. On both rails: the band starts right
+        // of whichever one the window has.
+        for shape in [Rail::Worded, Rail::Bare] {
+            under(shape, a_note_stays_in_its_band);
+        }
+    }
+
+    fn a_note_stays_in_its_band() {
         let bounds = note_bounds();
         let long = "Bronzowy hełm (stępiony) x1   1 kg";
         for text in ["oak", long] {
@@ -5524,8 +5806,11 @@ mod tests {
     /// the same rectangles and pens the drawing uses (`tab_contents`).
     #[test]
     fn every_word_on_the_rail_fits_its_tab_in_every_language() {
+        // The worded rail: the bare one has no words to fit, and names its
+        // tabs in the heading and under the pointer instead (see
+        // `a_bare_tab_is_named_in_the_heading_and_under_the_pointer`).
         for touch in [false, true] {
-            widgets::with_touch(touch, || {
+            under(Rail::Worded, || widgets::with_touch(touch, || {
                 for &language in Language::ALL {
                     let (scale, words) = rail_label(language);
                     assert!(
@@ -5566,8 +5851,257 @@ mod tests {
                         }
                     }
                 }
+            }));
+        }
+    }
+
+    /// Every window a player might hold the pack in: a square, the
+    /// squarest monitor, 4:3, 16:10, 16:9, a phone and wider, at every
+    /// interface size the setting offers, under either pointer.
+    fn every_window() -> Vec<(f32, f32, bool)> {
+        let mut windows = Vec::new();
+        for touch in [false, true] {
+            for aspect in [1.0, 1.25, 4.0 / 3.0, 1.6, 16.0 / 9.0, 2.0, 2712.0 / 1220.0, 2.4] {
+                for size in [0.5, 0.75, 1.0, 1.25, 1.5, 1.65, 2.0, 2.5, 3.0, 4.0] {
+                    windows.push((aspect, size, touch));
+                }
+            }
+        }
+        windows
+    }
+
+    /// **On every window the rail is worded or bare, and whichever it is,
+    /// nothing leaves the glass, the panel or the rail.**
+    ///
+    /// The worded rail exactly where the whole pack fits at the growth
+    /// every other screen is drawn at, and the pack at that growth there;
+    /// the bare one everywhere else, with the pack at the shared growth or
+    /// under it and never over; and the drawn pack on the glass in both.
+    #[test]
+    fn the_rail_is_worded_or_bare_on_every_window_and_nothing_leaves_it() {
+        for (aspect, size, touch) in every_window() {
+            widgets::with_touch(touch, || {
+                let layout = widgets::Layout::for_screen(aspect, size);
+                lay_out_for(layout);
+                let shared = widgets::screen_growth(layout);
+                let drawn = grow_by(layout);
+                let (across, down) = extent();
+                let at = format!("{aspect:.2} at {size} ({})", if touch { "phone" } else { "desktop" });
+                match rail() {
+                    Rail::Worded => assert!(
+                        (drawn - shared).abs() < 1e-5,
+                        "{at}: a worded rail was drawn at {drawn}, not the shared {shared}",
+                    ),
+                    Rail::Bare => assert!(
+                        !layout.holds(under(Rail::Worded, extent), shared) && drawn <= shared + 1e-5,
+                        "{at}: the rail went bare on a window that holds the words",
+                    ),
+                }
+                assert!(
+                    across * drawn <= aspect + 1e-4 && down * drawn <= 1.0 + 1e-4,
+                    "{at}: the pack is drawn {:.3} by {:.3}, off the glass",
+                    across * drawn,
+                    down * drawn,
+                );
+                let (panel, rail) = (panel_rect(), rail_rect());
+                assert!(widgets::holds(panel, rail, 1e-4), "{at}: the rail leaves the panel");
+                for index in 0..ALL_TABS.len() {
+                    assert!(
+                        widgets::holds(rail, tab_rect(index), 1e-4),
+                        "{at}: tab {index} leaves the rail",
+                    );
+                }
+                assert!(
+                    rail.x1 + RAIL_GAP <= content_left() + 1e-4,
+                    "{at}: the rail runs into the page",
+                );
             });
         }
+    }
+
+    /// **Dragging a window wider changes its rail at most once, from bare
+    /// to worded, and never back.**
+    ///
+    /// The flicker this rules out is a rail that went worded, made the pack
+    /// wider, found it no longer fitted and went bare again -- a frame each
+    /// way for as long as the window sat on the line. `rail_for` is a pure
+    /// function of the window and the worded rail is chosen on a set of
+    /// widths that only grows, and this is the sweep that says so: every
+    /// interface size, the window's width in steps of a two-hundredth.
+    #[test]
+    fn a_window_that_widens_changes_its_rail_at_most_once() {
+        for touch in [false, true] {
+            widgets::with_touch(touch, || {
+                for size in [0.5, 1.0, 1.5, 1.65, 2.0, 2.5, 3.0, 4.0] {
+                    let mut changes = 0;
+                    let mut last = rail_for(widgets::Layout::for_screen(1.0, size));
+                    for step in 0..=300 {
+                        let aspect = 1.0 + step as f32 * 0.005;
+                        let now = rail_for(widgets::Layout::for_screen(aspect, size));
+                        if now != last {
+                            assert_eq!(
+                                (last, now),
+                                (Rail::Bare, Rail::Worded),
+                                "at {size} the rail went back to bare at {aspect:.3}",
+                            );
+                            changes += 1;
+                            last = now;
+                        }
+                    }
+                    assert!(changes <= 1, "at {size} the rail changed {changes} times");
+                    // ...and the same window twice is the same rail twice.
+                    let window = widgets::Layout::for_screen(1.6, size);
+                    assert_eq!(rail_for(window), rail_for(window));
+                }
+            });
+        }
+    }
+
+    /// **A touch screen never draws the pack under its authored size.**
+    ///
+    /// The one screen allowed under 1.0 is the pack (`grow_by`), and it is
+    /// allowed there because nothing it would shrink is a finger on a
+    /// desktop. A finger-floored tab stays a finger only while the pack is
+    /// drawn at least as big as it was authored, so this holds the
+    /// allowance to the windows no phone or tablet is: 4:3 and wider, the
+    /// squarest a tablet held sideways gets, at every interface size.
+    #[test]
+    fn a_touch_screen_never_draws_the_pack_under_its_authored_size() {
+        widgets::as_a_phone(|| {
+            for (aspect, size, _) in every_window() {
+                if aspect < 4.0 / 3.0 - 1e-4 {
+                    continue;
+                }
+                let layout = widgets::Layout::for_screen(aspect, size);
+                assert!(
+                    grow_by(layout) >= 1.0 - 1e-5,
+                    "a {aspect:.2} touch screen at {size} draws the pack at {}",
+                    grow_by(layout),
+                );
+            }
+        });
+    }
+
+    /// **The rail does not change how big any other screen is drawn.**
+    ///
+    /// The eight percent this fixes: every centred screen grows by one
+    /// number measured against the widest of them, and while the pack was
+    /// measured with its rail a chest on a 4:3 monitor came out smaller for
+    /// tabs it does not have. The shared number is measured without the
+    /// rail now, so it is one number whichever rail is laid out, and it is
+    /// the number the pack gave before it had one -- which is what keeps a
+    /// chest, a hearth and every station at the size they were.
+    #[test]
+    fn the_rail_does_not_change_how_big_any_other_screen_is() {
+        let worded = under(Rail::Worded, widgets::screen_extent);
+        let bare = under(Rail::Bare, widgets::screen_extent);
+        assert!(
+            (worded.0 - bare.0).abs() < 1e-5 && (worded.1 - bare.1).abs() < 1e-5,
+            "the shared extent moves with the pack's rail: {worded:?} against {bare:?}",
+        );
+        // The pack without a rail: three columns and their gaps, the pad
+        // either side -- the panel exactly as it was before the rail.
+        let (grid_width, _) = grid_size();
+        let bare_pack = (body_column_width() + grid_width + COLUMN_GAP + recipe_grid_width()) / 2.0
+            + PANEL_PAD;
+        for shape in [Rail::Worded, Rail::Bare] {
+            let (across, _) = under(shape, content_extent);
+            assert!(
+                (across - bare_pack).abs() < 1e-5,
+                "{shape:?}: the pack is measured {across} across for the others, not {bare_pack}",
+            );
+        }
+        for (aspect, size, touch) in every_window() {
+            widgets::with_touch(touch, || {
+                let layout = widgets::Layout::for_screen(aspect, size);
+                let worded = under(Rail::Worded, || widgets::screen_growth(layout));
+                let bare = under(Rail::Bare, || widgets::screen_growth(layout));
+                assert!(
+                    (worded - bare).abs() < 1e-4,
+                    "{aspect:.2} at {size}: the shared growth is {worded} on one rail and {bare} on the other",
+                );
+            });
+        }
+    }
+
+    /// **A bare tab is named twice: in the heading, for the page that is
+    /// showing, and under the pointer, for the tab it is over.** See
+    /// `InventoryScreen::title` for why both.
+    #[test]
+    fn a_bare_tab_is_named_in_the_heading_and_under_the_pointer() {
+        let (pack, worn) = with_a_rucksack();
+        for &language in Language::ALL {
+            for (showing, over) in [(Tab::Pack, 2), (Tab::Health, 3), (Tab::Learn, 0)] {
+                let lines = under(Rail::Bare, || {
+                    let mut screen = InventoryScreen::new();
+                    screen.open = true;
+                    screen.sync(&pack);
+                    screen.set_tab(showing);
+                    let tab = tab_rect(over);
+                    screen.set_cursor(Some((tab.centre_x(), tab.centre_y())));
+                    let (_, lines) = crate::ui::widgets::while_recording_text(|| {
+                        let mut out = Vec::new();
+                        screen.build_into(
+                            FontAtlas::for_test(),
+                            &FaceLayers::empty_for_test(),
+                            &pack,
+                            &worn,
+                            &Injuries::default(),
+                            &Vitals::default(),
+                            crate::ui::ladder_screen::Learning::nothing_yet(),
+                            language,
+                            &mut out,
+                        );
+                    });
+                    lines
+                });
+                let said = |msg: Msg| lines.iter().any(|line| line.text == language.text(msg));
+                assert!(said(showing.label()), "{language:?}: the heading does not name {showing:?}");
+                assert!(
+                    said(ALL_TABS[over].label()),
+                    "{language:?}: nothing names tab {over} under the pointer",
+                );
+                // Simple English calls the pack page and the whole screen
+                // the same thing, WHAT YOU CARRY, and that is not the
+                // heading failing to change.
+                assert!(
+                    !said(Msg::Inventory)
+                        || language.text(Msg::Inventory) == language.text(showing.label())
+                        || language.text(Msg::Inventory) == language.text(ALL_TABS[over].label()),
+                    "{language:?}: a bare rail still says INVENTORY over a page it does not name",
+                );
+            }
+        }
+        // ...and on a worded rail the heading is what it always was, and
+        // no note repeats a word the tab already carries.
+        let lines = under(Rail::Worded, || {
+            let mut screen = InventoryScreen::new();
+            screen.open = true;
+            let tab = tab_rect(3);
+            screen.set_cursor(Some((tab.centre_x(), tab.centre_y())));
+            crate::ui::widgets::while_recording_text(|| {
+                let mut out = Vec::new();
+                screen.build_into(
+                    FontAtlas::for_test(),
+                    &FaceLayers::empty_for_test(),
+                    &pack,
+                    &worn,
+                    &Injuries::default(),
+                    &Vitals::default(),
+                    crate::ui::ladder_screen::Learning::nothing_yet(),
+                    Language::Russian,
+                    &mut out,
+                );
+            })
+            .1
+        });
+        let path = Language::Russian.text(Msg::LadderTab);
+        assert!(lines.iter().any(|line| line.text == Language::Russian.text(Msg::Inventory)));
+        assert_eq!(
+            lines.iter().filter(|line| line.text == path).count(),
+            1,
+            "a worded tab's name is written twice",
+        );
     }
 
     #[test]
