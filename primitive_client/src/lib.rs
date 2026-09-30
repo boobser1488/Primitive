@@ -2645,6 +2645,9 @@ fn run(
                     // anybody who has gone quiet, and these arrive in no
                     // snapshot at all. See `pose_for_a_photograph`.
                     remote_players.pose_for_a_photograph(player.position.as_vec3(), camera.yaw);
+                    // Where the world's day is, for the animals' own clocks
+                    // (`Entities::set_world_clock`).
+                    entities.set_world_clock(sky.world_days());
                     entities.tick(dt);
                     // Into a buffer that lives across frames. It is
                     // empty in singleplayer and a handful of entries
