@@ -125,7 +125,7 @@ pub fn mesh(
     dirty_set: &mut MeshQueueSet,
     chunk_versions: &mut HashMap<ChunkPos, u64>,
     chunk_lod: &mut HashMap<ChunkPos, Detail>,
-    lod_scanned_from: &mut Option<(ChunkPos, i32, crate::engine::lod::Quality, (i32, i32, crate::Vegetation))>,
+    lod_scanned_from: &mut Option<crate::LodKey>,
     debug_stats: &mut DebugStats,
 ) {
     // The same number `integrate` worked out for its own half, from the

@@ -705,7 +705,7 @@ fn run(
     // hundred of them at render distance 24 -- and nothing about it can
     // change until the player crosses into another chunk, so it runs
     // once per crossing rather than once per frame.
-    let mut lod_scanned_from: Option<(ChunkPos, i32, crate::engine::lod::Quality, (i32, i32, Vegetation))> = None;
+    let mut lod_scanned_from: Option<LodKey> = None;
     // Chunks that have arrived but aren't integrated yet. Receiving is
     // cheap; integrating (lighting a chunk) is not, so the two are
     // separated and only integration is budgeted -- see `integrate_chunks`.
@@ -6427,6 +6427,12 @@ impl Vegetation {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const NONE: Vegetation = Vegetation { blades: crate::engine::meadow::Density::Off, season: None };
 }
+
+/// What the detail scan was last run for (`frame::streaming::mesh`): the
+/// player's chunk, the coarse line and its quality, the stones' and the
+/// canopy's lines and what grows over the ground. A scan runs again when
+/// any of it changes.
+pub(crate) type LodKey = (ChunkPos, i32, crate::engine::lod::Quality, (i32, i32, Vegetation));
 
 /// What the mesh of a chunk on screen was built at, and the skyline that
 /// decided it -- a mountain's bands start nearer (`lod::band_start`), so
