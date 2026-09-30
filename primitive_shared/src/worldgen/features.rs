@@ -1268,6 +1268,29 @@ mod wild_plant_tests {
         }
     }
 
+    /// **Where to stand for a photograph of each country**, in a world made
+    /// now: the first column of a meadow, a steppe and a wood whose whole
+    /// chunk and its eight neighbours are that country. A tool, for the
+    /// before-and-after pictures (`PRIMITIVE_TEST_SPAWN`).
+    ///
+    /// ```text
+    /// SEED=1337 cargo test -p primitive_shared --lib where_to_stand -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a tool: prints where each country is"]
+    fn where_to_stand_for_a_photograph_of_each_country() {
+        let seed: u32 = std::env::var("SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(1337);
+        let gen = WorldGen::with_zone(seed, Preset::Normal, super::super::Zone::Temperate);
+        for wanted in [Biome::Plains, Biome::Steppe, Biome::Forest, Biome::Savanna] {
+            let found = (0..4000).find_map(|step: i32| {
+                let (x, z) = ((step % 80 - 40) * 48, (step / 80 - 25) * 48);
+                let whole = (-24..=24).step_by(8).all(|dz| (-24..=24).step_by(8).all(|dx| gen.biome_at(x + dx, z + dz) == wanted));
+                whole.then_some((x, z))
+            });
+            println!("{}: {:?}", wanted.name(), found);
+        }
+    }
+
     #[test]
     fn a_bluebell_is_a_flower_of_the_shade_and_the_rest_want_the_sky() {
         for plant in SECOND_ROUND {

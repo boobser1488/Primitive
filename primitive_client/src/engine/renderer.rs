@@ -5897,6 +5897,14 @@ pub(crate) mod offscreen_repro {
     use super::*;
     use crate::engine::mesh::Vertex;
 
+    thread_local! {
+        /// The wind a tool photographs the plants in, or `None` for a still
+        /// day (`engine::sway`). Per thread, because the tools draw side by
+        /// side.
+        pub(crate) static OFFSCREEN_BREEZE: std::cell::Cell<Option<crate::engine::sway::Breeze>> =
+            const { std::cell::Cell::new(None) };
+    }
+
     /// A device, or nothing on a machine with no GPU -- same shape as
     /// `arena::gpu_tests`.
     /// The one shared device. See `engine::test_gpu` for why every test
@@ -16517,6 +16525,14 @@ pub(crate) mod offscreen_repro {
             bearing
         };
         globals.render_origin = [origin.x, origin.y, origin.z, 0.0];
+        // The turf's blades to the settings' line, and a still day unless a
+        // tool asked for a wind (`OFFSCREEN_BREEZE`): zeroed, the line was
+        // nought and every blade was sunk into the ground before it was
+        // drawn.
+        globals.breeze = OFFSCREEN_BREEZE
+            .with(std::cell::Cell::get)
+            .unwrap_or(crate::engine::sway::Breeze::CALM)
+            .uniform(settings.grass_density.fade_line());
         globals.anim = [
             textures.flame_layer() as f32,
             crate::engine::texture::FLAME_FRAMES as f32,
@@ -24314,6 +24330,9 @@ mod dripstone_repro;
 #[cfg(test)]
 #[path = "flora_repro.rs"]
 mod flora_repro;
+#[cfg(test)]
+#[path = "meadow_repro.rs"]
+mod meadow_repro;
 
 /// Stones, sticks and flint lying on the ground, flat and with a thickness
 /// (`engine::relief`). A child for the reason `lod_repro` is.

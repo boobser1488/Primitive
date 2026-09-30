@@ -84,9 +84,9 @@ impl Density {
     pub fn clumps(self) -> f32 {
         match self {
             Density::Off => 0.0,
-            Density::Sparse => 0.8,
-            Density::Thick => 1.8,
-            Density::Lush => 3.0,
+            Density::Sparse => 1.0,
+            Density::Thick => 2.2,
+            Density::Lush => 3.5,
         }
     }
 
@@ -191,8 +191,15 @@ pub(crate) struct Blades {
 }
 
 /// How tall a clump stands, in blocks, and how wide it is.
-const HEIGHT: (f32, f32) = (0.22, 0.5);
-const WIDTH: (f32, f32) = (0.34, 0.52);
+///
+/// **Knee-high, and it was ankle-high.** The first clumps stood a quarter to
+/// half a block and were as wide as a boot, and photographed from a
+/// player's eye they were the turf's own picture with a few darker marks on
+/// it -- the owner's "отдельные пучки" all over again, only smaller. A
+/// meadow is grass as tall as the player's shin that hides the ground a few
+/// steps off, which is half a block and more.
+const HEIGHT: (f32, f32) = (0.35, 0.72);
+const WIDTH: (f32, f32) = (0.55, 0.85);
 /// The most clumps one cell is given, whatever the step.
 const MOST: u32 = 4;
 
