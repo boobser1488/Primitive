@@ -233,6 +233,9 @@ use primitive_shared::types::{
 };
 
 use crate::logic::falling::BlockWorld;
+
+mod woods;
+pub use woods::Edit;
 use primitive_shared::horse;
 use primitive_shared::husbandry;
 use primitive_shared::youth;
@@ -2395,9 +2398,10 @@ pub struct Animal {
     /// Seconds it stays frozen, head up, before it decides. See
     /// `FREEZE_SECONDS`.
     freeze_for: f32,
-    /// What a fox has in its jaws, if anything: the kill it is taking home.
-    /// See `carried` -- struck on the way, it drops it.
-    carrying: Option<Species>,
+    /// What a fox has in its jaws, if anything: the kill it is taking home,
+    /// or a piece of meat off the ground. See `woods::struck` -- hit on the
+    /// way, it drops it.
+    carrying: Option<woods::Carried>,
     /// Seconds a beaver or a frog stays under after it dived. See `dive`.
     under_for: f32,
     /// Seconds before a beaver next looks at its stream for somewhere to put
@@ -2408,8 +2412,10 @@ pub struct Animal {
     /// person standing over it.
     denned: bool,
     /// Seconds a woken bear is still half asleep: slow, and then very angry.
-    /// See `GROGGY_SECONDS`.
+    /// See `woods::GROGGY_SECONDS`.
     groggy_for: f32,
+    /// Seconds a bear goes on minding the food it ate at: see `woods::forage`.
+    guard_for: f32,
 }
 
 /// A horse with a rider: the body `horse::step` moves, and what the reins
@@ -2533,6 +2539,8 @@ impl From<Species> for Frame {
 #[derive(Debug, Clone, Copy)]
 struct Bite {
     at: EntityId,
+    /// Who bit: a fox that kills takes the body away (`settle_bites`).
+    by: EntityId,
     damage: f32,
     /// Where it came from, so the bitten animal knows which way to run.
     from: (f32, f32, f32),
@@ -2568,7 +2576,11 @@ impl Animal {
     /// asks this, so a young boar takes the prey's path through every rule.
     #[inline]
     fn fights(&self) -> bool {
-        self.species.is_hostile() && !youth::is_young(self.growth)
+        // **The animal's temper as it is today, not the species' table**
+        // (`woods::provoke_range`): a cow elk with her calf fights and one
+        // without does not, and a bear asleep in its den fights nobody until
+        // it is woken.
+        woods::provoke_range(self) > 0.0 && !youth::is_young(self.growth)
     }
 
     pub fn state(&self) -> EntityState {
@@ -2625,6 +2637,7 @@ impl Animal {
             | if tame { horse::TACK_HALTER } else { 0 }
             | if self.stallion && !tame { horse::TACK_STALLION } else { 0 }
             | if self.shorn() { horse::TACK_SHORN } else { 0 }
+            | if self.carrying.is_some() { horse::TACK_CARRYING } else { 0 }
     }
 
     /// A sheep with its fleece off and not yet grown back: what the model
@@ -2940,6 +2953,16 @@ pub struct Animals {
     /// Whether it is raining on the world, for the kept horses standing out
     /// in it (`husbandry::EXPOSED_CONDITION_PER_DAY`). Told by the tick loop.
     raining: bool,
+    /// Meat lying on the ground, handed in by the tick loop for the foxes
+    /// (`meat_lying`).
+    meat_lying: Vec<(f32, f32, f32)>,
+    /// Water that moved lately, and how many seconds more it is remembered,
+    /// for the beavers (`hear_running_water`).
+    running_water: Vec<((i32, i32, i32), f32)>,
+    /// What the animals did to the world this tick (`take_edits`).
+    edits: Vec<woods::Edit>,
+    /// Foxes with their jaws on meat, and where it lay (`take_meat_taken`).
+    meat_taken: Vec<(EntityId, (f32, f32, f32))>,
     /// Line-of-sight rays cast since the world started. Test-only, for the
     /// budget test.
     #[cfg(test)]
@@ -3018,6 +3041,10 @@ impl Animals {
             spilled: Vec::new(),
             thefts: Vec::new(),
             raining: false,
+            meat_lying: Vec::new(),
+            running_water: Vec::new(),
+            edits: Vec::new(),
+            meat_taken: Vec::new(),
             #[cfg(test)]
             rays_cast: 0,
             #[cfg(test)]
@@ -3221,7 +3248,24 @@ impl Animals {
     /// swimmer does not fall -- it has nowhere to fall to, and a fish rolling
     /// over in the water for a second before it is a heap on the surface is a
     /// fish dying twice -- so it goes straight to `fallen`.
+    /// What a fox had in its jaws, put on the ground where it was hit: a kill
+    /// goes down as the body it was (`lay_carcass`, through `fallen`), a piece
+    /// of meat as the piece. See `woods::struck`.
+    fn drop_carried(&mut self, dropped: Option<woods::Carried>, at: (f32, f32, f32), position: (f64, f64, f64)) {
+        match dropped {
+            Some(woods::Carried::Kill(prey)) => {
+                self.fallen.push(Death { species: prey, at, growth: youth::GROWN, shorn: false });
+            }
+            Some(woods::Carried::Meat(block)) => self.spilled.push((position, vec![(block, 1, 0)])),
+            None => {}
+        }
+    }
+
     fn fell(&mut self, index: usize) -> Death {
+        // Whatever a fox was carrying falls with it, however it died.
+        let dropped = self.animals[index].carrying.take();
+        let (at, position) = (self.animals[index].at(), self.animals[index].position);
+        self.drop_carried(dropped, at, position);
         let mut body = self.animals.remove(index);
         self.killed += 1;
         let death = Death { species: body.species, at: body.at(), growth: body.growth, shorn: body.shorn() };
@@ -3631,6 +3675,7 @@ impl Animals {
             dam_for: 0.0,
             denned: false,
             groggy_for: 0.0,
+            guard_for: 0.0,
         }
     }
 
@@ -3736,6 +3781,15 @@ impl Animals {
         // `&mut self` and this loop is already holding `&mut animal`
         // out of `self.animals`.
         let mut hazards: Vec<(EntityId, f32)> = Vec::new();
+        self.forget_running_water(dt);
+        let running: Vec<(i32, i32, i32)> = self.running_water.iter().map(|&(cell, _)| cell).collect();
+        let mut wild = woods::Wild {
+            season: self.season,
+            meat: &self.meat_lying,
+            running: &running,
+            edits: &mut self.edits,
+            taken: &mut self.meat_taken,
+        };
         for (index, animal) in self.animals.iter_mut().enumerate() {
             // **A swimmer thinks and moves down its own path** -- see the
             // module doc for why that is two functions rather than a
@@ -3763,6 +3817,7 @@ impl Animals {
                     &mut self.rng,
                     dt,
                     time_of_day,
+                    &mut wild,
                 );
                 keep_family(animal, family.as_ref().map(|f| f[index]).unwrap_or_default());
                 let fallen = walk(animal, world, dt);
@@ -3834,6 +3889,7 @@ impl Animals {
             // ...and the coast, the same way: a player nowhere near the sea
             // pays a few biome lookups and nothing else (`COAST_BEARINGS`).
             self.populate_shore(world, players, is_night(time_of_day));
+            self.populate_banks(world, players, is_night(time_of_day));
         }
         blows
     }
@@ -4009,6 +4065,7 @@ impl Animals {
         // about where you hit and the armour is about what you hit it
         // through. See `Species::hide_armour` for the arithmetic and
         // the reason it is a subtraction.
+        let dropped = woods::struck(animal, from);
         let damage = animal.species.hurt_by(damage);
         animal.health -= damage;
         animal.hurt_for = HURT_SECONDS;
@@ -4091,6 +4148,8 @@ impl Animals {
         }
         let species = animal.species;
         let at = animal.at();
+        let position = animal.position;
+        self.drop_carried(dropped, at, position);
 
         // **The herd remembers where this happened.** Everything of the
         // same kind within sight of the blow -- the struck animal
@@ -4460,8 +4519,14 @@ impl Animals {
                 animal.remember_danger((animal.at().0, animal.at().2));
                 continue;
             }
-            self.animals.remove(index);
+            let prey = self.animals.remove(index).species;
             self.killed += 1;
+            // **A fox carries its kill away** rather than eating it where it
+            // fell (`Species::Fox`): the body goes off in its jaws, and comes
+            // back to the ground only if somebody stops it on the way.
+            if let Some(fox) = self.animals.iter_mut().find(|a| a.id == bite.by && a.species == Species::Fox) {
+                fox.carrying = Some(woods::Carried::Kill(prey));
+            }
             // Everything that was hunting it stops, and whatever was
             // near enough to have made the kill is fed. Fed by proximity
             // rather than by whose bite landed last, because a pack eats
@@ -4611,7 +4676,10 @@ impl Animals {
         // water in it, and drawn here it would be a school spawned on turf.
         // Not the gull either: it lives on a beach, and a beach can have turf
         // on it, but it arrives from `populate_shore` or not at all.
-        let here = |species: &&Species| !species.swims() && !species.soars() && species.lives_in(biome);
+        // Nor the water's three, which come from the bank (`woods::populate_banks`).
+        let here = |species: &&Species| {
+            !species.swims() && !species.soars() && !woods::from_the_bank(**species) && species.lives_in(biome)
+        };
         let total: u32 = Species::ALL.iter().filter(here).map(|s| s.spawn_weight_in(night, biome)).sum();
         if total == 0 {
             return None;
@@ -4713,7 +4781,23 @@ impl Animals {
         if !fits(world, (f64::from(x), f64::from(ground as f32), f64::from(z)), species) {
             return;
         }
+        // **A bear in winter is a bear in its den**: under a roof of rock or
+        // roots and asleep (`woods::hibernate`), or nowhere. A winter wood has
+        // no bears walking in it, and a cave mouth in winter is the one place
+        // a player should look twice before going in.
+        let denning = species == Species::Bear && self.season == primitive_shared::season::Season::Winter;
+        if denning && !roofed(world, (x, ground as f32, z)) {
+            return;
+        }
         self.spawn(species, (x, ground as f32, z));
+        if denning {
+            if let Some(bear) = self.animals.last_mut() {
+                bear.denned = true;
+                bear.attitude = primitive_shared::protocol::Attitude::Resting;
+                bear.home = Some((x, z));
+            }
+            return;
+        }
 
         // **The rest of the group.** Everything these animals do
         // together -- a herd that bolts as one, a pack that will not
@@ -5828,7 +5912,7 @@ impl Animals {
         let hunters: Vec<Species> = Species::ALL
             .iter()
             .copied()
-            .filter(|h| h.shies_from_fire() && h.lives_in(country) && !h.needs_trees())
+            .filter(|h| h.shies_from_fire() && h.is_hostile() && h.lives_in(country) && !h.needs_trees())
             .collect();
         let Some(&hunter) = self.rng.pick(&hunters) else {
             return Vec::new();
@@ -6041,9 +6125,11 @@ fn think(
     rng: &mut Rng,
     dt: f32,
     time_of_day: f32,
+    wild: &mut woods::Wild<'_>,
 ) {
     animal.angry_for = (animal.angry_for - dt).max(0.0);
     animal.next_thought -= dt;
+    woods::tick(animal, dt);
 
     // **What the fly agaric is still doing.** A poisoned point does
     // its damage twice: the thrust, and then a few seconds of this.
@@ -6223,6 +6309,13 @@ fn think(
 
     animal.fed_for = (animal.fed_for - dt).max(0.0);
 
+    // **The woods' and the water's own decisions first** -- a bear asleep, a
+    // fox with a kill, a beaver at moving water, a duck off its pond, a frog
+    // gone quiet. See `woods`, and its module doc for why they are there.
+    if woods::think_first(animal, senses.figures, seen, world, rng, time_of_day, wild) {
+        return;
+    }
+
     // **In the water: get out of it.**
     //
     // Before every other decision, because an animal that is swimming is
@@ -6258,7 +6351,13 @@ fn think(
     // A gull is exempt: it sits on the water it comes down on, and gets off
     // it the way it gets off the sand -- by going up (`seabird`). Making for
     // the bank on foot is a grouse's answer.
-    if animal.mind != Mind::Charge && !animal.species.soars() && enters_liquid(world, animal.position) {
+    // (...and not for an animal that lives in the water: see
+    // `Species::takes_to_water`.)
+    if animal.mind != Mind::Charge
+        && !animal.species.soars()
+        && !animal.species.takes_to_water()
+        && enters_liquid(world, animal.position)
+    {
         if let Some(heading) = shore_heading(world, animal) {
             animal.wants_yaw = heading;
             if !matches!(animal.mind, Mind::Flee | Mind::Chase) {
@@ -6432,7 +6531,13 @@ fn think(
     }
 
     match danger {
-        Some((who, at, _)) => {
+        Some((who, at, distance)) => {
+            // **A freeze before the bolt**, for an animal that was at ease and
+            // is far enough off to place the sound first: see `woods::freeze`.
+            if woods::freeze(animal, at, distance, rng) {
+                animal.target = who;
+                return;
+            }
             // A `target` only exists for people. What it is *for* is the
             // grudge and the alarm, and neither has any meaning aimed at
             // an animal -- but the alarm does have to spread, so a deer
@@ -6466,7 +6571,9 @@ fn think(
                 seabird(animal, players, seen, world, rng, time_of_day);
                 return;
             }
-            if animal.species.flies() && homing(animal, world, rng, time_of_day) {
+            // Not the duck, whose home is a pond and whose coming back to it is
+            // `woods::think_first`'s: `homing` looks for a nest in a canopy.
+            if animal.species.flies() && animal.species != Species::Duck && homing(animal, world, rng, time_of_day) {
                 return;
             }
             graze(animal, seen, world, rng, time_of_day);
@@ -7443,6 +7550,12 @@ fn raid(animal: &mut Animal, mark: Mark, seen: &Neighbours, world: &dyn BlockWor
 }
 
 fn bolt(animal: &mut Animal, world: &dyn BlockWorld, away: f32, seen: &Neighbours) {
+    // A lying animal gets up first, and one that lives in the water makes
+    // for it or goes under it. See `woods::rise` and `woods::plunge`.
+    woods::rise(animal);
+    if woods::plunge(animal, world, away) {
+        return;
+    }
     animal.mind = Mind::Flee;
     animal.next_thought = FLEE_SECONDS;
     let mut wanted = away;
@@ -8338,7 +8451,7 @@ fn graze(
             rng.range(0.8, 2.0)
         } else if is_night(time_of_day) {
             if rng.chance(NIGHT_DOZE) {
-                animal.attitude = Attitude::Dozing;
+                animal.attitude = woods::rest(animal.species, rng);
             }
             rng.range(4.0, 10.0)
         } else if is_midday(time_of_day) && in_shade(world, animal) && rng.chance(MIDDAY_CHANCE) {
@@ -8349,7 +8462,7 @@ fn graze(
             // a few block reads a minute for an animal in a wood and none at
             // all for one in a meadow, because `is_midday` is a compare and
             // it is tested first.
-            animal.attitude = Attitude::Dozing;
+            animal.attitude = woods::rest(animal.species, rng);
             rng.range(MIDDAY_REST.0, MIDDAY_REST.1)
         } else if grass {
             // **Mouthfuls, with the head coming up between them.** A herd
@@ -8874,7 +8987,7 @@ fn think_hunter(
                     animal.wants_yaw = toward;
                 }
                 // Near enough to pounce.
-                _ if distance_sq <= animal.species.provoke_range().powi(2) => {
+                _ if distance_sq <= woods::provoke_range(animal).powi(2) => {
                     start_charge(animal, prey_at, pack_lane(animal, seen), rng)
                 }
                 // **Inside the run: chase it.**
@@ -9167,7 +9280,7 @@ fn think_hunter(
     let provoked = animal.angry_for > 0.0
         || opening
         || trespass
-        || (bold && (circling || distance <= animal.species.provoke_range()));
+        || (bold && (circling || distance <= woods::provoke_range(animal)));
 
     match animal.mind {
         // Mid-run: the burst is over, because `next_thought` is what
@@ -9471,8 +9584,14 @@ fn walk(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
     // an animal that cannot tell water from ground.
     let wading = in_liquid(world, animal.position, animal.species);
     if wading {
-        wanted *= WADE_SPEED;
+        // Wading for everything that fell in, swimming for the four that
+        // live there: see `woods::swim_pace`.
+        wanted *= if animal.species.takes_to_water() { woods::swim_pace(animal.species) } else { WADE_SPEED };
     }
+    animal.afloat = wading && animal.species.takes_to_water() && animal.under_for <= 0.0;
+    // Getting up, asleep in a den, or woken and not yet awake. See
+    // `woods::pace`.
+    wanted *= woods::pace(animal);
     // ...and this animal's own pace, so a herd is several animals
     // rather than one animal drawn four times. See `Animal::pace`.
     wanted *= animal.pace;
@@ -9803,7 +9922,12 @@ fn walk(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
     // half blocks of fall on three points of health -- which is a bird
     // that dies of having been startled.
     let aloft = matches!(animal.mind, Mind::Flee | Mind::Homing | Mind::Soar);
-    let flying = ground_below.is_some_and(|(ground, _)| aloft || animal.at().1 > ground + 0.2);
+    // **A bird on the water is swimming, not landing.** Over a pond the
+    // floor is the pond's bed, and a duck sitting on the surface is well
+    // above it -- so without this the landing spring pulled every duck down
+    // through the water to the mud and drowned it there. On the water and not
+    // taking off, the buoyancy below has it (`Species::takes_to_water`).
+    let flying = ground_below.is_some_and(|(ground, _)| aloft || (animal.at().1 > ground + 0.2 && !wading));
     if let (true, Some((ground, slope))) = (flying, ground_below) {
         // A journey is flown over the higher of what is under the bird
         // and what it is going to land on -- see `Animal::flight_ceiling`
@@ -9933,6 +10057,10 @@ fn walk(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
         // like a stone off the edge it had been standing on.
         let pull = LIFT_ACCEL * dt;
         animal.velocity.1 += (-LANDING_SINK - animal.velocity.1).clamp(-pull, pull);
+    } else if wading && animal.under_for > 0.0 {
+        // **Under**: a diving beaver or frog is held down rather than floated
+        // up (`woods::plunge`), and comes up when the dive is over.
+        animal.velocity.1 = (animal.velocity.1 - BUOYANCY * dt).max(-SWIM_RISE);
     } else if wading {
         animal.velocity.1 = (animal.velocity.1 + BUOYANCY * dt).min(SWIM_RISE);
     } else if let Some(up) = climbing(animal, world) {
@@ -10087,7 +10215,7 @@ fn walk(animal: &mut Animal, world: &dyn BlockWorld, dt: f32) -> f32 {
             // A charging boar goes in anyway, for the same reason it
             // goes off a cliff -- it has committed, and what happens
             // next is the player's doing.
-            if careful && !wading && enters_liquid(world, want) {
+            if careful && !wading && !animal.species.takes_to_water() && enters_liquid(world, want) {
                 steer_around(animal, world);
                 continue;
             }
@@ -11119,7 +11247,10 @@ fn bite(animal: &mut Animal, seen: &Neighbours) -> Option<Bite> {
     animal.gore_cooldown = GORE_INTERVAL;
     Some(Bite {
         at: quarry,
-        damage: animal.species.damage(),
+        by: animal.id,
+        // A fox has no blow for a person (`Species::damage` is nought) and
+        // jaws for a hare: see `woods::FOX_BITE`.
+        damage: if animal.species == Species::Fox { woods::FOX_BITE } else { animal.species.damage() },
         from: animal.at(),
     })
 }
@@ -13753,7 +13884,11 @@ mod tests {
         let world = meadow(40);
         let mut animals = Animals::seeded(91);
         let id = animals.spawn(Species::Deer, (0.5, 21.0, 0.5)).expect("deer");
-        let far = player((0.5, 21.0, 90.0));
+        // Out of every sense a deer has and well inside `DESPAWN_DISTANCE`: at
+        // ninety blocks a deer that grazed six blocks the wrong way in three
+        // minutes was forgotten, and the test asked a missing deer about its
+        // head.
+        let far = player((0.5, 21.0, 60.0));
         let mut fed = 0;
         let mut looked = 0;
         for _ in 0..4000 {

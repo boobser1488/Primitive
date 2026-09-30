@@ -2245,6 +2245,20 @@ async fn tick_loop(ctx: Arc<Context>) {
                 .falling_entities
                 .store(entity_count as u64, Ordering::Relaxed);
 
+            // **Moving water, for the beavers** (`animals::woods`): every cell
+            // the flow just wrote that is still water. A river standing in its
+            // bed writes nothing and is heard by nobody; a pond let out through
+            // its bank writes a front of cells every step, and that front is
+            // where the beavers go.
+            let running: Vec<(i32, i32, i32)> = changes
+                .iter()
+                .filter(|c| primitive_shared::types::is_liquid(c.block_id))
+                .map(|c| (c.global_x, c.global_y, c.global_z))
+                .collect();
+            if !running.is_empty() {
+                ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).hear_running_water(running);
+            }
+
             broadcast_changes(&ctx, changes);
             // After the blocks have moved and before anything else reads
             // health: whoever a block fell through this tick is hurt now,
@@ -2913,8 +2927,20 @@ async fn tick_loop(ctx: Arc<Context>) {
                     weather != primitive_shared::weather::Weather::Clear,
                 )
             };
+            // **Meat left lying, for the foxes**: where it is and nothing else,
+            // read with the items' lock let go before the animals' is taken.
+            // See `Animals::meat_lying`.
+            let meat: Vec<(f32, f32, f32)> = ctx
+                .items
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|item| is_meat(item.block))
+                .map(|item| primitive_shared::geometry::narrow(item.position))
+                .collect();
             let (blows, births, deaths, fallen, staked, dung, heavy, thefts) = {
                 let mut animals = ctx.animals.lock().unwrap_or_else(|e| e.into_inner());
+                animals.meat_lying(meat);
                 animals.carrying_fire(std::mem::take(&mut fire_bearers));
                 animals.player_signs(std::mem::take(&mut player_signs));
                 animals.feel_wind(wind);
@@ -2961,6 +2987,33 @@ async fn tick_loop(ctx: Arc<Context>) {
             let hay_eaten = ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).take_hay_eaten();
             for at in hay_eaten {
                 bite_the_haystack(&ctx, at);
+            }
+            // ...and what the woods' animals did to the world -- a stick of a
+            // beaver's dam, a bear's mouthful of a berry bush or a hive, a
+            // fox's of a carcass -- and the meat the foxes took off the ground,
+            // on the same terms (`animals::woods`).
+            let (edits, taken) = {
+                let mut animals = ctx.animals.lock().unwrap_or_else(|e| e.into_inner());
+                (animals.take_edits(), animals.take_meat_taken())
+            };
+            for edit in edits {
+                apply_animal_edit(&ctx, edit);
+            }
+            for (fox, at) in taken {
+                let cell = (at.0.floor() as i32, at.1.floor() as i32, at.2.floor() as i32);
+                let mut took = None;
+                ctx.items.lock().unwrap_or_else(|e| e.into_inner()).take_lying_in(
+                    cell,
+                    |block| {
+                        let wanted = took.is_none() && is_meat(block);
+                        if wanted {
+                            took = Some(block);
+                        }
+                        wanted
+                    },
+                    1,
+                );
+                ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).fox_took(fox, took);
             }
             // ...and what the monkeys took, for the same reason: an
             // inventory is the tick loop's, not the animals'.
@@ -8271,6 +8324,73 @@ fn lay_animal_dung(ctx: &Arc<Context>, feet: (f64, f64, f64)) {
 /// once the last is eaten (`types::haystack_holding`). A cell that is not a
 /// stack any more -- broken between the step and now -- is left alone; the
 /// sheep ate from a stack that was there when it ate.
+/// Is this a piece of meat a fox would take? Anything the diet counts as
+/// meat (`food::Group::Meat`): raw or cooked, dried or salted, a fish or a
+/// haunch. A fox is not particular.
+fn is_meat(block: primitive_shared::types::BlockId) -> bool {
+    primitive_shared::food::group(block) == Some(primitive_shared::food::Group::Meat)
+}
+
+/// Writes what an animal did to a cell (`animals::Edit`), with the broadcast
+/// and the wake-up every other edit gets -- the water beside a new stick of
+/// dam has to be re-examined, or the flow runs on past it until something
+/// else nearby moves.
+///
+/// **Each edit checks the cell again**, because the animal decided on the
+/// last thought and the world may have moved since: a stick is laid only on
+/// water, a bush is stripped only while it has berries, a carcass is gnawed
+/// only while there is a carcass.
+fn apply_animal_edit(ctx: &Arc<Context>, edit: logic::animals::Edit) {
+    use logic::animals::Edit;
+    use primitive_shared::types::{block_kind, is_carcass, is_liquid, BLOCK_AIR, BLOCK_BARE_BUSH, BLOCK_BEAVER_DAM, BLOCK_BERRY_BUSH, BLOCK_WILD_HIVE};
+    let (at, next) = match edit {
+        // **A stick on moving water.** The water in the cell goes with the
+        // cell, as it does under a stone dropped into a lake or a trap set in
+        // a stream (`types::BLOCK_FISH_TRAP`): at most one cell's worth, on
+        // a front that is thin because it is moving.
+        Edit::Dam(at) => {
+            if !ctx.world.cached_block(at.0, at.1, at.2).is_some_and(is_liquid) {
+                return;
+            }
+            (at, BLOCK_BEAVER_DAM)
+        }
+        Edit::Forage(at) => match ctx.world.cached_block(at.0, at.1, at.2) {
+            Some(block) if block_kind(block) == BLOCK_BERRY_BUSH => (at, BLOCK_BARE_BUSH),
+            Some(block) if block_kind(block) == BLOCK_WILD_HIVE => {
+                let honey = primitive_shared::bees::honey_in(block);
+                if honey == 0 {
+                    return;
+                }
+                (at, primitive_shared::bees::hive_holding(honey - 1))
+            }
+            _ => return,
+        },
+        // **A cut's worth gone** from a carcass nobody came back for: the
+        // stage moves on as if a knife had taken it, and what came off is in
+        // the fox. The last cut takes the carcass away.
+        Edit::Gnaw(at) => {
+            let Some(block) = ctx.world.cached_block(at.0, at.1, at.2).filter(|&b| is_carcass(b)) else {
+                return;
+            };
+            let Some(species) = primitive_shared::animals::Species::of_carcass(block) else {
+                return;
+            };
+            let next = primitive_shared::animals::butchering_stage(block) + 1;
+            if next >= species.butchering().len() {
+                (at, BLOCK_AIR)
+            } else {
+                (at, primitive_shared::animals::carcass_at_stage(species, next))
+            }
+        }
+    };
+    if ctx.world.set_block(at.0, at.1, at.2, next) {
+        ctx.metrics.block_edits.fetch_add(1, Ordering::Relaxed);
+        broadcast_block(ctx, at, next);
+        ctx.falling.lock().unwrap_or_else(|e| e.into_inner()).on_block_changed(at.0, at.1, at.2);
+        notify_mechanics(ctx, at.0, at.1, at.2);
+    }
+}
+
 fn bite_the_haystack(ctx: &Arc<Context>, at: (i32, i32, i32)) {
     use primitive_shared::types::{hay_in_stack, haystack_holding};
     let Some(left) = ctx.world.cached_block(at.0, at.1, at.2).and_then(hay_in_stack) else {

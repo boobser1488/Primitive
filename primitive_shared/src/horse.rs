@@ -67,6 +67,14 @@ pub const TACK_STALLION: u8 = 16;
 /// shear" is the question the picture answers.
 pub const TACK_SHORN: u8 = 32;
 
+/// **A fox with something in its jaws**: the kill it is taking away, or meat
+/// it took off the ground (the server's `woods::Carried`). The fox's bit, on
+/// the byte every animal carries for the horse's sake, read before the byte
+/// is narrowed to the horse's as the sheep's is -- see `TACK_SHORN`. What it
+/// buys a player is the sight of the grouse going off into the wood, which is
+/// the one chance to get it back.
+pub const TACK_CARRYING: u8 = 64;
+
 // ---- the gaits ----
 
 /// Blocks a second at a walk: under a walking player, the pace of a horse
