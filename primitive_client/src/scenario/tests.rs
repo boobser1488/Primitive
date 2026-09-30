@@ -4598,3 +4598,229 @@ fn a_player_who_walks_to_the_brink_of_a_bank_sees_the_clay_in_its_face() {
     );
     no_corrections(&s);
 }
+
+// ---- fishing ----
+
+/// A pond nine blocks square and four deep, dug into the field in front of
+/// where the player will stand, a rod and a few worms in the pack, and the
+/// rod in hand. Answers the pond's near corner (x, z).
+///
+/// **Dug into the field rather than found**: the test world's water is
+/// wherever its plots put it, and a scenario about a float wants open water
+/// a throw away with nothing between it and the bank.
+fn at_the_pond(s: &mut Scenario) -> (i32, i32) {
+    let (x0, z0) = (FIELD.0, FIELD.1 + 3);
+    let g = GROUND;
+    s.stand_at(feet_on(x0 + 4, z0 - 3));
+    s.fill((x0, g - 3, z0), (x0 + 8, g, z0 + 8), t::BLOCK_WATER);
+    s.stand_at(feet_on(x0 + 4, z0 - 3));
+    s.give(t::BLOCK_FISHING_ROD, 1);
+    s.give(t::BLOCK_WORM, 4);
+    s.select(t::BLOCK_FISHING_ROD);
+    (x0, z0)
+}
+
+/// Looks at the middle of the pond and throws: the use button held for
+/// `held` seconds and let go, through the frame's own rod. Waits for the
+/// server to answer with a float of its own.
+fn cast_into(s: &mut Scenario, pond: (i32, i32), held: f32) {
+    let g = GROUND;
+    s.look_at(DVec3::new(pond.0 as f64 + 4.5, g as f64 + 0.9, pond.1 as f64 + 3.5));
+    s.press_use(true);
+    s.seconds(held);
+    s.press_use(false);
+    s.frames(2);
+    assert!(s.fishing_float.is_some(), "the throw never left the hand: {:?}", s.notice.as_ref().map(|n| &n.0));
+    let answered = s.until(5.0, |s| s.heard_any(|m| matches!(m, ServerMessage::Line { float: Some(_), .. })));
+    assert!(answered, "the server never put the float on the water");
+}
+
+/// Brings a fish to the bait and waits for the float to do `wanted`,
+/// hurrying another fish whenever one noses the bait and swims off -- which
+/// a tremble sometimes does (`fishing::Bite::nothing`).
+fn until_the_float(s: &mut Scenario, wanted: crate::logic::fishing::Phase) -> bool {
+    use crate::logic::fishing::Phase;
+    for _ in 0..12 {
+        let name = s.name.clone();
+        s.server().hurry_bite(&name);
+        let moved = s.until(8.0, |s| s.fishing_float.is_some_and(|f| f.phase == wanted || f.phase == Phase::Nibbling));
+        if !moved {
+            continue;
+        }
+        if s.fishing_float.is_some_and(|f| f.phase == wanted) {
+            return true;
+        }
+        // Trembling: wait for it to go down, or to go still again.
+        let next = s.until(6.0, |s| s.fishing_float.is_none_or(|f| f.phase != Phase::Nibbling));
+        if next && s.fishing_float.is_some_and(|f| f.phase == wanted) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The float and the water round it, as specks for a shot: the float, and
+/// a ring of foam round it while it is moving -- what the particles draw.
+fn float_specks(s: &Scenario) -> Vec<(DVec3, f32, BlockId)> {
+    let Some(float) = s.fishing_float else { return Vec::new() };
+    let at = float.position(|x, y, z| s.chunks.block_at(x, y, z));
+    let at = DVec3::new(f64::from(at.0), f64::from(at.1), f64::from(at.2));
+    let mut specks = vec![(at + DVec3::Y * 0.05, 0.08, t::BLOCK_BRICKS)];
+    if !matches!(float.phase, crate::logic::fishing::Phase::Waiting | crate::logic::fishing::Phase::Settling) {
+        let surface = (at.y + 0.3).floor() - 0.05;
+        for i in 0..12 {
+            let a = i as f64 / 12.0 * std::f64::consts::TAU;
+            specks.push((DVec3::new(at.x + a.cos() * 0.45, surface, at.z + a.sin() * 0.45), 0.035, t::BLOCK_SNOW));
+        }
+    }
+    specks
+}
+
+#[test]
+fn a_player_casts_waits_for_the_dip_strikes_and_plays_a_fish_to_the_bank() {
+    use crate::logic::fishing::Phase;
+    let mut s = Scenario::new();
+    let pond = at_the_pond(&mut s);
+    let (fish_before, worms_before) = (s.inventory.count(t::BLOCK_RAW_FISH), s.inventory.count(t::BLOCK_WORM));
+    cast_into(&mut s, pond, 0.6);
+    let float = s.fishing_float.expect("a float");
+    assert!(
+        (pond.0..=pond.0 + 8).contains(&float.at.0) && (pond.1..=pond.1 + 8).contains(&float.at.2),
+        "the float came down at {:?}, not in the pond",
+        float.at
+    );
+    // It lands, and then it is on the water -- and the client is told so,
+    // or the float never twitches with how lively the water is.
+    let settled = s.until(3.0, |s| s.fishing_float.is_some_and(|f| f.phase == Phase::Waiting));
+    assert!(settled, "the float was never on the water, only landing: {:?}", s.fishing_float.map(|f| f.phase));
+    s.shot_with("fishing/cast", &float_specks(&s));
+    // The bite, read: the tremble is waited through, and the strike comes
+    // on the dip.
+    assert!(until_the_float(&mut s, Phase::Dipping), "the float never went under");
+    s.frames(10);
+    s.shot_with("fishing/bite-dip", &float_specks(&s));
+    assert!(s.sounds().contains(&crate::audio::Sfx::FloatBite), "the float went under without a sound");
+    s.press_use(true);
+    s.frame();
+    s.press_use(false);
+    let hooked = s.until(2.0, |s| s.fishing_float.is_some_and(|f| f.phase == Phase::Fighting));
+    assert!(hooked, "a strike on the dip did not hook the fish: {:?}", s.fishing_float.map(|f| f.phase));
+    // Played by the gauge: pulled while the line is easy, given when it
+    // tightens -- the way a player with only the strain to go on would, a
+    // server tick and a frame late.
+    let mut reeling = false;
+    let mut photographed = false;
+    let mut frames = 0;
+    let mut tightest: f32 = 0.0;
+    while s.fishing_float.is_some() && frames < 60 * 120 {
+        let strain = s.fishing_float.map_or(0.0, |f| f.strain);
+        tightest = tightest.max(strain);
+        if reeling && strain >= 0.5 {
+            reeling = false;
+            s.press_use(false);
+        } else if !reeling && strain <= 0.25 {
+            reeling = true;
+            s.press_use(true);
+        }
+        if !photographed && strain > 0.3 {
+            s.shot_with("fishing/fight", &float_specks(&s));
+            photographed = true;
+        }
+        s.frame();
+        frames += 1;
+    }
+    s.press_use(false);
+    assert!(s.fishing_float.is_none(), "two minutes and the fish was still on");
+    let caught = s.until(3.0, |s| s.inventory.count(t::BLOCK_RAW_FISH) > fish_before);
+    assert!(caught, "the line came out of the water with no fish (tightest {tightest:.2}): {:?}", s.notice.as_ref().map(|n| &n.0));
+    assert!(s.heard_any(|m| matches!(m, ServerMessage::Caught { .. })), "a fish landed and nobody said which");
+    assert_eq!(s.inventory.count(t::BLOCK_WORM), worms_before - 1, "the worm the fish took was not the one spent");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_player_who_strikes_at_the_tremble_loses_the_fish_and_keeps_the_worm() {
+    use crate::logic::fishing::Phase;
+    let mut s = Scenario::new();
+    let pond = at_the_pond(&mut s);
+    let (fish_before, worms_before) = (s.inventory.count(t::BLOCK_RAW_FISH), s.inventory.count(t::BLOCK_WORM));
+    cast_into(&mut s, pond, 0.6);
+    assert!(until_the_float(&mut s, Phase::Nibbling), "the float never trembled");
+    s.frames(6);
+    s.shot_with("fishing/tremble", &float_specks(&s));
+    // Struck at once, on the tremble.
+    s.press_use(true);
+    s.frame();
+    s.press_use(false);
+    let gone = s.until(2.0, |s| {
+        s.fishing_float.is_none() && s.heard.last().is_some_and(|m| matches!(m, ServerMessage::Line { float: None, .. }))
+    });
+    assert!(gone, "a strike at a trembling float left the line in the water: {:?}", s.fishing_float.map(|f| f.phase));
+    let said = crate::settings::ClientSettings::default().language.text(crate::ui::lang::Msg::FishingStruckTooSoon).to_string();
+    assert_eq!(s.notice.as_ref().map(|n| n.0.clone()), Some(said), "the player was not told it was too soon");
+    s.seconds(1.0);
+    assert_eq!(s.inventory.count(t::BLOCK_WORM), worms_before, "a worm went on a fish that only nosed it");
+    assert_eq!(s.inventory.count(t::BLOCK_RAW_FISH), fish_before, "a fish came out on a strike at a tremble");
+    no_corrections(&s);
+}
+
+#[test]
+fn fish_near_the_top_of_a_pond_rise_where_they_are_and_nowhere_else() {
+    // Morning, so the fish are feeding; the pond is the one above, and a
+    // school is put in it a block under the surface.
+    let mut settings = scenario_settings();
+    settings.start_time_of_day = 0.3;
+    let mut s = Scenario::with(settings);
+    let pond = at_the_pond(&mut s);
+    let g = GROUND as f32;
+    let (cx, cz) = (pond.0 as f32 + 4.5, pond.1 as f32 + 4.5);
+    for i in 0..6 {
+        let a = i as f32 / 6.0 * std::f32::consts::TAU;
+        s.server().spawn_animal(primitive_shared::animals::Species::Fish, (cx + a.cos() * 1.5, g - 0.6, cz + a.sin() * 1.5));
+    }
+    // Looking out over the water, the rod put away.
+    s.look_at(DVec3::new(f64::from(cx), f64::from(g), f64::from(cz) + 1.0));
+    let rose = s.until(90.0, |s| s.heard_any(|m| matches!(m, ServerMessage::FishRise { .. })));
+    assert!(rose, "a school a block under a pond in the morning never broke the surface in a minute and a half");
+    // A little longer, for a picture with more than one ring in it.
+    s.until(20.0, |s| s.heard.iter().filter(|m| matches!(m, ServerMessage::FishRise { .. })).count() >= 4);
+    let rises: Vec<(f32, f32, f32, bool)> = s
+        .heard
+        .iter()
+        .filter_map(|m| match *m {
+            ServerMessage::FishRise { x, y, z, leap } => Some((x, y, z, leap)),
+            _ => None,
+        })
+        .collect();
+    for &(x, y, z, _) in &rises {
+        // On the pond's surface, never on the grass round it: a ring is a
+        // fish under it.
+        assert!(
+            (pond.0 as f32..pond.0 as f32 + 9.0).contains(&x) && (pond.1 as f32..pond.1 as f32 + 9.0).contains(&z),
+            "a fish rose at ({x}, {z}), outside the pond"
+        );
+        assert!((y - (g + 1.0)).abs() < 0.3, "a ring at height {y}, and the water's surface is {}", g + 1.0);
+    }
+    // The picture: the rings where they came up, and the school under the
+    // water where the server last said it was.
+    let mut specks = Vec::new();
+    for &(x, y, z, leap) in &rises {
+        for i in 0..14 {
+            let a = i as f64 / 14.0 * std::f64::consts::TAU;
+            let r = 0.6;
+            specks.push((DVec3::new(f64::from(x) + a.cos() * r, f64::from(y) - 0.04, f64::from(z) + a.sin() * r), 0.04, t::BLOCK_SNOW));
+        }
+        if leap {
+            specks.push((DVec3::new(f64::from(x), f64::from(y) + 0.6, f64::from(z)), 0.15, t::BLOCK_GRAVEL));
+        }
+    }
+    for state in s.entities.values() {
+        if let primitive_shared::protocol::EntityKind::Animal { species, .. } = state.kind {
+            if species.swims() {
+                specks.push((DVec3::new(state.x, state.y + 0.15, state.z), 0.12, t::BLOCK_GRAVEL));
+            }
+        }
+    }
+    s.shot_with("fishing/rises", &specks);
+    no_corrections(&s);
+}

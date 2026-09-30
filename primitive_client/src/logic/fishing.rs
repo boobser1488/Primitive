@@ -38,14 +38,21 @@ use primitive_shared::fishing;
 use primitive_shared::types::{block_kind, is_liquid, trap_catch, BlockId, BLOCK_FISHING_ROD, BLOCK_FISH_TRAP};
 
 /// What a line is doing, as the server last said (`ServerMessage::Line`).
+///
+/// The bite is three of these -- the tremble, the dip, the take -- and the
+/// whole of reading it is telling them apart. See `fishing::Bite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     /// Still landing.
     Settling,
     /// On the water.
     Waiting,
-    /// **Under**: strike now.
+    /// **Trembling**: a fish at the bait. Not yet.
+    Nibbling,
+    /// **Half under**: it has it. Strike.
     Dipping,
+    /// **Under and going**: strike now, or it is gone with the bait.
+    Taking,
     /// A fish is on.
     Fighting,
 }
@@ -60,8 +67,16 @@ impl Phase {
             0 => Phase::Settling,
             2 => Phase::Dipping,
             3 => Phase::Fighting,
+            4 => Phase::Nibbling,
+            5 => Phase::Taking,
             _ => Phase::Waiting,
         }
+    }
+
+    /// Does a fish have the bait -- would a strike now hook it? The dip and
+    /// the take, and nothing else: the server's `Phase::is_bitten`.
+    pub fn is_bitten(self) -> bool {
+        matches!(self, Phase::Dipping | Phase::Taking)
     }
 }
 
@@ -86,6 +101,10 @@ pub struct Float {
     pub liveliness: f32,
     /// Seconds since the phase last changed, for the dip.
     pub since: f32,
+    /// How hard a hooked fish is running, 0 to 1 (`fishing::Fight::running`,
+    /// sent as `ServerMessage::Line::run`): what drags the float and bows
+    /// the rod.
+    pub run: f32,
 }
 
 /// How deep the float goes when a fish has the bait, in blocks.
@@ -269,11 +288,34 @@ impl Float {
         }
         let surface = block_at(self.at.0, top, self.at.2).map_or(1.0, primitive_shared::fluid::surface_height);
         let bob = 0.02 * (self.age * 2.6).sin();
+        let (dx, dz) = self.dragged();
         (
-            self.at.0 as f32 + 0.5,
+            self.at.0 as f32 + 0.5 + dx,
             top as f32 + surface + bob - self.sunk(),
-            self.at.2 as f32 + 0.5,
+            self.at.2 as f32 + 0.5 + dz,
         )
+    }
+
+    /// **How far a fish has towed the float sideways**, in blocks.
+    ///
+    /// The take is the float going *under and away* -- a movement along the
+    /// water as well as into it, because "it went down" and "it went down
+    /// and moved off" are the dip and the take, and a player told the two
+    /// apart only by depth is told them apart by a quarter of a block at a
+    /// dozen paces. Along a bearing fixed by the float's own cell, so it is
+    /// the same way every frame. Held to under half a block: the float is
+    /// still in the cell the server has it in.
+    fn dragged(&self) -> (f32, f32) {
+        let away = match self.phase {
+            Phase::Taking => 0.35 * (self.since / 0.8).min(1.0),
+            // On, the float goes where the run takes it and comes back.
+            Phase::Fighting => 0.3 * self.run,
+            _ => 0.0,
+        };
+        let bearing = ((self.at.0.wrapping_mul(73856093) ^ self.at.2.wrapping_mul(19349663)) & 0xff) as f32 / 255.0
+            * std::f32::consts::TAU
+            + if self.phase == Phase::Fighting { 0.6 * (self.age * 0.9).sin() } else { 0.0 };
+        (bearing.cos() * away, bearing.sin() * away)
     }
 
     /// How far under the surface the float is, in blocks.
@@ -289,9 +331,20 @@ impl Float {
             // Still landing: riding high on its own splash.
             Phase::Settling => -0.05 * (1.0 - self.since.min(1.0)),
             Phase::Waiting => self.twitch(),
-            // Under, and further under the longer it stays: the fish is
-            // taking it down.
-            Phase::Dipping => DIP_DEPTH * (0.55 + 0.45 * (self.since * 6.0).min(1.0)),
+            // **The tremble**: quick and shallow, about the surface rather
+            // than below it -- a float being nosed shivers, it does not go
+            // anywhere. Two waves that do not divide, so it is a tremble
+            // and not a beat.
+            Phase::Nibbling => {
+                let shiver = (self.since * 23.0).sin() * 0.6 + (self.since * 37.0 + 1.3).sin() * 0.4;
+                TWITCH_DEPTH * (0.5 + 0.5 * shiver)
+            }
+            // **Half under**, eased in over a sixth of a second and held:
+            // the fish has it and is still.
+            Phase::Dipping => DIP_DEPTH * 0.5 * (self.since * 6.0).min(1.0),
+            // **Under, and going**: past the dip and further, and dragged
+            // sideways by `dragged`.
+            Phase::Taking => DIP_DEPTH * (0.5 + 0.7 * (self.since * 3.0).min(1.0)),
             // Being fought: under, and jerking with the strain.
             Phase::Fighting => DIP_DEPTH * (0.8 + 0.5 * self.strain * (self.age * 11.0).sin().abs()),
         }
@@ -313,6 +366,100 @@ impl Float {
         let shape = (1.0 - (into / 0.2).min(1.0)) * (into * 32.0).sin().abs();
         TWITCH_DEPTH * shape
     }
+}
+
+/// What a `ServerMessage::Line` meant, beyond the float it describes: the
+/// news the caller has to *say* or *show*.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Told {
+    /// Only the picture moved.
+    Nothing,
+    /// The line came out of the water with a fish more in the pack than it
+    /// went in with: the fish is landed, where the float was.
+    Landed(Float),
+    /// A line that was fighting came out with nothing: it parted.
+    Parted(Float),
+    /// The float went from the take back to waiting: nobody struck, and the
+    /// bait is eaten (`fishing::Bite`).
+    BaitEaten,
+}
+
+/// **A `Line` message, applied to the float this client draws**, and what it
+/// meant.
+///
+/// One function for the game's socket (`drain_network`) and the scenario's,
+/// so what a scenario is told about its float is what a player is -- this
+/// used to be written inline in the one, and the other did not fish at all.
+///
+/// **This is where a catch is told from a loss**, because it is the only
+/// place both facts are in hand at once. A fish in the pack is what a catch
+/// *is* (the inventory arrives before this message does, so `fish_now` is
+/// already the new count); a line that was fighting and came back with
+/// nothing is a line that parted, and that is said in the player's
+/// language rather than sent from the server in English.
+///
+/// `rod_slot` is asked only when the server describes a line this client
+/// did not throw -- after a reconnect -- and answers which hotbar square the
+/// rod is in.
+#[allow(clippy::too_many_arguments)]
+pub fn told(
+    float: &mut Option<Float>,
+    at: Option<(i32, i32, i32)>,
+    phase: u8,
+    strain: u8,
+    liveliness: u8,
+    run: u8,
+    fish_now: u32,
+    rod_slot: impl FnOnce() -> usize,
+) -> Told {
+    let Some(at) = at else {
+        let Some(gone) = float.take() else {
+            return Told::Nothing;
+        };
+        if fish_now > gone.fish_before {
+            return Told::Landed(gone);
+        }
+        if gone.phase == Phase::Fighting {
+            return Told::Parted(gone);
+        }
+        return Told::Nothing;
+    };
+    let phase = Phase::of_code(phase);
+    let strain = f32::from(strain) / 255.0;
+    let liveliness = f32::from(liveliness) / 255.0;
+    let run = f32::from(run) / 255.0;
+    match float.as_mut() {
+        // The same line, further along: only the phase's own clock
+        // restarts, so the bob and the twitches do not jump every time the
+        // strain moves.
+        Some(old) if old.at == at => {
+            let eaten = old.phase == Phase::Taking && phase == Phase::Waiting;
+            if old.phase != phase {
+                old.since = 0.0;
+            }
+            old.phase = phase;
+            old.strain = strain;
+            old.liveliness = liveliness;
+            old.run = run;
+            if eaten {
+                return Told::BaitEaten;
+            }
+        }
+        _ => {
+            *float = Some(Float {
+                at,
+                slot: rod_slot(),
+                fish_before: fish_now,
+                age: 0.0,
+                phase,
+                strain,
+                liveliness,
+                since: 0.0,
+                run,
+            });
+        }
+    }
+    Told::Nothing
 }
 
 /// What the hand just told the rod to do.
@@ -464,6 +611,7 @@ mod tests {
             strain: 0.0,
             liveliness: 0.0,
             since: 0.0,
+            run: 0.0,
         }
     }
 
@@ -591,7 +739,7 @@ mod tests {
         }
         let mut dipping = lively;
         dipping.phase = Phase::Dipping;
-        dipping.since = 0.0;
+        dipping.since = 0.3;
         assert!(
             dipping.sunk() > deepest * 2.0,
             "a bite ({}) is not plainly deeper than a twitch ({deepest})",

@@ -40,8 +40,21 @@ use crate::logic::rng::Rng;
 /// The world's sky.
 pub struct Sky {
     weather: Weather,
-    /// Seconds until the next roll.
+    /// Seconds until this spell ends.
     remaining: f32,
+    /// **What comes after it**, rolled when this spell began.
+    ///
+    /// The roll used to be made when a spell *ended*, which is the same
+    /// odds and the same weather and meant the server could not know rain
+    /// was coming until it was falling -- and fishing wants to know
+    /// (`fishing::front_factor`: the fish feed in the last minutes before
+    /// the rain, and jump). Rolling one spell sooner changes nothing about
+    /// what the sky does: `roll` asks only what the weather is now, and it
+    /// is asked of the spell the new one follows, exactly as before. What
+    /// moves is the moment the coin is tossed, and so the stream a seeded
+    /// sky draws from -- a seed gives a different sky than it did, and the
+    /// same one every run.
+    next: Weather,
     /// Set by `/weather`, and what makes it different from the same
     /// weather arriving on its own: an operator's choice is not
     /// overwritten thirty seconds later by the countdown that was
@@ -67,12 +80,15 @@ impl Sky {
     pub fn new() -> Self {
         let mut rng = Rng::from_clock();
         let first = rng.range(SPELL_SECONDS.start, SPELL_SECONDS.end);
-        Self {
+        let mut sky = Self {
             weather: Weather::Clear,
             remaining: first,
+            next: Weather::Clear,
             held: false,
             rng,
-        }
+        };
+        sky.next = sky.roll_after(Weather::Clear);
+        sky
     }
 
     /// The same, repeatable. For tests, and for anybody who wants a
@@ -81,6 +97,7 @@ impl Sky {
         let mut sky = Self::new();
         sky.rng = Rng::seeded(seed);
         sky.remaining = sky.rng.range(SPELL_SECONDS.start, SPELL_SECONDS.end);
+        sky.next = sky.roll_after(sky.weather);
         sky
     }
 
@@ -93,6 +110,18 @@ impl Sky {
     /// whether the rain they are standing in is nearly over.
     pub fn remaining(&self) -> f32 {
         self.remaining
+    }
+
+    /// **What the sky does next, and in how many seconds**: `None` while an
+    /// operator is holding it, because a held sky has no next spell -- it
+    /// changes when somebody says so, and a forecast of it would be a guess
+    /// dressed as a fact.
+    ///
+    /// Only fishing reads it (`fishing::Moment::coming`), and only as the
+    /// fish do: nothing tells a player the weather that is coming, and the
+    /// fish jumping is the whole of the forecast.
+    pub fn coming(&self) -> Option<(Weather, f32)> {
+        (!self.held).then_some((self.next, self.remaining.max(0.0)))
     }
 
     /// Is the weather being held where an operator put it?
@@ -111,8 +140,10 @@ impl Sky {
         if self.remaining > 0.0 {
             return None;
         }
-        let next = self.roll();
+        let next = self.next;
         self.remaining = self.rng.range(SPELL_SECONDS.start, SPELL_SECONDS.end);
+        // The spell after this one, from this one -- see `next`.
+        self.next = self.roll_after(next);
         if next == self.weather {
             // The same weather again is not a change and must not be a
             // broadcast: two spells of rain in a row are one spell of
@@ -125,12 +156,14 @@ impl Sky {
 
     /// What the sky does next.
     ///
+    /// What the sky does after `now`.
+    ///
     /// Weather always gives way to clear, and clear rolls for weather.
     /// That asymmetry is what keeps most of a session dry: without it,
     /// two in five spells are wet from *any* state and it rains nearly
     /// half the time.
-    fn roll(&mut self) -> Weather {
-        if self.weather.is_wet() {
+    fn roll_after(&mut self, now: Weather) -> Weather {
+        if now.is_wet() {
             return Weather::Clear;
         }
         if !self.rng.chance(CHANCE_OF_WEATHER) {
@@ -156,6 +189,11 @@ impl Sky {
             return false;
         }
         self.weather = weather;
+        // What follows an operator's rain is what follows rain: the rule
+        // that weather gives way to clear is `roll_after`'s, and a spell
+        // rolled for the sky that was there before would put rain after
+        // rain the moment the hold is let go.
+        self.next = self.roll_after(weather);
         true
     }
 
@@ -289,5 +327,37 @@ mod tests {
         let mut a = Sky::seeded(1234);
         let mut b = Sky::seeded(1234);
         assert_eq!(run(&mut a, 3.0 * 3600.0), run(&mut b, 3.0 * 3600.0));
+    }
+
+    #[test]
+    fn the_weather_that_was_coming_is_the_weather_that_comes() {
+        // The forecast fishing reads is not a guess about the sky: it is
+        // the sky's own next spell, and it arrives when it said it would.
+        let mut sky = Sky::seeded(424242);
+        for _ in 0..40 {
+            let (next, in_seconds) = sky.coming().expect("a free sky knows what is next");
+            // Stepped until the spell turns over, which is the countdown
+            // jumping back up.
+            let mut waited = 0.0;
+            loop {
+                let before = sky.remaining();
+                sky.step(1.0);
+                waited += 1.0;
+                if sky.remaining() > before || waited > in_seconds + 2.0 {
+                    break;
+                }
+            }
+            assert!((waited - in_seconds).abs() <= 1.0, "the spell was due in {in_seconds} s and ended after {waited}");
+            assert_eq!(sky.weather(), next, "the forecast said {next:?}");
+        }
+        // Rain is never forecast after rain, which is `roll_after`'s rule
+        // asked one spell early.
+        let mut wet = Sky::seeded(8);
+        wet.set(Weather::Rain);
+        wet.release();
+        assert_eq!(wet.coming().map(|(w, _)| w), Some(Weather::Clear));
+        // ...and an operator's sky has no forecast.
+        wet.set(Weather::Storm);
+        assert_eq!(wet.coming(), None);
     }
 }
