@@ -8576,26 +8576,6 @@ pub(crate) fn place_carried(
     indices.extend(model_indices.iter().map(|index| base + index));
 }
 
-/// One axis-aligned box of a bespoke model, in sixteenths of a cell.
-///
-/// `quarters` turns it about the middle of the cell, so a model is
-/// written once facing north and the four facings come out of the same
-/// numbers -- see `types::Facing`.
-///
-/// **Every face wears a strip of the picture cut to its own size.** A
-/// terrain vertex carries one *bit* of texture coordinate per axis, so
-/// for a long time every face wore the whole picture corner to corner --
-/// a pole two sixteenths wide showed all sixteen columns of bark
-/// squeezed into two, which reads as noise glued to a stick. A crop code
-/// in the tint byte fixed that for sizes that were powers of two, and a
-/// real place in the picture fixes it for every size (see `FINE_UV_BIT`):
-/// a face two sixteenths wide shows two texels of bark, the density the
-/// block beside it is drawn at, and a face six sixteenths tall shows six.
-/// `cropped` says whether the faces wear the piece of the picture that
-/// lies under them (a material: bark, bare wood) or the middle of it (a
-/// picture drawn for the face, like the stretched hide) -- the same
-/// distinction `animal_model::Skin::tiles` makes. Neither squeezes.
-#[allow(clippy::too_many_arguments)]
 /// **Small boxes of a block's own picture, added to a chunk's mesh**, for a
 /// photograph: `(chunk-local centre, half a side in blocks, texture layer)`.
 ///
@@ -8630,6 +8610,26 @@ pub(crate) fn add_specks(buffers: &mut MeshBuffers, specks: &[([f32; 3], f32, u3
     buffers.top = specks.iter().fold(buffers.top, |top, &(centre, half, _)| top.max(centre[1] + half));
 }
 
+/// One axis-aligned box of a bespoke model, in sixteenths of a cell.
+///
+/// `quarters` turns it about the middle of the cell, so a model is
+/// written once facing north and the four facings come out of the same
+/// numbers -- see `types::Facing`.
+///
+/// **Every face wears a strip of the picture cut to its own size.** A
+/// terrain vertex carries one *bit* of texture coordinate per axis, so
+/// for a long time every face wore the whole picture corner to corner --
+/// a pole two sixteenths wide showed all sixteen columns of bark
+/// squeezed into two, which reads as noise glued to a stick. A crop code
+/// in the tint byte fixed that for sizes that were powers of two, and a
+/// real place in the picture fixes it for every size (see `FINE_UV_BIT`):
+/// a face two sixteenths wide shows two texels of bark, the density the
+/// block beside it is drawn at, and a face six sixteenths tall shows six.
+/// `cropped` says whether the faces wear the piece of the picture that
+/// lies under them (a material: bark, bare wood) or the middle of it (a
+/// picture drawn for the face, like the stretched hide) -- the same
+/// distinction `animal_model::Skin::tiles` makes. Neither squeezes.
+#[allow(clippy::too_many_arguments)]
 fn push_box(
     at: [f32; 3],
     from: [f32; 3],

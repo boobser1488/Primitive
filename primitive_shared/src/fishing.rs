@@ -919,6 +919,15 @@ impl Bait {
     /// at the sea, which is the same question the rod already asks about
     /// *where* -- asked again in the pack.
     ///
+    /// **Read again when the water began to decide the fish** (`Habitat`),
+    /// and left as it was, on purpose. The water now says which fish are
+    /// *there* and this says which of them *take*; the two multiply
+    /// (`rod_odds`), so a grub in a cold clear stream is a trout almost
+    /// every time and a grub in a warm brown pond is the school -- the
+    /// combination is the decision, and a table that tried to fold the
+    /// water in as well would be saying one thing twice. What bait says
+    /// about the *size* of what comes is its own table (`size_odds`).
+    ///
     /// A species nobody wrote a line for (one added after this table) is
     /// taken as an ordinary fish: it eats what the school eats. **A
     /// catch-all rather than an exhaustive match**, deliberately, because
