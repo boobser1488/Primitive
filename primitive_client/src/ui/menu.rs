@@ -7403,7 +7403,11 @@ mod tests {
         // arrows) less the letters the reshuffle saved. The fires' row is
         // twenty-second of twenty-nine, below the fold, and draws nothing
         // here.
-        ("settings", 2526, 5626143496880255084, 3645066025292734355),
+        // ...and the meadow's two rows (`Setting::GrassDensity`,
+        // `Setting::WindSway`), thirty-one: both under the stones' distance,
+        // below the fold, so the count and the colours are what they were
+        // and only the thumb shortened again.
+        ("settings", 2526, 15673960332135541035, 3645066025292734355),
         // More actions to bind than when this was taken, so more rows.
         // The last of them is GIVE (`keybinds::Action::Give`), which is
         // ninety more vertices -- a row's well, its word and its key --

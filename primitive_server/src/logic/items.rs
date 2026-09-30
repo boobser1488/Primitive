@@ -187,6 +187,11 @@ pub struct Item {
     /// time they were asked about since. See `RECLAIM_AFTER`.
     thrower_near: bool,
     resting: bool,
+    /// A tumbleweed's rolling (`tumbleweeds::Rolling`): how far since its
+    /// last skip, and whether a bush has it. Nought and false for every
+    /// other drop, which never reads them.
+    travelled: f32,
+    snagged: bool,
 }
 
 impl Item {
@@ -232,6 +237,12 @@ impl Item {
 #[derive(Default)]
 pub struct Items {
     items: Vec<Item>,
+    /// The world's wind, as a vector (`raft::Wind::vector`), set by the tick
+    /// before it steps: the one thing a tumbleweed needs that a drop does
+    /// not (`tumbleweeds`). A field rather than an argument to `step` so the
+    /// dozens of drops the tests throw about go on being stepped as they
+    /// were, in a still world.
+    wind: (f32, f32),
     /// How many stacks this simulation has ever put on the ground.
     /// **Not the id they are replicated under** -- see
     /// `protocol::EntitySource`.
@@ -338,6 +349,8 @@ impl Items {
             dropped_by,
             thrower_near: dropped_by.is_some(),
             resting: false,
+            travelled: 0.0,
+            snagged: false,
         });
         // Indexed straight away rather than waiting for the next step:
         // spawns happen from connection tasks between steps, and the
@@ -350,11 +363,27 @@ impl Items {
         true
     }
 
+    /// Sets the wind the next step rolls tumbleweeds in.
+    pub fn set_wind(&mut self, wind: (f32, f32)) {
+        self.wind = wind;
+    }
+
+    /// How many tumbleweeds lie or roll within `reach` of a point, across.
+    /// See `tumbleweeds::MOST_NEAR`.
+    pub fn tumbleweeds_near(&self, at: (f64, f64, f64), reach: f64) -> usize {
+        self.items
+            .iter()
+            .filter(|item| crate::logic::tumbleweeds::is_tumbleweed(item.block))
+            .filter(|item| (item.position.0 - at.0).powi(2) + (item.position.2 - at.2).powi(2) <= reach * reach)
+            .count()
+    }
+
     /// Advances the whole simulation one tick.
     pub fn step(&mut self, world: &World, dt: f32, now: Instant) {
         let mut any_moving = false;
+        let wind = self.wind;
         for item in &mut self.items {
-            step_one(item, world, dt);
+            step_one(item, world, dt, wind);
             any_moving |= !item.resting;
         }
         // A world of settled piles is the common case, and rebuilding
@@ -369,8 +398,16 @@ impl Items {
         }
         self.had_settling = settling_now;
         let before = self.items.len();
-        self.items
-            .retain(|item| now.duration_since(item.spawned_at) < LIFETIME);
+        // **A tumbleweed falls apart sooner** than a drop expires: it is dry
+        // stems, and it has been blowing about since it broke loose.
+        self.items.retain(|item| {
+            let life = if crate::logic::tumbleweeds::is_tumbleweed(item.block) {
+                crate::logic::tumbleweeds::LIFE
+            } else {
+                LIFETIME
+            };
+            now.duration_since(item.spawned_at) < life
+        });
         self.expired += (before - self.items.len()) as u64;
         // Everything above may have moved items or shifted indices;
         // one rebuild covers all of it. O(items), once per tick --
@@ -508,7 +545,9 @@ impl Items {
             // A stack that is still settling takes no part: merging it
             // into an older pile would hand it the older pile's age, and
             // the delays are the whole point.
-            if item.count == 0 || item.is_settling(now) {
+            // ...nor a tumbleweed: two balls blown against one bush are two
+            // balls, and one swallowing the other would be one vanishing.
+            if item.count == 0 || item.is_settling(now) || crate::logic::tumbleweeds::is_tumbleweed(item.block) {
                 continue;
             }
             let key = (
@@ -692,7 +731,27 @@ impl Items {
     }
 }
 
-fn step_one(item: &mut Item, world: &World, dt: f32) {
+fn step_one(item: &mut Item, world: &World, dt: f32, wind: (f32, f32)) {
+    // **A tumbleweed rolls**, on dry ground: see `tumbleweeds`. In water
+    // it is a drop like any other and floats, as dry stems do.
+    if crate::logic::tumbleweeds::is_tumbleweed(item.block) && submerged_sized(world, item.position, crate::logic::tumbleweeds::RADIUS) == 0.0 {
+        let mut ball = crate::logic::tumbleweeds::Rolling {
+            position: item.position,
+            velocity: item.velocity,
+            on_ground: item.resting || supported_sized(world, item.position, crate::logic::tumbleweeds::RADIUS),
+            travelled: item.travelled,
+            snagged: item.snagged,
+        };
+        crate::logic::tumbleweeds::roll(&mut ball, wind, dt, &WorldGround(world));
+        item.position = ball.position;
+        item.velocity = ball.velocity;
+        item.travelled = ball.travelled;
+        item.snagged = ball.snagged;
+        // Never resting: a ball in a wind is stepped every tick, and there
+        // are a handful of them where there are thousands of drops.
+        item.resting = false;
+        return;
+    }
     if item.resting && item.velocity.1 == 0.0 {
         // Still settled, and the ground has not moved. Skipping the
         // whole integration here is what keeps a field of dropped blocks
@@ -972,10 +1031,16 @@ fn solid_at(world: &World, at: (f64, f64, f64)) -> bool {
 /// and measuring to the ceiling floated everything that far above the
 /// water it was drawn on.
 fn submerged(world: &World, centre: (f64, f64, f64)) -> f32 {
+    submerged_sized(world, centre, HALF)
+}
+
+/// `submerged`, for a thing `half` across either way from its middle: a
+/// tumbleweed (`tumbleweeds::RADIUS`).
+fn submerged_sized(world: &World, centre: (f64, f64, f64), half: f32) -> f32 {
     use primitive_shared::types::{is_liquid, BLOCK_AIR};
     let (x, z) = (centre.0.floor() as i32, centre.2.floor() as i32);
     // Height never leaves a few hundred, so this half stays in `f32`.
-    let (bottom, top) = (centre.1 as f32 - HALF, centre.1 as f32 + HALF);
+    let (bottom, top) = (centre.1 as f32 - half, centre.1 as f32 + half);
     let mut wet = 0.0;
     for y in bottom.floor() as i32..=top.floor() as i32 {
         let Some(block) = world.cached_block(x, y, z) else {
@@ -988,7 +1053,7 @@ fn submerged(world: &World, centre: (f64, f64, f64)) -> f32 {
         let surface = y as f32 + primitive_shared::fluid::surface_height_with_above(block, above);
         wet += (top.min(surface) - bottom.max(y as f32)).max(0.0);
     }
-    (wet / ITEM_SIZE).clamp(0.0, 1.0)
+    (wet / (2.0 * half)).clamp(0.0, 1.0)
 }
 
 /// Whether an item centred here would overlap anything solid.
@@ -1016,9 +1081,16 @@ fn blocked(world: &World, centre: (f64, f64, f64)) -> bool {
 /// rest on the block. It is at most eight comparisons, inside the
 /// column lookup that already dominates this.
 fn overlap_top(world: &World, centre: (f64, f64, f64)) -> Option<f64> {
+    overlap_top_sized(world, centre, HALF)
+}
+
+/// `overlap_top`, for a thing `half` across either way from its middle: a
+/// tumbleweed (`tumbleweeds::RADIUS`), which is bigger than a drop and must
+/// stop where it is drawn stopping.
+fn overlap_top_sized(world: &World, centre: (f64, f64, f64), half: f32) -> Option<f64> {
     // A hair inside the faces, so an item resting exactly on a surface
     // does not read as intersecting it.
-    let e = f64::from(HALF) - 1e-3;
+    let e = f64::from(half) - 1e-3;
     let (x0, y0, z0) = (
         (centre.0 - e).floor() as i32,
         (centre.1 - e).floor() as i32,
@@ -1108,6 +1180,24 @@ fn overlap_top(world: &World, centre: (f64, f64, f64)) -> Option<f64> {
 /// Whether there is something directly under a resting item.
 fn supported(world: &World, at: (f64, f64, f64)) -> bool {
     blocked(world, (at.0, at.1 - 0.05, at.2))
+}
+
+/// ...and under a thing `half` from its middle to its bottom.
+fn supported_sized(world: &World, at: (f64, f64, f64), half: f32) -> bool {
+    overlap_top_sized(world, (at.0, at.1 - 0.05, at.2), half).is_some()
+}
+
+/// The world as a tumbleweed asks it (`tumbleweeds::Ground`): the same boxes
+/// a drop lands on, at the ball's size.
+struct WorldGround<'a>(&'a World);
+
+impl crate::logic::tumbleweeds::Ground for WorldGround<'_> {
+    fn top(&self, centre: (f64, f64, f64), half: f32) -> Option<f64> {
+        overlap_top_sized(self.0, centre, half)
+    }
+    fn block(&self, cell: (i32, i32, i32)) -> BlockId {
+        self.0.cached_block(cell.0, cell.1, cell.2).unwrap_or(primitive_shared::types::BLOCK_AIR)
+    }
 }
 
 #[cfg(test)]

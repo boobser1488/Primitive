@@ -14756,6 +14756,68 @@ mod plant_tests {
     }
 
     #[test]
+    fn a_meadow_is_meshed_thicker_at_every_grass_step_and_only_on_open_turf() {
+        use crate::engine::meadow::Density;
+        // A lawn of turf, with a slab of stone over one corner of it and a
+        // bare patch of sand in another.
+        let lawn = || {
+            cache_of(|x, y, z| match (x, y, z) {
+                (_, 0, _) if x >= 12 && z >= 12 => primitive_shared::types::BLOCK_SAND,
+                (_, 0, _) => primitive_shared::types::BLOCK_GRASS,
+                (_, 1, _) if x < 4 && z < 4 => primitive_shared::types::BLOCK_STONE,
+                _ => BLOCK_AIR,
+            })
+        };
+        let sprites = |density: Density| {
+            let mut cache = lawn();
+            cache.grow_blades(density);
+            let out = mesh_of(&cache);
+            (out.sprite_end - out.leaf_end, out)
+        };
+        let counts: Vec<u32> = Density::ALL.iter().map(|&d| sprites(d).0).collect();
+        assert_eq!(counts[0], 0, "OFF laid blades");
+        assert!(counts.windows(2).all(|w| w[1] > w[0]), "a step was no thicker than the one below it: {counts:?}");
+        // Every blade is rooted on open turf: not under the stone, not on
+        // the sand, and on the turf's top.
+        let (_, out) = sprites(Density::Lush);
+        for &index in &out.indices[out.leaf_end as usize..out.sprite_end as usize] {
+            let v = out.vertices[index as usize];
+            let (x, z) = (v.position[0], v.position[2]);
+            assert!(!(x < 4.0 && z < 4.0), "a blade under the stone at {:?}", v.position);
+            assert!(!(x > 12.0 && z > 12.0), "a blade on the sand at {:?}", v.position);
+            assert!(v.position[1] >= 1.0 - 1e-4, "a blade below the turf's top at {:?}", v.position);
+        }
+        // ...and a snapshot nobody told draws none: what every other test
+        // and photograph of a mesh was taken with.
+        assert_eq!(mesh_of(&lawn()).sprite_end, mesh_of(&lawn()).leaf_end);
+    }
+
+    #[test]
+    fn a_tuft_bends_from_its_tip_and_never_from_its_root() {
+        // The mesher's half of "the wind does not move the base of a stem"
+        // (`sway::the_root_of_a_stem_never_moves_in_any_wind` is the
+        // shader's): a tuft's corners on the ground carry no reach.
+        let out = mesh_of(&one_tuft());
+        let reach = |v: &Vertex| (v.uv >> crate::engine::sway::SWAY_SHIFT) & crate::engine::sway::SWAY_STEPS;
+        let plant: Vec<&Vertex> = out.indices[out.leaf_end as usize..out.sprite_end as usize]
+            .iter()
+            .map(|&i| &out.vertices[i as usize])
+            .collect();
+        assert!(!plant.is_empty());
+        for v in plant {
+            if v.position[1] <= 1.0 + 1e-4 {
+                assert_eq!(reach(v), 0, "a tuft's root carries a reach: {:?}", v.position);
+            } else {
+                assert!(reach(v) > 0, "a tuft's tip carries none: {:?}", v.position);
+            }
+        }
+        // ...and the dirt it stands on carries none anywhere.
+        for &i in &out.indices[..out.solid_index_count as usize] {
+            assert_eq!(reach(&out.vertices[i as usize]), 0, "the ground under a tuft would sway");
+        }
+    }
+
+    #[test]
     fn a_tuft_of_grass_is_two_quads_rather_than_four() {
         // The bug this guards: the cutout pass runs with culling off, so
         // emitting both windings put two coplanar depth-writing quads in

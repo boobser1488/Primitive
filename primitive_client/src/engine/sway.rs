@@ -227,10 +227,7 @@ impl Breeze {
         }
         let reach = reach as f32 / SWAY_STEPS as f32 * REACH;
         let d = self.toward;
-        let along_world = local[0] * d[0] + local[2] * d[1];
-        let k = std::f32::consts::TAU / GUST_LENGTH as f32;
-        let crest = 0.5 + 0.5 * (along_world * k + self.phases[0]).sin();
-        let gust = crest * crest * (3.0 - 2.0 * crest);
+        let gust = self.gust(local);
         let wave = |w: (f64, f64, f64, f64), phase: f32| {
             let k = std::f32::consts::TAU / w.2 as f32;
             ((local[0] * w.0 as f32 + local[2] * w.1 as f32) * k + phase).sin()
@@ -244,6 +241,16 @@ impl Breeze {
             -reach * SINK * along * along,
             reach * (d[1] * along + d[0] * across),
         ]
+    }
+
+    /// How far into a gust a point is, 0 (between gusts) to 1 (under its
+    /// crest): the long wave that runs down-wind across a meadow.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn gust(&self, local: [f32; 3]) -> f32 {
+        let along = local[0] * self.toward[0] + local[2] * self.toward[1];
+        let k = std::f32::consts::TAU / GUST_LENGTH as f32;
+        let crest = 0.5 + 0.5 * (along * k + self.phases[0]).sin();
+        crest * crest * (3.0 - 2.0 * crest)
     }
 
     /// The constants the shader has to agree with, by the names it gives
@@ -330,17 +337,11 @@ mod tests {
 
     #[test]
     fn a_gust_runs_down_wind() {
-        // Where the push is greatest along a line down-wind, a moment later
+        // Where the gust is deepest along a line down-wind, a moment later
         // is further down-wind.
         let crest = |seconds: f64| {
             let breeze = Breeze::at(Wind { toward: 0.0, strength: 1.0 }, Sway::Full, [0.0; 3], seconds);
-            (0..200)
-                .map(|i| i as f32 * 0.1)
-                .max_by(|a, b| {
-                    let push = |x: f32| breeze.offset([x, 70.0, 0.0], SWAY_STEPS)[0];
-                    push(*a).total_cmp(&push(*b))
-                })
-                .unwrap()
+            (0..220).map(|i| i as f32 * 0.1).max_by(|a, b| breeze.gust([*a, 70.0, 0.0]).total_cmp(&breeze.gust([*b, 70.0, 0.0]))).unwrap()
         };
         let (now, later) = (crest(10.0), crest(10.5));
         let moved = (later - now).rem_euclid(GUST_LENGTH as f32);

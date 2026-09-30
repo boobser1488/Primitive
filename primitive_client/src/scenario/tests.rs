@@ -4598,3 +4598,70 @@ fn a_player_who_walks_to_the_brink_of_a_bank_sees_the_clay_in_its_face() {
     );
     no_corrections(&s);
 }
+
+// ---------------------------------------------------------------- the wind in the grass
+
+/// The storm's wind as the server rolls tumbleweeds in it, as a unit vector
+/// (x, z) and its strength.
+fn storm_wind(s: &Scenario) -> ((f64, f64), f32) {
+    let wind = primitive_shared::raft::wind(s.server().world_days(), primitive_shared::weather::Weather::Storm);
+    let (sin, cos) = wind.toward.sin_cos();
+    ((f64::from(cos), f64::from(sin)), wind.strength)
+}
+
+/// The tumbleweed nearest a point, if there is one.
+fn nearest_ball(s: &Scenario, to: (f64, f64, f64)) -> Option<(f64, f64, f64)> {
+    s.server().items_of(t::BLOCK_TUMBLEWEED).into_iter().min_by(|a, b| {
+        let d = |p: &(f64, f64, f64)| (p.0 - to.0).powi(2) + (p.2 - to.2).powi(2);
+        d(a).total_cmp(&d(b))
+    })
+}
+
+#[test]
+fn a_tumbleweed_rolls_before_a_storm_and_stops_at_a_wall_across_its_way() {
+    let mut s = Scenario::new();
+    s.server().console_command("/weather storm");
+    let ((dx, dz), strength) = storm_wind(&s);
+    assert!(strength >= primitive_server::logic::tumbleweeds::STILL, "a storm too still to roll anything ({strength})");
+    let start = (FIELD.0 as f64 + 0.5, (GROUND + 1) as f64 + 0.4, FIELD.1 as f64 + 0.5);
+    // The player well upwind and aside, out of the ball's way.
+    s.stand_at(feet_on((start.0 - dx * 6.0 + dz * 6.0).floor() as i32, (start.2 - dz * 6.0 - dx * 6.0).floor() as i32));
+    // A wall two high and two thick across the wind, nine blocks down it.
+    let mut wall = Vec::new();
+    for along in [9.0, 10.0] {
+        for across in -10..=10 {
+            let x = (start.0 + dx * along - dz * f64::from(across)).floor() as i32;
+            let z = (start.2 + dz * along + dx * f64::from(across)).floor() as i32;
+            for y in [GROUND + 1, GROUND + 2] {
+                wall.push(((x, y, z), t::BLOCK_COBBLESTONE));
+            }
+        }
+    }
+    s.build(&wall);
+    assert!(s.server().drop_item(t::BLOCK_TUMBLEWEED, start), "the store refused the ball");
+    s.seconds(8.0);
+    let ball = nearest_ball(&s, start).expect("the ball is gone");
+    let went = (ball.0 - start.0) * dx + (ball.2 - start.2) * dz;
+    assert!(went > 4.0, "in a storm the ball went {went:.2} blocks down the wind");
+    // The wall's near face is eight and a half blocks down the wind or more
+    // wherever the ball meets it: its cells are rounded down from nine.
+    assert!(went < 9.0, "the ball is {went:.2} blocks down the wind -- through a wall at nine");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_tumbleweed_blown_into_a_player_ends_up_in_the_pack() {
+    let mut s = Scenario::new();
+    s.server().console_command("/weather storm");
+    let ((dx, dz), _) = storm_wind(&s);
+    let start = (FIELD.0 as f64 + 0.5, (GROUND + 1) as f64 + 0.4, FIELD.1 as f64 + 0.5);
+    // Standing six blocks down the wind: the ball comes to the player.
+    s.stand_at(feet_on((start.0 + dx * 6.0).floor() as i32, (start.2 + dz * 6.0).floor() as i32));
+    assert!(s.server().drop_item(t::BLOCK_TUMBLEWEED, start), "the store refused the ball");
+    assert!(
+        s.until(10.0, |s| s.inventory.count(t::BLOCK_TUMBLEWEED) > 0),
+        "the ball never reached the pack; it is at {:?}",
+        nearest_ball(&s, start)
+    );
+    no_corrections(&s);
+}

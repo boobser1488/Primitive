@@ -52,4 +52,5 @@ pub mod riding;
 pub mod horseback;
 pub mod shake;
 pub mod stamina;
+pub mod tumbleweed_model;
 pub mod worlds;

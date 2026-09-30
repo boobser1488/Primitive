@@ -1384,6 +1384,22 @@ impl Entities {
                         light,
                     );
                 }
+                // **A tumbleweed rolls as a ball**, turned by how far it has
+                // gone (`tumbleweed_model`), at the size the server rolls it:
+                // not the spinning sprite of a drop, which read as a coin.
+                EntityKind::Item { block, .. }
+                    if primitive_shared::types::block_kind(block) == primitive_shared::types::BLOCK_TUMBLEWEED =>
+                {
+                    let middle = entity.drawn(now);
+                    crate::logic::tumbleweed_model::append(
+                        (middle - origin.as_dvec3()).as_vec3(),
+                        crate::logic::tumbleweed_model::turned(middle, *id),
+                        layers.layer_for_face(block, 0),
+                        sampled_light(middle, light),
+                        vertices,
+                        indices,
+                    );
+                }
                 // **A block with a model of its own lies as that model**: a
                 // barrel on the grass is staves round a floor, a bed is a bed.
                 // It was a sprite cut from the barrel's icon or, with no icon,
