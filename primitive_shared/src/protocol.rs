@@ -574,6 +574,11 @@ pub type PlayerId = u64;
 /// because 57 is what 1.5.1 shipped speaking: a 1.5.1 server handed one
 /// of these would read a variant index it has never heard of and drop
 /// the client mid-gesture, where a bump tells it at the door.
+///
+/// The second round of wild plants (blocks 790-801, `types::BLOCK_TUMBLEWEED`
+/// to `BLOCK_BUTTERCUP`, and two rows at the end of `RECIPES`) came in
+/// beside it and needs nothing of its own: a tumbleweed rolls as an
+/// `EntityKind::Item`, which was on the wire already.
 pub const PROTOCOL_VERSION: u32 = 58;
 
 /// What kind of container a screen is showing.

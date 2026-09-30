@@ -679,6 +679,13 @@ pub enum Setting {
     /// Under the grass-and-stone distance, which says how far they are
     /// drawn at all: the two are one question about the same things.
     ReliefDistance,
+    /// How thick the turf's own blades are (`engine::meadow`). Under the
+    /// two rows about what lies on the ground, as the third question about
+    /// it: how much grass.
+    GrassDensity,
+    /// How much the wind moves the plants (`engine::sway`). Under the
+    /// meadow's thickness, because what it moves is mostly that meadow.
+    WindSway,
     /// Where distant terrain starts being meshed out of bigger blocks.
     ///
     /// Next to the grass distance because they answer the same
@@ -709,7 +716,7 @@ impl Setting {
     /// moved from third place to just under the preset when the row arrived:
     /// it is the biggest thing the set changes, and it used to sit six rows
     /// above the set that changes it.
-    pub const ALL: [Setting; 29] = [
+    pub const ALL: [Setting; 31] = [
         Setting::Language,
         Setting::Username,
         Setting::Fov,
@@ -734,6 +741,8 @@ impl Setting {
         Setting::FireShadows,
         Setting::DetailDistance,
         Setting::ReliefDistance,
+        Setting::GrassDensity,
+        Setting::WindSway,
         Setting::LodDistance,
         Setting::LodQuality,
         Setting::Cloudiness,
@@ -774,6 +783,8 @@ impl Setting {
             Setting::FireShadows => Msg::FireShadows,
             Setting::DetailDistance => Msg::DetailDistance,
             Setting::ReliefDistance => Msg::ReliefDistance,
+            Setting::GrassDensity => Msg::GrassDensity,
+            Setting::WindSway => Msg::WindSway,
             Setting::LodDistance => Msg::LodDistance,
             Setting::LodQuality => Msg::LodQuality,
             Setting::Cloudiness => Msg::Cloudiness,
@@ -952,6 +963,27 @@ impl Setting {
                     .to_string()
             }
             Setting::DetailDistance => format!("{:.0}%", settings.detail_distance * 100.0),
+            Setting::GrassDensity => {
+                use crate::engine::meadow::Density;
+                language
+                    .text(match settings.grass_density {
+                        Density::Off => Msg::Off,
+                        Density::Sparse => Msg::GrassSparse,
+                        Density::Thick => Msg::GrassThick,
+                        Density::Lush => Msg::GrassLush,
+                    })
+                    .to_string()
+            }
+            Setting::WindSway => {
+                use crate::engine::sway::Sway;
+                language
+                    .text(match settings.wind_sway {
+                        Sway::Off => Msg::Off,
+                        Sway::Gentle => Msg::WindGentle,
+                        Sway::Full => Msg::WindFull,
+                    })
+                    .to_string()
+            }
             Setting::ReliefDistance => {
                 if settings.relief_chunks <= 0 {
                     language.text(Msg::Off).to_string()
@@ -1169,6 +1201,9 @@ impl Setting {
             // Walked, not wrapped: see `FireShadows::step`.
             Setting::FireShadows => settings.fire_shadows = settings.fire_shadows.step(delta),
             Setting::DetailDistance => settings.detail_distance += 0.1 * d,
+            // Walked, not wrapped, both: see `Setting::Lighting`.
+            Setting::GrassDensity => settings.grass_density = settings.grass_density.step(delta),
+            Setting::WindSway => settings.wind_sway = settings.wind_sway.step(delta),
             Setting::ReliefDistance => {
                 settings.relief_chunks = walk_stops(&crate::settings::RELIEF_STOPS, settings.relief_chunks, delta)
             }
@@ -7368,7 +7403,11 @@ mod tests {
         // arrows) less the letters the reshuffle saved. The fires' row is
         // twenty-second of twenty-nine, below the fold, and draws nothing
         // here.
-        ("settings", 2526, 5626143496880255084, 3645066025292734355),
+        // ...and the meadow's two rows (`Setting::GrassDensity`,
+        // `Setting::WindSway`), thirty-one: both under the stones' distance,
+        // below the fold, so the count and the colours are what they were
+        // and only the thumb shortened again.
+        ("settings", 2526, 15673960332135541035, 3645066025292734355),
         // More actions to bind than when this was taken, so more rows.
         // The last of them is GIVE (`keybinds::Action::Give`), which is
         // ninety more vertices -- a row's well, its word and its key --

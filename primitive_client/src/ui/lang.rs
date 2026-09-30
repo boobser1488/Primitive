@@ -1055,6 +1055,17 @@ pub enum Msg {
     PresetMedium,
     PresetHigh,
     PresetUltra,
+    /// The meadow's thickness and its three steps past OFF. See
+    /// `engine::meadow::Density`.
+    GrassDensity,
+    GrassSparse,
+    GrassThick,
+    GrassLush,
+    /// The wind in the plants and its two steps past OFF. See
+    /// `engine::sway::Sway`.
+    WindSway,
+    WindGentle,
+    WindFull,
 }
 
 /// One line of interface text, in every language at once.
@@ -1941,6 +1952,16 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::PresetMedium,   en: "MEDIUM", simple: "MIDDLE",   ru: "СРЕДНИЙ",    pl: "ŚREDNI" },
     Line { msg: Msg::PresetHigh,     en: "HIGH",   simple: "HIGH",     ru: "ВЫСОКИЙ",    pl: "WYSOKI" },
     Line { msg: Msg::PresetUltra,    en: "ULTRA",  simple: "HIGHEST",  ru: "УЛЬТРА",     pl: "ULTRA" },
+    // The meadow and the wind in it. "Густая" and not a count: what the
+    // player is choosing is how the grass looks, and the step's numbers are
+    // `meadow::Density::clumps`'s business.
+    Line { msg: Msg::GrassDensity, en: "GRASS DENSITY", simple: "HOW THICK THE GRASS IS", ru: "ГУСТОТА ТРАВЫ", pl: "GĘSTOŚĆ TRAWY" },
+    Line { msg: Msg::GrassSparse,  en: "SPARSE", simple: "THIN",      ru: "РЕДКАЯ",  pl: "RZADKA" },
+    Line { msg: Msg::GrassThick,   en: "THICK",  simple: "THICK",     ru: "ГУСТАЯ",  pl: "GĘSTA" },
+    Line { msg: Msg::GrassLush,    en: "LUSH",   simple: "VERY THICK", ru: "ПЫШНАЯ", pl: "BUJNA" },
+    Line { msg: Msg::WindSway, en: "WIND IN THE GRASS", simple: "GRASS MOVES IN THE WIND", ru: "ВЕТЕР В ТРАВЕ", pl: "WIATR W TRAWIE" },
+    Line { msg: Msg::WindGentle,   en: "GENTLE", simple: "A LITTLE",  ru: "СЛАБЫЙ",  pl: "SŁABY" },
+    Line { msg: Msg::WindFull,     en: "FULL",   simple: "AS IT BLOWS", ru: "ПОЛНЫЙ", pl: "PEŁNY" },
 ];
 
 /// A block's or a recipe's name as a person reads it: `copper_ingot` as

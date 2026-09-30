@@ -70,6 +70,30 @@ pub mod simulation;
 pub mod smelting;
 pub mod snowfall;
 pub mod survival;
+pub mod tumbleweeds;
+
+/// The top of the ground in a column near a height, and what it is, for a
+/// tumbleweed breaking loose (`tumbleweeds::loose_ball`): the highest block a
+/// ball could lie on within twenty blocks of `near_y`, with air over it.
+/// `None` in an unloaded chunk, and over water -- a ball does not break loose
+/// from a lake.
+pub fn tumbleweeds_surface(world: &world::World, x: i32, z: i32, near_y: f64) -> Option<(i32, primitive_shared::types::BlockId)> {
+    use primitive_shared::types::{is_collidable, is_liquid, CHUNK_SIZE_Y};
+    let from = (near_y as i32 + 20).min(CHUNK_SIZE_Y as i32 - 2);
+    let to = (near_y as i32 - 20).max(1);
+    let mut above = world.cached_block(x, from + 1, z)?;
+    for y in (to..=from).rev() {
+        let here = world.cached_block(x, y, z)?;
+        if is_liquid(here) {
+            return None;
+        }
+        if is_collidable(here) {
+            return (above == primitive_shared::types::BLOCK_AIR).then_some((y, here));
+        }
+        above = here;
+    }
+    None
+}
 pub mod vermin;
 pub mod water;
 pub mod weather;

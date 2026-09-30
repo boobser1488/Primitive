@@ -291,6 +291,27 @@ strawberry_bare = "plants/strawberry_bare.png"
 plantain = "plants/plantain.png"
 fern = "plants/fern.png"
 sundew = "plants/sundew.png"
+# The second round (`types::BLOCK_TUMBLEWEED`). Every picture a recolour or a
+# trim of one above: the four flowers are the first flower's head in their
+# own colours, the bluebell the fireweed's spike in blue, the heather the
+# bilberry browned and in bloom, the dog rose the berry bush with hips.
+# **A flower out of season wears its leaves** (`side`, `mesh::cross_face` and
+# `types::is_in_bloom`): one picture, the first flower's stem with its head
+# taken off, shared by all four, so the seasons cost one layer. The icon in
+# the pack is always the flower (`item`). The picked dog rose is the picked
+# berry bush -- the same bare twigs, no layer.
+tumbleweed = "plants/tumbleweed.png"
+lichen = "plants/lichen.png"
+heather = "plants/heather.png"
+rosehip_bush = "plants/rosehip_bush.png"
+rosehip_bare = "plants/bare_bush.png"
+rosehips = "food/rosehips.png"
+yarrow = "plants/yarrow.png"
+thistle = "plants/thistle.png"
+poppy = { top = "plants/poppy.png", side = "plants/flower_leaves.png", item = "plants/poppy.png" }
+cornflower = { top = "plants/cornflower.png", side = "plants/flower_leaves.png", item = "plants/cornflower.png" }
+bluebell = { top = "plants/bluebell.png", side = "plants/flower_leaves.png", item = "plants/bluebell.png" }
+buttercup = { top = "plants/buttercup.png", side = "plants/flower_leaves.png", item = "plants/buttercup.png" }
 
 # What you carry. Only raw meat and the hide are ever a face of anything --
 # a carcass at that stage -- and those name a face apart from the icon.

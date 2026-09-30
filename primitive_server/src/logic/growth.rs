@@ -379,7 +379,11 @@ pub fn fruit_sets_above_c(block: BlockId) -> Option<f32> {
     // bush in the middle of a winter the frost has just stripped it for
     // (`frost_takes_the_berries`), and the player asked for no berries in
     // winter at all.
-    if matches!(block_kind(block), BLOCK_BILBERRY_BARE | BLOCK_STRAWBERRY_BARE | BLOCK_BARE_BUSH) {
+    // ...and the dog rose, picked: its hips set with the berries' summer.
+    if matches!(
+        block_kind(block),
+        BLOCK_BILBERRY_BARE | BLOCK_STRAWBERRY_BARE | BLOCK_BARE_BUSH | primitive_shared::types::BLOCK_ROSEHIP_BARE
+    ) {
         return Some(FRUIT_SET_C);
     }
     // ...and a tall plant's shoot, which is not fruit and wants the same
@@ -517,6 +521,8 @@ fn ripening_seconds(block: BlockId) -> Option<f32> {
         // shoot: the world's own growth, on the world's clock, counted in
         // warm air (`fruit_sets_above_c`).
         BLOCK_BILBERRY_BARE | BLOCK_STRAWBERRY_BARE => REGROW_SECONDS,
+        // ...and the dog rose, on the bush's clock.
+        primitive_shared::types::BLOCK_ROSEHIP_BARE => REGROW_SECONDS,
         // **A mussel is the slowest thing that comes back here**, and it is
         // the bush's clock multiplied rather than a number of its own, so
         // that the property which has to hold -- a mussel comes back slower
@@ -1356,6 +1362,15 @@ fn offspring(here: BlockId) -> Option<(BlockId, Wants)> {
         BLOCK_TALL_GRASS => (BLOCK_TALL_GRASS, Wants::Open),
         BLOCK_DRY_GRASS => (BLOCK_DRY_GRASS, Wants::Open),
         BLOCK_FLOWER => (BLOCK_FLOWER, Wants::Open),
+        // **The four flowers and the yarrow sow themselves as the first
+        // flower does**, each into its own light: a drift of poppies is a
+        // drift again the summer after it was picked. The bluebell is the
+        // fern's kind, and fills the shade.
+        kind @ (primitive_shared::types::BLOCK_POPPY
+        | primitive_shared::types::BLOCK_CORNFLOWER
+        | primitive_shared::types::BLOCK_BUTTERCUP
+        | primitive_shared::types::BLOCK_YARROW) => (kind, Wants::Open),
+        primitive_shared::types::BLOCK_BLUEBELL => (primitive_shared::types::BLOCK_BLUEBELL, Wants::Shade),
         BLOCK_PLANTAIN => (BLOCK_PLANTAIN, Wants::Open),
         BLOCK_SUNDEW => (BLOCK_SUNDEW, Wants::Open),
         BLOCK_STRAWBERRY | BLOCK_STRAWBERRY_BARE => (BLOCK_STRAWBERRY_BARE, Wants::Open),
@@ -1372,7 +1387,7 @@ fn offspring(here: BlockId) -> Option<(BlockId, Wants)> {
 /// The ground cover that thins only by the crowd, not by its kind: grass,
 /// flowers and ferns are what a patch is made of. See `KIN`.
 fn is_ground_cover(id: BlockId) -> bool {
-    matches!(block_kind(id), BLOCK_TALL_GRASS | BLOCK_DRY_GRASS | BLOCK_FLOWER | BLOCK_FERN)
+    matches!(block_kind(id), BLOCK_TALL_GRASS | BLOCK_DRY_GRASS | BLOCK_FERN) || primitive_shared::types::is_flower(id)
 }
 
 /// One plant for the `KIN` count, whichever state it is in.
@@ -1380,6 +1395,7 @@ fn kin_of(id: BlockId) -> BlockId {
     match block_kind(id) {
         BLOCK_BILBERRY_BARE => BLOCK_BILBERRY,
         BLOCK_STRAWBERRY_BARE => BLOCK_STRAWBERRY,
+        primitive_shared::types::BLOCK_ROSEHIP_BARE => primitive_shared::types::BLOCK_ROSEHIP_BUSH,
         kind => kind,
     }
 }
@@ -1533,6 +1549,10 @@ fn frost_takes_the_berries(world: &dyn BlockWorld, soil: &dyn Soil, at: Cell) ->
         BLOCK_BERRY_BUSH => BLOCK_BARE_BUSH,
         BLOCK_BILBERRY => BLOCK_BILBERRY_BARE,
         BLOCK_STRAWBERRY => BLOCK_STRAWBERRY_BARE,
+        // **Not the dog rose.** Its hips hang on through the frost -- they
+        // are sweeter after one -- and that is the whole of what the bush is
+        // for: the one fruit a winter walk can still find
+        // (`types::BLOCK_ROSEHIP_BUSH`). `the_frost_leaves_the_rose_hips` holds it.
         _ => return None,
     };
     let air = soil.air_c(at.0, at.1, at.2)?;
@@ -2631,6 +2651,38 @@ mod tests {
         for (x, _, bare) in plants {
             assert_eq!(world.get(x, 21, 0), bare, "a berry set again in the frost");
         }
+    }
+
+    #[test]
+    fn the_frost_leaves_the_rose_hips() {
+        // The same frost that strips a berry bush beside it: the dog rose
+        // keeps its hips, which is what it is for.
+        use primitive_shared::types::BLOCK_ROSEHIP_BUSH;
+        let world = TestWorld::default();
+        world.put(0, 20, 0, BLOCK_GRASS);
+        world.put(0, 21, 0, BLOCK_BERRY_BUSH);
+        world.put(1, 20, 0, BLOCK_GRASS);
+        world.put(1, 21, 0, BLOCK_ROSEHIP_BUSH);
+        let mut growth = Growth::seeded(13);
+        growth.watch(vec![(0.5, 21.0, 0.0)]);
+        let frost = Air::at(FROST_C - 1.0);
+        for _ in 0..6000 {
+            growth.step(&world, &frost, 0.05, 64);
+        }
+        assert_eq!(world.get(0, 21, 0), BLOCK_BARE_BUSH, "the frost missed the berry bush, so it proved nothing");
+        assert_eq!(world.get(1, 21, 0), BLOCK_ROSEHIP_BUSH, "the frost took the rose hips");
+    }
+
+    #[test]
+    fn a_picked_dog_rose_fruits_again_in_warm_air() {
+        use primitive_shared::types::{BLOCK_ROSEHIP_BARE, BLOCK_ROSEHIP_BUSH};
+        let world = TestWorld::default();
+        world.put(AT.0, AT.1 - 1, AT.2, BLOCK_GRASS);
+        world.put(AT.0, AT.1, AT.2, BLOCK_ROSEHIP_BARE);
+        let mut growth = Growth::seeded(14);
+        growth.on_block_changed(AT.0, AT.1, AT.2);
+        wait_it_out(&mut growth, &world);
+        assert_eq!(world.get(AT.0, AT.1, AT.2), BLOCK_ROSEHIP_BUSH, "a picked dog rose never set hips again");
     }
 
     #[test]

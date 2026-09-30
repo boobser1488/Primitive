@@ -705,7 +705,7 @@ fn run(
     // hundred of them at render distance 24 -- and nothing about it can
     // change until the player crosses into another chunk, so it runs
     // once per crossing rather than once per frame.
-    let mut lod_scanned_from: Option<(ChunkPos, i32, crate::engine::lod::Quality, (i32, i32))> = None;
+    let mut lod_scanned_from: Option<LodKey> = None;
     // Chunks that have arrived but aren't integrated yet. Receiving is
     // cheap; integrating (lighting a chunk) is not, so the two are
     // separated and only integration is budgeted -- see `integrate_chunks`.
@@ -2444,6 +2444,7 @@ fn run(
                     // `frame::streaming`.
                     frame::streaming::mesh(
                         &settings,
+                        primitive_shared::season::Season::at(sky.world_days()),
                         dt,
                         world_ready,
                         &player,
@@ -4063,6 +4064,18 @@ fn frame_params(
         detail_distance: settings.detail_distance,
         // Where the moon is and how dark its night is: `primitive_shared::moon`.
         moon: sky.moon_uniform(),
+        // **The wind the rain slants in and the clouds run with**, bending
+        // the grass: one wind, so a player reading the meadow reads the
+        // weather (`engine::sway`). Under water and under ground the eye
+        // sees no meadow, and the wind is left to blow; the plants in a cave
+        // mouth still move, which is what a cave mouth looks like.
+        breeze: crate::engine::sway::Breeze::at(
+            primitive_shared::raft::wind(sky.world_days(), sky.weather()),
+            settings.wind_sway,
+            [f64::from(render_origin.x), f64::from(render_origin.y), f64::from(render_origin.z)],
+            f64::from(sky.elapsed()),
+        ),
+        blade_line: settings.grass_density.fade_line(),
     }
 }
 
@@ -6401,6 +6414,38 @@ fn mark_urgent(
     }
 }
 
+/// What a chunk's mesh lays over its blocks that the blocks do not say: the
+/// turf's blades (`engine::meadow`) and which of its flowers are in flower
+/// (`types::is_in_bloom`).
+///
+/// **One value, carried beside the stones' and the leaves' lines**, because
+/// it changes a chunk's mesh without moving it across any line: a player who
+/// steps the grass row, or a world that turns from spring to summer, has
+/// chunks whose level, stones and canopy are all what they were and whose
+/// mesh is not. `restripe_detail_levels` compares what a chunk was built with
+/// against this and queues the ones that differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Vegetation {
+    /// The player's grass step (`ClientSettings::grass_density`).
+    pub blades: crate::engine::meadow::Density,
+    /// The season the flowers are drawn in, or `None` for every flower in
+    /// flower -- the tools' and the tests' world.
+    pub season: Option<primitive_shared::season::Season>,
+}
+
+impl Vegetation {
+    /// No blades and every flower out: the world as the mesher drew it
+    /// before either existed.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const NONE: Vegetation = Vegetation { blades: crate::engine::meadow::Density::Off, season: None };
+}
+
+/// What the detail scan was last run for (`frame::streaming::mesh`): the
+/// player's chunk, the coarse line and its quality, the stones' and the
+/// canopy's lines and what grows over the ground. A scan runs again when
+/// any of it changes.
+pub(crate) type LodKey = (ChunkPos, i32, crate::engine::lod::Quality, (i32, i32, Vegetation));
+
 /// What the mesh of a chunk on screen was built at, and the skyline that
 /// decided it -- a mountain's bands start nearer (`lod::band_start`), so
 /// the level alone is not enough to say whether it still holds.
@@ -6417,6 +6462,26 @@ struct Detail {
     /// `relief`'s reason, and recorded for coarse chunks too so a chunk
     /// coming back to full detail is judged against what it last was.
     see_through: bool,
+    /// The blades it was given (`Off` past the player's blade line or in a
+    /// coarse chunk) and the season its flowers were drawn in.
+    blades: crate::engine::meadow::Density,
+    season: Option<primitive_shared::season::Season>,
+}
+
+/// What blades a chunk `distance` away is given at the player's step `wanted`,
+/// knowing what it was built with. See `meadow::meshes_blades_at`.
+fn blades_at(
+    distance: f32,
+    wanted: crate::engine::meadow::Density,
+    built: crate::engine::meadow::Density,
+) -> crate::engine::meadow::Density {
+    // "Currently in" means "built with blades of any step": a step changed
+    // under a chunk inside the line keeps it inside while its mesh catches up.
+    if crate::engine::meadow::meshes_blades_at(distance, wanted, built != crate::engine::meadow::Density::Off) {
+        wanted
+    } else {
+        crate::engine::meadow::Density::Off
+    }
 }
 
 /// How far a chunk is from the player's, in chunks.
@@ -6467,6 +6532,8 @@ fn restripe_detail_levels(
     // line, and the comparison below finds exactly those.
     relief_chunks: i32,
     leaf_chunks: i32,
+    // The player's grass step and the season. See `Vegetation`.
+    vegetation: Vegetation,
     chunk_lod: &mut HashMap<ChunkPos, Detail>,
     versions: &mut HashMap<ChunkPos, u64>,
     dirty: &mut VecDeque<ChunkPos>,
@@ -6504,7 +6571,13 @@ fn restripe_detail_levels(
         // its real lighting, its grass -- and neither is visible in the
         // number this loop compares. A fine chunk is not touched: there
         // is nothing about it that the quality has an opinion on.
-        if moved || relief_moved || leaves_moved || (quality_changed && built.level > 0) {
+        // ...and the blades and the flowers (`Vegetation`), for a chunk at
+        // full detail: a coarse chunk draws neither, whichever side of the
+        // line it is.
+        let vegetation_moved = built.level == 0
+            && (blades_at(distance, vegetation.blades, built.blades) != built.blades
+                || built.season != vegetation.season);
+        if moved || relief_moved || leaves_moved || vegetation_moved || (quality_changed && built.level > 0) {
             changed.push((pos, distance));
         }
     }
@@ -6548,6 +6621,9 @@ fn dispatch_meshing(
     // The two lines of `restripe_detail_levels`, passed for the same reason.
     relief_chunks: i32,
     leaf_chunks: i32,
+    // ...and what grows over the ground, for the same reason. See
+    // `Vegetation`.
+    vegetation: Vegetation,
     chunk_lod: &mut HashMap<ChunkPos, Detail>,
     budget_ms: f32,
     debug_stats: &mut DebugStats,
@@ -6622,7 +6698,23 @@ fn dispatch_meshing(
             chunk_lod.get(&pos).is_none_or(|built| built.see_through),
         );
         cache.draw_leaves_solid(!see_through);
-        chunk_lod.insert(pos, Detail { level, skyline, relief, see_through });
+        // The turf's blades inside the player's line, and the flowers in the
+        // season they are in. A chunk nobody has meshed counts as having no
+        // blades, which is the stricter side of the line's margin.
+        let blades = if level == 0 {
+            blades_at(
+                chunk_distance(pos, player_chunk),
+                vegetation.blades,
+                chunk_lod.get(&pos).map_or(crate::engine::meadow::Density::Off, |built| built.blades),
+            )
+        } else {
+            crate::engine::meadow::Density::Off
+        };
+        cache.grow_blades(blades);
+        if let Some(season) = vegetation.season {
+            cache.in_season(season);
+        }
+        chunk_lod.insert(pos, Detail { level, skyline, relief, see_through, blades, season: vegetation.season });
         mesher.submit(pos, version, level, lod_quality, cache);
         debug_stats.chunks_meshed_this_second += 1;
     }
@@ -7150,6 +7242,8 @@ mod meshing_priority_tests {
                             crate::engine::lod::StoneDetail::Full,
                         ),
                         see_through: true,
+                        blades: crate::engine::meadow::Density::Off,
+                        season: None,
                     },
                 );
             }
@@ -7179,6 +7273,7 @@ mod meshing_priority_tests {
             lod,
             crate::engine::lod::RELIEF_CHUNKS,
             crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE,
+            Vegetation::NONE,
             &mut chunk_lod,
             &mut versions,
             &mut dirty,
@@ -7237,6 +7332,7 @@ mod meshing_priority_tests {
                 lod,
                 crate::engine::lod::RELIEF_CHUNKS,
                 crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE,
+                Vegetation::NONE,
                 &mut chunk_lod,
                 &mut versions,
                 &mut dirty,
@@ -7272,6 +7368,7 @@ mod meshing_priority_tests {
             0,
             crate::engine::lod::RELIEF_CHUNKS,
             crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE,
+            Vegetation::NONE,
             &mut chunk_lod,
             &mut versions,
             &mut dirty,
@@ -7301,6 +7398,7 @@ mod meshing_priority_tests {
             lod,
             crate::engine::lod::RELIEF_CHUNKS,
             crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE,
+            Vegetation::NONE,
             &mut chunk_lod,
             &mut versions,
             &mut dirty,
@@ -7334,6 +7432,7 @@ mod meshing_priority_tests {
             lod,
             crate::engine::lod::RELIEF_CHUNKS,
             crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE,
+            Vegetation::NONE,
             &mut chunk_lod,
             &mut versions,
             &mut dirty,
@@ -7388,6 +7487,7 @@ mod meshing_priority_tests {
             crate::engine::lod::Quality::Normal,
             crate::engine::lod::RELIEF_CHUNKS,
             crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE,
+            Vegetation::NONE,
             &mut HashMap::new(),
             8.0,
             &mut stats,
@@ -7443,6 +7543,7 @@ mod meshing_priority_tests {
             crate::engine::lod::Quality::Normal,
             relief_chunks,
             leaf_chunks,
+            Vegetation::NONE,
             &mut chunk_lod,
             1000.0,
             &mut DebugStats::default(),
@@ -7512,6 +7613,7 @@ mod meshing_priority_tests {
             0,
             crate::engine::lod::RELIEF_CHUNKS,
             crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE,
+            Vegetation::NONE,
             &mut chunk_lod,
             &mut versions,
             &mut dirty,
@@ -7526,6 +7628,7 @@ mod meshing_priority_tests {
             0,
             crate::engine::lod::RELIEF_CHUNKS,
             6,
+            Vegetation::NONE,
             &mut chunk_lod,
             &mut versions,
             &mut dirty,
@@ -7569,6 +7672,7 @@ mod meshing_priority_tests {
             crate::engine::lod::Quality::Normal,
             crate::engine::lod::RELIEF_CHUNKS,
             crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE,
+            Vegetation::NONE,
             &mut HashMap::new(),
             8.0,
             &mut stats,
@@ -7610,6 +7714,7 @@ mod meshing_priority_tests {
                 crate::engine::lod::Quality::Normal,
                 crate::engine::lod::RELIEF_CHUNKS,
                 crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE,
+                Vegetation::NONE,
                 &mut HashMap::new(),
                 8.0,
                 &mut DebugStats::default(),
@@ -7672,6 +7777,7 @@ mod meshing_priority_tests {
             crate::engine::lod::Quality::Normal,
             crate::engine::lod::RELIEF_CHUNKS,
             crate::engine::lod::LEAVES_SEE_THROUGH_EVERYWHERE,
+            Vegetation::NONE,
             &mut HashMap::new(),
             8.0,
             &mut stats,

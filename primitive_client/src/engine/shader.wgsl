@@ -80,6 +80,14 @@ struct Globals {
     // gives; the other shaders that declare this block declare a prefix of
     // it and are untouched by a field on the end.
     weather: vec4<f32>,
+    // **The wind in the grass** (`engine::sway::Breeze::uniform`): xy the
+    // way the wind blows (x, z), z how hard with the player's step already
+    // in it, w how far from the eye the turf's blades have sunk into the
+    // ground (`meadow::Density::fade_line`). Then the gust's and the two
+    // flutters' phases at the render origin. Appended, for the reason `anim`
+    // gives.
+    breeze: vec4<f32>,
+    breeze_phase: vec4<f32>,
 };
 
 // **Which lighting step this module was compiled for**: 0 Simple, 1
@@ -260,6 +268,80 @@ const FINE_UV_BIT: u32 = 2147483648u;
 const FINE_V_SHIFT: u32 = 14u;
 const FINE_MASK: u32 = 16383u;
 const FINE_UNITS: f32 = 256.0;
+
+// ---- the wind in the grass (`engine::sway`, where the argument is) ----
+//
+// How far a corner stands above its root, in `SWAY_STEPS`ths of a block, at
+// `SWAY_SHIFT` in the coordinate word -- only on a plain cell coordinate that
+// is not water; and the bit that says it is one of the turf's blades. Every
+// number here is also written in sway.rs, and
+// `the_shader_bends_by_the_numbers_this_file_names` reads them off this file.
+const SWAY_SHIFT: u32 = 15u;
+const SWAY_STEPS: u32 = 15u;
+const COVER_BIT: u32 = 524288u;
+const SWAY_REACH: f32 = 0.22;
+const SWAY_LEAN: f32 = 0.35;
+const SWAY_GUST: f32 = 0.65;
+const SWAY_GUST_LENGTH: f32 = 22.0;
+const SWAY_FLUTTER_ALONG: f32 = 0.3;
+const SWAY_FLUTTER_ACROSS: f32 = 0.12;
+const SWAY_SINK: f32 = 0.35;
+const SWAY_A_X: f32 = 0.8;
+const SWAY_A_Z: f32 = 0.6;
+const SWAY_A_LENGTH: f32 = 3.3;
+const SWAY_B_X: f32 = -0.447;
+const SWAY_B_Z: f32 = 0.894;
+const SWAY_B_LENGTH: f32 = 4.8;
+// How many blocks the turf's blades take to sink into the ground, inside the
+// line where they are gone (`meadow::Density::fade_line`).
+const COVER_FADE: f32 = 12.0;
+const TAU: f32 = 6.2831853;
+
+// Where this corner of the terrain is drawn: where the mesher put it, bent by
+// the wind if it is a plant, and sunk toward its root if it is one of the
+// turf's blades near the edge of the ring they are drawn in.
+//
+// **A root never moves**: a corner with no reach returns before anything is
+// worked out, and everything past that is multiplied by the reach. That is
+// the branch nearly every vertex of the world takes -- stone, earth and wood
+// carry no reach -- and it is a compare against a word already fetched.
+fn swayed(in: VertexInput) -> vec3<f32> {
+    let world = in.position + in.chunk_offset.xyz;
+    if ((in.uv_cells & FINE_UV_BIT) != 0u || (in.packed & TRANSLUCENT_BIT) != 0u) {
+        return world;
+    }
+    let steps = (in.uv_cells >> SWAY_SHIFT) & SWAY_STEPS;
+    if (steps == 0u) {
+        return world;
+    }
+    let height = f32(steps) / f32(SWAY_STEPS);
+    var bent = world;
+    if ((in.uv_cells & COVER_BIT) != 0u) {
+        // Sunk by as much of its height as the fade has taken: the edge of
+        // the lawn is grass getting shorter, not a ring where it stops.
+        let out_there = length(world.xz - globals.camera_pos.xz);
+        let line = globals.breeze.w;
+        let kept = 1.0 - smoothstep(line - COVER_FADE, line, out_there);
+        bent.y = bent.y - height * (1.0 - kept);
+    }
+    let strength = globals.breeze.z;
+    if (strength <= 0.0) {
+        return bent;
+    }
+    let toward = globals.breeze.xy;
+    let crest = 0.5 + 0.5 * sin(dot(world.xz, toward) * (TAU / SWAY_GUST_LENGTH) + globals.breeze_phase.x);
+    let gust = crest * crest * (3.0 - 2.0 * crest);
+    let flutter = 0.6 * sin(dot(world.xz, vec2<f32>(SWAY_A_X, SWAY_A_Z)) * (TAU / SWAY_A_LENGTH) + globals.breeze_phase.y)
+        + 0.4 * sin(dot(world.xz, vec2<f32>(SWAY_B_X, SWAY_B_Z)) * (TAU / SWAY_B_LENGTH) + globals.breeze_phase.z);
+    let push = strength * (SWAY_LEAN + SWAY_GUST * gust);
+    let along = push * (1.0 + SWAY_FLUTTER_ALONG * flutter);
+    let across = strength * SWAY_FLUTTER_ACROSS * flutter;
+    let reach = height * SWAY_REACH;
+    bent.x = bent.x + reach * (toward.x * along - toward.y * across);
+    bent.z = bent.z + reach * (toward.y * along + toward.x * across);
+    bent.y = bent.y - reach * SWAY_SINK * along * along;
+    return bent;
+}
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     // **Centroid, because the frame is multisampled.** With several
@@ -1444,7 +1526,8 @@ fn terrain_vertex(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     let light = in.packed & LIGHT_MASK;
 
-    let world = in.position + in.chunk_offset.xyz;
+    // Bent by the wind, if it is a plant: see `swayed`.
+    let world = swayed(in);
     // Cells, not corners: a merged rectangle four blocks wide hands
     // this a 4, and the sampler's `Repeat` mode tiles the picture
     // across it. An unmerged face hands it a 1 and comes out exactly as
@@ -3327,7 +3410,9 @@ fn fs_cutout_shadowed(
 // The casters: the world drawn from the sun, depth only.
 @vertex
 fn vs_shadow(in: VertexInput) -> @builtin(position) vec4<f32> {
-    return globals.shadow_view_proj * vec4<f32>(in.position + in.chunk_offset.xyz, 1.0);
+    // The same bend the picture has (`swayed`), or a crown's shadow would
+    // stand still under a crown that shivers.
+    return globals.shadow_view_proj * vec4<f32>(swayed(in), 1.0);
 }
 
 struct ShadowCutoutOutput {
@@ -3343,7 +3428,7 @@ struct ShadowCutoutOutput {
 fn vs_shadow_cutout(in: VertexInput) -> ShadowCutoutOutput {
     let v = terrain_vertex(in);
     var out: ShadowCutoutOutput;
-    out.clip_position = globals.shadow_view_proj * vec4<f32>(in.position + in.chunk_offset.xyz, 1.0);
+    out.clip_position = globals.shadow_view_proj * vec4<f32>(swayed(in), 1.0);
     // **A face that looks at the sun is drawn behind itself.** These are
     // drawn from both sides -- `shadow::LEAF_CASTER_CULL` says why a canopy
     // let the light through when they were not -- and a face turned toward
@@ -3403,7 +3488,7 @@ const LEAF_PUSH_BLOCKS: f32 = 0.75;
 fn vs_shadow_plant(in: VertexInput) -> ShadowCutoutOutput {
     let v = terrain_vertex(in);
     var out: ShadowCutoutOutput;
-    out.clip_position = globals.shadow_view_proj * vec4<f32>(in.position + in.chunk_offset.xyz, 1.0);
+    out.clip_position = globals.shadow_view_proj * vec4<f32>(swayed(in), 1.0);
     let rise = max(-globals.sun.y, 1e-3);
     let run = max(length(globals.sun.xz), 1e-3);
     let push = min(globals.shadow_bias.x * rise / run, LEAF_PUSH_BLOCKS);

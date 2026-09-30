@@ -1000,6 +1000,312 @@ pub fn features_in(gen: &WorldGen, from: (i32, i32), to: (i32, i32)) -> Vec<Feat
     found
 }
 
+// ---- the second round of wild plants ----
+//
+// **Here and not in `place_ground_cover`**, which is where every other plant
+// is rolled: that function is the ground pass's, and another pass of work was
+// reshaping the ground beside it (`lips`, `landforms`) at the same time. What
+// it hands this is one column's answer to "which of these, if any"; the
+// cascade asks once, in one line, before the berry bushes.
+
+/// Which of the second round grows in this column, if one does.
+///
+/// **In patches, not scattered.** A poppy every fifty columns evenly is a
+/// meadow with red dots on it; the same number of poppies gathered into
+/// drifts a few blocks across, with open grass between the drifts, is what
+/// a steppe in May looks like -- and a drift is something seen from a hill
+/// and walked to, where a dot is not. So each plant's roll is made in a
+/// patch (`PATCH` columns square) that is first rolled to hold that plant at
+/// all, and inside a patch the plant is `PATCH_SHARE` times as thick: the
+/// same count over the country, in places.
+///
+/// Rejected: a noise field for the patches. It is smoother, and it is four
+/// noise samples a column on a pass that is otherwise hashes; a hashed patch
+/// has square corners that nobody sees, because a patch is never full.
+///
+/// **Only in a world drawn by the landforms** (`Scale::Landforms`, the
+/// generator a world made now gets). An older world's new chunks come out of
+/// the generator it was made with, to the block
+/// (`an_old_worlds_new_chunks_are_the_old_generators_to_the_block`): a
+/// meadow explored last month and the one beside it explored today would
+/// otherwise be two floras with a straight line between them.
+impl WorldGen {
+    pub(super) fn wild_plant(
+        &self,
+        biome: Biome,
+        ground: BlockId,
+        (gx, gz): (i32, i32),
+        shaded: bool,
+        waterline: bool,
+    ) -> Option<BlockId> {
+        use crate::types::{
+            can_grow_on, BLOCK_BLUEBELL, BLOCK_BUTTERCUP, BLOCK_CORNFLOWER, BLOCK_HEATHER, BLOCK_LICHEN, BLOCK_POPPY,
+            BLOCK_ROSEHIP_BUSH, BLOCK_THISTLE, BLOCK_YARROW,
+        };
+        if self.scale != super::Scale::Landforms {
+            return None;
+        }
+        for (plant, salt) in [
+            (BLOCK_LICHEN, 0x11C4_E000u32),
+            (BLOCK_HEATHER, 0x4EA7_0000),
+            (BLOCK_ROSEHIP_BUSH, 0x2053_0000),
+            (BLOCK_BLUEBELL, 0xB1BE_0000),
+            (BLOCK_BUTTERCUP, 0xB077_0000),
+            (BLOCK_CORNFLOWER, 0xC0F1_0000),
+            (BLOCK_POPPY, 0x9099_0000),
+            (BLOCK_YARROW, 0x7A22_0000),
+            (BLOCK_THISTLE, 0x7415_0000),
+        ] {
+            let Some(spacing) = wild_spacing(plant, biome, shaded, waterline) else {
+                continue;
+            };
+            if !can_grow_on(plant, ground) {
+                continue;
+            }
+            let seed = self.seed.wrapping_add(salt);
+            let patch = hash2(gx.div_euclid(PATCH), gz.div_euclid(PATCH), seed ^ 0x5A7C_4000);
+            if !patch.is_multiple_of(PATCH_SHARE) {
+                continue;
+            }
+            if hash2(gx, gz, seed).is_multiple_of((spacing / PATCH_SHARE).max(2)) {
+                return Some(plant);
+            }
+        }
+        None
+    }
+}
+
+/// How many columns square a patch of one plant is.
+const PATCH: i32 = 6;
+/// One patch in this many holds the plant, and inside it the plant is this
+/// many times as thick. See `WorldGen::wild_plant`.
+const PATCH_SHARE: u32 = 4;
+
+/// One of `plant` per this many columns of `biome`, over the country, or
+/// `None` where it does not grow at all.
+///
+/// **The tables are where each plant's message lives**, so each row says
+/// what it tells:
+///
+/// * **lichen** -- the north's bare ground and the high stone: thickest in
+///   the tundra, where it is the pasture, and on the peaks where nothing else
+///   holds;
+/// * **heather** -- the moor: the bog's edge first, then the bare hills and
+///   the open taiga;
+/// * **dog rose** -- the edges: a meadow's hedge, a wood's open side, the
+///   steppe's scrub. Never under a closed crown, and rarer than the berry
+///   bush it stands in for in winter;
+/// * **bluebell** -- the one flower of the shade, and only in the broadleaf
+///   woods: under a crown or nowhere;
+/// * **buttercup** -- wet turf: along a waterline in any green country, the
+///   river meadows and the swamp's open ground;
+/// * **cornflower** -- rich open ground, the plains' black earth and the
+///   steppe's: where it is, wheat will grow;
+/// * **poppy** -- the dry open steppe, and a dry meadow;
+/// * **yarrow** -- dry grassland: steppe first, then plain and hill;
+/// * **thistle** -- dry, grazed, poor ground: the steppe, the savanna, the
+///   dead wood's bare earth.
+fn wild_spacing(plant: BlockId, biome: Biome, shaded: bool, waterline: bool) -> Option<u32> {
+    use crate::types::{
+        BLOCK_BLUEBELL, BLOCK_BUTTERCUP, BLOCK_CORNFLOWER, BLOCK_HEATHER, BLOCK_LICHEN, BLOCK_POPPY,
+        BLOCK_ROSEHIP_BUSH, BLOCK_THISTLE, BLOCK_YARROW,
+    };
+    use Biome::*;
+    // Everything but the bluebell and the lichen wants the sky.
+    if shaded && !matches!(plant, BLOCK_BLUEBELL | BLOCK_LICHEN) {
+        return None;
+    }
+    match (plant, biome) {
+        (BLOCK_LICHEN, Tundra) => Some(10),
+        (BLOCK_LICHEN, SnowyPeaks) => Some(16),
+        (BLOCK_LICHEN, Mountains) => Some(22),
+        (BLOCK_LICHEN, Taiga) => Some(45),
+        (BLOCK_LICHEN, Bog) => Some(70),
+        (BLOCK_HEATHER, Bog) => Some(14),
+        (BLOCK_HEATHER, Hills) => Some(40),
+        (BLOCK_HEATHER, Taiga) => Some(50),
+        (BLOCK_HEATHER, Tundra) => Some(60),
+        (BLOCK_HEATHER, Mountains) => Some(80),
+        (BLOCK_ROSEHIP_BUSH, Steppe) => Some(70 * super::BERRY_THINNING),
+        (BLOCK_ROSEHIP_BUSH, Forest | BirchForest) => Some(60 * super::BERRY_THINNING),
+        (BLOCK_ROSEHIP_BUSH, Plains | Hills) => Some(90 * super::BERRY_THINNING),
+        // Thin, for the leaf litter's sake: a bluebell takes the cell the
+        // fallen leaves would have lain in, and an oak wood's floor is brown
+        // first (`an_oak_wood_floor_is_brown_with_fallen_leaves...`).
+        (BLOCK_BLUEBELL, Forest) if shaded => Some(70),
+        (BLOCK_BLUEBELL, BirchForest) if shaded => Some(90),
+        (BLOCK_BUTTERCUP, Plains | Forest | BirchForest | Hills | Steppe) if waterline => Some(8),
+        (BLOCK_BUTTERCUP, River) => Some(20),
+        (BLOCK_BUTTERCUP, Swamp) => Some(35),
+        (BLOCK_BUTTERCUP, Plains) => Some(220),
+        (BLOCK_CORNFLOWER, Plains) => Some(60),
+        (BLOCK_CORNFLOWER, Steppe) => Some(130),
+        (BLOCK_CORNFLOWER, Hills) => Some(200),
+        (BLOCK_POPPY, Steppe) => Some(45),
+        (BLOCK_POPPY, Plains) => Some(170),
+        (BLOCK_POPPY, Hills) => Some(150),
+        (BLOCK_YARROW, Steppe) => Some(40),
+        (BLOCK_YARROW, Hills) => Some(80),
+        (BLOCK_YARROW, Plains) => Some(100),
+        (BLOCK_YARROW, Savanna) => Some(160),
+        (BLOCK_THISTLE, Steppe) => Some(60),
+        (BLOCK_THISTLE, Savanna) => Some(80),
+        (BLOCK_THISTLE, DeadForest) => Some(70),
+        (BLOCK_THISTLE, Plains) => Some(320),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod wild_plant_tests {
+    use super::super::tests::{chunks_in, count_of, world_for};
+    use super::*;
+    use crate::types::{
+        BLOCK_BLUEBELL, BLOCK_BUTTERCUP, BLOCK_CORNFLOWER, BLOCK_HEATHER, BLOCK_LICHEN, BLOCK_POPPY,
+        BLOCK_ROSEHIP_BUSH, BLOCK_THISTLE, BLOCK_YARROW,
+    };
+
+    const SECOND_ROUND: [BlockId; 9] = [
+        BLOCK_LICHEN,
+        BLOCK_HEATHER,
+        BLOCK_ROSEHIP_BUSH,
+        BLOCK_BLUEBELL,
+        BLOCK_BUTTERCUP,
+        BLOCK_CORNFLOWER,
+        BLOCK_POPPY,
+        BLOCK_YARROW,
+        BLOCK_THISTLE,
+    ];
+
+    /// Where each plant must be found, and where it must never be.
+    fn homes(plant: BlockId) -> (&'static [Biome], &'static [Biome]) {
+        use Biome::*;
+        match plant {
+            BLOCK_LICHEN => (&[Tundra], &[Desert, Savanna, Plains, Swamp]),
+            BLOCK_HEATHER => (&[Bog], &[Desert, Savanna, Plains, Swamp]),
+            BLOCK_ROSEHIP_BUSH => (&[Steppe], &[Desert, Tundra, Bog]),
+            BLOCK_BLUEBELL => (&[Forest], &[Desert, Steppe, Plains, Tundra, Savanna]),
+            BLOCK_BUTTERCUP => (&[Swamp], &[Desert, Tundra, Savanna]),
+            BLOCK_CORNFLOWER => (&[Plains], &[Desert, Tundra, Forest, Bog]),
+            BLOCK_POPPY => (&[Steppe], &[Desert, Tundra, Forest, Bog, Swamp]),
+            BLOCK_YARROW => (&[Steppe], &[Desert, Tundra, Forest, Bog]),
+            BLOCK_THISTLE => (&[Steppe], &[Tundra, Forest, Bog, Swamp]),
+            _ => (&[], &[]),
+        }
+    }
+
+    /// A handful of chunks of each biome the tests look in, once.
+    fn sample() -> &'static Vec<(Biome, Vec<crate::types::Chunk>)> {
+        static SAMPLE: std::sync::OnceLock<Vec<(Biome, Vec<crate::types::Chunk>)>> = std::sync::OnceLock::new();
+        SAMPLE.get_or_init(|| {
+            use Biome::*;
+            [Tundra, Bog, Steppe, Forest, Swamp, Plains, Desert, Savanna]
+                .into_iter()
+                .map(|biome| (biome, chunks_in(&world_for(90_2026, biome), biome, 10)))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn each_new_plant_grows_in_its_own_country() {
+        for plant in SECOND_ROUND {
+            let (found_in, _) = homes(plant);
+            for biome in found_in {
+                let (_, chunks) = sample().iter().find(|(b, _)| b == biome).expect("sampled");
+                let count: usize = chunks.iter().map(|c| count_of(c, plant)).sum();
+                assert!(
+                    count > 0,
+                    "{} chunks of {} and not one {}",
+                    chunks.len(),
+                    biome.name(),
+                    crate::types::block_name(plant)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_new_plant_grows_where_it_does_not_belong() {
+        for plant in SECOND_ROUND {
+            let (_, never) = homes(plant);
+            for biome in never {
+                let Some((_, chunks)) = sample().iter().find(|(b, _)| b == biome) else { continue };
+                // Counted only in the chunk's own biome: a sampled chunk's
+                // middle is the biome and its edge may be the next country.
+                let count: usize = chunks.iter().map(|c| count_of(c, plant)).sum();
+                assert!(
+                    count == 0 || wild_spacing(plant, *biome, false, true).is_some(),
+                    "{count} {} in {} chunks of {}",
+                    crate::types::block_name(plant),
+                    chunks.len(),
+                    biome.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_new_plant_stands_on_ground_that_holds_it() {
+        for (_, chunks) in sample() {
+            for chunk in chunks {
+                for y in 1..crate::types::CHUNK_SIZE_Y {
+                    for z in 0..CHUNK_SIZE_Z {
+                        for x in 0..CHUNK_SIZE_X {
+                            let here = chunk.get(x, y, z);
+                            if SECOND_ROUND.contains(&block_kind(here)) {
+                                let under = chunk.get(x, y - 1, z);
+                                assert!(
+                                    crate::types::can_grow_on(here, under),
+                                    "{} on {}",
+                                    crate::types::block_name(here),
+                                    crate::types::block_name(under)
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Where to stand for a photograph of each country**, in a world made
+    /// now: the first column of a meadow, a steppe and a wood whose whole
+    /// chunk and its eight neighbours are that country. A tool, for the
+    /// before-and-after pictures (`PRIMITIVE_TEST_SPAWN`).
+    ///
+    /// ```text
+    /// SEED=1337 cargo test -p primitive_shared --lib where_to_stand -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a tool: prints where each country is"]
+    fn where_to_stand_for_a_photograph_of_each_country() {
+        let seed: u32 = std::env::var("SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(1337);
+        let gen = WorldGen::with_zone(seed, Preset::Normal, super::super::Zone::Temperate);
+        for wanted in [Biome::Plains, Biome::Steppe, Biome::Forest, Biome::Savanna] {
+            let found = (0..4000).find_map(|step: i32| {
+                let (x, z) = ((step % 80 - 40) * 48, (step / 80 - 25) * 48);
+                let whole = (-24..=24).step_by(8).all(|dz| (-24..=24).step_by(8).all(|dx| gen.biome_at(x + dx, z + dz) == wanted));
+                whole.then_some((x, z))
+            });
+            println!("{}: {:?}", wanted.name(), found);
+        }
+    }
+
+    #[test]
+    fn a_bluebell_is_a_flower_of_the_shade_and_the_rest_want_the_sky() {
+        for plant in SECOND_ROUND {
+            for &biome in Biome::ALL {
+                let shaded = wild_spacing(plant, biome, true, false).is_some();
+                if plant == BLOCK_BLUEBELL {
+                    assert!(wild_spacing(plant, biome, false, false).is_none(), "a bluebell in the open {}", biome.name());
+                } else if plant != BLOCK_LICHEN {
+                    assert!(!shaded, "{} under a crown in {}", crate::types::block_name(plant), biome.name());
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

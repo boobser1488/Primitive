@@ -2071,6 +2071,109 @@ pub const BLOCK_FERN: BlockId = 479;
 /// would be a rule nobody could discover.
 pub const BLOCK_SUNDEW: BlockId = 480;
 
+// ---- the second round of wild plants, and the tumbleweed ----
+//
+// Ids from 790, for the sea floor's reason: other work was adding ids at the
+// same time, and a block is its number.
+//
+// "добавь больше растений": the country that had least of its own -- the
+// north's bare rock, the moors, the steppe, the dry fringe -- and flowers
+// that say which meadow and which month. **Each is here for what it gives or
+// what it tells**, the rule the first round was held to; where each grows is
+// `worldgen::features::wild_plant`, what it needs under it `can_grow_on`.
+
+/// **A tumbleweed** (перекати-поле): the dry, rolled-up crown of a steppe
+/// saltwort, broken off at the root and blown across open dry country in a
+/// wind. **Not a block in the world but a thing on the ground**: the server
+/// rolls it as a dropped item that the wind pushes (`logic::items`), and
+/// walking into one picks it up like any drop. What it is for is fire where
+/// there is no wood -- it is kindling in the hearth, and it comes apart into
+/// fibre for the kiln and the torch (`crafting`, "tumbleweed fibre"). The
+/// steppe's fuel comes to the player who runs it down.
+pub const BLOCK_TUMBLEWEED: BlockId = 790;
+/// **Reindeer lichen** (ягель): pale, branching cushions on the bare ground
+/// and rock of the tundra, the taiga's clearings and the high stone. Lies
+/// flat. Dry, it catches a spark like nothing else in the north
+/// (`hearth::fuel_seconds`); and where it grows is the country where nothing
+/// else will, which is the other thing it says.
+pub const BLOCK_LICHEN: BlockId = 791;
+/// **Heather** (вереск): a knee-high woody shrub of the moor, the bog's
+/// edge and the bare hills, purple in late summer. It burns like brushwood
+/// (`hearth::fuel_seconds`): the fuel of country with no trees in it, which
+/// is exactly where it grows.
+pub const BLOCK_HEATHER: BlockId = 792;
+/// **Dog rose** (шиповник): a thorny shrub on the edges of woods, in hedges
+/// and across the steppe, hung with orange-red hips from late summer. **The
+/// hips stay on through the frost** that strips every berry bush
+/// (`growth::frost_takes_the_berries` leaves it alone), and they keep for
+/// weeks once picked (`food::freshness`): the one fruit a player can still
+/// find, and still carry, in winter. Picked like the berry bush.
+pub const BLOCK_ROSEHIP_BUSH: BlockId = 793;
+/// ...picked. Sets fruit again in warm air, as the bush does.
+pub const BLOCK_ROSEHIP_BARE: BlockId = 794;
+/// **Rose hips**, off the dog rose. Poor food, like any fruit, and nearly
+/// dry already: they keep as dried meat does. See `BLOCK_ROSEHIP_BUSH`.
+pub const BLOCK_ROSEHIPS: BlockId = 795;
+/// **Yarrow** (тысячелистник): a flat white umbel over feathery leaves, in
+/// dry meadows and on the steppe. A wound herb -- the soldier's herb of
+/// every army that ever walked -- and here the steppe's poultice
+/// (`crafting`, "yarrow poultice") where the plantain of the wet meadow is
+/// not.
+pub const BLOCK_YARROW: BlockId = 796;
+/// **Thistle** (чертополох): spiny grey leaves and a purple brush of a head,
+/// on dry, grazed ground. Its down is tinder (`hearth::fuel_seconds`), and
+/// where thistles stand the ground is dry and the grass poor.
+pub const BLOCK_THISTLE: BlockId = 797;
+/// **Poppy** (мак): red, on the dry open steppe and the dry meadow. Flowers
+/// in spring and early summer, and is leaves the rest of the year
+/// (`is_in_bloom`).
+pub const BLOCK_POPPY: BlockId = 798;
+/// **Cornflower** (василёк): blue, a weed of rich open ground -- **where it
+/// grows, wheat grows** (it is the old sign of good ploughland). Flowers in
+/// summer.
+pub const BLOCK_CORNFLOWER: BlockId = 799;
+/// **Bluebell** (пролеска): a spike of blue bells on the floor of an old
+/// broadleaf wood, in the spring before the canopy closes. The one flower
+/// that grows in the shade, and what it says is that the wood is old.
+pub const BLOCK_BLUEBELL: BlockId = 800;
+/// **Buttercup** (лютик): yellow, in the damp meadows along rivers and in
+/// the swamp's open turf. Spring and summer. Where it grows the water is
+/// near the surface.
+pub const BLOCK_BUTTERCUP: BlockId = 801;
+
+/// Every flower, the first and the four that came after it.
+///
+/// **Asked by name wherever a rule means "a flower"** -- what a butterfly
+/// looks for, what grows in a pot, what a grazing animal puts its head down
+/// for -- so a fifth flower is one line here and not a hunt.
+#[inline]
+pub fn is_flower(id: BlockId) -> bool {
+    matches!(block_kind(id), BLOCK_FLOWER | BLOCK_POPPY | BLOCK_CORNFLOWER | BLOCK_BLUEBELL | BLOCK_BUTTERCUP)
+}
+
+/// Whether a flower is in flower in this season, or only leaves.
+///
+/// **What the flowers tell is the month as well as the place.** A meadow
+/// that was one colour all year told the player nothing about the year;
+/// poppies first, then cornflowers, and nothing but leaves in the cold, is
+/// a calendar a player can read off a hillside. The first flower, which
+/// came before seasons were drawn, keeps flowering from spring to autumn,
+/// the picture it always had.
+///
+/// Asked by the mesher (`mesh::cross_face` via the season it is handed), so
+/// the plant in the world does not change -- only what it looks like.
+pub fn is_in_bloom(id: BlockId, season: crate::season::Season) -> bool {
+    use crate::season::Season;
+    match block_kind(id) {
+        BLOCK_POPPY => matches!(season, Season::Spring | Season::Summer),
+        BLOCK_CORNFLOWER => season == Season::Summer,
+        BLOCK_BLUEBELL => season == Season::Spring,
+        BLOCK_BUTTERCUP => matches!(season, Season::Spring | Season::Summer),
+        BLOCK_FLOWER => season != Season::Winter,
+        _ => true,
+    }
+}
+
 // ---- the woods of the north and of the desert ----
 //
 // Ids from 490, for the sea floor's reason: fire was adding ids from 500 at
@@ -2579,9 +2682,12 @@ pub fn grows_in_a_pot(plant: BlockId) -> bool {
     if crate::ground::is_grass(plant) {
         return true;
     }
+    if is_flower(plant) {
+        return true;
+    }
     matches!(
         block_kind(plant),
-        BLOCK_FLOWER
+        BLOCK_YARROW
             | BLOCK_BILBERRY
             | BLOCK_BILBERRY_BARE
             | BLOCK_STRAWBERRY
@@ -5071,6 +5177,19 @@ pub const ALL_BLOCK_IDS: &[(BlockId, &str)] = &[
     (BLOCK_PLANTAIN, "plantain"),
     (BLOCK_FERN, "fern"),
     (BLOCK_SUNDEW, "sundew"),
+    // The second round, and the tumbleweed. See `BLOCK_TUMBLEWEED`.
+    (BLOCK_TUMBLEWEED, "tumbleweed"),
+    (BLOCK_LICHEN, "lichen"),
+    (BLOCK_HEATHER, "heather"),
+    (BLOCK_ROSEHIP_BUSH, "rosehip_bush"),
+    (BLOCK_ROSEHIP_BARE, "rosehip_bare"),
+    (BLOCK_ROSEHIPS, "rosehips"),
+    (BLOCK_YARROW, "yarrow"),
+    (BLOCK_THISTLE, "thistle"),
+    (BLOCK_POPPY, "poppy"),
+    (BLOCK_CORNFLOWER, "cornflower"),
+    (BLOCK_BLUEBELL, "bluebell"),
+    (BLOCK_BUTTERCUP, "buttercup"),
     // The fir and the saxaul. See `BLOCK_FIR_LOG` and `wood`.
     (BLOCK_FIR_LOG, "fir_log"),
     (BLOCK_FIR_NEEDLES, "fir_needles"),
@@ -5512,6 +5631,18 @@ pub const PLACEABLE_BLOCKS: &[BlockId] = &[
     // back where they will grow. See `BLOCK_PLANTAIN` and `BLOCK_SUNDEW`.
     BLOCK_PLANTAIN,
     BLOCK_SUNDEW,
+    // ...and the second round's herbs, shrubs and flowers, picked whole on
+    // the same terms (`BLOCK_YARROW`): the heather and the thistle burn, and
+    // can be set back in the ground unburnt. Not the dog rose, for the berry
+    // bush's reason: what a player carries off it is fruit, not a bush.
+    BLOCK_LICHEN,
+    BLOCK_HEATHER,
+    BLOCK_THISTLE,
+    BLOCK_YARROW,
+    BLOCK_POPPY,
+    BLOCK_CORNFLOWER,
+    BLOCK_BLUEBELL,
+    BLOCK_BUTTERCUP,
     // A fire, laid but not lit. The burning one is deliberately absent:
     // fire is something you *start*, with flint and a spark, and a
     // player who could place a lit one would be carrying a burning
@@ -7308,7 +7439,12 @@ pub fn density(id: BlockId) -> f32 {
         // ...and the wild plants, leaf and stalk.
         | BLOCK_FIREWEED | BLOCK_CATTAIL | BLOCK_NETTLE | BLOCK_BRACKEN | BLOCK_ARUNDO | BLOCK_CANE | BLOCK_BILBERRY
         | BLOCK_BILBERRY_BARE | BLOCK_STRAWBERRY | BLOCK_STRAWBERRY_BARE | BLOCK_PLANTAIN | BLOCK_FERN
-        | BLOCK_SUNDEW => 250.0,
+        | BLOCK_SUNDEW
+        // ...and the second round, and the tumbleweed, which is the lightest
+        // thing on the steppe and is why the wind can roll it.
+        | BLOCK_TUMBLEWEED | BLOCK_LICHEN | BLOCK_HEATHER | BLOCK_ROSEHIP_BUSH | BLOCK_ROSEHIP_BARE
+        | BLOCK_ROSEHIPS | BLOCK_YARROW | BLOCK_THISTLE | BLOCK_POPPY | BLOCK_CORNFLOWER | BLOCK_BLUEBELL
+        | BLOCK_BUTTERCUP => 250.0,
         // Fat floats, and only just -- which is the whole of why tallow
         // is skimmed off the top of a pot.
         BLOCK_FAT => 900.0,
@@ -8213,6 +8349,8 @@ pub fn ripens_into(id: BlockId) -> Option<BlockId> {
         // ...and the two berries of the forest floor, picked, as the bush.
         BLOCK_BILBERRY_BARE => Some(BLOCK_BILBERRY),
         BLOCK_STRAWBERRY_BARE => Some(BLOCK_STRAWBERRY),
+        // ...and the dog rose, as the bush.
+        BLOCK_ROSEHIP_BARE => Some(BLOCK_ROSEHIP_BUSH),
         // ...and a tall plant's shoot grows into the plant. This says what
         // the shoot's own cell becomes; the upper half it grows into the
         // cell over it is `growth`'s to write, because a table from one id to
@@ -8534,6 +8672,29 @@ pub fn can_grow_on(plant: BlockId, ground: BlockId) -> bool {
         BLOCK_BERRY_BUSH | BLOCK_BARE_BUSH | BLOCK_FLOWER => {
             matches!(ground, BLOCK_GRASS | BLOCK_DIRT | BLOCK_DRY_TURF) && full_floor
         }
+        // ---- the second round (`BLOCK_TUMBLEWEED`) ----
+        //
+        // **Lichen wants what nothing else will have**: bare stone and its
+        // gravel, the frozen ground, the peat and the thin turf of the
+        // north. Not sand, which moves under it.
+        BLOCK_LICHEN => {
+            (matches!(ground, BLOCK_STONE | BLOCK_GRAVEL | BLOCK_COBBLESTONE | BLOCK_GRASS | BLOCK_DIRT | BLOCK_PEAT)
+                || ground == BLOCK_PERMAFROST)
+                && full_floor
+        }
+        // Heather: the thin acid ground of the moor -- turf, peat, bare
+        // earth and the gravel of a hillside.
+        BLOCK_HEATHER => matches!(ground, BLOCK_GRASS | BLOCK_DIRT | BLOCK_PEAT | BLOCK_GRAVEL) && full_floor,
+        // The dog rose and the thistle take dry ground as well as turf: the
+        // steppe's is dry turf.
+        BLOCK_ROSEHIP_BUSH | BLOCK_ROSEHIP_BARE | BLOCK_THISTLE | BLOCK_YARROW | BLOCK_POPPY => {
+            matches!(ground, BLOCK_GRASS | BLOCK_DIRT | BLOCK_DRY_TURF) && full_floor
+        }
+        // The cornflower wants rich soil, the buttercup wet turf, the
+        // bluebell a wood's floor: turf and bare earth all three -- which
+        // soil and which light is the generator's to choose.
+        BLOCK_CORNFLOWER | BLOCK_BLUEBELL => matches!(ground, BLOCK_GRASS | BLOCK_DIRT) && full_floor,
+        BLOCK_BUTTERCUP => matches!(ground, BLOCK_GRASS | BLOCK_DIRT | BLOCK_MUD) && full_floor,
         // **A crop wants tilled earth and nothing else.** This one rule
         // is the whole reason the hoe exists: without it a seed would go
         // in anywhere a tuft of grass does, and a field would be

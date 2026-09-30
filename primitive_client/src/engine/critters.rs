@@ -79,7 +79,7 @@
 use glam::Vec3;
 
 use primitive_shared::lighting::LightMap;
-use primitive_shared::types::{self, BlockId, BLOCK_FLOWER, BLOCK_REEDS, BLOCK_TALL_GRASS};
+use primitive_shared::types::{self, BlockId, BLOCK_REEDS, BLOCK_TALL_GRASS};
 use primitive_shared::worldgen::Biome;
 
 use crate::engine::mesh::pack_light;
@@ -627,7 +627,9 @@ impl Critters {
             }
         }
 
-        if spot.plant.is_some_and(|p| types::block_kind(p) == BLOCK_FLOWER)
+        // Every flower, the four new ones too (`types::is_flower`): a
+        // butterfly over a drift of poppies is the steppe in May.
+        if spot.plant.is_some_and(types::is_flower)
             && butterfly_hour(hour)
             && !around.wet
             && warm >= BUTTERFLY_WARMTH_C
@@ -1773,7 +1775,7 @@ mod tests {
                         let water = pond && (0..4).contains(&x) && (0..4).contains(&z);
                         blocks[Chunk::index(lx, 10, lz)] = if water { BLOCK_WATER } else { BLOCK_GRASS };
                         if flowers && !water && (x + 2 * z).rem_euclid(3) == 0 {
-                            blocks[Chunk::index(lx, 11, lz)] = BLOCK_FLOWER;
+                            blocks[Chunk::index(lx, 11, lz)] = types::BLOCK_FLOWER;
                         }
                         for &((cx_, cy_, cz_), block) in cells {
                             if (cx_, cz_) == (x, z) {

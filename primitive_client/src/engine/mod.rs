@@ -19,6 +19,8 @@
 //! | `texture`  | the block/glyph texture array and the face lookup      |
 //! | `mesh`     | the vertex format, and turning a chunk into triangles   |
 //! | `lod`      | the same chunk out of bigger blocks, when it is far away |
+//! | `meadow`   | the turf's own low blades, as thick as the step allows  |
+//! | `sway`     | the wind in the grass and the leaves, in the shader      |
 //! | `mesher`   | doing that on worker threads                            |
 //! | `camera`   | view and projection                                     |
 //! | `frustum`  | which chunks the camera can actually see                |
@@ -57,6 +59,7 @@ pub mod lamp_shadow;
 mod lean_to_tests;
 pub mod lighting;
 pub mod lod;
+pub mod meadow;
 pub mod mesh;
 pub mod mesher;
 pub mod opt;
@@ -64,6 +67,7 @@ pub mod particles;
 pub mod relief;
 pub mod renderer;
 pub mod shadow;
+pub mod sway;
 pub mod sky;
 pub mod texture;
 pub mod water;

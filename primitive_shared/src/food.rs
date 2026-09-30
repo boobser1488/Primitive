@@ -184,6 +184,8 @@ pub fn group(block: BlockId) -> Option<Group> {
             Some(Group::Plant)
         }
         crate::types::BLOCK_COCONUT => Some(Group::Plant),
+        // Rose hips are fruit, whatever they keep like.
+        crate::types::BLOCK_ROSEHIPS => Some(Group::Plant),
         // **Honey is gathered, so it is the forager's group**: what a wood
         // gives a player who did not kill it and did not sow it. Not meat,
         // though bees made it -- the egg is meat because it is an animal's
@@ -287,6 +289,12 @@ pub fn nutrition(block: BlockId) -> Option<f32> {
     // off takes a share back at the end. See `freshness`.
     let fresh = match block_kind(block) {
         BLOCK_BERRIES => Some(2.0),
+        // **Less than a berry, and it keeps.** A hip is skin, hair and seed
+        // round a little flesh; what it is worth is that it is still on the
+        // bush in the snow and still good in the pack a week later
+        // (`rot_every`). A winter fruit that fed as well as a summer one
+        // would make the summer's walk to the bushes pointless.
+        crate::types::BLOCK_ROSEHIPS => Some(1.5),
         // **A mouthful, and deliberately not a meal.** Two eggs are a
         // handful of berries; a nest holds a couple. What a nest is
         // worth is that it is *there again next week*, not that it
@@ -621,7 +629,9 @@ pub fn rot_per_step(block: BlockId) -> u8 {
         // and the must are not here -- they are still working, and what the
         // clock does to them is `ferment`'s.
         | crate::types::BLOCK_CHEESE
-        | crate::types::BLOCK_PEMMICAN => 1,
+        | crate::types::BLOCK_PEMMICAN
+        // Rose hips dry on the bush: the larder's pace, not the berry's.
+        | crate::types::BLOCK_ROSEHIPS => 1,
         _ => 0,
     }
 }
@@ -672,6 +682,8 @@ pub fn rot_every(block: BlockId) -> u32 {
         // A cellar doubles it, as it doubles everything (`rot::Keeping`).
         BLOCK_BREAD => 2,
         BLOCK_DRIED_MEAT | crate::types::BLOCK_DRIED_FISH => 24,
+        // ...and hips as the rack's meat does: eight days in the pack.
+        crate::types::BLOCK_ROSEHIPS => 24,
         crate::types::BLOCK_DRIED_SALTED_MEAT | crate::types::BLOCK_DRIED_SALTED_FISH => 72,
         // **A cheese keeps as the rack's meat keeps**, eight days in the warm
         // and sixteen in the cellar it ripened in; pemmican as the salted and

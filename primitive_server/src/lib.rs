@@ -883,6 +883,25 @@ impl Server {
         }
     }
 
+    /// A drop of `block` lying at `at` (its middle) with nobody's name on it,
+    /// for a scenario: the item store's own `spawn`, so it is capped, rolled
+    /// by the wind if it is a tumbleweed, and picked up like any other.
+    pub fn drop_item(&self, block: primitive_shared::types::BlockId, at: (f64, f64, f64)) -> bool {
+        self.ctx.items.lock().unwrap_or_else(|e| e.into_inner()).spawn(block, 1, at, (0.0, 0.0, 0.0), None, Instant::now())
+    }
+
+    /// Where every drop of `block` is, for a scenario following one.
+    pub fn items_of(&self, block: primitive_shared::types::BlockId) -> Vec<(f64, f64, f64)> {
+        self.ctx
+            .items
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|item| primitive_shared::types::block_kind(item.block) == primitive_shared::types::block_kind(block))
+            .map(|item| item.position)
+            .collect()
+    }
+
     /// An animal of `species` at `at`, for a scenario: the spawner's own
     /// `Animals::spawn`, so it is capped and announced like any other.
     pub fn spawn_animal(&self, species: primitive_shared::animals::Species, at: (f32, f32, f32)) -> Option<primitive_shared::protocol::EntityId> {
@@ -923,6 +942,12 @@ impl Server {
     /// `WorldClock::set_world_days`): a scenario about a winter starts in one.
     pub fn set_world_days(&self, world_days: f32) {
         self.ctx.clock.set_world_days(world_days);
+    }
+
+    /// The world's age in days, for a scenario that has to know which way
+    /// the wind is blowing (`raft::wind`).
+    pub fn world_days(&self) -> f32 {
+        self.ctx.clock.world_days()
     }
 
     /// Turns an animal to face `yaw`: a scenario stands a horse along its
@@ -2075,6 +2100,10 @@ async fn tick_loop(ctx: Arc<Context>) {
     // The clock the world's food goes off by. A local for the same
     // reason again; see `logic::rot`.
     let mut rot = logic::rot::Rot::new();
+    // Where the wind brings the tumbleweeds from (`logic::tumbleweeds`). A
+    // local for the rain's reason: a random number generator that belongs to
+    // the tick.
+    let mut tumble_dice = logic::rng::Rng::from_clock();
     // ...and whether they were standing on something, which is the only
     // way the server can see a jump: a player who was on the ground, is
     // not now, and has gone *up* has jumped. Leaving a ledge is the same
@@ -2501,6 +2530,43 @@ async fn tick_loop(ctx: Arc<Context>) {
         // Stepped every tick, then offered to each player in range. The
         // pickup pass holds the item list and one player's lock at a
         // time, never both across an await -- there are none here.
+        // --- tumbleweeds ---
+        //
+        // Before the drops are stepped, because they are drops: a ball that
+        // breaks loose here rolls on the same tick. The wind is handed to the
+        // item store, which rolls every tumbleweed in it -- the ones the
+        // country sends and the ones a player drops alike. See
+        // `logic::tumbleweeds`.
+        {
+            let now = Instant::now();
+            let weather = ctx.sky.lock().unwrap_or_else(|e| e.into_inner()).weather();
+            let wind = primitive_shared::raft::wind(ctx.clock.world_days(), weather).vector();
+            let feet: Vec<(f64, f64, f64)> = handles
+                .iter()
+                .filter_map(|handle| {
+                    let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+                    (!state.vitals.is_dead()).then_some(state.position)
+                })
+                .collect();
+            let mut items = ctx.items.lock().unwrap_or_else(|e| e.into_inner());
+            items.set_wind(wind);
+            for at in feet {
+                let near = items.tumbleweeds_near(at, logic::tumbleweeds::NEAR);
+                let loose = logic::tumbleweeds::loose_ball(
+                    at,
+                    wind,
+                    near,
+                    tick_duration.as_secs_f32(),
+                    &mut tumble_dice,
+                    |x, z| logic::tumbleweeds_surface(&ctx.world, x, z, at.1),
+                    |x, z| ctx.world.generator().biome_at(x, z),
+                );
+                if let Some(spot) = loose {
+                    items.spawn(primitive_shared::types::BLOCK_TUMBLEWEED, 1, spot, (0.0, 0.0, 0.0), None, now);
+                }
+            }
+        }
+
         {
             let now = Instant::now();
             // Which cells hold items at all, sampled once after the

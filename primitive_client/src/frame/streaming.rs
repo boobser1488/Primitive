@@ -111,6 +111,8 @@ pub fn integrate(
 #[allow(clippy::too_many_arguments)]
 pub fn mesh(
     settings: &ClientSettings,
+    // The world's season, for the flowers (`types::is_in_bloom`).
+    season: primitive_shared::season::Season,
     dt: f32,
     world_ready: bool,
     player: &Player,
@@ -123,7 +125,7 @@ pub fn mesh(
     dirty_set: &mut MeshQueueSet,
     chunk_versions: &mut HashMap<ChunkPos, u64>,
     chunk_lod: &mut HashMap<ChunkPos, Detail>,
-    lod_scanned_from: &mut Option<(ChunkPos, i32, crate::engine::lod::Quality, (i32, i32))>,
+    lod_scanned_from: &mut Option<crate::LodKey>,
     debug_stats: &mut DebugStats,
 ) {
     // The same number `integrate` worked out for its own half, from the
@@ -152,6 +154,7 @@ pub fn mesh(
     // player walked out of the chunk they were standing
     // in. Bumping the version of every coarse chunk is
     // what `restripe_detail_levels` does about it.
+    let vegetation = crate::Vegetation { blades: settings.grass_density, season: Some(season) };
     let lod_key = (
         player_chunk,
         settings.lod_distance_chunks,
@@ -159,7 +162,9 @@ pub fn mesh(
         // The two lines a player moves from the same
         // screen: without them in the key, a changed
         // setting waited for the player to leave the chunk.
-        (settings.relief_chunks, settings.transparent_leaves_chunks),
+        // ...and what grows over the ground: the grass step and the season
+        // (`Vegetation`), neither of which moves a chunk across a line.
+        (settings.relief_chunks, settings.transparent_leaves_chunks, vegetation),
     );
     if *lod_scanned_from != Some(lod_key) {
         let quality_changed = lod_scanned_from
@@ -172,6 +177,7 @@ pub fn mesh(
             settings.lod_distance_chunks,
             settings.relief_chunks,
             settings.transparent_leaves_chunks,
+            vegetation,
             chunk_lod,
             chunk_versions,
             dirty,
@@ -191,6 +197,7 @@ pub fn mesh(
         settings.lod_quality,
         settings.relief_chunks,
         settings.transparent_leaves_chunks,
+        vegetation,
         chunk_lod,
         mesh_ms,
         debug_stats,

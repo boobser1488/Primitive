@@ -269,6 +269,14 @@ fn fuel_seconds_seasoned(block: BlockId) -> Option<f32> {
         // really worth is the field (`crafting`, "mulch"), and a player
         // burning a stack of them is choosing the evening over the harvest.
         crate::types::BLOCK_LEAF_HANDFUL => Some(8.0),
+        // **The treeless country's fuels** (`types::BLOCK_TUMBLEWEED`).
+        // A tumbleweed is a ball of dry stems and goes up like the feathers;
+        // thistle down and dry lichen are tinder and less. Heather is the
+        // exception, and the reason it is here: a woody shrub that burns as
+        // long as a stick, which is what the moors were cut for.
+        crate::types::BLOCK_TUMBLEWEED => Some(12.0),
+        crate::types::BLOCK_THISTLE | crate::types::BLOCK_LICHEN => Some(6.0),
+        crate::types::BLOCK_HEATHER => Some(25.0),
         // **Amadou smoulders**, and this is the number that says so: a
         // shelf fungus is worth more than the stick beside it and less
         // than the plank, because what it does in a fire is glow for a
@@ -379,6 +387,10 @@ fn fuel_degrees_seasoned(block: BlockId) -> Option<f32> {
         // evening meal, and nothing else.
         crate::types::BLOCK_BRACKET_FUNGUS => Some(300.0),
         crate::types::BLOCK_FEATHER => Some(250.0),
+        // Dry stems and tinder flash, as down does; heather is brushwood and
+        // burns as a thin stick does -- enough to cook on, never to smelt.
+        crate::types::BLOCK_TUMBLEWEED | crate::types::BLOCK_THISTLE | crate::types::BLOCK_LICHEN => Some(350.0),
+        crate::types::BLOCK_HEATHER => Some(600.0),
         _ => None,
     }
 }
