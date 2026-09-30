@@ -282,6 +282,12 @@ pub struct Scenario {
     pub horseback: Option<crate::logic::horseback::Horseback>,
     /// The latest snapshot of every entity the server has sent, by id.
     pub entities: HashMap<primitive_shared::protocol::EntityId, primitive_shared::protocol::EntityState>,
+    /// **What the last snapshot held, and nothing older**: what a picture
+    /// draws (`shots`). `entities` keeps every animal ever heard of, which is
+    /// what a test counting them wants and exactly what a photograph does not
+    /// -- a grouse a fox has already carried off was drawn hanging in the air
+    /// of the coop it was killed in.
+    pub(crate) in_view: Vec<primitive_shared::protocol::EntityState>,
 }
 
 /// **How far the world has got, in frames, and how many ticks that has
@@ -536,6 +542,7 @@ impl Scenario {
             jump_edge: false,
             horseback: None,
             entities: HashMap::new(),
+            in_view: Vec::new(),
         };
         // **A player in a world has the cursor.** The frame refuses to
         // mine without it (`can_mine`), which is right -- the click that
@@ -1229,6 +1236,7 @@ impl Scenario {
                     for state in states {
                         self.entities.insert(state.id, *state);
                     }
+                    self.in_view = states.clone();
                     // Snapshots are twenty a second: not kept in `heard`.
                     continue;
                 }

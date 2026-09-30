@@ -10672,7 +10672,7 @@ pub(crate) mod offscreen_repro {
         for &species in Species::ALL {
             let centre = Vec3::new(8.5, 2.0 + species.height() * 0.5, 8.5);
             let run = species.run_speed().max(1.0);
-            let poses: [(&str, f32, Motion); 4] = [
+            let poses: [(&str, f32, Motion); 10] = [
                 ("standing", 0.0, Motion::default()),
                 (
                     "walking",
@@ -10691,6 +10691,17 @@ pub(crate) mod offscreen_repro {
                     0.0,
                     Motion { speed: run, walked: quarter / 2.0, turning: -2.5, ..Default::default() },
                 ),
+                // **The gaits and the rest** (`animal_model::gait_of`,
+                // `Motion::lie`, `Motion::glance`, `Motion::swim`): a trot and a
+                // gallop a quarter into the stride, lying down, the head turned
+                // to a sound on its right, halfway down the death fall, and
+                // swimming.
+                ("trotting", 0.0, Motion { speed: run * 0.6, walked: quarter / 2.0, gait: Some(1.0), ..Default::default() }),
+                ("galloping", 0.0, Motion { speed: run, walked: quarter / 2.0, gait: Some(2.0), ..Default::default() }),
+                ("lying", 0.0, Motion { lie: 1.0, ..Default::default() }),
+                ("glancing", 0.0, Motion { glance: 0.9, ..Default::default() }),
+                ("falling", 0.0, Motion { fallen: 0.45, ..Default::default() }),
+                ("swimming", 0.0, Motion { swim: 1.0, ..Default::default() }),
             ];
             for (name, yaw, motion) in poses {
                 let (mut vertices, mut indices) = (ground.0.clone(), ground.1.clone());

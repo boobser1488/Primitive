@@ -526,6 +526,99 @@
 //!   The forelegs stand a fifth of a sixteenth behind the fleece's front,
 //!   which their own fronts used to share (`model_overlap`).
 //!
+//! ## animals/fox.bbmodel
+//!
+//! **The fox: a small dog's body on long black legs, and a brush half as
+//! long again as the body.** Built from the wolf's proportions and made
+//! slighter in everything but the tail, because at the distance a fox is
+//! seen from -- the edge of the firelight, a field away at dusk -- what
+//! tells it from a wolf is the colour and the brush.
+//!
+//! - **tail**: Carried out behind, level, from a joint at the root of the rump,
+//!   which the tip shares: the two swish as one piece (a part named
+//!   tail swings about its joint, `animal_model::secondary`).
+//!
+//! - **tail tip**: The white end of the brush, in the muzzle's cream -- the
+//!   horn's square is the antelope's (`only_the_antelope_wears_horns`).
+//!   Listed after the muzzle, which is the first snout-skinned part the
+//!   muzzle test finds.
+//!
+//! - **muzzle**: Long and narrow, cream with a black nose: the fox's face is
+//!   the pale part of it, and the sheet draws the cheeks cream too.
+//!
+//! - **ear left**: Tall and black-backed, the one part of a fox that shows over
+//!   long grass.
+//!
+//! ## animals/elk.bbmodel
+//!
+//! **The elk: the tallest thing that walks, humped at the withers, with
+//! a long drooping muzzle and a bell under the throat.** Two blocks at the
+//! shoulder-hump, legs a block long and pale -- the dark body over pale
+//! stockings is what an elk looks like standing in willow.
+//!
+//! - **hump**: Over the withers, where the neck muscles are; the line of the back
+//!   falls from it to the rump, which is the elk's outline and not the
+//!   deer's.
+//!
+//! - **muzzle**: Most of the head, and hanging down: a deer's snout is a nose, an
+//!   elk's is half its face.
+//!
+//! - **bell**: The flap of skin under the throat, hung from the head so it
+//!   nods and turns with it.
+//!
+//! - **antler left beam**: Standing up from the crown, four high: the tine sits on its top.
+//!
+//! - **antler left tine**: **The palm**: a broad plate carried along the head on top of
+//!   the beam. Long rather than wide, and not for looks -- two palms each
+//!   wider than the gap between the beams meet over the skull when the
+//!   skeleton is laid on its side, and fought over one plane there
+//!   (`no_two_bones_of_a_skeleton_fight_over_one_plane`). Named `tine` so
+//!   the skeleton keeps it as it keeps the deer's (`skeleton_parts`).
+//!
+//! ## animals/beaver.bbmodel
+//!
+//! **The beaver: a sack on short legs with a paddle behind it.**
+//!
+//! - **tail**: Flat, scaled and black, hung off the rump on its own joint. In the
+//!   fur's square of the sheet: in the tusk's it was a tusk to the
+//!   skeleton, which keeps whatever wears ivory.
+//!
+//! - **muzzle**: Short and blunt, with the two orange teeth drawn on the front of the
+//!   head above it -- the one colour on a beaver that is not brown.
+//!
+//! ## animals/duck.bbmodel
+//!
+//! **The duck: a mallard drake**, because it is the duck everybody can
+//! name -- the green head, the white collar, the blue in the wing.
+//!
+//! - **beak**: Flat and long, the silhouette that says duck and not grouse.
+//!   Named `beak`, as the grouse's and the gull's are, which is what the
+//!   skeleton looks for.
+//!
+//! - **neck**: Green with the white collar at its foot: the sheet's ear square,
+//!   which a duck has no ears to wear, and which carries no eye -- the head's
+//!   squares do, and a neck wearing one was a neck with eyes on it.
+//!
+//! - **wing left**: Spread in the air and folded on the water, the fowl's two pairs
+//!   (`Gait::Wing`, `Gait::Folded`).
+//!
+//! ## animals/frog.bbmodel
+//!
+//! **The frog: a flat body, a wide head, the eyes on top, and the hind legs
+//! folded under it** -- which are most of the animal.
+//!
+//! - **eye left**: On top of the head, gold with a black slot: the one part of a frog
+//!   that shows over the water. In the ear's square, because a frog has no
+//!   ears to wear it (`every_ear_is_an_ear`).
+//!
+//! - **haunch left**: Folded under the body, in diagonal pairs with the forelegs as every
+//!   four-legged model is grouped; the hop is the animation's
+//!   (`animal_model`'s `hop`), not the grouping's.
+//!
+//! - **muzzle**: A frog's snout is barely one, and it is here because every animal
+//!   answers to the muzzle test: a head with a face in front, and something
+//!   narrower ahead of it.
+//!
 //! ## furniture/bed_head.bbmodel
 //!
 //! The head half of a bed, written with its head toward -z and the seam

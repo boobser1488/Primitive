@@ -4859,6 +4859,20 @@ fn apart_on_the_ground(a: DVec3, b: DVec3) -> f64 {
     (a.x - b.x).hypot(a.z - b.z)
 }
 
+/// A picture taken from `from`, looking at `at`, with the player left where
+/// they stand: the camera is this client's alone and the server never hears
+/// of it, so a fox that will only come with the player twenty blocks off can
+/// still be photographed from four.
+fn photograph(s: &mut Scenario, from: DVec3, at: DVec3, name: &str) {
+    let kept = (s.camera.position, s.camera.yaw, s.camera.pitch);
+    let dir = (at - from).as_vec3().normalize();
+    s.camera.position = from;
+    s.camera.yaw = dir.z.atan2(dir.x);
+    s.camera.pitch = dir.y.asin();
+    s.shot(name);
+    (s.camera.position, s.camera.yaw, s.camera.pitch) = kept;
+}
+
 /// Where the server has an animal's feet, as a point.
 fn server_sees(s: &Scenario, id: primitive_shared::protocol::EntityId) -> Option<DVec3> {
     s.server().animal_position(id).map(|p| DVec3::new(f64::from(p.0), f64::from(p.1), f64::from(p.2)))
@@ -4917,15 +4931,26 @@ fn a_bear_eating_at_a_wild_hive_in_autumn_comes_at_a_player_who_walks_up() {
     // It finds the hive and eats: the comb goes down on this client's copy.
     let ate = s.until(30.0, |s| s.block(hive).is_some_and(|b| honey_in(b) < HIVE_FULL));
     assert!(ate, "a bear stood beside a full hive in autumn for half a minute and did not touch it");
-    s.look_at(DVec3::new(trunk as f64 - 2.0, (GROUND + 2) as f64, z as f64 + 0.5));
-    s.shot("animals/bear_at_the_hive");
+    let hive_side = DVec3::new(trunk as f64 - 1.5, (GROUND + 2) as f64, z as f64 + 0.5);
+    photograph(&mut s, hive_side + DVec3::new(-5.0, 1.5, 4.0), hive_side, "animals/bear_at_the_hive");
     // Walking up to look: somewhere inside its guard, and it comes.
+    //
+    // **Came is "reached the player or struck them", over the walk and the
+    // wait both.** A bear quick off the mark charges while the player is
+    // still walking up, and a charge that lands knocks the player back: a
+    // check that only started counting once the walk was over, and only by
+    // distance, missed exactly the bear that did its job best -- which is
+    // how this went red once, with the machine loaded and the bear early.
+    let struck = |s: &Scenario| s.heard_any(|m| matches!(m, ServerMessage::Health { current, max } if current < max));
+    let reached = |s: &Scenario| server_sees(s, bear).is_some_and(|at| apart_on_the_ground(at, s.feet()) < 2.6);
     s.face(0.0);
     s.hold(Action::Forward);
-    let near = s.until(10.0, |s| server_sees(s, bear).is_some_and(|at| apart_on_the_ground(at, s.feet()) < 8.0));
+    let near = s.until(10.0, |s| {
+        reached(s) || struck(s) || server_sees(s, bear).is_some_and(|at| apart_on_the_ground(at, s.feet()) < 8.0)
+    });
     s.release(Action::Forward);
     assert!(near, "the player never got near the bear");
-    let came = s.until(8.0, |s| server_sees(s, bear).is_some_and(|at| apart_on_the_ground(at, s.feet()) < 2.6));
+    let came = s.until(8.0, |s| reached(s) || struck(s));
     assert!(came, "a bear at its hive let a player stand eight blocks off");
 }
 
@@ -4971,15 +4996,21 @@ fn a_fox_takes_a_grouse_out_of_a_coop_left_open_and_carries_it_off() {
         s.server().animals_of(Species::Fowl).is_empty() && seen_animal(s, fox).is_some_and(|(_, _, tack)| tack & TACK_CARRYING != 0)
     });
     assert!(carried, "a fox at the open door of a coop with a grouse in it came away with nothing");
-    if let Some((at, _, _)) = seen_animal(&s, fox) {
-        s.look_at(at);
+    // ...and it comes out with it: a kill is eaten where the fox was going,
+    // not in the coop. Out means off the coop's floor by a stride -- where it
+    // goes then is round the back, away from the player watching, which is
+    // what a fox would do.
+    let out = |at: DVec3| {
+        let (x, z) = (at.x - cx as f64, at.z - cz as f64);
+        !(-1.0..6.0).contains(&x) || !(-1.0..6.0).contains(&z)
+    };
+    let gone = s.until(12.0, |s| server_sees(s, fox).is_none_or(out));
+    assert!(gone, "the fox stayed in the coop with the grouse in its jaws");
+    // The picture once it is out in the open, the grouse still in its jaws.
+    if let Some((at, _, tack)) = seen_animal(&s, fox) {
+        assert!(tack & TACK_CARRYING != 0, "the fox dropped the grouse with nobody near it");
+        photograph(&mut s, at + DVec3::new(-2.2, 1.0, 2.0), at, "animals/fox_carrying_the_grouse");
     }
-    s.shot("animals/fox_carrying_the_grouse");
-    // ...and it goes: a kill is eaten where the fox was going, not in the
-    // coop.
-    let coop = DVec3::new(cx as f64 + 2.5, 0.0, cz as f64 + 2.5);
-    let gone = s.until(10.0, |s| server_sees(s, fox).is_none_or(|at| apart_on_the_ground(at, coop) > 6.0));
-    assert!(gone, "the fox stayed at the coop with the grouse in its jaws");
 }
 
 #[test]
@@ -4996,9 +5027,8 @@ fn a_cow_elk_with_her_calf_comes_at_a_player_who_walks_up_on_it() {
     s.server().animal_gives_birth(cow).expect("the cow had no calf");
     s.seconds(1.0);
     if let Some((at, _, _)) = seen_animal(&s, cow) {
-        s.look_at(at);
+        photograph(&mut s, at + DVec3::new(-5.5, 1.2, 3.5), at, "animals/elk_cow_and_calf");
     }
-    s.shot("animals/elk_cow_and_calf");
     s.face(0.0);
     s.hold(Action::Forward);
     let came = s.until(12.0, |s| server_sees(s, cow).is_some_and(|at| apart_on_the_ground(at, s.feet()) < 2.8));
@@ -5021,12 +5051,15 @@ fn a_flock_of_ducks_goes_up_off_the_pond_when_a_player_comes_down_the_bank() {
         })
         .collect();
     assert_eq!(ducks.len(), 3, "the ducks would not come");
-    s.seconds(3.0);
+    // **Until they are all sitting on it**, not after a fixed wait: the world
+    // goes on round a scenario, its spawner puts a fox or a wolf where it
+    // likes, and a flock put up by one of those is doing its job -- and comes
+    // back down on its own pond (`woods::duck`), which is what this waits for.
     let on_the_water =
         |s: &Scenario| ducks.iter().all(|&d| seen_animal(s, d).is_some_and(|(at, _, _)| (at.y - f64::from(GROUND)).abs() < 1.6));
-    assert!(on_the_water(&s), "the ducks are not sitting on the pond");
-    s.look_at(DVec3::new(x0 as f64 + 17.5, GROUND as f64 + 1.0, z as f64 + 1.5));
-    s.shot("animals/ducks_on_the_pond");
+    assert!(s.until(15.0, on_the_water), "the ducks never settled on the pond");
+    let flock = DVec3::new(x0 as f64 + 17.5, GROUND as f64 + 0.8, z as f64 + 1.5);
+    photograph(&mut s, flock + DVec3::new(-4.0, 1.4, 2.5), flock, "animals/ducks_on_the_pond");
     s.face(0.0);
     s.hold(Action::Forward);
     let up = s.until(10.0, |s| ducks.iter().any(|&d| seen_animal(s, d).is_some_and(|(at, _, _)| at.y > f64::from(GROUND) + 3.0)));
@@ -5109,7 +5142,7 @@ fn the_woods_and_the_waters_five_stand_for_their_picture() {
         s.server().spawn_animal(species, spot).unwrap_or_else(|| panic!("no {} would come", species.name()));
     }
     s.seconds(0.6);
-    s.look_at(DVec3::new(x0 as f64 + 13.0, GROUND as f64 + 1.2, z as f64 + 1.5));
-    s.shot("animals/the_five");
+    let middle = DVec3::new(x0 as f64 + 13.5, GROUND as f64 + 1.1, z as f64 + 1.5);
+    photograph(&mut s, middle + DVec3::new(-6.5, 1.6, 1.0), middle, "animals/the_five");
     assert!(s.entities.len() >= 5, "only {} of the five were ever seen", s.entities.len());
 }

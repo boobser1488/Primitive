@@ -83,7 +83,7 @@ pub(super) fn write(scenario: &Scenario, dir: &Path, name: &str, specks: &[(glam
             // is drawn is the pose the snapshot says -- lying, head up, in the
             // water -- and not somewhere between two.
             if pos == centre {
-                let states: Vec<_> = scenario.entities.values().copied().collect();
+                let states = scenario.in_view.clone();
                 let mut drawn = crate::logic::entities::Entities::default();
                 drawn.apply_snapshot(1, &states);
                 drawn.tick(0.0);
