@@ -75,6 +75,31 @@ pub(super) fn write(scenario: &Scenario, dir: &Path, name: &str, specks: &[(glam
                 })
                 .collect();
             crate::engine::mesh::add_specks(&mut buffers, &mine);
+            // **...and the animals**, which the offscreen tool does not draw
+            // either: every entity this client has been told about, built by
+            // the game's own entity list around this chunk's corner and put in
+            // the chunk the camera stands in. Built fresh from the last states
+            // heard rather than from a list that has been easing them, so what
+            // is drawn is the pose the snapshot says -- lying, head up, in the
+            // water -- and not somewhere between two.
+            if pos == centre {
+                let states: Vec<_> = scenario.entities.values().copied().collect();
+                let mut drawn = crate::logic::entities::Entities::default();
+                drawn.apply_snapshot(1, &states);
+                drawn.tick(0.0);
+                let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+                drawn.build_meshes_into(
+                    glam::Vec3::new(ox as f32, 0.0, oz as f32),
+                    &layers,
+                    &light,
+                    Some(textures),
+                    &mut vertices,
+                    &mut indices,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                );
+                crate::engine::mesh::add_geometry(&mut buffers, &vertices, &indices);
+            }
             (pos, buffers)
         })
         .collect();

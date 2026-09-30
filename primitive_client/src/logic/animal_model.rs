@@ -1025,7 +1025,7 @@ fn fidget(age: f32, idle: f32) -> (f32, f32, f32) {
     match (cycle as i64).rem_euclid(3) {
         // The scratch: head round to the left flank and down, the left hind
         // foot up and working.
-        0 => (-1.0 * envelope, -0.35 * envelope, (0.5 + 0.35 * (into * 18.0).sin()) * envelope),
+        0 => (-envelope, -0.35 * envelope, (0.5 + 0.35 * (into * 18.0).sin()) * envelope),
         // The head shake: quick, and small.
         1 => (0.3 * (into * 22.0).sin() * envelope, 0.0, 0.0),
         // A look round, to one side and back.

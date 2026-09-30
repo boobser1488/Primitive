@@ -411,12 +411,21 @@ const FORAGE_BITE_SECONDS: f32 = 6.0;
 /// `FORAGE_SCAN_SECONDS` (`next_home_scan`, another bird's field for its own
 /// scan clock).
 fn forage(animal: &mut Animal, figures: &[Figure], world: &dyn BlockWorld, rng: &mut Rng, wild: &mut Wild<'_>) -> bool {
-    if wild.season != Season::Autumn || animal.angry_for > 0.0 || animal.target.is_some() {
+    // **Not "nobody in its head"**: a bear smells a person across a whole
+    // clearing (`Species::nose`) and keeps them as its `target` while it
+    // watches, and a bear that would not eat while anybody was downwind of it
+    // never ate. What stops the meal is a grudge, or somebody inside the guard
+    // (below).
+    if wild.season != Season::Autumn || animal.angry_for > 0.0 {
         return false;
     }
-    // A person in plain sight comes first: the shared mind decides about
-    // them, guarding and all. Food is for when nobody is about.
-    if figures.iter().any(|f| (f.at.0 - animal.at().0).hypot(f.at.2 - animal.at().2) <= GUARD_RANGE) && animal.guard_for <= 0.0 {
+    // **A person inside the guard comes first**, whether or not it is already
+    // eating: the shared mind decides about them (`think_hunter`), and a bear
+    // minding its food is quicker to come at them there (`provoke_range`).
+    // Asked only of the guard, so it could not be a bear that goes on eating
+    // with somebody standing at the hive -- which is what this said when it
+    // let a feeding bear keep the thought.
+    if figures.iter().any(|f| (f.at.0 - animal.at().0).hypot(f.at.2 - animal.at().2) <= GUARD_RANGE) {
         return false;
     }
     if animal.bound_for.is_none() && animal.next_home_scan <= 0.0 {
@@ -534,6 +543,13 @@ fn fox(
         .iter()
         .map(|f| (f.at, (f.at.0 - animal.at().0).hypot(f.at.2 - animal.at().2)))
         .min_by(|a, b| a.1.total_cmp(&b.1));
+    // **Where it last stood under the open sky**, kept in `home` -- which
+    // nothing else of a fox's uses. Under a roof it is the way it came in:
+    // see the carrying branch below.
+    let covered = roofed(world, animal.at());
+    if !covered {
+        animal.home = Some((animal.at().0, animal.at().2));
+    }
     // **Carrying: going home**, away from whoever is nearest and into cover,
     // at a trot. The kill is eaten where it was going; nothing of it comes
     // back unless somebody stops the fox on the way (`struck`).
@@ -548,11 +564,18 @@ fn fox(
         };
         animal.mind = Mind::Wander;
         animal.attitude = Attitude::Easy;
-        animal.wants_yaw = match cover_heading(world, animal, away) {
-            Some((cx, cz)) => (cz - animal.at().2).atan2(cx - animal.at().0),
-            None => open_heading(world, animal, away),
+        // **Out of a building the way it came in.** Animals here do not find
+        // paths -- one that could find its way out of a pit is one nobody can
+        // trap (the parent module's doc) -- and none of `way_out`'s sixteen
+        // headings threads a one-cell door from the back of a hen house. What
+        // a fox has instead is the last spot it stood on under the sky, which
+        // for a coop is the step outside its door, and a line to that goes
+        // through the door it came in by.
+        animal.wants_yaw = match animal.home.filter(|_| covered) {
+            Some((hx, hz)) => (hz - animal.at().2).atan2(hx - animal.at().0),
+            None => way_out(world, animal, away),
         };
-        animal.next_thought = rng.range(0.8, 1.6);
+        animal.next_thought = rng.range(0.6, 1.2);
         return true;
     }
     if animal.fed_for > 0.0 {
@@ -619,6 +642,36 @@ fn fox(
     }
     false
 }
+
+/// **Which way a fox with a kill goes**: the heading with the most open
+/// ground in front of it, with "away from whoever is watching" to settle the
+/// ties.
+///
+/// Two ways were tried first and both left the fox standing in a hen house
+/// with the bird in its jaws. *Straight away*, or the nearest cover that way,
+/// is the back wall -- stone is cover (`is_cover`). *A flight's weighing*
+/// (`escape_heading`) still pays most for away and treats a heading toward
+/// the person as a cost, and the door of a coop is on the side the person is
+/// watching from. What a fox leaving a coop actually does is go out the way
+/// it came in, which is the one way with any room in it: so room counts
+/// most, `WAY_OUT_REACH` blocks of it, and away is worth two.
+fn way_out(world: &dyn BlockWorld, animal: &Animal, away: f32) -> f32 {
+    const HEADINGS: usize = 16;
+    let mut best = (away, f32::MIN);
+    for i in 0..HEADINGS {
+        let yaw = i as f32 / HEADINGS as f32 * std::f32::consts::TAU;
+        let room = clear_run(world, animal, yaw, WAY_OUT_REACH);
+        let score = room + 2.0 * (yaw - away).cos();
+        if score > best.1 {
+            best = (yaw, score);
+        }
+    }
+    best.0
+}
+
+/// How far ahead `way_out` counts room, in blocks: past the door of a hen
+/// house and a stride into the open.
+const WAY_OUT_REACH: f32 = 8.0;
 
 /// What a fox did when the tick loop took the meat it had its jaws on off
 /// the ground: `Some` block if there was still something there.

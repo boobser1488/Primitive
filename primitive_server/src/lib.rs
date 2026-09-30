@@ -913,6 +913,14 @@ impl Server {
         self.ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).set_sleeper_dice(dice);
     }
 
+    /// A calf for `mother`, now, beside her: what a scenario about a cow elk
+    /// defending one does instead of waiting for the spring. The spawner's
+    /// own birth (`Animals::bear_young`), so the calf is linked to her as a
+    /// born one is.
+    pub fn animal_gives_birth(&self, mother: primitive_shared::protocol::EntityId) -> Option<primitive_shared::protocol::EntityId> {
+        self.ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).bear_young(mother)
+    }
+
     /// Where every animal of `species` is, for a scenario counting wolves.
     pub fn animals_of(&self, species: primitive_shared::animals::Species) -> Vec<(f32, f32, f32)> {
         self.ctx.animals.lock().unwrap_or_else(|e| e.into_inner()).positions_of(species)
@@ -939,6 +947,13 @@ impl Server {
     /// `WorldClock::set_world_days`): a scenario about a winter starts in one.
     pub fn set_world_days(&self, world_days: f32) {
         self.ctx.clock.set_world_days(world_days);
+    }
+
+    /// Sets the hour and leaves the day where it is (see
+    /// `WorldClock::set_time_of_day`): a scenario about a chorus at a marsh
+    /// starts in the dark.
+    pub fn set_time_of_day(&self, time_of_day: f32) {
+        self.ctx.clock.set_time_of_day(time_of_day);
     }
 
     /// Turns an animal to face `yaw`: a scenario stands a horse along its

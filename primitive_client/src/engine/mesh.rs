@@ -8586,6 +8586,29 @@ pub(crate) fn place_carried(
 /// group of faces that look no one way, where the models already are, so
 /// the renderer's per-direction culling never throws one away.
 #[cfg(test)]
+pub(crate) fn add_geometry(buffers: &mut MeshBuffers, vertices: &[Vertex], indices: &[u32]) {
+    // Whatever else a scenario's picture has to show that is not the world:
+    // the animals, built by the entity list itself around this chunk's
+    // corner (`scenario::shots`). Into the same group the specks go in, for
+    // the same reason.
+    let base = buffers.vertices.len() as u32;
+    buffers.vertices.extend_from_slice(vertices);
+    let extra: Vec<u32> = indices.iter().map(|i| i + base).collect();
+    let added = extra.len() as u32;
+    let into = buffers.solid_groups[0] as usize;
+    buffers.indices.splice(into..into, extra);
+    for end in &mut buffers.solid_groups {
+        *end += added;
+    }
+    buffers.solid_index_count += added;
+    buffers.leaf_end += added;
+    buffers.sprite_end += added;
+    buffers.top = vertices.iter().fold(buffers.top, |top, v| top.max(v.position[1]));
+}
+
+/// Boxes, for a scenario's photograph: see `add_geometry` for the other thing
+/// a picture can be handed.
+#[cfg(test)]
 pub(crate) fn add_specks(buffers: &mut MeshBuffers, specks: &[([f32; 3], f32, u32)]) {
     let mut extra = Vec::new();
     for &(centre, half, layer) in specks {

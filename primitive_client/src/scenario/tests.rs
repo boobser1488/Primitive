@@ -4824,3 +4824,292 @@ fn fish_near_the_top_of_a_pond_rise_where_they_are_and_nowhere_else() {
     s.shot_with("fishing/rises", &specks);
     no_corrections(&s);
 }
+
+// ---------------------------------------------------------------- the woods' and the water's animals
+//
+// What each of the five is for, played end to end against the real server:
+// a hare runs, a bear at its hive in autumn comes at whoever walks up, a fox
+// carries a grouse out of a coop somebody left open, a cow elk stands over
+// her calf, a flock of ducks goes up off the pond, a frog goes quiet, and a
+// beaver goes under. See `primitive_shared::animals`, the module doc's
+// "woods' and water's five", and the server's `logic::animals::woods`.
+
+/// The client's own copy of an animal, as the last snapshot said it: where
+/// it is, what its body is doing, and its tack byte.
+fn seen_animal(s: &Scenario, id: primitive_shared::protocol::EntityId) -> Option<(DVec3, primitive_shared::protocol::Attitude, u8)> {
+    match s.entities.get(&id) {
+        Some(primitive_shared::protocol::EntityState {
+            kind: primitive_shared::protocol::EntityKind::Animal { attitude, tack, .. },
+            x,
+            y,
+            z,
+            ..
+        }) => Some((DVec3::new(*x, *y, *z), *attitude, *tack)),
+        _ => None,
+    }
+}
+
+/// A pond cut into the field, two deep, `along` by `across` cells from
+/// `(x, z)`: its surface level with the grass round it.
+fn dig_a_pond(s: &mut Scenario, x: i32, z: i32, across: i32, along: i32) {
+    s.fill((x, GROUND - 1, z), (x + along - 1, GROUND, z + across - 1), t::BLOCK_WATER);
+}
+
+fn apart_on_the_ground(a: DVec3, b: DVec3) -> f64 {
+    (a.x - b.x).hypot(a.z - b.z)
+}
+
+/// Where the server has an animal's feet, as a point.
+fn server_sees(s: &Scenario, id: primitive_shared::protocol::EntityId) -> Option<DVec3> {
+    s.server().animal_position(id).map(|p| DVec3::new(f64::from(p.0), f64::from(p.1), f64::from(p.2)))
+}
+
+#[test]
+fn a_hare_the_player_walks_at_bolts_and_is_not_caught() {
+    use primitive_shared::animals::Species;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(0.5);
+    let feet = s.feet();
+    let hare = s
+        .server()
+        .spawn_animal(Species::Hare, (feet.x as f32 + 9.0, feet.y as f32, feet.z as f32))
+        .expect("no hare would come");
+    s.seconds(1.0);
+    s.face(0.0);
+    s.hold(Action::Forward);
+    let fled = s.until(8.0, |s| server_sees(s, hare).is_some_and(|at| apart_on_the_ground(at, s.feet()) > 16.0));
+    s.release(Action::Forward);
+    assert!(fled, "a hare nine blocks off let a walking player close on it for eight seconds");
+    no_corrections(&s);
+}
+
+#[test]
+fn a_bear_eating_at_a_wild_hive_in_autumn_comes_at_a_player_who_walks_up() {
+    use primitive_shared::animals::Species;
+    use primitive_shared::bees::{hive_holding, honey_in, HIVE_FULL};
+    let mut s = Scenario::new();
+    // Two days into the first autumn, at noon. Asked of the calendar rather
+    // than worked out from `SEASON_DAYS`, because the world does not open on
+    // the first day of spring (`season::WORLD_OPENS_ON_DAY`): two and a half
+    // seasons in was midwinter, and this bear slept through its scenario.
+    let autumn = (0..400)
+        .map(|q| q as f32 * 0.25)
+        .find(|&day| primitive_shared::season::Season::at(day) == primitive_shared::season::Season::Autumn)
+        .expect("a year with no autumn");
+    s.server().set_world_days(autumn + 2.5);
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    // A trunk twenty-two blocks off with a full hive on its near side.
+    let trunk = x0 + 22;
+    let hive = (trunk - 1, GROUND + 2, z);
+    s.build(&[
+        ((trunk, GROUND + 1, z), t::BLOCK_LOG),
+        ((trunk, GROUND + 2, z), t::BLOCK_LOG),
+        ((trunk, GROUND + 3, z), t::BLOCK_LOG),
+        (hive, hive_holding(HIVE_FULL)),
+    ]);
+    let bear = s
+        .server()
+        .spawn_animal(Species::Bear, (trunk as f32 - 4.5, (GROUND + 1) as f32, z as f32 + 0.5))
+        .expect("no bear would come");
+    // It finds the hive and eats: the comb goes down on this client's copy.
+    let ate = s.until(30.0, |s| s.block(hive).is_some_and(|b| honey_in(b) < HIVE_FULL));
+    assert!(ate, "a bear stood beside a full hive in autumn for half a minute and did not touch it");
+    s.look_at(DVec3::new(trunk as f64 - 2.0, (GROUND + 2) as f64, z as f64 + 0.5));
+    s.shot("animals/bear_at_the_hive");
+    // Walking up to look: somewhere inside its guard, and it comes.
+    s.face(0.0);
+    s.hold(Action::Forward);
+    let near = s.until(10.0, |s| server_sees(s, bear).is_some_and(|at| apart_on_the_ground(at, s.feet()) < 8.0));
+    s.release(Action::Forward);
+    assert!(near, "the player never got near the bear");
+    let came = s.until(8.0, |s| server_sees(s, bear).is_some_and(|at| apart_on_the_ground(at, s.feet()) < 2.6));
+    assert!(came, "a bear at its hive let a player stand eight blocks off");
+}
+
+#[test]
+fn a_fox_takes_a_grouse_out_of_a_coop_left_open_and_carries_it_off() {
+    use primitive_shared::animals::Species;
+    use primitive_shared::horse::TACK_CARRYING;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    // **A coop**: stone walls round a three-by-three floor, a roof two blocks
+    // up, and the door left open -- one cell wide, the full two high, on the
+    // side facing the fox. Low, because a hen house is: under a roof three up
+    // a grouse flutters at the rafters out of any fox's reach, and the first
+    // version of this scenario watched a fox pace under one for forty
+    // seconds.
+    let (cx, cz) = (x0 + 14, z - 2);
+    let mut cells = Vec::new();
+    for dx in 0..5 {
+        for dz in 0..5 {
+            let edge = dx == 0 || dx == 4 || dz == 0 || dz == 4;
+            for dy in 1..=2 {
+                let door = dx == 0 && dz == 2;
+                if edge && !door {
+                    cells.push(((cx + dx, GROUND + dy, cz + dz), t::BLOCK_COBBLESTONE));
+                }
+            }
+            cells.push(((cx + dx, GROUND + 3, cz + dz), t::BLOCK_PLANKS));
+        }
+    }
+    // The player well back, standing still: a fox does not come for a bird
+    // with somebody watching from close by.
+    s.stand_at(feet_on(cx - 24, cz + 2));
+    s.seconds(1.0);
+    s.build(&cells);
+    s.server()
+        .spawn_animal(Species::Fowl, (cx as f32 + 2.5, (GROUND + 1) as f32, cz as f32 + 2.5))
+        .expect("no grouse would come");
+    let fox = s
+        .server()
+        .spawn_animal(Species::Fox, (cx as f32 - 3.5, (GROUND + 1) as f32, cz as f32 + 2.5))
+        .expect("no fox would come");
+    let carried = s.until(40.0, |s| {
+        s.server().animals_of(Species::Fowl).is_empty() && seen_animal(s, fox).is_some_and(|(_, _, tack)| tack & TACK_CARRYING != 0)
+    });
+    assert!(carried, "a fox at the open door of a coop with a grouse in it came away with nothing");
+    if let Some((at, _, _)) = seen_animal(&s, fox) {
+        s.look_at(at);
+    }
+    s.shot("animals/fox_carrying_the_grouse");
+    // ...and it goes: a kill is eaten where the fox was going, not in the
+    // coop.
+    let coop = DVec3::new(cx as f64 + 2.5, 0.0, cz as f64 + 2.5);
+    let gone = s.until(10.0, |s| server_sees(s, fox).is_none_or(|at| apart_on_the_ground(at, coop) > 6.0));
+    assert!(gone, "the fox stayed at the coop with the grouse in its jaws");
+}
+
+#[test]
+fn a_cow_elk_with_her_calf_comes_at_a_player_who_walks_up_on_it() {
+    use primitive_shared::animals::Species;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(0.5);
+    let cow = s
+        .server()
+        .spawn_animal(Species::Elk, (x0 as f32 + 16.5, (GROUND + 1) as f32, z as f32 + 0.5))
+        .expect("no elk would come");
+    s.server().animal_gives_birth(cow).expect("the cow had no calf");
+    s.seconds(1.0);
+    if let Some((at, _, _)) = seen_animal(&s, cow) {
+        s.look_at(at);
+    }
+    s.shot("animals/elk_cow_and_calf");
+    s.face(0.0);
+    s.hold(Action::Forward);
+    let came = s.until(12.0, |s| server_sees(s, cow).is_some_and(|at| apart_on_the_ground(at, s.feet()) < 2.8));
+    s.release(Action::Forward);
+    assert!(came, "a cow elk let a player walk up on her calf");
+}
+
+#[test]
+fn a_flock_of_ducks_goes_up_off_the_pond_when_a_player_comes_down_the_bank() {
+    use primitive_shared::animals::Species;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(1.0);
+    dig_a_pond(&mut s, x0 + 12, z - 4, 9, 10);
+    let ducks: Vec<_> = (0..3)
+        .filter_map(|n| {
+            s.server()
+                .spawn_animal(Species::Duck, (x0 as f32 + 16.5 + n as f32, GROUND as f32 + 0.6, z as f32 + 0.5 + n as f32))
+        })
+        .collect();
+    assert_eq!(ducks.len(), 3, "the ducks would not come");
+    s.seconds(3.0);
+    let on_the_water =
+        |s: &Scenario| ducks.iter().all(|&d| seen_animal(s, d).is_some_and(|(at, _, _)| (at.y - f64::from(GROUND)).abs() < 1.6));
+    assert!(on_the_water(&s), "the ducks are not sitting on the pond");
+    s.look_at(DVec3::new(x0 as f64 + 17.5, GROUND as f64 + 1.0, z as f64 + 1.5));
+    s.shot("animals/ducks_on_the_pond");
+    s.face(0.0);
+    s.hold(Action::Forward);
+    let up = s.until(10.0, |s| ducks.iter().any(|&d| seen_animal(s, d).is_some_and(|(at, _, _)| at.y > f64::from(GROUND) + 3.0)));
+    s.release(Action::Forward);
+    assert!(up, "a player walked down to the pond and the ducks sat on");
+}
+
+#[test]
+fn a_frog_at_the_marsh_goes_quiet_when_a_player_walks_up_at_night() {
+    use primitive_shared::animals::Species;
+    use primitive_shared::protocol::Attitude;
+    let mut s = Scenario::new();
+    s.server().set_time_of_day(0.9);
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(1.0);
+    dig_a_pond(&mut s, x0 + 20, z - 3, 7, 6);
+    let frog = s
+        .server()
+        .spawn_animal(Species::Frog, (x0 as f32 + 19.5, (GROUND + 1) as f32, z as f32 + 0.5))
+        .expect("no frog would come");
+    s.seconds(3.0);
+    assert!(
+        seen_animal(&s, frog).is_some_and(|(_, attitude, _)| attitude != Attitude::Alert),
+        "a frog alone at night is quiet already"
+    );
+    s.face(0.0);
+    s.hold(Action::Forward);
+    let hushed = s.until(8.0, |s| seen_animal(s, frog).is_some_and(|(_, attitude, _)| attitude == Attitude::Alert));
+    s.release(Action::Forward);
+    assert!(hushed, "a frog went on singing with a player walking up to it");
+    let distance = seen_animal(&s, frog).map_or(0.0, |(at, _, _)| apart_on_the_ground(at, s.feet()));
+    assert!(distance > 5.0, "the frog only went quiet with the player {distance:.1} blocks off, on top of it");
+}
+
+#[test]
+fn a_beaver_in_its_pond_goes_under_when_a_player_comes_along_the_bank() {
+    use primitive_shared::animals::Species;
+    let mut s = Scenario::new();
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(1.0);
+    dig_a_pond(&mut s, x0 + 12, z - 4, 9, 10);
+    let beaver = s
+        .server()
+        .spawn_animal(Species::Beaver, (x0 as f32 + 17.5, GROUND as f32 + 0.3, z as f32 + 0.5))
+        .expect("no beaver would come");
+    s.seconds(2.0);
+    let surface = f64::from(GROUND) + 1.0;
+    s.face(0.0);
+    s.hold(Action::Forward);
+    let under = s.until(10.0, |s| seen_animal(s, beaver).is_some_and(|(at, _, _)| at.y < surface - 0.45));
+    s.release(Action::Forward);
+    assert!(under, "a beaver on its pond let a player walk up the bank to it");
+}
+
+#[test]
+fn the_woods_and_the_waters_five_stand_for_their_picture() {
+    use primitive_shared::animals::Species;
+    // **Not a test of anything but the drawing**: every new animal in one
+    // frame through the real renderer, standing about at noon by a pond, so
+    // the models, the coats and the poses can be looked at in the light they
+    // live in. Asserts only that the five came.
+    let mut s = Scenario::new();
+    s.server().set_time_of_day(0.45);
+    let (x0, z) = FIELD;
+    s.stand_at(feet_on(x0, z));
+    s.seconds(1.0);
+    dig_a_pond(&mut s, x0 + 14, z - 1, 6, 5);
+    let at = |dx: f32, dz: f32, y: f32| (x0 as f32 + dx, y, z as f32 + dz);
+    let ground = (GROUND + 1) as f32;
+    let five = [
+        (Species::Fox, at(10.5, -2.5, ground)),
+        (Species::Elk, at(12.5, 5.5, ground)),
+        (Species::Beaver, at(13.5, 1.5, ground)),
+        (Species::Duck, at(16.5, 1.5, GROUND as f32 + 0.6)),
+        (Species::Frog, at(13.5, -0.5, ground)),
+    ];
+    for (species, spot) in five {
+        s.server().spawn_animal(species, spot).unwrap_or_else(|| panic!("no {} would come", species.name()));
+    }
+    s.seconds(0.6);
+    s.look_at(DVec3::new(x0 as f64 + 13.0, GROUND as f64 + 1.2, z as f64 + 1.5));
+    s.shot("animals/the_five");
+    assert!(s.entities.len() >= 5, "only {} of the five were ever seen", s.entities.len());
+}
