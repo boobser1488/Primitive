@@ -185,16 +185,9 @@ pub fn step(
         }
     }
     particles.update(chunks, dt);
-    // ...and the butterflies, fireflies and frogs. The
-    // wolves the frogs fall quiet for are the ones the
-    // last snapshot brought -- behind a hill or in the
-    // dark, but not unknown to the client.
-    let dangers: Vec<glam::Vec3> = entities
-        .heard()
-        .into_iter()
-        .filter(|animal| animal.species.is_hostile())
-        .map(|animal| animal.at.as_vec3())
-        .collect();
+    // ...and the butterflies, fireflies, bees and bats. The
+    // frogs are the server's now, and the soundscape hears
+    // them off the entities (`soundscape::calls`).
     let country = |gx: i32, gy: i32, gz: i32| {
         (
             worldgen.biome_at(gx, gz),
@@ -208,7 +201,6 @@ pub fn step(
             player: player.position.as_vec3(),
             world_time: sky.world_days(),
             wet: weather.is_wet(),
-            dangers: &dangers,
             country: &country,
             light,
             lantern: inventory
