@@ -41,6 +41,7 @@ pub mod menu;
 pub mod names;
 pub mod recipe_book;
 pub mod sleep;
+pub mod split_bar;
 pub mod station_screen;
 pub mod snapshot;
 pub mod widgets;

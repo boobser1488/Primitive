@@ -31,6 +31,7 @@ use primitive_shared::protocol::{
     sanitize_chat, sanitize_username, BlockChange, ClientMessage, DisconnectReason, ServerMessage,
     PROTOCOL_VERSION,
 };
+use primitive_shared::inventory::Portion;
 use primitive_shared::types::{ChunkPos, Placement, BLOCK_AIR};
 
 use crate::logic::anticheat::{AntiCheat, Verdict};
@@ -1622,6 +1623,15 @@ async fn read_loop(
                 crate::send_inventory(&handle);
             }
 
+            ClientMessage::SplitSomeSlot { from, to, count } => {
+                {
+                    let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+                    state.inventory.split_some_into(from as usize, to as usize, u32::from(count));
+                    state.inventory_dirty = true;
+                }
+                crate::send_inventory(&handle);
+            }
+
             ClientMessage::QuickMoveSlot { slot } => {
                 {
                     let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1720,7 +1730,12 @@ async fn read_loop(
             }
 
             ClientMessage::ChestMove { from, to, half } => {
-                crate::chest_move(&ctx, &handle, from, to, half);
+                let portion = if half { Portion::Half } else { Portion::Whole };
+                crate::chest_move(&ctx, &handle, from, to, portion);
+            }
+
+            ClientMessage::ChestMoveSome { from, to, count } => {
+                crate::chest_move(&ctx, &handle, from, to, Portion::Exactly(u32::from(count)));
             }
 
             ClientMessage::ChestQuickMove { side, slot } => {
@@ -1872,7 +1887,12 @@ async fn read_loop(
             }
 
             ClientMessage::TakeFromJug { jug, to, half } => {
-                crate::take_from_jug(&handle, jug as usize, to as usize, half);
+                let portion = if half { Portion::Half } else { Portion::Whole };
+                crate::take_from_jug(&handle, jug as usize, to as usize, portion);
+            }
+
+            ClientMessage::TakeSomeFromJug { jug, to, count } => {
+                crate::take_from_jug(&handle, jug as usize, to as usize, Portion::Exactly(u32::from(count)));
             }
 
             ClientMessage::Respawn => {
@@ -1966,6 +1986,7 @@ fn barred_while_downed(msg: &ClientMessage) -> bool {
         | ClientMessage::SelectSlot { .. }
         | ClientMessage::MoveSlots { .. }
         | ClientMessage::SplitSlot { .. }
+        | ClientMessage::SplitSomeSlot { .. }
         | ClientMessage::QuickMoveSlot { .. }
         | ClientMessage::SortInventory
         | ClientMessage::SortChest
@@ -1974,6 +1995,7 @@ fn barred_while_downed(msg: &ClientMessage) -> bool {
         | ClientMessage::OpenChest { .. }
         | ClientMessage::CloseChest
         | ClientMessage::ChestMove { .. }
+        | ClientMessage::ChestMoveSome { .. }
         | ClientMessage::ChestQuickMove { .. }
         | ClientMessage::ChestMoveKind { .. }
         | ClientMessage::ChestBulkMove { .. }
@@ -1982,6 +2004,7 @@ fn barred_while_downed(msg: &ClientMessage) -> bool {
         | ClientMessage::PourIntoJug { .. }
         | ClientMessage::EmptyJug { .. }
         | ClientMessage::TakeFromJug { .. }
+        | ClientMessage::TakeSomeFromJug { .. }
         // What saves a body is put into it or onto it.
         | ClientMessage::Eat { .. }
         | ClientMessage::TreatInjury { .. }

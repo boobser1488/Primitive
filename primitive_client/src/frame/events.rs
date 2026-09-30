@@ -1580,6 +1580,11 @@ pub fn on_mouse_button(
                         from: from as u8,
                         to: to as u8,
                     },
+                    Intent::SplitSome { from, to, count } => ClientMessage::SplitSomeSlot {
+                        from: from as u8,
+                        to: to as u8,
+                        count: count.min(u32::from(u16::MAX)) as u16,
+                    },
                     Intent::QuickMove(slot) => {
                         ClientMessage::QuickMoveSlot { slot: slot as u8 }
                     }

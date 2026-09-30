@@ -766,6 +766,48 @@ fn a_chest_lid_rises_when_it_is_opened_and_falls_when_it_is_shut() {
     no_corrections(&s);
 }
 
+/// **"На телефоне невозможно разделить слот на части."** A player on glass
+/// opens a chest, picks up twelve stones with a tap, chooses five on the bar
+/// the stack comes with -- a half and one less -- puts them in a square of
+/// the chest, and sends the seven left straight across with the bar's arrow.
+/// Taps and nothing else: no right button, no shift, no rested finger --
+/// through the real screen, the real messages and the real server.
+#[test]
+fn on_glass_a_player_splits_a_stack_into_a_chest_and_sends_the_rest_across() {
+    use crate::ui::split_bar::Choice;
+    crate::ui::widgets::with_touch(true, || {
+        let mut s = Scenario::new();
+        let (x0, z) = FIELD;
+        let chest = (x0 + 2, GROUND + 1, z);
+        s.stand_at(feet_on(x0, z));
+        s.build(&[(chest, t::BLOCK_CHEST)]);
+        s.give(t::BLOCK_STONE, 12);
+        s.chest_screen.set_touch(true);
+        s.look_at_face(chest, (-1, 0, 0));
+        s.use_aimed();
+        assert!(s.until(3.0, |s| s.chest_screen.is_open()), "the chest never opened");
+
+        let stones = pack_square(&s, t::BLOCK_STONE);
+        s.chest_click(stones);
+        assert!(s.chest_screen.held().is_some(), "the tap did not pick the stones up");
+        for choice in [Choice::Half, Choice::Less] {
+            let button = s.chest_screen.split_bar_button(&s.inventory, choice).expect("the stack came with no bar");
+            s.chest_click(centre(button));
+        }
+        let square = crate::ui::chest_screen::slot_rect(primitive_shared::protocol::Side::Chest, 5);
+        s.chest_click(centre(square));
+        let five = s.until(3.0, |s| last_contents(s).count_in(5) == 5 && s.inventory.count(t::BLOCK_STONE) == 7);
+        assert!(five, "five stones never reached the chest: {:?}", s.heard.iter().rev().take(3).collect::<Vec<_>>());
+        assert!(s.chest_screen.held().is_some(), "the seven left did not stay in hand");
+
+        let across = s.chest_screen.split_bar_button(&s.inventory, Choice::Across { up: true }).expect("no arrow on the bar");
+        s.chest_click(centre(across));
+        let all = s.until(3.0, |s| last_contents(s).count(t::BLOCK_STONE) == 12 && s.inventory.count(t::BLOCK_STONE) == 0);
+        assert!(all, "the rest never went across: {} left in the pack", s.inventory.count(t::BLOCK_STONE));
+        no_corrections(&s);
+    });
+}
+
 #[test]
 fn an_anvil_is_opened_a_run_is_played_and_the_nails_come_out_of_it() {
     use primitive_shared::minigame::{self, Job};

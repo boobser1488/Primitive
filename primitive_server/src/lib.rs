@@ -8051,7 +8051,7 @@ pub(crate) fn take_from_jug(
     handle: &Arc<players::PlayerHandle>,
     jug: usize,
     to: usize,
-    half: bool,
+    portion: primitive_shared::inventory::Portion,
 ) {
     use primitive_shared::inventory::{filled_jug, jug_contents, Stack, SLOTS};
     let taken = {
@@ -8071,8 +8071,12 @@ pub(crate) fn take_from_jug(
             Some(_) => return,
         }
         // Rounded up, the rule every other half gesture follows: half of
-        // one seed is the seed.
-        let wanted = if half { count.div_ceil(2) } else { count };
+        // one seed is the seed. A said number is never more than is in the
+        // jug. Both are `Portion::of`.
+        let wanted = portion.of(count);
+        if wanted == 0 {
+            return;
+        }
         let left = state.inventory.put_in_slot(to, Stack::new(goods, wanted));
         let moved = wanted - left.map_or(0, |left| left.count);
         if moved == 0 {
@@ -10939,12 +10943,12 @@ pub(crate) fn chest_move(
     handle: &Arc<players::PlayerHandle>,
     from: (Side, u8),
     to: (Side, u8),
-    half: bool,
+    portion: primitive_shared::inventory::Portion,
 ) {
     // **The saddlebags first**: a player with a horse's bags open is at the
     // bags, and has no chest open (`horses::open_bags` shuts it).
     if horses::with_open_bags(ctx, handle, |pack, bags| {
-        container_move(pack, bags, Roles::Bags, (from.0, from.1 as usize), (to.0, to.1 as usize), half)
+        container_move(pack, bags, Roles::Bags, (from.0, from.1 as usize), (to.0, to.1 as usize), portion)
     })
     .is_some()
     {
@@ -10979,7 +10983,7 @@ pub(crate) fn chest_move(
                 roles,
                 (from_side, from_slot),
                 (to_side, to_slot),
-                half,
+                portion,
             )
         })
     };
@@ -11002,9 +11006,16 @@ fn container_move(
     roles: Roles,
     (from_side, from_slot): (Side, usize),
     (to_side, to_slot): (Side, usize),
-    half: bool,
+    portion: primitive_shared::inventory::Portion,
 ) -> bool {
-    use primitive_shared::inventory::{move_between, split_between};
+    use primitive_shared::inventory::{move_between, split_some_between, Portion};
+    // How many a part-move carries, out of the stack it is taken from.
+    // `None` is the whole stack, which is not a split: it merges, and it
+    // swaps with a different block in the way, where a part refuses one.
+    let part = |count: u32| match portion {
+        Portion::Whole => None,
+        _ => Some(portion.of(count)),
+    };
     let allowed = |slot: usize, block: primitive_shared::types::BlockId| roles.accepts(slot, block);
     // **A swap is two moves, and the second one goes into the container
     // too.** Only the first used to be asked: a player lifting supper out
@@ -11027,21 +11038,18 @@ fn container_move(
     match (from_side, to_side) {
         // Within one inventory: the pack's own rules, which
         // already know how to merge, swap and halve.
-        (Side::Pack, Side::Pack) => {
-            if half {
-                pack.split_into(from_slot, to_slot)
-            } else {
-                pack.move_or_merge(from_slot, to_slot)
-            }
-        }
+        (Side::Pack, Side::Pack) => match part(pack.count_in(from_slot)) {
+            Some(wanted) => pack.split_some_into(from_slot, to_slot, wanted),
+            None => pack.move_or_merge(from_slot, to_slot),
+        },
         (Side::Chest, Side::Chest) => {
             // Rearranging inside the container obeys the same
             // rule: sliding ore from an input slot into the
             // output tray is the same jam by another route.
             match chest.block_in(from_slot) {
                 Some(block) if allowed(to_slot, block) => {
-                    if half {
-                        chest.split_into(from_slot, to_slot)
+                    if let Some(wanted) = part(chest.count_in(from_slot)) {
+                        chest.split_some_into(from_slot, to_slot, wanted)
                     } else if swap_back_allowed(from_slot, block, chest.block_in(to_slot)) {
                         chest.move_or_merge(from_slot, to_slot)
                     } else {
@@ -11067,18 +11075,18 @@ fn container_move(
             // takes. Read before the move, because after it the
             // stack is somewhere else.
             match pack.block_in(from_slot) {
-                Some(block) if allowed(to_slot, block) => {
-                    if half {
-                        split_between(pack, from_slot, chest, to_slot)
-                    } else {
-                        move_between(pack, from_slot, chest, to_slot)
-                    }
-                }
+                Some(block) if allowed(to_slot, block) => match part(pack.count_in(from_slot)) {
+                    Some(wanted) => split_some_between(pack, from_slot, chest, to_slot, wanted),
+                    None => move_between(pack, from_slot, chest, to_slot),
+                },
                 _ => false,
             }
         }
         (Side::Chest, Side::Pack) => match chest.block_in(from_slot) {
-            Some(_) if half => split_between(chest, from_slot, pack, to_slot),
+            Some(_) if portion != Portion::Whole => {
+                let wanted = portion.of(chest.count_in(from_slot));
+                split_some_between(chest, from_slot, pack, to_slot, wanted)
+            }
             Some(block) if swap_back_allowed(from_slot, block, pack.block_in(to_slot)) => {
                 move_between(chest, from_slot, pack, to_slot)
             }
@@ -16748,7 +16756,7 @@ mod container_gesture_tests {
         fire.put_in_slot(OUTPUT_SLOTS.start, Stack::new(BLOCK_COOKED_MEAT, 2));
         let mut pack = Inventory::new();
         pack.put_in_slot(0, Stack::new(BLOCK_STICK, 5));
-        container_move(&mut pack, &mut fire, CAMPFIRE, (Side::Chest, OUTPUT_SLOTS.start), (Side::Pack, 0), false);
+        container_move(&mut pack, &mut fire, CAMPFIRE, (Side::Chest, OUTPUT_SLOTS.start), (Side::Pack, 0), primitive_shared::inventory::Portion::Whole);
         assert_ne!(
             fire.block_in(OUTPUT_SLOTS.start),
             Some(BLOCK_STICK),
@@ -16763,12 +16771,12 @@ mod container_gesture_tests {
         fire.put_in_slot(FUEL_SLOT, Stack::new(BLOCK_COAL, 3));
         fire.put_in_slot(INPUT_SLOTS.start, Stack::new(BLOCK_IRON_ORE, 2));
         let mut pack = Inventory::new();
-        container_move(&mut pack, &mut fire, CAMPFIRE, (Side::Chest, FUEL_SLOT), (Side::Chest, INPUT_SLOTS.start), false);
+        container_move(&mut pack, &mut fire, CAMPFIRE, (Side::Chest, FUEL_SLOT), (Side::Chest, INPUT_SLOTS.start), primitive_shared::inventory::Portion::Whole);
         assert_ne!(fire.block_in(FUEL_SLOT), Some(BLOCK_IRON_ORE), "ore was swapped into the fuel slot");
         // ...while a swap whose both halves are welcome still happens.
         fire.take_slot(INPUT_SLOTS.start);
         fire.put_in_slot(INPUT_SLOTS.start, Stack::new(BLOCK_LOG, 2));
-        assert!(container_move(&mut pack, &mut fire, CAMPFIRE, (Side::Chest, FUEL_SLOT), (Side::Chest, INPUT_SLOTS.start), false));
+        assert!(container_move(&mut pack, &mut fire, CAMPFIRE, (Side::Chest, FUEL_SLOT), (Side::Chest, INPUT_SLOTS.start), primitive_shared::inventory::Portion::Whole));
         assert_eq!(fire.block_in(FUEL_SLOT), Some(BLOCK_LOG));
     }
 
@@ -16779,7 +16787,7 @@ mod container_gesture_tests {
         rack.put_in_slot(LEATHER_SLOT, Stack::new(BLOCK_LEATHER, 1));
         let mut pack = Inventory::new();
         pack.put_in_slot(3, Stack::new(BLOCK_STONE, 4));
-        container_move(&mut pack, &mut rack, Roles::Rack(primitive_shared::rack::Trade::Skins), (Side::Chest, LEATHER_SLOT), (Side::Pack, 3), false);
+        container_move(&mut pack, &mut rack, Roles::Rack(primitive_shared::rack::Trade::Skins), (Side::Chest, LEATHER_SLOT), (Side::Pack, 3), primitive_shared::inventory::Portion::Whole);
         assert_ne!(rack.block_in(LEATHER_SLOT), Some(BLOCK_STONE), "a stone was hung on the rack");
     }
 
@@ -16789,7 +16797,7 @@ mod container_gesture_tests {
         chest.put_in_slot(0, Stack::new(BLOCK_STONE, 4));
         let mut pack = Inventory::new();
         pack.put_in_slot(0, Stack::new(BLOCK_DIRT, 7));
-        assert!(container_move(&mut pack, &mut chest, Roles::Chest, (Side::Chest, 0), (Side::Pack, 0), false));
+        assert!(container_move(&mut pack, &mut chest, Roles::Chest, (Side::Chest, 0), (Side::Pack, 0), primitive_shared::inventory::Portion::Whole));
         assert_eq!(pack.block_in(0), Some(BLOCK_STONE));
         assert_eq!(chest.block_in(0), Some(BLOCK_DIRT));
     }
@@ -16803,20 +16811,43 @@ mod container_gesture_tests {
         let mut long = Inventory::body(true);
         let mut pack = Inventory::new();
         pack.put_in_slot(0, Stack::new(BLOCK_STONE, 4));
-        assert!(!container_move(&mut pack, &mut long, Roles::Chest, (Side::Pack, 0), (Side::Chest, 45), false));
+        assert!(!container_move(&mut pack, &mut long, Roles::Chest, (Side::Pack, 0), (Side::Chest, 45), primitive_shared::inventory::Portion::Whole));
         assert_eq!(long.block_in(45), None, "a chest took a square it does not have");
 
-        assert!(container_move(&mut pack, &mut long, Roles::Body, (Side::Pack, 0), (Side::Chest, 45), false));
+        assert!(container_move(&mut pack, &mut long, Roles::Body, (Side::Pack, 0), (Side::Chest, 45), primitive_shared::inventory::Portion::Whole));
         assert_eq!(long.block_in(45), Some(BLOCK_STONE));
         // ...and back out of it.
-        assert!(container_move(&mut pack, &mut long, Roles::Body, (Side::Chest, 45), (Side::Pack, 2), false));
+        assert!(container_move(&mut pack, &mut long, Roles::Body, (Side::Chest, 45), (Side::Pack, 2), primitive_shared::inventory::Portion::Whole));
         assert_eq!(pack.block_in(2), Some(BLOCK_STONE));
 
         // A body without a compartment has no square forty-five, and the
         // stone stays in the hand it was in.
         let mut bare = Inventory::body(false);
-        assert!(!container_move(&mut pack, &mut bare, Roles::Body, (Side::Pack, 2), (Side::Chest, 45), false));
+        assert!(!container_move(&mut pack, &mut bare, Roles::Body, (Side::Pack, 2), (Side::Chest, 45), primitive_shared::inventory::Portion::Whole));
         assert_eq!(pack.block_in(2), Some(BLOCK_STONE), "the stone went into a square that is not there");
+    }
+
+    /// **A finger's number crosses a container exactly, both ways and
+    /// within it**, and refuses a different block in the way rather than
+    /// swapping -- the half's rule, because it is the half with the number
+    /// said.
+    #[test]
+    fn a_said_number_moves_exactly_that_many_in_and_out_of_a_chest() {
+        use primitive_shared::inventory::Portion;
+        let mut chest = Inventory::new();
+        let mut pack = Inventory::new();
+        pack.put_in_slot(0, Stack::new(BLOCK_STONE, 20));
+        assert!(container_move(&mut pack, &mut chest, Roles::Chest, (Side::Pack, 0), (Side::Chest, 3), Portion::Exactly(7)));
+        assert_eq!((pack.count_in(0), chest.count_in(3)), (13, 7));
+        assert!(container_move(&mut pack, &mut chest, Roles::Chest, (Side::Chest, 3), (Side::Pack, 9), Portion::Exactly(2)));
+        assert_eq!((pack.count_in(9), chest.count_in(3)), (2, 5));
+        assert!(container_move(&mut pack, &mut chest, Roles::Chest, (Side::Chest, 3), (Side::Chest, 4), Portion::Exactly(1)));
+        assert_eq!((chest.count_in(3), chest.count_in(4)), (4, 1));
+        assert!(container_move(&mut pack, &mut chest, Roles::Chest, (Side::Pack, 0), (Side::Pack, 1), Portion::Exactly(3)));
+        assert_eq!((pack.count_in(0), pack.count_in(1)), (10, 3));
+        chest.put_in_slot(8, Stack::new(BLOCK_DIRT, 1));
+        assert!(!container_move(&mut pack, &mut chest, Roles::Chest, (Side::Pack, 0), (Side::Chest, 8), Portion::Exactly(3)));
+        assert_eq!(pack.count(BLOCK_STONE) + chest.count(BLOCK_STONE), 20, "stone was made or lost");
     }
 }
 
@@ -18421,8 +18452,8 @@ mod vessel_tests {
         open_chest(&ctx, &handle, AT);
         assert_eq!(handle.state.lock().unwrap().open_chest, Some(AT), "the jug did not open");
 
-        chest_move(&ctx, &handle, (Side::Pack, 0), (Side::Chest, 0), false);
-        chest_move(&ctx, &handle, (Side::Pack, 1), (Side::Chest, 0), false);
+        chest_move(&ctx, &handle, (Side::Pack, 0), (Side::Chest, 0), primitive_shared::inventory::Portion::Whole);
+        chest_move(&ctx, &handle, (Side::Pack, 1), (Side::Chest, 0), primitive_shared::inventory::Portion::Whole);
 
         assert_eq!(
             vessel_store_contents(&ctx.chests.lock().unwrap().contents(AT)),
@@ -18442,7 +18473,7 @@ mod vessel_tests {
             state.inventory.put_in_slot(6, Stack::new(BLOCK_STONE, 1));
         }
 
-        take_from_jug(&handle, 0, 5, true);
+        take_from_jug(&handle, 0, 5, primitive_shared::inventory::Portion::Half);
         {
             let state = handle.state.lock().unwrap();
             assert_eq!(state.inventory.slots()[5], Some(Stack::new(BLOCK_GRAIN, 5)), "half of nine is five");
@@ -18451,13 +18482,30 @@ mod vessel_tests {
 
         // Onto a square holding something else: that would be swapping the
         // stone into the jug, and nothing happens.
-        take_from_jug(&handle, 0, 6, false);
+        take_from_jug(&handle, 0, 6, primitive_shared::inventory::Portion::Whole);
         // ...and into the jug's own square, which is no gesture either.
-        take_from_jug(&handle, 0, 0, false);
+        take_from_jug(&handle, 0, 0, primitive_shared::inventory::Portion::Whole);
         let state = handle.state.lock().unwrap();
         assert_eq!(jug_contents(&state.inventory.slots()[0].unwrap()), Some((BLOCK_GRAIN, 4)));
         assert_eq!(state.inventory.count(BLOCK_GRAIN), 5, "grain was made or lost");
         assert_eq!(state.inventory.count(BLOCK_STONE), 1);
+    }
+
+    #[test]
+    fn a_said_number_out_of_a_jug_is_that_many_and_never_more_than_it_holds() {
+        use primitive_shared::inventory::Portion;
+        let handle = a_player();
+        handle.state.lock().unwrap().inventory.put_in_slot(0, filled_jug(BLOCK_GRAIN, 9));
+        take_from_jug(&handle, 0, 5, Portion::Exactly(2));
+        {
+            let state = handle.state.lock().unwrap();
+            assert_eq!(state.inventory.slots()[5], Some(Stack::new(BLOCK_GRAIN, 2)));
+            assert_eq!(jug_contents(&state.inventory.slots()[0].unwrap()), Some((BLOCK_GRAIN, 7)));
+        }
+        take_from_jug(&handle, 0, 5, Portion::Exactly(50));
+        let state = handle.state.lock().unwrap();
+        assert_eq!(state.inventory.count(BLOCK_GRAIN), 9, "grain was made or lost");
+        assert_eq!(state.inventory.count_in(5), 9, "the rest of the jug did not follow");
     }
 }
 
@@ -21506,9 +21554,9 @@ mod stall_tests {
         stranger.state.lock().unwrap().inventory.add(BLOCK_STONE, 5);
         open_chest(&ctx, &stranger, STALL);
         stall_offer(&ctx, &stranger, 0, Some(Offer { give_count: 1, ..FLINT_FOR_HIDE }));
-        chest_move(&ctx, &stranger, (Side::Chest, 0), (Side::Pack, 5), false);
+        chest_move(&ctx, &stranger, (Side::Chest, 0), (Side::Pack, 5), primitive_shared::inventory::Portion::Whole);
         chest_bulk_move(&ctx, &stranger, false);
-        chest_move(&ctx, &stranger, (Side::Pack, 0), (Side::Chest, 3), false);
+        chest_move(&ctx, &stranger, (Side::Pack, 0), (Side::Chest, 3), primitive_shared::inventory::Portion::Whole);
         assert_eq!(pack_count(&stranger, BLOCK_FLINT), 0, "a stranger took goods off the counter");
         assert_eq!(pack_count(&stranger, BLOCK_STONE), 5, "a stranger stocked somebody else's stall");
         assert_eq!(ctx.stalls.lock().unwrap().get(STALL).unwrap().offer(0), Some(FLINT_FOR_HIDE));
@@ -21522,9 +21570,9 @@ mod stall_tests {
         let owner = stocked(&ctx, 0);
         owner.state.lock().unwrap().inventory.add(BLOCK_STONE, 5);
         let from = owner.state.lock().unwrap().inventory.slots().iter().position(|s| s.is_some_and(|s| s.block == BLOCK_STONE)).unwrap();
-        chest_move(&ctx, &owner, (Side::Pack, from as u8), (Side::Chest, TAKINGS.start as u8), false);
+        chest_move(&ctx, &owner, (Side::Pack, from as u8), (Side::Chest, TAKINGS.start as u8), primitive_shared::inventory::Portion::Whole);
         assert_eq!(pack_count(&owner, BLOCK_STONE), 5, "the till took something by hand");
-        chest_move(&ctx, &owner, (Side::Pack, from as u8), (Side::Chest, STOCK.start as u8), false);
+        chest_move(&ctx, &owner, (Side::Pack, from as u8), (Side::Chest, STOCK.start as u8), primitive_shared::inventory::Portion::Whole);
         assert_eq!(ctx.chests.lock().unwrap().contents(STALL).count_within(STOCK, BLOCK_STONE), 5);
     }
 

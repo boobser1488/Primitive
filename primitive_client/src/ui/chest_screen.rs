@@ -193,6 +193,13 @@ pub enum Intent {
         to: (Side, usize),
         half: bool,
     },
+    /// `count` of `from` onto `to`: the split a finger chooses the number
+    /// of (`ui::split_bar`). `Move` with `half` is the right button's.
+    MoveSome {
+        from: (Side, usize),
+        to: (Side, usize),
+        count: u32,
+    },
     /// Straight across to the other side, wherever it fits.
     QuickMove(Side, usize),
     /// Every stack of what is in this slot, across: the ctrl-click.
@@ -433,6 +440,12 @@ pub struct ChestScreen {
     /// "four flint for one of nothing" -- which a buyer's screen would draw
     /// as an offer, for the half a minute the owner was looking for a hide.
     drafts: [(Half, Half); primitive_shared::stall::OFFERS],
+    /// Whether presses come from a finger: the stack in hand then comes
+    /// with `ui::split_bar`. See `InventoryScreen::set_touch`.
+    touch: bool,
+    /// How much of the stack in hand the next square receives; the whole
+    /// of it unless a finger's bar said otherwise. See the pack's own.
+    portion: primitive_shared::inventory::Portion,
 }
 
 impl Default for ChestScreen {
@@ -459,6 +472,97 @@ impl ChestScreen {
             rucksack_page: false,
             stall: None,
             drafts: Default::default(),
+            touch: false,
+            portion: primitive_shared::inventory::Portion::Whole,
+        }
+    }
+
+    /// Whether presses on this screen come from a finger.
+    ///
+    /// On glass a stack picked up comes with the row of buttons that
+    /// split it, send it across or choose how many (`ui::split_bar`),
+    /// because the right button and the shift key that do those with a
+    /// mouse are not on a phone. Off glass nothing changes.
+    pub fn set_touch(&mut self, touch: bool) {
+        self.touch = touch;
+    }
+
+    /// The rectangle a square is drawn in, on this screen as it is laid
+    /// out: [`slot_at`] asked the other way round.
+    fn square_rect(&self, (side, slot): (Side, usize)) -> Option<Rect> {
+        let layout = self.layout();
+        match (side, layout) {
+            (Side::Pack, _) => (slot < side_slots(Side::Pack)).then(|| chest_slot_rect(Side::Pack, slot)),
+            (Side::Chest, Layout::Hearth) => hearth_slot_rect(slot),
+            (Side::Chest, Layout::Rack) => rack_slot_rect(slot),
+            (Side::Chest, Layout::Vessel) => vessel_slot_rect(slot),
+            (Side::Chest, Layout::Stall) => stall_slot_rect(slot),
+            (Side::Chest, _) => (0..side_slots(Side::Chest))
+                .find(|&place| chest_square(layout, place) == Some(slot))
+                .map(|place| chest_slot_rect(Side::Chest, place)),
+        }
+    }
+
+    /// The bar the stack in a finger's hand comes with, if there is one:
+    /// beside the square it came from, inside the panel.
+    fn split_bar(&self, pack: &Inventory) -> Option<crate::ui::split_bar::Bar> {
+        use crate::ui::split_bar::{Bar, Choice};
+        if !self.touch {
+            return None;
+        }
+        let held = self.held?;
+        let anchor = self.square_rect(held)?;
+        let panel = panel_rect(self.layout());
+        let inside = Rect::new(
+            panel.x0 + widgets::PANEL_BORDER,
+            panel.y0 + widgets::PANEL_BORDER,
+            panel.x1 - widgets::PANEL_BORDER,
+            panel.y1 - widgets::PANEL_BORDER,
+        );
+        // The shift-click's way: the container is drawn over the pack, so
+        // out of the pack is up the screen and out of the container down.
+        let across = [Choice::Across { up: held.0 == Side::Pack }];
+        let count = match held.0 {
+            Side::Pack => pack.count_in(held.1),
+            Side::Chest => self.contents.count_in(held.1),
+        };
+        // One of anything has no part to choose: see the pack's own bar.
+        if count <= 1 {
+            return Some(Bar::lay_out_row(anchor, inside, &across));
+        }
+        Some(Bar::lay_out(anchor, inside, &across))
+    }
+
+    /// Where a button of the finger's bar is drawn, for a script that
+    /// presses it the way a thumb would: the scenarios.
+    #[cfg(test)]
+    pub fn split_bar_button(&self, pack: &Inventory, choice: crate::ui::split_bar::Choice) -> Option<Rect> {
+        self.split_bar(pack)?
+            .buttons
+            .into_iter()
+            .find(|(c, _)| *c == choice)
+            .map(|(_, rect)| rect)
+    }
+
+    /// A tap on a finger's bar: see `InventoryScreen::on_split_bar`.
+    fn on_split_bar(&mut self, pack: &Inventory, choice: Option<crate::ui::split_bar::Choice>) -> Option<Intent> {
+        use crate::ui::split_bar::Choice;
+        let (side, slot) = self.held?;
+        let count = match side {
+            Side::Pack => pack.count_in(slot),
+            Side::Chest => self.contents.count_in(slot),
+        };
+        match choice? {
+            Choice::Across { .. } => {
+                self.release();
+                Some(Intent::QuickMove(side, slot))
+            }
+            amount => {
+                if let Some(portion) = amount.portion(self.portion, count) {
+                    self.portion = portion;
+                }
+                None
+            }
         }
     }
 
@@ -762,6 +866,7 @@ impl ChestScreen {
     fn release(&mut self) {
         self.held = None;
         self.held_block = None;
+        self.portion = primitive_shared::inventory::Portion::Whole;
     }
 
     pub fn set_cursor(&mut self, cursor: Option<(f32, f32)>) {
@@ -804,6 +909,14 @@ impl ChestScreen {
 
     /// Handles a click. `quick` is the shift modifier, `every` the ctrl.
     pub fn click(&mut self, pack: &Inventory, button: Button, quick: bool, every: bool) -> Option<Intent> {
+        // **A finger's bar before everything**, the bulk buttons included:
+        // it is drawn over whatever is next to the square the stack came
+        // from, and between the grids that is TAKE ALL and STORE ALL.
+        if let (Some(cursor), Some(bar)) = (self.cursor, self.split_bar(pack)) {
+            if bar.covers(cursor) {
+                return self.on_split_bar(pack, bar.at(cursor));
+            }
+        }
         // **The bulk buttons are hit-tested only where they are drawn.**
         // They are a chest's, and the test used to be unconditional: at
         // a hearth or a rack -- neither of which draws them -- the two
@@ -897,6 +1010,13 @@ impl ChestScreen {
             // hands has nowhere to put half of anything.
             (Button::Right, None) => None,
             (Button::Left, Some(from)) => {
+                // Part of it, when a finger's bar said so, keeping the rest
+                // in hand: the pack's rule (`InventoryScreen::click`).
+                let count = count_in(from);
+                let part = self.portion.of(count);
+                if from != target && part < count {
+                    return Some(Intent::MoveSome { from, to: target, count: part });
+                }
                 self.release();
                 (from != target).then_some(Intent::Move {
                     from,
@@ -945,6 +1065,9 @@ impl ChestScreen {
         self.held
             .map(|(side, slot)| (side == Side::Chest, slot))
             .hash(&mut h);
+        // The number on a finger's bar, which a press of `+` changes
+        // without moving the pointer.
+        self.portion.hash(&mut h);
         self.cursor
             .map(|(x, y)| (x.to_bits(), y.to_bits()))
             .hash(&mut h);
@@ -1846,9 +1969,25 @@ impl ChestScreen {
             widgets::INK_DIM,
         );
 
+        // A finger's bar, over the squares beside the one it is about.
+        if let (Some(bar), Some((side, slot))) = (self.split_bar(pack), self.held) {
+            let inventory = match side {
+                Side::Pack => pack,
+                Side::Chest => &self.contents,
+            };
+            let count = inventory.count_in(slot);
+            let caption = inventory
+                .block_in(slot)
+                .map(|block| crate::ui::names::stack_line(block, count, language))
+                .unwrap_or_default();
+            bar.draw(&mut p, &caption, Some((self.portion, count)), self.cursor, language);
+        }
+
         // Last, over everything it describes: the stack in hand rides
         // the cursor, or there is nothing on screen saying one is held.
-        if let (Some(cursor), Some((side, slot))) = (self.cursor, self.held) {
+        // Not on glass, for the pack's reason (`InventoryScreen::build_into`):
+        // a finger's last tap is a button of its bar, not where the stack is.
+        if let (Some(cursor), Some((side, slot)), false) = (self.cursor, self.held, self.touch) {
             let inventory = match side {
                 Side::Pack => pack,
                 Side::Chest => &self.contents,
@@ -1974,7 +2113,58 @@ pub fn held_vessel_message(
                 ClientMessage::MoveSlots { from, to }
             })
         }
+        // A finger's number: out of the jug it is that many of what is
+        // in it, and within the pack it is the pack's own split. Into the
+        // jug it is a pour, which fills the jug as far as it goes whatever
+        // the number -- a jug takes all that fits, as the whole-stack drop
+        // above does.
+        Intent::MoveSome {
+            from: (Side::Chest, _),
+            to: (Side::Pack, to),
+            count,
+        } => {
+            if to == jug {
+                return None;
+            }
+            Some(ClientMessage::TakeSomeFromJug {
+                jug: byte(jug)?,
+                to: byte(to)?,
+                count: u16::try_from(count).unwrap_or(u16::MAX),
+            })
+        }
+        Intent::MoveSome {
+            from: (Side::Pack, from),
+            to: (Side::Pack, to),
+            count,
+        } => {
+            if from == jug || to == jug {
+                return None;
+            }
+            Some(ClientMessage::SplitSomeSlot {
+                from: byte(from)?,
+                to: byte(to)?,
+                count: u16::try_from(count).unwrap_or(u16::MAX),
+            })
+        }
+        Intent::MoveSome {
+            from: (Side::Pack, from),
+            to: (Side::Chest, _),
+            ..
+        } => {
+            if from == jug {
+                return None;
+            }
+            Some(ClientMessage::PourIntoJug {
+                from: byte(from)?,
+                jug: byte(jug)?,
+            })
+        }
         Intent::Move {
+            from: (Side::Chest, _),
+            to: (Side::Chest, _),
+            ..
+        }
+        | Intent::MoveSome {
             from: (Side::Chest, _),
             to: (Side::Chest, _),
             ..
@@ -5150,5 +5340,132 @@ mod layout_guards {
             header_height(),
             widgets::TITLE_BAND,
         );
+    }
+}
+
+/// A finger at a container: the bar its stack comes with.
+#[cfg(test)]
+mod finger_tests {
+    use super::*;
+    use crate::ui::split_bar::Choice;
+    use primitive_shared::protocol::ContainerKind;
+    use primitive_shared::types::{BLOCK_CHEST, BLOCK_DIRT, BLOCK_STONE};
+
+    const AT: (i32, i32, i32) = (2, 30, 2);
+
+    fn on_glass(kind: ContainerKind) -> ChestScreen {
+        let mut screen = ChestScreen::new();
+        let mut chest = Inventory::new();
+        chest.add(BLOCK_DIRT, 30);
+        screen.show(AT, chest, Some(BLOCK_CHEST), kind, None, None);
+        screen.set_touch(true);
+        screen
+    }
+
+    fn tap(screen: &mut ChestScreen, pack: &Inventory, at: Rect) -> Option<Intent> {
+        screen.set_cursor(Some((at.centre_x(), at.centre_y())));
+        screen.click(pack, Button::Left, false, false)
+    }
+
+    fn press(screen: &mut ChestScreen, pack: &Inventory, choice: Choice) -> Option<Intent> {
+        let bar = screen.split_bar(pack).expect("a finger's stack came with no bar");
+        let at = bar.buttons.iter().find(|(c, _)| *c == choice).expect("no such button").1;
+        tap(screen, pack, at)
+    }
+
+    /// **A finger puts part of a stack in a chest, and sends a whole one
+    /// across, with taps** -- the right button and the shift-click, which
+    /// it has neither of.
+    #[test]
+    fn a_finger_splits_into_a_chest_and_sends_a_stack_across_with_taps() {
+        widgets::with_touch(true, || {
+            let mut pack = Inventory::new();
+            pack.add(BLOCK_STONE, 12);
+            let mut screen = on_glass(ContainerKind::Chest);
+            tap(&mut screen, &pack, slot_rect(Side::Pack, 0));
+            assert_eq!(screen.held(), Some((Side::Pack, 0)));
+            press(&mut screen, &pack, Choice::Half);
+            press(&mut screen, &pack, Choice::Less);
+            assert_eq!(
+                tap(&mut screen, &pack, slot_rect(Side::Chest, 12)),
+                Some(Intent::MoveSome { from: (Side::Pack, 0), to: (Side::Chest, 12), count: 5 }),
+            );
+            assert_eq!(screen.held(), Some((Side::Pack, 0)), "the rest did not stay in hand");
+            assert_eq!(press(&mut screen, &pack, Choice::Across { up: true }), Some(Intent::QuickMove(Side::Pack, 0)));
+            assert_eq!(screen.held(), None);
+            // ...and out of the chest the arrow points down.
+            tap(&mut screen, &pack, slot_rect(Side::Chest, 0));
+            assert_eq!(press(&mut screen, &pack, Choice::Across { up: false }), Some(Intent::QuickMove(Side::Chest, 0)));
+        });
+    }
+
+    #[test]
+    fn a_mouse_at_a_chest_never_sees_a_fingers_bar() {
+        let mut pack = Inventory::new();
+        pack.add(BLOCK_STONE, 12);
+        let mut screen = on_glass(ContainerKind::Chest);
+        screen.set_touch(false);
+        tap(&mut screen, &pack, slot_rect(Side::Pack, 0));
+        assert!(screen.split_bar(&pack).is_none());
+        assert_eq!(
+            tap(&mut screen, &pack, slot_rect(Side::Chest, 12)),
+            Some(Intent::Move { from: (Side::Pack, 0), to: (Side::Chest, 12), half: false }),
+        );
+    }
+
+    /// **From every square of every container, the bar stays inside the
+    /// panel, off the square it is about, a finger per button, and answers
+    /// where it is drawn** -- a chest, a hearth, a rack, a jug, a stall and
+    /// saddlebags, from both sides.
+    #[test]
+    fn a_fingers_bar_stays_in_the_panel_and_off_its_square_in_every_container() {
+        widgets::with_touch(true, || {
+            for kind in [
+                ContainerKind::Chest,
+                ContainerKind::Hearth(primitive_shared::hearth::Kind::Kiln),
+                ContainerKind::Rack,
+                ContainerKind::Vessel,
+                ContainerKind::Stall,
+                ContainerKind::Saddlebags,
+            ] {
+                let mut screen = on_glass(kind);
+                // Twelve of something in every square of the pack, so the
+                // bar is the full one from every pack square.
+                let mut stones = Inventory::new();
+                for slot in 0..side_slots(Side::Pack) {
+                    stones.put_in_slot(slot, primitive_shared::inventory::Stack::new(BLOCK_STONE, 12));
+                }
+                let panel = panel_rect(screen.layout());
+                let inside = Rect::new(
+                    panel.x0 + widgets::PANEL_BORDER,
+                    panel.y0 + widgets::PANEL_BORDER,
+                    panel.x1 - widgets::PANEL_BORDER,
+                    panel.y1 - widgets::PANEL_BORDER,
+                );
+                let squares: Vec<(Side, usize)> = (0..side_slots(Side::Pack))
+                    .map(|slot| (Side::Pack, slot))
+                    .chain((0..side_slots(Side::Chest)).map(|slot| (Side::Chest, slot)))
+                    .filter(|&held| screen.square_rect(held).is_some())
+                    .collect();
+                assert!(squares.len() > 40, "{kind:?}: hardly any squares were found");
+                for held in squares {
+                    screen.held = Some(held);
+                    let square = screen.square_rect(held).expect("drawn");
+                    let bar = screen.split_bar(&stones).expect("no bar");
+                    assert!(widgets::holds(inside, bar.plate, 1e-4), "{kind:?}: the bar from {held:?} leaves the panel");
+                    assert!(
+                        !widgets::crossing(bar.plate, square, 0.0),
+                        "{kind:?}: the bar covers {held:?}, the square it is about",
+                    );
+                    for (choice, rect) in &bar.buttons {
+                        assert!(rect.width() >= widgets::FINGER_SIDE - 1e-5 && rect.height() >= widgets::FINGER_SIDE - 1e-5);
+                        assert_eq!(bar.at((rect.centre_x(), rect.centre_y())), Some(*choice));
+                    }
+                    // The rectangle a square is drawn in is the one it is
+                    // clicked in: `square_rect` is `slot_at` backwards.
+                    assert_eq!(slot_at((square.centre_x(), square.centre_y()), screen.layout()), Some(held));
+                }
+            }
+        });
     }
 }

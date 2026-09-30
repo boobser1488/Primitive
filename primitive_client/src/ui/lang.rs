@@ -549,6 +549,15 @@ pub enum Msg {
     TabHealth,
     TabPack,
     TabBackpack,
+    // ---- the row of buttons a stack in a finger's hand comes with ----
+    //
+    // `ui::split_bar`. A finger-wide button each, so short: `CAŁOŚĆ` and
+    // `ВЫЛИТЬ` are the longest there are room for at a size worth reading,
+    // and Simple English says the plain word because it is the plain word.
+    /// The whole stack.
+    SplitAll,
+    /// Tip a jug out.
+    PourOut,
     // ---- the health page ----
     //
     // A label per vital the server sends, plus the two lines that
@@ -1413,6 +1422,8 @@ pub const STRINGS: &[Line] = &[
     Line { msg: Msg::TabHealth,    en: "BODY",         simple: "HOW YOU ARE", ru: "ТЕЛО", pl: "CIAŁO" },
     Line { msg: Msg::TabPack,      en: "PACK",         simple: "WHAT YOU CARRY", ru: "ПОЖИТКИ", pl: "TORBA" },
     Line { msg: Msg::TabBackpack,  en: "RUCKSACK",     simple: "BAG ON YOUR BACK", ru: "РЮКЗАК", pl: "PLECAK" },
+    Line { msg: Msg::SplitAll,     en: "ALL",          simple: "ALL",       ru: "ВСЁ",    pl: "CAŁOŚĆ" },
+    Line { msg: Msg::PourOut,      en: "EMPTY",        simple: "EMPTY",     ru: "ВЫЛИТЬ", pl: "WYLEJ" },
     // ...and the health page under the first of them. Sentence case, not
     // capitals: this is a page of readings to be read down, and a column
     // of shouted words is harder to read than a column of words.

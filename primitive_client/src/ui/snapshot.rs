@@ -3191,3 +3191,76 @@ fn through_the_card(
     readback.unmap();
     out
 }
+
+/// The pack and a chest as a finger sees them with a stack in hand: the
+/// bar the stack comes with (`ui::split_bar`), from a square in the middle
+/// of the pack, from one against its edge, from the belt, from a jug, and
+/// at a chest from either side.
+///
+/// ```text
+/// UI_SNAPSHOT_SIZE=2712x1220 UI_SNAPSHOT_SCALE=1.5 PRIMITIVE_TOUCH_UI=1 \
+///   UI_SNAPSHOT_DIR=shots/touch cargo test -p primitive_client --lib \
+///   touch_inventory_snapshot -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "a tool: writes PNGs of a finger's bar for a person to look at"]
+fn touch_inventory_snapshot() {
+    use crate::ui::inventory_screen::{slot_rect, Button};
+    use crate::ui::split_bar::Choice;
+    wear_the_skin();
+    let out = std::env::var("UI_SNAPSHOT_DIR").unwrap_or_else(|_| ".".to_string());
+    std::fs::create_dir_all(&out).expect("output directory");
+    let font = FontAtlas::for_size(32, 1_000);
+    let layers = FaceLayers::empty_for_test();
+    let language = match std::env::var("UI_SNAPSHOT_LANG").as_deref() {
+        Ok("en") => Language::English,
+        _ => Language::Russian,
+    };
+    let mut pack = a_playing_pack();
+    pack.put_in_slot(29, Stack::new(BLOCK_CLAY, 64));
+    pack.put_in_slot(5, primitive_shared::inventory::filled_jug(primitive_shared::types::BLOCK_SEEDS, 11));
+    let pack_scale = crate::ui::inventory_screen::grow_by(snapshot_layout());
+    let centre = |r: crate::ui::widgets::Rect| (r.centre_x(), r.centre_y());
+    // The middle of the pack with a half chosen; the right-hand edge with
+    // one chosen; the belt, where the bar goes over the squares above; and
+    // a jug, whose bar can tip it out.
+    for (name, slot, choice) in [
+        ("pack_middle_half", 23, Some(Choice::Half)),
+        ("pack_edge_one", 29, Some(Choice::One)),
+        ("pack_belt", 2, None),
+        ("pack_jug", 5, None),
+    ] {
+        let mut screen = InventoryScreen::new();
+        screen.set_touch(true);
+        screen.open = true;
+        screen.sync(&pack);
+        screen.set_cursor(Some(centre(slot_rect(slot))));
+        screen.click(&pack, Button::Left, false);
+        if let Some(button) = choice.and_then(|choice| screen.split_bar_button(&pack, choice)) {
+            screen.set_cursor(Some(centre(button)));
+            screen.click(&pack, Button::Left, false);
+        }
+        let v = screen.build(font, &layers, &pack, 0.7, language);
+        write_grown(&format!("{out}/{name}.png"), &v, font, pack_scale);
+    }
+
+    // A chest: a stack picked up off the pack, and one out of the chest's
+    // right-hand edge, a half chosen of each.
+    for (name, from) in [
+        ("chest_from_pack", (primitive_shared::protocol::Side::Pack, 10)),
+        ("chest_from_chest_edge", (primitive_shared::protocol::Side::Chest, 0)),
+    ] {
+        let mut chest = ChestScreen::new();
+        chest.show((0, 0, 0), a_full_chest(), Some(primitive_shared::types::BLOCK_CHEST), ContainerKind::Chest, None, None);
+        chest.set_touch(true);
+        chest.set_cursor(Some(centre(crate::ui::chest_screen::slot_rect(from.0, from.1))));
+        let _ = chest.click(&pack, Button::Left, false, false);
+        if let Some(half) = chest.split_bar_button(&pack, Choice::Half) {
+            chest.set_cursor(Some(centre(half)));
+            let _ = chest.click(&pack, Button::Left, false, false);
+        }
+        let v = chest.build(font, &layers, &pack, language);
+        write_grown(&format!("{out}/{name}.png"), &v, font, chest.grow_by(snapshot_layout()));
+    }
+    println!("wrote the finger's bar to {out}");
+}

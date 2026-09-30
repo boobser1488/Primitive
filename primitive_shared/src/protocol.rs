@@ -568,7 +568,13 @@ pub type PlayerId = u64;
 /// `ForgetMark` out, `Trail` back, all appended, and blocks at ids 695-696
 /// (`types::BLOCK_MAP`, `types::BLOCK_BLAZE`) with one row at the end of
 /// `RECIPES`. 57 still, which no release speaks.
-pub const PROTOCOL_VERSION: u32 = 57;
+/// v58 is the finger's split: `SplitSomeSlot`, `ChestMoveSome` and
+/// `TakeSomeFromJug`, a number of a stack rather than all of it or half,
+/// appended to `ClientMessage`. A bump rather than another "57 still",
+/// because 57 is what 1.5.1 shipped speaking: a 1.5.1 server handed one
+/// of these would read a variant index it has never heard of and drop
+/// the client mid-gesture, where a bump tells it at the door.
+pub const PROTOCOL_VERSION: u32 = 58;
 
 /// What kind of container a screen is showing.
 ///
@@ -2093,6 +2099,35 @@ pub enum ClientMessage {
         global_x: i32,
         global_y: i32,
         global_z: i32,
+    },
+    /// "Put `count` of `from` in `to`" -- `SplitSlot` with the number said
+    /// rather than halved. `to` has to be empty or hold the same block.
+    ///
+    /// **What a finger splits a stack with.** The half was the right mouse
+    /// button, and a phone has no right button; the stack a finger holds
+    /// comes with a row of buttons that choose any number instead
+    /// (`ui::split_bar`), and this is what they send. A count past the
+    /// stack moves the stack, and a count past what `to` holds moves what
+    /// fits: the server asks the same two questions the half does.
+    SplitSomeSlot {
+        from: u8,
+        to: u8,
+        count: u16,
+    },
+    /// `ChestMove` with the number said: `count` of `from` onto `to`,
+    /// either side. The finger's split in a chest, a hearth, a rack, a
+    /// stall or saddlebags, for `SplitSomeSlot`'s reason.
+    ChestMoveSome {
+        from: (Side, u8),
+        to: (Side, u8),
+        count: u16,
+    },
+    /// `TakeFromJug` with the number said: `count` of what is in the jug
+    /// into `to`. The finger's split out of a jug held open.
+    TakeSomeFromJug {
+        jug: u8,
+        to: u8,
+        count: u16,
     },
 }
 

@@ -1071,6 +1071,23 @@ impl Inventory {
     ///
     /// Returns whether anything moved.
     pub fn split_into(&mut self, from: usize, to: usize) -> bool {
+        // Rounded up, so splitting a single block moves it rather than
+        // doing nothing at all.
+        let half = self.count_in(from).div_ceil(2);
+        self.split_some_into(from, to, half)
+    }
+
+    /// Moves `wanted` of `from` into `to`, or as many as there are and as
+    /// fit -- the same rules as [`split_into`](Self::split_into), with the
+    /// number said rather than halved.
+    ///
+    /// **What a finger splits with.** A mouse has a right button for the
+    /// half and nothing for "three"; a phone has no right button at all,
+    /// and the stack it holds comes with a row of buttons that choose any
+    /// number (`ui::split_bar`). Half is one of those numbers, so the half
+    /// is this with the number worked out, and there is one rule for how a
+    /// part of a stack moves rather than two that can disagree.
+    pub fn split_some_into(&mut self, from: usize, to: usize, wanted: u32) -> bool {
         if from == to || from >= self.slots.len() || to >= self.slots.len() {
             return false;
         }
@@ -1085,9 +1102,7 @@ impl Inventory {
             }
             Some(_) => return false,
         };
-        // Rounded up, so splitting a single block moves it rather than
-        // doing nothing at all.
-        let moved = source.count.div_ceil(2).min(room);
+        let moved = wanted.min(source.count).min(room);
         if moved == 0 {
             return false;
         }
@@ -1754,6 +1769,35 @@ pub fn move_between(
     }
 }
 
+/// How much of a stack one gesture moves.
+///
+/// Three answers, because there are three ways of asking: the left button
+/// moves the stack, the right one moves half of it, and a finger -- which
+/// has neither -- says a number (`ui::split_bar`). One type for all three
+/// so a container move, a pack move and a pour out of a jug read the same
+/// question the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Portion {
+    #[default]
+    Whole,
+    Half,
+    Exactly(u32),
+}
+
+impl Portion {
+    /// How many that is, of a stack of `count`: never more than there are.
+    ///
+    /// Half is rounded up, the rule every half in the game follows, so the
+    /// half of one is the one.
+    pub fn of(self, count: u32) -> u32 {
+        match self {
+            Portion::Whole => count,
+            Portion::Half => count.div_ceil(2),
+            Portion::Exactly(wanted) => wanted.min(count),
+        }
+    }
+}
+
 /// Moves half of a slot into a slot of another inventory.
 ///
 /// The right-click gesture. Refuses onto a different block for the same
@@ -1765,6 +1809,22 @@ pub fn split_between(
     to: &mut Inventory,
     to_slot: usize,
 ) -> bool {
+    // Rounded up, so splitting a single block moves it rather than
+    // doing nothing at all.
+    let half = from.count_in(from_slot).div_ceil(2);
+    split_some_between(from, from_slot, to, to_slot, half)
+}
+
+/// Moves `wanted` of a slot into a slot of another inventory, or as many
+/// as there are and as fit: [`split_between`] with the number said. See
+/// [`Inventory::split_some_into`] for why the half is one of these.
+pub fn split_some_between(
+    from: &mut Inventory,
+    from_slot: usize,
+    to: &mut Inventory,
+    to_slot: usize,
+    wanted: u32,
+) -> bool {
     let Some(source) = from.slots().get(from_slot).copied().flatten() else {
         return false;
     };
@@ -1773,10 +1833,7 @@ pub fn split_between(
             return false;
         }
     }
-    // Rounded up, so splitting a single block moves it rather than
-    // doing nothing at all.
-    let wanted = source.count.div_ceil(2);
-    let taken = from.take_from(from_slot, wanted);
+    let taken = from.take_from(from_slot, wanted.min(source.count));
     if taken == 0 {
         return false;
     }
@@ -2498,6 +2555,38 @@ mod tests {
     }
 
     #[test]
+    fn a_said_number_is_split_off_exactly_and_nothing_is_invented() {
+        // The finger's split: any number, not only the half. One, a
+        // handful, all but one, more than there are -- and every time the
+        // two squares add up to what was there.
+        for (wanted, moved) in [(1, 1), (3, 3), (11, 11), (12, 12), (40, 12)] {
+            let mut inventory = Inventory::new();
+            inventory.add(BLOCK_STONE, 12);
+            assert!(inventory.split_some_into(0, 7, wanted));
+            assert_eq!(inventory.count_in(7), moved, "asked for {wanted}");
+            assert_eq!(inventory.count_in(0), 12 - moved, "asked for {wanted}");
+            assert_eq!(inventory.count(BLOCK_STONE), 12, "a split of {wanted} changed the total");
+        }
+        // Nothing asked for is nothing moved, and a different block in the
+        // way is refused rather than swapped, exactly as the half is.
+        let mut inventory = Inventory::new();
+        inventory.add(BLOCK_STONE, 12);
+        assert!(!inventory.split_some_into(0, 7, 0));
+        inventory.slots[3] = Some(Stack::new(BLOCK_DIRT, 2));
+        assert!(!inventory.split_some_into(0, 3, 4));
+        assert_eq!(inventory.count_in(0), 12);
+    }
+
+    #[test]
+    fn a_portion_is_never_more_than_the_stack() {
+        assert_eq!(Portion::Whole.of(9), 9);
+        assert_eq!(Portion::Half.of(9), 5, "half is rounded up");
+        assert_eq!(Portion::Half.of(1), 1, "the half of one is the one");
+        assert_eq!(Portion::Exactly(3).of(9), 3);
+        assert_eq!(Portion::Exactly(30).of(9), 9);
+    }
+
+    #[test]
     fn splitting_onto_the_same_block_tops_it_up() {
         let mut inventory = Inventory::new();
         inventory.slots[0] = Some(Stack::new(BLOCK_STONE, 3));
@@ -2998,6 +3087,19 @@ mod transfer_tests {
         assert!(split_between(&mut pack, 0, &mut chest, 1));
         assert_eq!(chest.count_in(1), 1);
         assert_eq!(pack.total_items(), 0);
+    }
+
+    #[test]
+    fn a_said_number_crosses_into_a_chest_exactly() {
+        let (mut pack, mut chest) = pack_and_chest();
+        let before = total(&pack, &chest);
+        assert!(split_some_between(&mut pack, 0, &mut chest, 2, 7));
+        assert_eq!(chest.count_in(2), 7);
+        assert_eq!(pack.count_in(0), 13);
+        assert!(split_some_between(&mut chest, 2, &mut pack, 5, 1));
+        assert_eq!(pack.count_in(5), 1);
+        assert_eq!(chest.count_in(2), 6);
+        assert_eq!(total(&pack, &chest), before, "a split across invented or ate blocks");
     }
 
     #[test]

@@ -964,6 +964,8 @@ fn run(
     // seen, the kinds held, the way back to a bag. See `ui::journal`.
     let mut journal = ui::journal::Journal::new();
     let mut chest_screen = chest_screen::ChestScreen::new();
+    // A finger's stack comes with a row of buttons; see `set_touch`.
+    chest_screen.set_touch(touch_controls);
     // The anvil's and the wheel's screen. On the chest's footing everywhere
     // below: it owns the cursor while it is up, it opens when the server
     // answers rather than when the player clicks, and it is shut by the same
@@ -2039,6 +2041,8 @@ fn run(
                                     // the HUD, because full breath is the
                                     // one reading nobody sends.
                                     chest_screen = chest_screen::ChestScreen::new();
+                                    // A new screen, the same glass.
+                                    chest_screen.set_touch(touch_controls);
                                     chest_was_open = false;
                                     sleep = logic::posture::Sleep::default();
                                     resting = logic::posture::Resting::Standing;
@@ -4367,6 +4371,11 @@ fn chest_intent_message(intent: chest_screen::Intent) -> Option<ClientMessage> {
             from: (from.0, byte(from.1)),
             to: (to.0, byte(to.1)),
             half,
+        },
+        Intent::MoveSome { from, to, count } => ClientMessage::ChestMoveSome {
+            from: (from.0, byte(from.1)),
+            to: (to.0, byte(to.1)),
+            count: count.min(u32::from(u16::MAX)) as u16,
         },
         Intent::QuickMove(side, slot) => ClientMessage::ChestQuickMove { side, slot: byte(slot) },
         Intent::BulkMove { to_chest } => ClientMessage::ChestBulkMove { to_chest },
