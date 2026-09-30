@@ -855,6 +855,22 @@ impl Server {
         left
     }
 
+    /// **The fish comes to the bait now**, on the line of the player called
+    /// `name`: the wait is over, and everything after it -- which fish, how
+    /// big, the tremble, whether it comes to nothing, the dip and the take --
+    /// is rolled as it always is. Says whether there was a line to hurry.
+    ///
+    /// A scenario's door, for the reason `set_sleeper_dice` is one: what a
+    /// scenario about the bite has to test is the reading of it, and a wait
+    /// that is half a minute on average and ten at worst is a scenario that
+    /// passes or times out on a coin.
+    pub fn hurry_bite(&self, name: &str) -> bool {
+        let Some(handle) = self.named(name) else {
+            return false;
+        };
+        self.ctx.fishing.lock().unwrap_or_else(|e| e.into_inner()).hurry(handle.id)
+    }
+
     /// `teleport_player`, for the player called `name`.
     pub fn teleport_named(&self, name: &str, x: f32, y: f32, z: f32) {
         if let Some(handle) = self.named(name) {
@@ -12761,7 +12777,8 @@ pub(crate) fn step_fishing(ctx: &Arc<Context>, dt: f32) {
             // each is only the picture changing, and the picture is `Line`.
             // The player has the dip and the take (`fishing::Bite::window`)
             // to strike in.
-            CastEvent::Nibbled
+            CastEvent::Settled
+            | CastEvent::Nibbled
             | CastEvent::LeftIt
             | CastEvent::Dipped
             | CastEvent::Took

@@ -195,6 +195,15 @@ pub struct Cast {
 /// What happened to a line in one step, for the server to act on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CastEvent {
+    /// The float has finished landing and is on the water, waiting.
+    ///
+    /// **Said, and it was not.** The line went from landing to waiting in
+    /// silence, so the client's float stayed "landing" until the first bite
+    /// -- and a landing float does not twitch, so the liveliness the server
+    /// sent with the cast, which is the whole of how a player reads a spot
+    /// before anything bites (`logic::fishing::TWITCHES_A_SECOND` in the
+    /// client), was never drawn at all.
+    Settled,
     /// The float began to tremble: a fish is at the bait.
     Nibbled,
     /// The tremble came to nothing and the float is still again. Nothing
@@ -421,6 +430,21 @@ impl Fishing {
         self.casts.insert(player, cast);
     }
 
+    /// Ends the wait on `player`'s line, if it is waiting or still landing:
+    /// the next step brings a fish to the bait. For `Server::hurry_bite`.
+    pub fn hurry(&mut self, player: PlayerId) -> bool {
+        let Some(cast) = self.casts.get_mut(&player) else {
+            return false;
+        };
+        match cast.phase {
+            Phase::Waiting | Phase::Settling(_) => {
+                cast.bite_in = 0.0;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Takes the line out of the water, if there was one.
     pub fn reel_in(&mut self, player: PlayerId) -> Option<Cast> {
         self.casts.remove(&player)
@@ -567,7 +591,12 @@ impl Fishing {
             match cast.phase {
                 Phase::Settling(left) => {
                     let left = left - dt;
-                    cast.phase = if left > 0.0 { Phase::Settling(left) } else { Phase::Waiting };
+                    if left > 0.0 {
+                        cast.phase = Phase::Settling(left);
+                    } else {
+                        cast.phase = Phase::Waiting;
+                        events.push((player, *cast, CastEvent::Settled));
+                    }
                     true
                 }
                 Phase::Waiting => {
