@@ -22,7 +22,10 @@
 //!   the one property this whole module is built around, and the one the
 //!   tests hold: **the base of a stem never moves**. The cost is a branch
 //!   every vertex of the terrain takes and nearly every vertex fails, and a
-//!   dozen multiplies on the few that pass.
+//!   dozen multiplies on the few that pass. **Measured**: a GTX 1050 Ti at
+//!   1920x1080 in a storm, the meadow at its thickest -- the cut-out pass
+//!   1.968 ms still and 1.978 in the full wind, the solid pass 0.663 and
+//!   0.665. A hundredth of a millisecond, inside the noise.
 //!
 //! ## Why the push is a function of the world position and nothing else
 //!

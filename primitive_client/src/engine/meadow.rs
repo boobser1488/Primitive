@@ -77,10 +77,13 @@ impl Density {
 
     /// How many blade clumps an open cell of turf holds, on average.
     ///
-    /// **Measured, not guessed**: the table in `CHANGELOG.md` (1.6, the
-    /// meadow) is what each step costs on a GTX 1050 Ti. `Sparse` is a lawn
-    /// with the ground showing through it, `Thick` a hayfield, `Lush` a
-    /// meadow nobody has grazed.
+    /// **Measured, not guessed** (`CHANGELOG.md`, "Луг стал лугом"): on a
+    /// GTX 1050 Ti at 1920x1080, world `night`, the cut-out pass is 1.25 ms
+    /// with the blades off, 1.44 sparse, 1.69 thick and 1.96 lush -- the
+    /// cost grows faster than the triangles, because what is paid for is
+    /// the alpha-cut pixels near the eye. `Sparse` is a lawn with the ground
+    /// showing through it, `Thick` a hayfield, `Lush` a meadow nobody has
+    /// grazed.
     pub fn clumps(self) -> f32 {
         match self {
             Density::Off => 0.0,
