@@ -481,6 +481,8 @@ pub const EXTRA_TEXTURES: &[&str] = &[
     "ui/track.png",
     "ui/grip.png",
     "ui/rule.png",
+    "ui/rail_on.png",
+    "ui/rail_off.png",
 ];
 
 /// How many sheets the fire is drawn from: one per crossing quad.
@@ -585,7 +587,7 @@ pub const EXTRA_UI_SKIN: usize = EXTRA_TEXTURES.len() - UI_SKIN_PIECES;
 /// not depend on the interface to know how long its own list is; the test
 /// `widgets::every_piece_of_the_skin_is_the_picture_the_atlas_loads_for_it`
 /// is what keeps the two agreeing.
-pub const UI_SKIN_PIECES: usize = 15;
+pub const UI_SKIN_PIECES: usize = 17;
 
 /// The first of `FLAME_FRAMES` pictures of the fire on a torch. The
 /// rest follow it, and they are a run in the array the same way the

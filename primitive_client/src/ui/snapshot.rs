@@ -549,7 +549,7 @@ fn ui_snapshot() {
             (Tab::Learn, "pack_path"),
         ] {
             // **All four languages, not two.** The pack's furniture is
-            // fixed and its words are not: a tab strip that holds
+            // fixed and its words are not: a tab rail that holds
             // `ЗДОРОВЬЕ` holds `ZDROWIE` with room to spare and
             // `EKWIPUNEK` not at all, and the only way to know which is
             // to look. Two of four was how `SPRZĄTNIJ` came to be

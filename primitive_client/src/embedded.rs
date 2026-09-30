@@ -706,6 +706,8 @@ pub const TEXTURES: &[(&str, &[u8])] = &[
     ("ui/track.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/track.png"))),
     ("ui/grip.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/grip.png"))),
     ("ui/rule.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/rule.png"))),
+    ("ui/rail_on.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/rail_on.png"))),
+    ("ui/rail_off.png", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/textures/ui/rail_off.png"))),
 ];
 
 /// The built-in copy of one texture, if there is one.

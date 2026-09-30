@@ -491,6 +491,12 @@ pub enum Piece {
     Track,
     Grip,
     Rule,
+    /// A tab of the pack's rail that is showing: `TabOn` turned a
+    /// quarter, open on the right where the page is. See
+    /// [`Painter::rail_tab`].
+    RailOn,
+    /// ...and one that is not, shut on the right by a dark line.
+    RailOff,
 }
 
 impl Piece {
@@ -502,7 +508,7 @@ impl Piece {
     /// `texture::EXTRA_TEXTURES`, and the harness that turns a vertex
     /// list back into pixels without a card.
     #[cfg(test)]
-    pub const ALL: [Piece; 15] = [
+    pub const ALL: [Piece; 17] = [
         Piece::Panel,
         Piece::Tray,
         Piece::Well,
@@ -518,6 +524,8 @@ impl Piece {
         Piece::Track,
         Piece::Grip,
         Piece::Rule,
+        Piece::RailOn,
+        Piece::RailOff,
     ];
 
     /// The file it is drawn in, under `assets/textures/`.
@@ -559,6 +567,13 @@ impl Piece {
             Piece::Panel => PANEL_BORDER,
             other => other.border_texels() * SKIN_TEXEL,
         }
+    }
+
+    /// The side of one repeat of this piece's middle, drawn at
+    /// [`FIELD_TEXEL`]: whatever the frame leaves of the thirty-two
+    /// texels, at two frame texels each. [`FIELD_TILE`] for the panel.
+    fn field_tile(self) -> f32 {
+        (SKIN_RESOLUTION - 2.0 * self.border_texels()) * FIELD_TEXEL
     }
 }
 
@@ -681,7 +696,23 @@ pub const SKIN_GAIN: f32 = 2.5;
 /// Twice the field's own sixteen texels, so the grain is chunky enough
 /// to read as a material at arm's length and half as many quads as it
 /// would be at one to one.
-pub const FIELD_TILE: f32 = 32.0 * SKIN_TEXEL;
+///
+/// **What repeats is the thing to watch, not how often.** The tile is
+/// ninety pixels on a 1080p monitor and two hundred on the phone, and the
+/// first field drawn into it had a darker pore two texels across: laid
+/// down a dozen times along the pack it was a row of identical blotches,
+/// which the player called "пятна повторяющиеся" -- spots, repeating. A
+/// repeat is only seen through a feature it repeats, so the field is
+/// grain now and nothing bigger (`tools/draw_ui_skin.py`, `grain`), and
+/// `a_surfaces_grain_has_no_blotch_to_repeat_and_is_not_a_flat_fill`
+/// holds the pictures to it.
+pub const FIELD_TILE: f32 = 16.0 * FIELD_TEXEL;
+
+/// How big one texel of a surface's *field* is drawn: two of the
+/// frame's. One size for every tiled surface, so the hide of the panel
+/// and the floor of a tray beside it are the same grain rather than two
+/// materials that happen to be the same colour.
+pub const FIELD_TEXEL: f32 = 2.0 * SKIN_TEXEL;
 
 /// Where the interface's pictures are in the texture array.
 ///
@@ -2685,7 +2716,14 @@ impl Painter {
     /// bevel below.
     pub fn well(&mut self, rect: Rect, face: [f32; 4]) {
         let piece = if face == self.theme.tray { Piece::Tray } else { Piece::Well };
-        if self.nine(rect, piece, face, None) {
+        // **Tiled at the panel's grain, not stretched.** It was
+        // stretched, which is right for the scroll groove and a settings
+        // row and was wrong for the trays: the pack's is a unit and a
+        // half across, and its twenty-texel floor pulled over that is a
+        // texel the size of a slot -- soft blobs, beside a panel whose
+        // grain is two font pixels. `spans` leaves a run shorter than a
+        // tile whole, so a small well is drawn exactly as before.
+        if self.nine(rect, piece, face, Some(piece.field_tile())) {
             return;
         }
         self.bevelled(rect, face, false);
@@ -3097,6 +3135,56 @@ impl Painter {
             let colour = if enabled { self.theme.ink } else { self.theme.ink_dim };
             let scale = button_label_scale(rect, text, self.content);
             self.label_in(rect, text, scale, colour);
+        }
+    }
+
+    /// One tab of a rail down the left of a panel: [`Painter::tab`]'s
+    /// faces and colours, turned a quarter.
+    ///
+    /// **The face only; the caller letters it**, and answers the ink to
+    /// letter it in. A rail tab carries a picture over a word that may
+    /// be two or three lines, laid out by the one screen that has a rail
+    /// (`inventory_screen::rail_label`), and `label_in` is one line
+    /// centred in a box -- there is no shape of it that is both.
+    ///
+    /// The showing tab is lit and open on its right, where the page is
+    /// (`ui/rail_on.png`); the rest sit back behind a dark line. The flat
+    /// fallback is `tab`'s: a tray for the showing one, a raised board
+    /// for the others.
+    pub fn rail_tab(&mut self, rect: Rect, showing: bool, hovered: bool, enabled: bool) -> [f32; 4] {
+        if showing {
+            if !self.nine(rect, Piece::RailOn, self.theme.panel, None) {
+                self.bevelled(rect, self.theme.tray, false);
+            }
+            // **A bar of the accent down its inner edge**, because lit
+            // against sitting back was not enough on its own: the first
+            // picture of the rail had `ПОЖИТКИ` chosen and it took a
+            // second look to see which. A mark down the edge of the
+            // chosen item is what a column of places says "here" with in
+            // every program that has one; the word in the same accent
+            // ties the two together. **On the lit lip, not inside it**:
+            // the first cut stood the bar just inside the lip and
+            // `RUCKSACK`, which is the whole width of its tab, was
+            // written through it. The lip is the one strip of a tab no
+            // word is allowed on, so a mark there cannot meet one.
+            let lip = 3.0 * SKIN_TEXEL;
+            self.quad(
+                Rect::new(rect.x0 + SKIN_TEXEL, rect.y0 + lip, rect.x0 + lip, rect.y1 - lip),
+                self.theme.accent,
+            );
+            self.theme.accent
+        } else {
+            let face = if !enabled {
+                self.theme.disabled
+            } else if hovered {
+                self.theme.button_hover
+            } else {
+                self.theme.button
+            };
+            if !self.nine(rect, Piece::RailOff, face, None) {
+                self.bevelled(rect, face, true);
+            }
+            if enabled { self.theme.ink } else { self.theme.ink_dim }
         }
     }
 
@@ -4523,6 +4611,64 @@ mod tests {
         }
     }
 
+    /// **A tiled surface has no blotch in it for the eye to see repeat,
+    /// and it is still a surface rather than a flat fill.**
+    ///
+    /// The player's words were "пятна повторяющиеся": the panel's field
+    /// had a darker pore in it, and a field tiled a dozen times across the
+    /// pack drew the pore a dozen times in a grid. A repeat is seen through
+    /// a *feature*, so what is measured is the biggest feature -- the mean
+    /// of the worst four-by-four patch against the mean of the whole field.
+    /// The pore made that 12% on the panel; grain makes it about 1%. The
+    /// other half keeps the fix from being "draw nothing": the grain has to
+    /// be there, texel to texel, or the hide is a sheet of plastic.
+    #[test]
+    fn a_surfaces_grain_has_no_blotch_to_repeat_and_is_not_a_flat_fill() {
+        let linear = |byte: u8| {
+            let c = byte as f32 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        for piece in [Piece::Panel, Piece::Tray, Piece::Well, Piece::Track] {
+            let bytes = crate::embedded::texture(piece.file()).expect("a skin picture");
+            let picture = image::load_from_memory(bytes).expect("a png").to_rgba8();
+            let border = piece.border_texels() as u32;
+            let side = picture.width() - 2 * border;
+            let at = |x: u32, y: u32| linear(picture.get_pixel(border + x, border + y).0[0]) * SKIN_GAIN;
+            let count = (side * side) as f32;
+            let mean = (0..side).flat_map(|y| (0..side).map(move |x| (x, y))).map(|(x, y)| at(x, y)).sum::<f32>() / count;
+            let spread = ((0..side)
+                .flat_map(|y| (0..side).map(move |x| (x, y)))
+                .map(|(x, y)| (at(x, y) - mean).powi(2))
+                .sum::<f32>()
+                / count)
+                .sqrt()
+                / mean;
+            let mut blotch = 0.0f32;
+            for y in 0..side - 3 {
+                for x in 0..side - 3 {
+                    let patch = (0..4).flat_map(|j| (0..4).map(move |i| (x + i, y + j))).map(|(x, y)| at(x, y)).sum::<f32>() / 16.0;
+                    blotch = blotch.max((patch - mean).abs() / mean);
+                }
+            }
+            assert!(
+                blotch < 0.02,
+                "{} has a patch {:.1}% off its own field: a blotch every tile",
+                piece.file(),
+                blotch * 100.0,
+            );
+            assert!(
+                spread > 0.01,
+                "{} varies by {:.2}% texel to texel: a flat fill, not a surface",
+                piece.file(),
+                spread * 100.0,
+            );
+        }
+    }
+
     #[test]
     fn a_whole_screen_of_skin_stays_inside_one_upload() {
         // Tiling a panel's field costs quads, and a number written down
@@ -4533,6 +4679,9 @@ mod tests {
         // than a stutter somebody notices six months later.
         let mut p = with_skin(A_SKIN, Painter::default);
         p.deep_panel(Rect::new(-1.0, -0.72, 1.0, 0.72));
+        // ...and a tray as big as the pack's, which is tiled too now
+        // (see `Painter::well`) and was one stretched picture before.
+        p.well(Rect::new(-0.95, -0.65, 0.55, 0.05), TRAY);
         for row in 0..4 {
             for column in 0..10 {
                 let (x, y) = (-0.9 + column as f32 * 0.09, -0.6 + row as f32 * 0.09);

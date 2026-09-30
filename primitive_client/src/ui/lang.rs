@@ -536,13 +536,16 @@ pub enum Msg {
     SlotFeet,
     /// The fifth square: what is slung over the shoulders.
     SlotBack,
-    // ---- the pack screen's three tabs ----
+    // ---- the pack screen's tabs ----
     //
-    // Short on purpose. Three of them share one strip across the top of
-    // the panel, and the strip has to hold the longest of the three in
-    // the longest of the four languages at a size a thumb can read --
-    // see `inventory_screen::tab_rect`, which shrinks the text to fit
-    // rather than letting it run out of its tab.
+    // Short on purpose. They stand in a rail down the left of the panel,
+    // a finger wide, and the rail has to hold the longest single word of
+    // the four in the longest of the four languages at a size a thumb
+    // can read -- see `inventory_screen::rail_label`, which breaks a
+    // label at its spaces and letters the whole rail at one size, and
+    // `every_word_on_the_rail_fits_its_tab_in_every_language`, which goes
+    // red for a word that does not fit. A space is cheap here; a long
+    // word is what costs.
     TabHealth,
     TabPack,
     TabBackpack,

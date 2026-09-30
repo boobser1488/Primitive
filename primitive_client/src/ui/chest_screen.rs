@@ -2804,6 +2804,17 @@ fn chest_square(layout: Layout, place: usize) -> Option<usize> {
 // band (`panel_rect`), so the grids under them are where a chest's are.
 // The pack screen's strip at a smaller count: the same finger-floored
 // height, the same hairline gap, the same margin above and below.
+//
+// **Still a strip, though the pack's pages went into a rail**
+// (`inventory_screen::tab_rail`), and the difference is what the tabs
+// turn. The pack's four are four pages of the whole screen, so a rail the
+// panel's full height says the right thing; these two turn only the
+// *upper* grid -- the body's forty or its rucksack -- while the pack
+// under them stays put. A rail down the whole panel would claim the
+// carried half as well, and a strip sitting on the grid it switches is
+// the one shape that says "this grid, not that one". It would also cost
+// the one screen that is already the tallest and narrowest a finger's
+// width it does not have to give.
 
 /// Air above and below the strip.
 const PAGE_MARGIN: f32 = 0.014;

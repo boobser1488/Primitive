@@ -344,7 +344,9 @@ pub enum Tab {
     Learn,
 }
 
-/// The four, left to right, in the order they are drawn and indexed.
+/// The four, top to bottom down the rail, in the order they are drawn and
+/// indexed. (Left to right, while they were a strip; the sentence below
+/// reads the same either way.)
 ///
 /// A player reads them as a sentence about themselves: how am I, what
 /// have I, what else have I, where am I going. The body is first because
@@ -357,7 +359,10 @@ pub enum Tab {
 /// the middle is where the eye and the thumb both start, and the pack is
 /// what the screen is opened for nine times out of ten. Four tabs have
 /// no middle, and of the two places the pack could go, second keeps it
-/// where a returning player's thumb already is.
+/// where a returning player's thumb already is. The owner named them in
+/// this order too -- "рюкзак, здоровье, гайд" is the list, not the
+/// sequence -- and moving the pack to the top of the rail would have
+/// moved every tab a returning player has learned.
 pub const ALL_TABS: [Tab; 4] = [Tab::Health, Tab::Pack, Tab::Backpack, Tab::Learn];
 
 impl Tab {
@@ -622,15 +627,15 @@ impl InventoryScreen {
             return Some(Intent::Close);
         }
 
-        // **The tabs, before anything on a page.** They are drawn over
-        // the top of the trays, so a click that reached the pages first
-        // would find the tray's own "outside the grid, cancel" arm and
-        // the strip would never answer.
+        // **The tabs, before anything on a page.** A click that reached
+        // the pages first would find the page's own "outside the grid,
+        // cancel" arm -- the rail is outside every grid -- and the tabs
+        // would never answer.
         if let Some(index) = tab_at(cursor) {
             let wanted = ALL_TABS[index];
             // A rucksack page with no rucksack is refused rather than
             // shown empty: the tab is drawn greyed out (see
-            // `tab_strip`), and a disabled control that still works is
+            // `tab_rail`), and a disabled control that still works is
             // worse than one that is not there.
             if wanted == Tab::Backpack && !inventory.backpack_open() {
                 return None;
@@ -952,8 +957,11 @@ impl InventoryScreen {
         // floating in the air between the title and the tabs -- and,
         // with the band that much shallower, through the title itself.
         // One number for the room and for what is drawn in it.
-        p.panel_header(panel, language.text(Msg::Inventory), HEADER_HEIGHT, 0.0);
-        tab_strip(&mut p, self.tab, self.cursor, inventory.backpack_open(), language);
+        //
+        // Across the page, not the panel: the rail runs up beside the
+        // title rather than under it. See `page_rect`.
+        p.panel_header(page_rect(), language.text(Msg::Inventory), HEADER_HEIGHT, 0.0);
+        tab_rail(&mut p, layers, self.tab, self.cursor, inventory.backpack_open(), language);
 
         // ---- the health page, which shares nothing below this ----
         //
@@ -1665,31 +1673,45 @@ pub(crate) fn shelter_lines(body: &crate::ui::hud::BodyGauges, language: Languag
     lines
 }
 
-/// Draws the four tabs.
+/// Draws the rail and the four tabs in it.
 ///
-/// The one showing is a *well* and the rest are buttons: the page you
-/// are on is the hole the panel's content comes out of, and the ones you
-/// are not on are things to press. That is one shape carrying the
-/// state rather than a colour, which survives being looked at on a phone
-/// in daylight.
-fn tab_strip(
+/// **Which page is showing is said three ways at once**, because it is
+/// the one thing on this screen a glance has to get right: the showing
+/// tab is lit where the others sit back, it is open on the right so it
+/// runs on into the page it opened (`ui/rail_on.png`), and its word is
+/// in the accent -- the one colour on the panel that is not grey. Shape
+/// and light survive a phone in daylight; the colour is for everyone
+/// else.
+fn tab_rail(
     p: &mut Painter,
+    layers: &FaceLayers,
     showing: Tab,
     cursor: Option<(f32, f32)>,
     backpack_on: bool,
     language: Language,
 ) {
+    // The recess first: the dark strip of the sketch, a well the tabs
+    // stand in, the whole height of the panel.
+    p.well(rail_rect(), widgets::WELL);
+    let (scale, words) = rail_label(language);
     for (index, tab) in ALL_TABS.iter().copied().enumerate() {
         let rect = tab_rect(index);
-        let text = language.text(tab.label());
         // The rucksack page exists only while a rucksack is worn. Drawn
-        // greyed rather than hidden, because a strip that lost a tab
+        // greyed rather than hidden, because a rail that lost a tab
         // would move the rest of them -- and a control that moves when
         // the player takes their pack off is a control they have to find
         // again.
         let enabled = tab != Tab::Backpack || backpack_on;
         let hovered = cursor.is_some_and(|(x, y)| rect.contains(x, y));
-        p.tab(rect, text, tab == showing, hovered, enabled);
+        let ink = p.rail_tab(rect, tab == showing, hovered, enabled);
+        let (icon, pens) = tab_contents(index, scale, &words[index]);
+        // A greyed tab's picture is the empty body square's ghost: the
+        // same faint grey that says "a rucksack goes here" on the figure.
+        let tint = if enabled { [1.0; 4] } else { GHOST };
+        textured(p, icon, icon_layer(layers, tab_icon(tab)), tint);
+        for (line, (x, top)) in words[index].iter().zip(pens) {
+            p.text(line, x, top, scale, ink);
+        }
     }
 }
 
@@ -2244,14 +2266,16 @@ use crate::ui::widgets::{
 /// top of it.
 ///
 /// **Not `panel_rect`**, which is what every note on this screen used to
-/// be held to. That rectangle includes the title and the tab strip, so a
-/// note taken from the top of the recipe grid rode up over the tabs and
-/// hid one of the four controls a player uses on every visit. The
-/// content band is the room a note is allowed, and it is the room it
-/// needs: everything a note can be about is in it.
+/// be held to. That rectangle includes the title and the tabs, so a note
+/// taken from the top of the recipe grid rode up over the tabs and hid
+/// one of the four controls a player uses on every visit. The content
+/// band is the room a note is allowed, and it is the room it needs:
+/// everything a note can be about is in it. It starts right of the rail
+/// now, for the same reason it stops under the title -- a note about the
+/// figure's arm pushed left would otherwise be drawn over `ТЕЛО`.
 fn note_bounds() -> Rect {
     let panel = panel_rect();
-    Rect::new(panel.x0 + PANEL_PAD, panel.y0, panel.x1 - PANEL_PAD, content_top())
+    Rect::new(content_left(), panel.y0, panel.x1 - PANEL_PAD, content_top())
 }
 
 /// One line of text in a box, beside the pointer and inside `bounds`.
@@ -2728,8 +2752,11 @@ fn grid_left() -> f32 {
     // recipes -- and the middle of it is what gets centred. The body
     // column shifts the other two right by exactly its own width, which
     // is what keeps the panel symmetrical about the screen rather than
-    // symmetrical about the pack with a strip hanging off the side.
-    -(grid_width + COLUMN_GAP + recipe_grid_width()) / 2.0 + body_column_width() / 2.0
+    // symmetrical about the pack with a strip hanging off the side. The
+    // rail left of the body is the same argument once more.
+    -(grid_width + COLUMN_GAP + recipe_grid_width()) / 2.0
+        + body_column_width() / 2.0
+        + RAIL_SHARE / 2.0
 }
 
 /// How much the body takes up: the figure, the four squares beside it,
@@ -2871,83 +2898,306 @@ fn belt_strip() -> Rect {
     )
 }
 
-/// The whole screen's extent, panel padding included.
+/// The whole screen's extent, panel padding included: the rail on the
+/// left, then the page.
 fn panel_rect() -> Rect {
     Rect::new(
-        // Past the body column rather than past the pack: the figure and
-        // the four squares are inside the panel, and a panel that stopped
-        // at the pack would have them hanging over its edge.
-        grid_left() - body_column_width() - PANEL_PAD,
+        // Past the rail, which is past the body column: the figure and
+        // the squares are inside the panel, and the rail is beside them
+        // inside it too. See `RAIL_SHARE`.
+        grid_left() - body_column_width() - RAIL_SHARE - PANEL_PAD,
         -content_top() - FOOTER_HEIGHT,
         recipe_left() + recipe_grid_width() + PANEL_PAD,
-        // The tab strip is a band of its own between the title and the
-        // content, so the panel is that much taller. Growing the *header*
-        // instead was tried and rejected twice: a header band is where a
-        // title goes, and a title centred in a band twice its own height
-        // is a word floating in an empty stripe -- which is precisely
-        // what the phone's header looked like while the tidy button was
-        // holding it open.
-        content_top() + HEADER_HEIGHT + tab_band(),
+        // **A title and nothing else over the page.** There was a band of
+        // tabs here, between the title and the trays, a finger tall on a
+        // phone; the tabs are down the side now, and the panel is that
+        // much shorter -- which is where the rail's width was paid back,
+        // see `RAIL_SHARE`.
+        content_top() + HEADER_HEIGHT,
     )
 }
 
-// ---- the three tabs ----
+/// The page's own part of the panel: everything right of the rail.
+///
+/// What the title band is drawn across. The band and its rule start at
+/// the page rather than at the panel's edge, so the rail runs the whole
+/// height of the panel beside them -- the owner's sketch, a dark strip
+/// from the panel's top to its floor -- instead of the title and its
+/// rule running over the top of the rail.
+fn page_rect() -> Rect {
+    let panel = panel_rect();
+    Rect::new(content_left() - widgets::PANEL_BORDER, panel.y0, panel.x1, panel.y1)
+}
+
+/// Where the page's contents start: the body column's left edge, one
+/// [`RAIL_GAP`] right of the rail.
+fn content_left() -> f32 {
+    grid_left() - body_column_width()
+}
+
+// ---- the rail ----
 //
-// A strip of three across the top of the panel, under the title and over
-// everything else. Full width, three equal parts, because a tab whose
-// width depends on its own label moves when the language changes -- and
-// a control that is in a different place in Polish is a control the
-// player has to find twice.
+// **The four pages are a column of tabs down the left of the panel, the
+// whole height of it.** They were a strip of four across the top, under
+// the title. The owner asked for the rail with a sketch -- a dark strip
+// beside a grey page, as tall as the page -- and the reasons it is the
+// better shape are these:
+//
+// * **The pages are about different things, and a rail says so.** A
+//   strip across the top of a page reads as views of *that* page; the
+//   body, the pack, the rucksack and the path are four places, and a
+//   column of them beside the page is the shape every program with
+//   places in it uses.
+// * **Room for a picture.** A tab a quarter of the panel's height and a
+//   rail's width is square enough to carry an icon over its word, and
+//   the icon is what an eye finds before it reads.
+// * **It costs width, and the panel had height to give.** The strip was
+//   a finger tall on a phone -- 0.178 of a panel 0.87 tall -- and it is
+//   gone; the rail takes `RAIL_SHARE` across instead. See there for
+//   what that does to a square window.
+//
+// Every tab the same size, whatever its label, for the strip's old
+// reason: a control whose place depends on its word is in a different
+// place in Polish.
 
-/// Height of one tab.
+/// How wide one tab is, and so the rail.
 ///
-/// `tappable`: with the tidy button gone these four are the *only*
-/// controls on the pack screen, they are what a phone player uses on
-/// every visit, and they are at the top of the panel where a thumb is
-/// least accurate. The header band above them is not `tappable` and must
-/// not become so again -- nothing in it is pressed.
-fn tab_height() -> f32 {
-    widgets::tappable(0.058)
-}
+/// **One width on both pointers, and it is the phone's that decides
+/// it.** A tab in a rail is pressed across its width as much as down
+/// its height, so on glass it has to be a finger wide
+/// ([`widgets::FINGER_SIDE`], 0.15) as well as a finger tall -- and a
+/// rail that was narrower on a desktop would be a page that moved
+/// sideways between the two. The rest over the finger is the room
+/// `RUCKSACK` needs on one line at [`RAIL_TEXT_FLOOR`] and a hair more;
+/// `every_word_on_the_rail_fits_its_tab_in_every_language` measures it.
+const RAIL_TAB_WIDTH: f32 = 0.180;
 
-/// How much height the strip takes out of the panel, air included.
-fn tab_band() -> f32 {
-    tab_height() + TAB_MARGIN * 2.0
-}
+/// Air between the rail's own lip and the tabs in it, on the left and at
+/// both ends. The right has none: see [`tab_rect`].
+const RAIL_INSET: f32 = 0.008;
 
-/// Air above and below the strip.
+/// The rail, lip included.
+const RAIL_WIDTH: f32 = RAIL_TAB_WIDTH + RAIL_INSET;
+
+/// Air between the rail and the page's first column.
 ///
-/// Above it separates the tabs from the title; below it separates them
-/// from the trays. The same number for both, because a strip closer to
-/// one than the other reads as belonging to it.
-const TAB_MARGIN: f32 = 0.014;
+/// The same as the air between the figure and the body squares
+/// (`MANNEQUIN_GAP`): the rail is a separate thing from the figure
+/// beside it, and a hair of hide between them is what says so.
+const RAIL_GAP: f32 = 0.016;
 
-/// The gap between two tabs.
+/// How much wider the panel is for having a rail.
 ///
-/// Narrow on purpose: three tabs with a slot's gap between them read as
-/// three buttons that happen to be in a row, and what this has to say is
-/// that they are three faces of one thing.
+/// **0.204, and that is the price of the rail, paid in width.** The pack
+/// was 1.99 across and fitted a square window with four thousandths to
+/// spare; with the rail it is 2.19, which fits a 5:4 window -- the
+/// squarest monitor sold, 1280x1024 -- and a 4:3 tablet with room over
+/// (`the_whole_screen_fits_the_squarest_window_anyone_plays_in`).
+///
+/// Paid for, rather than found, because the two places it could have
+/// been found were both worse:
+///
+/// * **Three columns of recipes instead of four** buys 0.107 -- half of
+///   it -- and costs every player five of the twenty recipes on screen.
+/// * **A narrower figure** is a narrower arm, and an arm narrower than
+///   two thirds of a slot is a bandage aimed with a thumb landing on the
+///   tray beside it (see `MANNEQUIN_WIDTH`).
+///
+/// What the width does cost: every centred screen grows by one shared
+/// number (`widgets::screen_growth`), measured against the pack, so on a
+/// window narrow enough that the pack is what stops the growing -- a
+/// 4:3 monitor, or a phone past the INTERFACE SIZE it starts at --
+/// every screen now stops about eight percent sooner. At the phone's own
+/// 1.5 the pack is still not the limit, and nothing is smaller.
+const RAIL_SHARE: f32 = RAIL_WIDTH + RAIL_GAP;
+
+/// The gap between two tabs: narrow, because they are four faces of one
+/// thing rather than four buttons that happen to be in a column.
 const TAB_GAP: f32 = 0.008;
+
+/// The recess the tabs stand in, the full height of the panel inside its
+/// frame.
+fn rail_rect() -> Rect {
+    let panel = panel_rect();
+    let left = panel.x0 + PANEL_PAD;
+    Rect::new(left, panel.y0 + PANEL_PAD, left + RAIL_WIDTH, panel.y1 - PANEL_PAD)
+}
 
 /// Where one tab is drawn.
 ///
 /// **The exact inverse of [`tab_at`]**, which is not a style note here:
 /// the interface is laid out in its own space and scaled, so a hit test
-/// written independently of the drawing is a strip that looks right and
+/// written independently of the drawing is a rail that looks right and
 /// answers in the wrong place. There is a test that says so.
+///
+/// The four share the rail's height between them, so a tab is as tall as
+/// the panel allows (0.171) -- over a finger on a phone without asking
+/// `tappable` for it, and a test says that too. Flush with the rail's
+/// right edge rather than inset from it: the showing tab is open on that
+/// side (`ui/rail_on.png`), and a lit tab that stopped short of the page
+/// would be a tab with a groove between it and what it opened.
 pub fn tab_rect(index: usize) -> Rect {
-    let panel = panel_rect();
-    let inner = panel.width() - PANEL_PAD * 2.0;
+    let rail = rail_rect();
     let count = ALL_TABS.len() as f32;
-    let width = (inner - TAB_GAP * (count - 1.0)) / count;
-    let left = panel.x0 + PANEL_PAD + index as f32 * (width + TAB_GAP);
-    let top = panel.y1 - HEADER_HEIGHT - TAB_MARGIN;
-    Rect::new(left, top - tab_height(), left + width, top)
+    let inner = rail.height() - RAIL_INSET * 2.0;
+    let height = (inner - TAB_GAP * (count - 1.0)) / count;
+    let top = rail.y1 - RAIL_INSET - index as f32 * (height + TAB_GAP);
+    Rect::new(rail.x0 + RAIL_INSET, top - height, rail.x1, top)
 }
 
 /// Which tab a point is over, as an index into [`ALL_TABS`].
 pub fn tab_at(cursor: (f32, f32)) -> Option<usize> {
     (0..ALL_TABS.len()).find(|&index| tab_rect(index).contains(cursor.0, cursor.1))
+}
+
+/// The picture on a tab.
+///
+/// Pictures the game already has, because a tab's icon has to be the
+/// thing a player already knows by sight:
+///
+/// * the body is a **bandage** -- what the page is for, the one place a
+///   dressing is put on;
+/// * the pack is a **stone axe**, the first thing every player makes and
+///   carries. Not a bag: the bag's picture is the rucksack's (see
+///   `blocks.toml`), and two tabs with one picture are one tab too many;
+/// * the rucksack is **the rucksack**;
+/// * the path is **an iron ingot**, the last rung's mark -- where the path
+///   goes, which is what the page is about.
+fn tab_icon(tab: Tab) -> primitive_shared::types::BlockId {
+    use primitive_shared::types::{BLOCK_BANDAGE, BLOCK_IRON_INGOT, BLOCK_RUCKSACK, BLOCK_STONE_AXE};
+    match tab {
+        Tab::Health => BLOCK_BANDAGE,
+        Tab::Pack => BLOCK_STONE_AXE,
+        Tab::Backpack => BLOCK_RUCKSACK,
+        Tab::Learn => BLOCK_IRON_INGOT,
+    }
+}
+
+/// How big the picture on a tab is: a slot's icon, a little smaller,
+/// because the word under it needs the height.
+const RAIL_ICON: f32 = 0.056;
+/// Air between the picture and the word under it.
+const RAIL_ICON_AIR: f32 = 0.008;
+/// Air at the top and bottom of a tab, inside its lip.
+const RAIL_PAD_Y: f32 = 0.012;
+/// How far a word keeps from a tab's sides: the picture's lip, three
+/// texels -- where the showing tab's accent bar is drawn, see
+/// `Painter::rail_tab` -- and a texel of air.
+const RAIL_TEXT_PAD: f32 = 4.0 * widgets::SKIN_TEXEL;
+/// Between two lines of one word.
+const RAIL_LINE_AIR: f32 = 0.002;
+
+/// The smallest the rail will letter a word.
+///
+/// Half the size of body text, which at the pack's own growth is a font
+/// pixel of two screen pixels on a 1080p monitor and three and a half on
+/// the phone -- small, and every stroke still there. It is the floor the
+/// longest words in the four languages come to rest above (`RUCKSACK`,
+/// and Simple English's three-line `BAG ON YOUR BACK`), not a size
+/// anything is drawn at on purpose; a test holds every language off it.
+const RAIL_TEXT_FLOOR: f32 = 0.50;
+
+/// The word on each tab, laid out: the size the whole rail is lettered
+/// at, and each tab's lines.
+///
+/// **Two decisions, and the ones they beat.**
+///
+/// * **A word under the picture, on both pointers, and not a bare icon
+///   on the phone.** A finger-wide rail has room for `ПОЖИТКИ` at a
+///   readable size, and a picture alone would be the one place in the
+///   game a player has to learn a symbol to find a page: nothing else
+///   here is an unlabelled button.
+/// * **One size for the whole rail, wrapped rather than shrunk word by
+///   word.** Each word fitted on its own came out at four sizes in one
+///   column -- `ТЕЛО` large and `ПОЖИТКИ` small -- which is the complaint
+///   `Painter::tab` was rewritten to answer. So the rail is lettered at
+///   the largest size at which *every* word fits its tab, breaking at
+///   spaces where it has them (Simple English's `BAG ON YOUR BACK` is
+///   three short lines), and only the length of the longest single word
+///   in a language decides how small that is.
+fn rail_label(language: Language) -> (f32, [Vec<String>; 4]) {
+    let room_across = RAIL_TAB_WIDTH - RAIL_TEXT_PAD * 2.0;
+    let room_down = tab_rect(0).height() - RAIL_PAD_Y * 2.0 - RAIL_ICON - RAIL_ICON_AIR;
+    let lay_out = |scale: f32| -> Option<[Vec<String>; 4]> {
+        let mut out: [Vec<String>; 4] = Default::default();
+        for (slot, tab) in out.iter_mut().zip(ALL_TABS) {
+            let lines = wrap_to(language.text(tab.label()), scale, room_across)?;
+            let tall = lines.len() as f32 * widgets::cell_height(scale)
+                + (lines.len() as f32 - 1.0) * RAIL_LINE_AIR;
+            if tall > room_down {
+                return None;
+            }
+            *slot = lines;
+        }
+        Some(out)
+    };
+    let mut scale = widgets::size::NOTE;
+    while scale > RAIL_TEXT_FLOOR {
+        if let Some(lines) = lay_out(scale) {
+            return (scale, lines);
+        }
+        scale -= 0.01;
+    }
+    // At the floor whatever happens: a word drawn slightly past its tab
+    // is a word that can still be read, and the test that holds every
+    // language above this line is what stops it being reached.
+    let lines = ALL_TABS.map(|tab| {
+        wrap_to(language.text(tab.label()), RAIL_TEXT_FLOOR, room_across)
+            .unwrap_or_else(|| vec![language.text(tab.label()).to_string()])
+    });
+    (RAIL_TEXT_FLOOR, lines)
+}
+
+/// Breaks a label at its spaces into lines no wider than `room` at
+/// `scale`, or `None` if one of its words is wider than that alone.
+fn wrap_to(text: &str, scale: f32, room: f32) -> Option<Vec<String>> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        if widgets::ink_width(word, scale) > room {
+            return None;
+        }
+        match lines.last_mut() {
+            Some(line) if widgets::ink_width(&format!("{line} {word}"), scale) <= room => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    Some(lines)
+}
+
+/// Where a tab's picture and each line of its word go, top down.
+///
+/// **One function for the drawing and the test** that says no word
+/// leaves its tab, so the two cannot measure different words.
+fn tab_contents(index: usize, scale: f32, lines: &[String]) -> (Rect, Vec<(f32, f32)>) {
+    let tab = tab_rect(index);
+    let words = lines.len() as f32 * widgets::cell_height(scale)
+        + (lines.len() as f32 - 1.0).max(0.0) * RAIL_LINE_AIR;
+    let group = RAIL_ICON + RAIL_ICON_AIR + words;
+    // The picture and the word centred together, so a one-line tab and a
+    // three-line one have their middles level with their tab's.
+    let top = tab.centre_y() + group / 2.0;
+    let icon = Rect::new(
+        tab.centre_x() - RAIL_ICON / 2.0,
+        top - RAIL_ICON,
+        tab.centre_x() + RAIL_ICON / 2.0,
+        top,
+    );
+    let first = icon.y0 - RAIL_ICON_AIR;
+    let pens = lines
+        .iter()
+        .enumerate()
+        .map(|(n, line)| {
+            let width = widgets::ink_width(line, scale);
+            (
+                tab.centre_x() - width / 2.0,
+                first - n as f32 * (widgets::cell_height(scale) + RAIL_LINE_AIR),
+            )
+        })
+        .collect();
+    (icon, pens)
 }
 
 /// How much of the screen the pack takes, about the middle it is
@@ -3194,14 +3444,15 @@ fn content_top() -> f32 {
 
 /// The band a page that is not a grid gets to draw in.
 ///
-/// Everything between the tabs and the panel's floor, padded. Named,
-/// because the path page is laid out inside it and a second copy of
-/// "panel, less the header, less the tabs, less the footer margin" is a
-/// page that drifts off the panel the next time the header grows.
+/// Everything between the title and the panel's floor, right of the
+/// rail, padded. Named, because the path page is laid out inside it and
+/// a second copy of "panel, less the header, less the rail, less the
+/// footer margin" is a page that drifts off the panel -- or under the
+/// rail -- the next time either of them grows.
 pub fn content_band() -> Rect {
     let panel = panel_rect();
     Rect::new(
-        panel.x0 + PANEL_PAD,
+        content_left(),
         panel.y0 + FOOTER_MARGIN,
         panel.x1 - PANEL_PAD,
         content_top(),
@@ -3763,20 +4014,24 @@ mod tests {
     }
 
     #[test]
-    fn the_whole_screen_fits_a_square_window() {
-        // Authored as if the window were square, which is the worst case
-        // the aspect divide can produce: x runs -aspect..+aspect, and
-        // aspect is 1.0 there.
+    fn the_whole_screen_fits_the_squarest_window_anyone_plays_in() {
+        // Authored against a 5:4 window -- 1280x1024, the squarest
+        // monitor sold -- where x runs -1.25..+1.25. It was a square
+        // window until the rail arrived: the pack fitted one with four
+        // thousandths to spare, and a rail a finger wide could only come
+        // out of the recipes or the figure's arm. See `RAIL_SHARE` for
+        // that argument and what the width costs instead.
         //
         // Regression: the recipe column used to hang off the right of a
         // centred grid, putting the panel's right edge at x = 1.47. On
         // anything narrower than about 3:2 the crafting menu was off the
         // screen entirely, and on 16:9 the whole thing sat visibly to
         // one side.
+        const FIVE_BY_FOUR: f32 = 1.25;
         let panel = panel_rect();
         assert!(
-            panel.x0 > -1.0 && panel.x1 < 1.0,
-            "the panel runs from {} to {}, off a square window",
+            panel.x0 > -FIVE_BY_FOUR && panel.x1 < FIVE_BY_FOUR,
+            "the panel runs from {} to {}, off a 5:4 window",
             panel.x0,
             panel.x1
         );
@@ -3966,22 +4221,26 @@ mod tests {
             let drawn = grow_by(phone);
             const SLACK: f32 = 1e-4;
             let panel = panel_rect();
-            // **The four tabs**, which are the control a phone
-            // player uses on every visit and sit at the very top of the
-            // panel, where a thumb is least accurate. Across is not
-            // checked: a third of the panel is far wider than a finger
-            // in every language.
+            // **The four tabs**, which are the control a phone player
+            // uses on every visit. **Both ways now.** Across was not
+            // checked while the tabs were a strip -- a quarter of the
+            // panel is far wider than a finger -- and it is the tight
+            // one in a rail: a thumb pressing a tab in a column misses
+            // sideways as easily as up and down.
+            let rail = rail_rect();
             for index in 0..ALL_TABS.len() {
                 let tab = tab_rect(index);
+                for (side, across) in [("down", tab.height()), ("across", tab.width())] {
+                    assert!(
+                        across >= widgets::FINGER_SIDE - SLACK
+                            && across * drawn >= widgets::FINGER_SIDE - SLACK,
+                        "tab {index} is {:.0} device pixels {side}, against a finger of 91",
+                        across * drawn * 610.0,
+                    );
+                }
                 assert!(
-                    tab.height() >= widgets::FINGER_SIDE - SLACK
-                        && tab.height() * drawn >= widgets::FINGER_SIDE - SLACK,
-                    "tab {index} is {:.0} device pixels down, against a finger of 91",
-                    tab.height() * drawn * 610.0,
-                );
-                assert!(
-                    tab.y1 <= panel.y1 && tab.y0 >= content_top(),
-                    "tab {index} has grown out of its band",
+                    widgets::holds(rail, tab, SLACK) && widgets::holds(panel, rail, SLACK),
+                    "tab {index} has grown out of its rail",
                 );
             }
         });
@@ -4275,7 +4534,11 @@ mod tests {
         let inventory = stocked();
         for touch in [false, true] {
             widgets::with_touch(touch, || {
-                let panel = panel_rect();
+                // The page's part of the panel: the band runs from the
+                // rail to the frame, and the rail beside it is the one
+                // place up there that is pressed -- on purpose, and
+                // checked by `every_tab_is_clicked_where_it_is_drawn_and_on_nothing_else`.
+                let panel = page_rect();
                 // Inside the frame, because a point exactly on the
                 // panel's edge is outside it and closes the screen --
                 // which is the tap-off-the-panel gesture doing its job
@@ -5104,6 +5367,8 @@ mod tests {
             // thumb lands when it is aiming at the tab beside this one.
             for (x, y) in [
                 (rect.x0 + 0.002, rect.y0 + 0.002),
+                (rect.x1 - 0.002, rect.y0 + 0.002),
+                (rect.x0 + 0.002, rect.y1 - 0.002),
                 (rect.x1 - 0.002, rect.y1 - 0.002),
             ] {
                 assert_eq!(tab_at((x, y)), Some(index), "{tab:?} misses its own corner");
@@ -5115,20 +5380,27 @@ mod tests {
             assert_eq!(screen.click(&pack, Button::Left, false), None, "a tab asked the server for something");
             assert_eq!(screen.tab(), tab, "clicking {tab:?} turned to another page");
         }
-        // Between two tabs, and well away from the strip, is nothing.
-        let gap = (tab_rect(0).x1 + TAB_GAP / 2.0, tab_rect(0).centre_y());
-        assert_eq!(tab_at(gap), None, "the gap between two tabs is a tab");
+        // Between two tabs, beside the rail, and well away from it, is
+        // nothing.
+        for index in 1..ALL_TABS.len() {
+            let gap = (tab_rect(index).centre_x(), tab_rect(index).y1 + TAB_GAP / 2.0);
+            assert_eq!(tab_at(gap), None, "the gap over tab {index} is a tab");
+        }
+        let beside = (content_left() - RAIL_GAP / 2.0, tab_rect(1).centre_y());
+        assert_eq!(tab_at(beside), None, "the air between the rail and the page is a tab");
         assert_eq!(tab_at((0.0, -0.9)), None, "the bottom of the screen is a tab");
-        // ...and no tab is drawn over a slot or a recipe, which are the
-        // two things under it, nor over the title band above it.
+        // ...and no tab is drawn over a slot, a recipe, the figure or the
+        // title band: everything a tab could be mistaken for is right of
+        // the rail, and so is the page.
         for index in 0..ALL_TABS.len() {
             let rect = tab_rect(index);
             let centre = (rect.centre_x(), rect.centre_y());
             assert_eq!(slot_place_at(centre), None, "a tab sits on a slot");
             assert_eq!(recipe_at(centre, 0, &pack), None, "a tab sits on a recipe");
+            assert_eq!(body_part_at(centre), None, "a tab sits on the figure");
             assert!(
-                rect.y1 <= panel_rect().y1 - HEADER_HEIGHT + 1e-4,
-                "a tab has climbed into the title band",
+                rect.x1 <= content_left() - RAIL_GAP + 1e-4,
+                "tab {index} reaches into the page",
             );
         }
     }
@@ -5227,13 +5499,75 @@ mod tests {
                 }
             }
         }
-        // ...and the band it is held to really does start below the
-        // tabs, which is the half of the fix a coordinate test cannot
-        // see on its own.
-        assert!(
-            bounds.y1 <= tab_rect(0).y0 + 1e-3,
-            "the note band reaches up into the tab strip",
-        );
+        // ...and the band it is held to really does stay clear of every
+        // tab, which is the half of the fix a coordinate test cannot see
+        // on its own. Beside them now rather than below them: the rail
+        // runs the panel's whole height, so it is the band's left edge
+        // that keeps a note off `ТЕЛО`.
+        for index in 0..ALL_TABS.len() {
+            assert!(
+                !widgets::crossing(bounds, tab_rect(index), 1e-4),
+                "the note band reaches over tab {index}",
+            );
+        }
+    }
+
+    /// **No word on the rail leaves its tab, in any language, on either
+    /// pointer** -- and none is lettered at the floor it would be forced
+    /// down to if it did not fit.
+    ///
+    /// The rail is a finger wide and four languages have to live in it:
+    /// `RUCKSACK` is the longest single word, Simple English's `BAG ON YOUR
+    /// BACK` the longest label, and Polish and Russian bring their own.
+    /// `rail_label` picks one size for the whole rail from what fits; this
+    /// is the line that says it found one for every language, measured on
+    /// the same rectangles and pens the drawing uses (`tab_contents`).
+    #[test]
+    fn every_word_on_the_rail_fits_its_tab_in_every_language() {
+        for touch in [false, true] {
+            widgets::with_touch(touch, || {
+                for &language in Language::ALL {
+                    let (scale, words) = rail_label(language);
+                    assert!(
+                        scale > RAIL_TEXT_FLOOR,
+                        "{language:?}: the rail came down to its floor, so some word does not fit",
+                    );
+                    for (index, lines) in words.iter().enumerate() {
+                        let tab = tab_rect(index);
+                        let room = Rect::new(
+                            tab.x0 + RAIL_TEXT_PAD,
+                            tab.y0 + RAIL_PAD_Y,
+                            tab.x1 - RAIL_TEXT_PAD,
+                            tab.y1 - RAIL_PAD_Y,
+                        );
+                        assert_eq!(
+                            lines.join(" "),
+                            language.text(ALL_TABS[index].label()),
+                            "{language:?}: tab {index} lost a word to its wrapping",
+                        );
+                        let (icon, pens) = tab_contents(index, scale, lines);
+                        assert!(widgets::holds(room, icon, 1e-4), "{language:?}: tab {index}'s picture leaves it");
+                        for (line, (x, top)) in lines.iter().zip(pens) {
+                            let ink = Rect::new(
+                                x,
+                                top - widgets::cell_height(scale),
+                                x + widgets::ink_width(line, scale),
+                                top,
+                            );
+                            assert!(
+                                widgets::holds(room, ink, 1e-4),
+                                "{language:?}/{}: {line:?} at {ink:?} leaves tab {index} ({room:?})",
+                                if touch { "phone" } else { "desktop" },
+                            );
+                            assert!(
+                                !widgets::crossing(ink, icon, 0.0),
+                                "{language:?}: {line:?} is written over tab {index}'s picture",
+                            );
+                        }
+                    }
+                }
+            });
+        }
     }
 
     #[test]

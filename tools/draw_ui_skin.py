@@ -105,6 +105,58 @@ def lit_side(x, y):
     return d == t or d == l
 
 
+def grain(seed, period, amount):
+    """Fine grain, 1.0 in the mean, with nothing in it bigger than a texel
+    or two -- the surface of a hide, and the whole of what may repeat.
+
+    **This is the answer to "пятна повторяющиеся".** The middle of a
+    panel is one small picture laid down over and over (see
+    widgets::FIELD_TILE), and whatever in it is big enough to be *seen*
+    is seen again every tile: the first cut of this skin had smooth value
+    noise four cells across and a scatter of darker "pores" in it, and a
+    pore two texels wide in a sixteen-texel tile is a grid of identical
+    blotches marching across the pack -- which is exactly what the
+    player described. The eye finds a repeat by finding a *feature*
+    twice; a field with no feature has no repeat to find.
+
+    So: independent texels, with everything a 5x5 neighbourhood has in
+    common subtracted (a high-pass), and nothing else. What is left is
+    grain at the size of one texel and no blotch at any size above it --
+    `a_surfaces_grain_has_no_blotch_to_repeat_and_is_not_a_flat_fill`
+    in widgets.rs measures both halves of that on the pictures this
+    writes. `amount` is the standard deviation of the multiplier: a
+    couple of percent, which is the step of one sRGB byte or two, and is
+    what a hide looks like from arm's length rather than a flat fill.
+
+    Rejected, and written down so nobody tries them again:
+
+    * **Stretching the middle instead of tiling it.** Sixteen texels
+      across a panel two units wide are sixteen blocks a sixth of the
+      screen apart -- a pixel game drawing its leather in pixels eight
+      times the size of its letters' pixels.
+    * **A big middle that does not repeat.** Every layer in the array is
+      32 texels square (it is the blocks' array), so a field that never
+      repeats across a whole panel is a few dozen layers, or a second
+      texture and a second binding in a pipeline the GLES split already
+      has to rewrite. Both to hide a repeat that fine grain does not have.
+    * **Grain tied to the screen's pixels.** The shader would sample by
+      fragment position, the snapshot harness would have to learn it,
+      and a screen pixel on the phone this is for is a fifth of a font
+      pixel: at 446 ppi that grain is invisible, and the panel is a flat
+      fill after all.
+    """
+    rng = random.Random(seed)
+    r = [[rng.random() for _ in range(period)] for _ in range(period)]
+    hp = [[0.0] * period for _ in range(period)]
+    for y in range(period):
+        for x in range(period):
+            around = sum(r[(y + j) % period][(x + i) % period] for j in range(-2, 3) for i in range(-2, 3)) / 25.0
+            hp[y][x] = r[y][x] - around
+    mean = sum(sum(row) for row in hp) / (period * period)
+    sd = math.sqrt(sum((v - mean) ** 2 for row in hp for v in row) / (period * period)) or 1.0
+    return [[1.0 + max(-2.0, min(2.0, (hp[y % period][x % period] - mean) / sd)) * amount for x in range(N)] for y in range(N)]
+
+
 def field(rng, seed_cells, amount, period):
     """A tileable grain, 1.0 in the mean.
 
@@ -123,22 +175,17 @@ def panel():
 
     Eight texels of border, which is what the stitching needs to be a
     row of stitches rather than a dotted line, and a middle of sixteen
-    that tiles.
+    that tiles -- in `grain`, which see for why there are no pores any
+    more.
     """
-    rng = random.Random(7401)
-    grain = field(rng, 4, 0.085, 16)
-    pores = vnoise(random.Random(7402), 8, 16)
+    hide = grain(7401, 16, 0.022)
     m = blank()
     a = blank(1.0)
     for y in range(N):
         for x in range(N):
             t, l, b, r, d = depths(x, y)
             lit = lit_side(x, y)
-            v = grain[y][x]
-            # The hide's own pores: patches, never single pixels -- a
-            # lone dark texel at this size reads as dirt on the screen.
-            if pores[y % 16][x % 16] < 0.30:
-                v *= 0.90
+            v = hide[y][x]
             if d == 0:
                 v = 0.22            # the panel's own edge, against the world
             elif d == 1:
@@ -181,8 +228,7 @@ def hollow(floor, lip_dark, lip_light, border, grain_amount, seed):
     skin whose mean is not neutral would make every one of those
     measurements a lie.
     """
-    rng = random.Random(seed)
-    grain = field(rng, 4, grain_amount, N - 2 * border)
+    floor_grain = grain(seed, N - 2 * border, grain_amount)
     m = blank()
     a = blank(1.0)
     for y in range(N):
@@ -196,14 +242,14 @@ def hollow(floor, lip_dark, lip_light, border, grain_amount, seed):
             elif d == 2:
                 v = (lip_dark + 1.0) / 2.0 if lit else (lip_light + 1.0) / 2.0
             else:
-                v = floor * grain[y][x]
+                v = floor * floor_grain[y][x]
             m[y][x] = v
     return m, a
 
 
 # --------------------------------------------------------------- slots
 
-def slot(floor, lip_dark, lip_light, seed, scuff):
+def slot(floor, lip_dark, lip_light, seed):
     """One cell, drawn whole rather than sliced.
 
     A slot is always about square and always about the same size, so it
@@ -211,8 +257,7 @@ def slot(floor, lip_dark, lip_light, seed, scuff):
     a nine-slice and, at this size, indistinguishable. `Painter::well`
     is what a *stretched* hollow goes through.
     """
-    rng = random.Random(seed)
-    grain = vnoise(rng, 8, N)
+    floor_grain = grain(seed, N, 0.020)
     m = blank()
     a = blank(1.0)
     for y in range(N):
@@ -232,12 +277,14 @@ def slot(floor, lip_dark, lip_light, seed, scuff):
                 dx = (x - 15.5) / 12.0
                 dy = (y - 15.5) / 12.0
                 v = floor * (1.0 - 0.13 * min(1.0, dx * dx + dy * dy))
-                v *= 1.0 + (grain[y][x] - 0.5) * 2.0 * 0.05
-                # A few scuffs where things have been dropped in, in
-                # patches rather than as single texels: a lone dark
-                # pixel at this size is a dead sub-pixel, not a scuff.
-                if scuff and grain[y][x] < 0.24:
-                    v *= 0.90
+                # **No scuffs.** There were -- a patch of darker floor
+                # where things had been dropped in -- and the same patch
+                # in the same place in forty cells side by side is not
+                # wear, it is a pattern: the pack read as a wall of
+                # identical smudges. Grain, and the vignette, which is
+                # centred on the cell and so says "hole" rather than
+                # "stamp".
+                v *= floor_grain[y][x]
             m[y][x] = v
     return m, a
 
@@ -318,7 +365,8 @@ def slot_blocked():
 
 # ------------------------------------------------------------- raised
 
-def board(face, lip_light, lip_dark, seed, pressed=False, bottom_line=False, open_bottom=False):
+def board(face, lip_light, lip_dark, seed, pressed=False, bottom_line=False, open_bottom=False,
+          open_right=False, right_line=False):
     """A board standing proud of the panel: what a button is.
 
     `pressed` turns the bevel over. That is the whole of what a pressed
@@ -351,6 +399,13 @@ def board(face, lip_light, lip_dark, seed, pressed=False, bottom_line=False, ope
             elif d == 2:
                 v = (lip_light + face) / 2.0 if lit else (lip_dark + face) / 2.0
             if bottom_line and b <= 1:
+                v = 0.30
+            # Open on the right: the edge the page is on carries on in
+            # the board's own face, so the chosen tab and the page under
+            # it read as one piece of hide folded out of the rail.
+            if open_right and r <= 2 and r < min(t, b):
+                v = face * grain[y][x] * streak[y % 20]
+            if right_line and r <= 1:
                 v = 0.30
             m[y][x] = v
     return m, a
@@ -398,9 +453,9 @@ def main():
         # A shallow tray: a group of slots stands in one, and it has to
         # read as a different *place* from the panel without reading as
         # a hole. See `Theme::tray`.
-        "tray.png": hollow(1.0, 0.62, 1.45, 6, 0.05, 3101),
-        "well.png": hollow(1.0, 0.36, 1.80, 6, 0.06, 3102),
-        "slot.png": slot(1.0, 0.36, 1.78, 3201, True),
+        "tray.png": hollow(1.0, 0.62, 1.45, 6, 0.020, 3101),
+        "well.png": hollow(1.0, 0.36, 1.80, 6, 0.020, 3102),
+        "slot.png": slot(1.0, 0.36, 1.78, 3201),
         "slot_hover.png": slot_hover(),
         "slot_selected.png": slot_selected(),
         "slot_blocked.png": slot_blocked(),
@@ -409,9 +464,14 @@ def main():
         "button_down.png": board(0.82, 1.55, 0.38, 4103, pressed=True),
         "tab_on.png": board(1.10, 2.05, 0.46, 4201, open_bottom=True),
         "tab_off.png": board(0.86, 1.45, 0.40, 4202, bottom_line=True),
-        "track.png": hollow(1.0, 0.44, 1.55, 6, 0.04, 3103),
+        # The rail's two, at the end of the list because the list is the
+        # array's order (see widgets::Piece): the tab strip's pair, open
+        # and shut on the right rather than at the bottom.
+        "track.png": hollow(1.0, 0.44, 1.55, 6, 0.020, 3103),
         "grip.png": grip(),
         "rule.png": rule(),
+        "rail_on.png": board(1.10, 2.05, 0.46, 4203, open_right=True),
+        "rail_off.png": board(0.86, 1.45, 0.40, 4204, right_line=True),
     }
     images = []
     for name, (m, a) in pieces.items():
