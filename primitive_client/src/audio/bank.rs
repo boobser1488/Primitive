@@ -579,7 +579,11 @@ impl Cry {
 ///   the flick of its tail as a school scatters, and the thrash on a
 ///   spear;
 /// * a gull's calm call and its alarm are the recordings it already had
-///   (`Sfx::GullCall`), so only its wound and death are here.
+///   (`Sfx::GullCall`), so only its wound and death are here;
+/// * the rat, the monkey, the crab, the three river and sea fish and the
+///   five of the woods and the water (fox, elk, beaver, duck, frog) have no
+///   rows at all: each speaks with somebody else's recording, at its own
+///   size, and [`voice_of`] and [`throat_of`] say whose and why.
 ///
 /// Appended to the bank after everything else, so every other sound keeps
 /// its slot. `every_species_has_a_voice` holds this to `Species::ALL`.
@@ -666,51 +670,160 @@ pub fn voice_of(species: Species, cry: Cry) -> Option<Sfx> {
     if matches!(species, Species::Trout | Species::Pike | Species::Herring) {
         return voice_of(Species::Fish, cry);
     }
-    // **A rat is heard as a hare**, and for the same kind of reason the
-    // three fish are heard as the school: these recordings are not a
-    // *hare*, they are a small mammal squealing, and a rat squealing is
-    // the same throat at the same size. Borrowed rather than left as a
-    // gap waiting for a file, because a rat with no voice is the one
-    // animal in this game whose whole job is to be heard before it is
-    // seen -- you are asleep, the room is dark, and the noise is the
-    // mechanic.
-    //
-    // A rat gets the alarm squeal for its *idle* as well, which the hare
-    // has no sound for and does not need: a hare at rest is silent and a
-    // rat in your storeroom is not. It is the same clip either way; what
-    // differs is when the soundscape asks for it (`idle_chance`).
-    if species == Species::Rat {
-        return voice_of(Species::Hare, if cry == Cry::Idle { Cry::Alarm } else { cry });
-    }
-    // **A monkey is heard as the fowl**, and nothing was downloaded for it.
-    // The budget was there for recordings and the borrow is the better
-    // answer anyway: what these clips *are* is a small warm-blooded thing
-    // calling in short repeated bursts -- which is what a troop in a crown
-    // is, and a bird is the only animal already recorded doing it. A hare's
-    // squeal is one long note and would have read as a wounded animal every
-    // time the troop merely saw somebody.
-    //
-    // Its idle and its alarm are deliberately the *same* clip, because for
-    // this animal they are the same event: a troop chattering is a troop
-    // saying something is there, and whether that something is you or a
-    // branch is not a distinction a chatter makes. See
-    // `soundscape::idle_chance`, which is the only thing that differs --
-    // a monkey talks more than anything else alive.
-    if species == Species::Monkey {
-        return voice_of(Species::Fowl, if cry == Cry::Idle { Cry::Alarm } else { cry });
-    }
     // **A crab is heard as a hare, and it has nothing to say until it is
     // trodden on.** `idle_chance` gives it no calm voice at all: a beach at
     // night is the surf, not a chorus. What is left is a blow and a death,
     // and the smallest, shortest squeal in the bank is the nearest thing
-    // there is to a shell going under a foot.
+    // there is to a shell going under a foot. Not a throat, so not in
+    // [`throat_of`]: a shell has no size a squeal could be pitched to.
     if species == Species::Crab {
         return voice_of(Species::Hare, cry);
+    }
+    // **What a beaver and a frog say when they go is water, not a voice.**
+    //
+    // A beaver's alarm is its tail brought down flat on the pond -- the
+    // crack every beaver within earshot dives at (`Species::Beaver`) -- and
+    // the bank's `Splash` is a body hitting water hard, which is that. It
+    // is the player's own splash, played where the beaver is and higher
+    // (`voice_pitch`), and it is what a player hears of a beaver more often
+    // than the animal: a slap round the bend of a stream is a pond with a
+    // beaver on it.
+    //
+    // A frog's is the plop of it going in off the bank, and `FloatPlop` is
+    // a small thing dropping into still water -- a float, a frog: the same
+    // size of thing in the same water, so it is played as it was recorded.
+    // Rejected: the school's flick (`Species::Fish`'s alarm), which is a
+    // tail at the surface and not a body going under, and which the fish
+    // own.
+    match (species, cry) {
+        (Species::Beaver, Cry::Alarm) => return Some(Sfx::Splash),
+        (Species::Frog, Cry::Alarm) => return Some(Sfx::FloatPlop),
+        _ => {}
+    }
+    if let Some((lender, as_cry)) = throat_of(species, cry) {
+        return voice_of(lender, as_cry);
     }
     VOICES
         .contains(&(species, cry))
         .then_some(Sfx::Animal(species, cry))
 }
+
+/// Whose throat a species with no recording of its own speaks a cry with,
+/// and which of that animal's cries it takes.
+///
+/// **One table for [`voice_of`] and [`voice_pitch`] both**, because they
+/// are one decision: which animal is making the noise decides which clip
+/// plays *and* how far it is pitched, and a borrow written down in two
+/// places is a fox that barks with the wolf's clip at the fox's pitch until
+/// somebody edits one of them.
+///
+/// * **A rat is heard as a hare**, and for the same kind of reason the three
+///   fish are heard as the school: these recordings are not a *hare*, they
+///   are a small mammal squealing, and a rat squealing is the same throat.
+///   Borrowed rather than left as a gap waiting for a file, because a rat
+///   with no voice is the one animal in this game whose whole job is to be
+///   heard before it is seen -- you are asleep, the room is dark, and the
+///   noise is the mechanic. It gets the alarm squeal for its *idle* as well,
+///   which the hare has no sound for and does not need: a hare at rest is
+///   silent and a rat in your storeroom is not. It is the same clip either
+///   way; what differs is when the soundscape asks for it (`idle_chance`).
+/// * **A monkey is heard as the fowl**, and nothing was downloaded for it:
+///   what these clips *are* is a small warm-blooded thing calling in short
+///   repeated bursts -- which is what a troop in a crown is, and a bird is
+///   the only animal already recorded doing it. A hare's squeal is one long
+///   note and would have read as a wounded animal every time the troop
+///   merely saw somebody. Its idle and its alarm are deliberately the
+///   *same* clip, because for this animal they are the same event: a troop
+///   chattering is a troop saying something is there, and whether that is
+///   you or a branch is not a distinction a chatter makes.
+/// * **A fox is heard as the wolf** -- the dog's bark, yelp and whine the
+///   wolf is recorded with (`SOURCES.md`), which is what a fox is: a small
+///   dog. Its calm voice at night is the *bark*, the wolf's alarm, and not
+///   the scream a vixen is known for. The scream in this bank would be the
+///   wolf's yelp, which is its wound; a fox that sounded wounded every night
+///   would teach a player that the wound cry means nothing -- the argument
+///   the monkey's chatter was chosen on. It has no threat: a fox has no
+///   blow for a person (`Species::damage`), and it does not howl.
+/// * **An elk is heard as the deer**, lower: the same bleat at rest, the
+///   same bark when it goes. And an elk, unlike a deer, *comes at* people --
+///   a cow between a player and her calf (the server's `defends`) -- so it
+///   has a threat, and the threat is the bark. Rejected: the rut's bellow,
+///   which is in the deer's recordings but as one of three death cries, and
+///   a slot plays its variants at random; an elk charging that sometimes
+///   bellowed and sometimes bleated would be worse than one that barks.
+/// * **A duck is heard as the fowl**, lower: a bird calling on the water in
+///   short bursts all day, and a flock going up in alarm. Not the gull's,
+///   which is the gull's own calm voice and alarm (`Sfx::GullCall`), and one
+///   sound two species own is a gull on a pond in the woods.
+/// * **A beaver and a frog take the hare's wound and death**: a small mammal
+///   squealing and a small thing squealing, at their own sizes -- a beaver
+///   a little lower, a frog much higher. Their alarms are water, not a
+///   throat: see [`voice_of`].
+fn throat_of(species: Species, cry: Cry) -> Option<(Species, Cry)> {
+    match (species, cry) {
+        (Species::Rat, Cry::Idle) => Some((Species::Hare, Cry::Alarm)),
+        (Species::Rat, cry) => Some((Species::Hare, cry)),
+        (Species::Monkey, Cry::Idle) => Some((Species::Fowl, Cry::Alarm)),
+        (Species::Monkey, cry) => Some((Species::Fowl, cry)),
+        (Species::Fox, Cry::Idle) => Some((Species::Wolf, Cry::Alarm)),
+        (Species::Fox, Cry::Threat) => None,
+        (Species::Fox, cry) => Some((Species::Wolf, cry)),
+        (Species::Elk, Cry::Threat) => Some((Species::Deer, Cry::Alarm)),
+        (Species::Elk, cry) => Some((Species::Deer, cry)),
+        (Species::Duck, cry) => Some((Species::Fowl, cry)),
+        (Species::Beaver | Species::Frog, Cry::Hurt | Cry::Death) => Some((Species::Hare, cry)),
+        _ => None,
+    }
+}
+
+/// How far a borrowed voice is pitched from the recording it borrows, as a
+/// playback rate: above one is higher and shorter, below it lower and longer.
+///
+/// **A borrowed throat at the animal's own size.** A voice is a tube, and
+/// what it rings at goes as one over how long it is; how long it is goes as
+/// the animal, and the animal's size here is the box a blow lands in
+/// (`Species::half_extents`), measured off every model. So a borrowed cry is
+/// played at the cube root of the lender's volume over the borrower's -- a
+/// fox, under half the wolf's bulk, barks at 1.3 times the wolf's rate; an
+/// elk, near enough three deer in one, bleats at 0.7 of the deer's. The
+/// rustle through a bush already scales its pitch by the animal's size the
+/// same way (`Soundscape::wildlife`), and a fox whose bark was the wolf's
+/// own would be a wolf at the edge of the firelight -- the one mistake a
+/// player at night must not be able to make, in either direction.
+///
+/// **Held to [`VOICE_PITCH`]**, because a resampled recording is a tape at
+/// the wrong speed past a point: its length and its breath give it away as
+/// the lender's clip played fast, and a frog's squeal at the full ratio
+/// (1.75, and a rat's near two) would be a cartoon. Inside the range the ear
+/// hears a smaller or bigger animal; past it, a trick.
+///
+/// Rejected: a pitch per species written by hand. It is the same number for
+/// every cry an animal borrows, and a table of them is a table that says
+/// nothing about why a duck is lower than a hen -- where this says it is
+/// three hens' worth of bird.
+pub fn voice_pitch(species: Species, cry: Cry) -> f32 {
+    // A tail brought down flat is a smaller, sharper blow than the body
+    // `Splash` was recorded as: higher, and over sooner.
+    if (species, cry) == (Species::Beaver, Cry::Alarm) {
+        return BEAVER_SLAP_PITCH;
+    }
+    let Some((lender, _)) = throat_of(species, cry) else {
+        return 1.0;
+    };
+    let volume = |s: Species| {
+        let (x, y, z) = s.half_extents();
+        x * y * z
+    };
+    (volume(lender) / volume(species)).cbrt().clamp(VOICE_PITCH.0, VOICE_PITCH.1)
+}
+
+/// The range [`voice_pitch`] keeps a borrowed voice inside: a little over
+/// two thirds of an octave either way.
+pub const VOICE_PITCH: (f32, f32) = (0.65, 1.75);
+
+/// How much higher a beaver's tail is than the player's own splash. See
+/// [`voice_pitch`].
+const BEAVER_SLAP_PITCH: f32 = 1.3;
 
 /// The sounds that are not a material times an impact, in the order they
 /// are indexed. Adding one means adding it here, to `file_name`, and a
@@ -1968,14 +2081,22 @@ mod tests {
         // swimmers that are heard as the school: see `voice_of` for why one
         // recording of disturbed water is the truth about all of them, and
         // not a gap waiting for three more files.
-        let holder = |species: Species| match species {
-            Species::Trout | Species::Pike | Species::Herring => Species::Fish,
+        let holder = |species: Species, cry: Cry| match (species, cry) {
+            (Species::Trout | Species::Pike | Species::Herring, _) => Species::Fish,
             // ...and the rat and the crab, heard as a hare, and the monkey,
             // heard as the fowl: see `voice_of` for what each borrows and
             // why nothing was recorded for them.
-            Species::Rat | Species::Crab => Species::Hare,
-            Species::Monkey => Species::Fowl,
-            other => other,
+            (Species::Rat | Species::Crab, _) => Species::Hare,
+            (Species::Monkey, _) => Species::Fowl,
+            // ...and the five of the woods and the water, each with the
+            // throat nearest its own (`throat_of`). The beaver's and the
+            // frog's alarms are water and theirs alone -- the splash and the
+            // plop -- so they fall through to the last arm and are owned.
+            (Species::Fox, _) => Species::Wolf,
+            (Species::Elk, _) => Species::Deer,
+            (Species::Duck, _) => Species::Fowl,
+            (Species::Beaver | Species::Frog, Cry::Hurt | Cry::Death) => Species::Hare,
+            (other, _) => other,
         };
         let mut owner: HashMap<usize, Species> = HashMap::new();
         for &species in Species::ALL {
@@ -1988,10 +2109,10 @@ mod tests {
                 };
                 assert!(all().contains(&sfx), "{} is not in the bank", sfx.file_name());
                 assert!(!clips(sfx).is_empty(), "{} has no recording", sfx.file_name());
-                if let Some(other) = owner.insert(sfx.index(), holder(species)) {
+                if let Some(other) = owner.insert(sfx.index(), holder(species, cry)) {
                     assert_eq!(
                         other,
-                        holder(species),
+                        holder(species, cry),
                         "a {} and a {} share {}",
                         other.name(),
                         species.name(),
@@ -2000,9 +2121,52 @@ mod tests {
                 }
             }
         }
-        // Everything that hunts or fights back can be heard coming.
-        for species in [Species::Boar, Species::Wolf, Species::Bear, Species::Lion] {
+        // Everything that hunts or fights back can be heard coming -- the
+        // cow elk over her calf as well.
+        for species in [Species::Boar, Species::Wolf, Species::Bear, Species::Lion, Species::Elk] {
             assert!(voice_of(species, Cry::Threat).is_some(), "a {} charges in silence", species.name());
+        }
+    }
+
+    /// **A borrowed voice is the lender's throat at the borrower's size**: a
+    /// fox barks higher than the wolf it borrows from, an elk lower than the
+    /// deer, a duck lower than a hen, a frog squeals higher than a hare -- and
+    /// an animal speaking with its own recordings is played as recorded.
+    #[test]
+    fn a_borrowed_voice_is_pitched_to_the_animals_own_size() {
+        let higher = |small: Species, big: Species, cry: Cry| {
+            assert_eq!(voice_of(small, cry).map(|s| s.index()), voice_of(big, cry).map(|s| s.index()), "not the same clip");
+            assert!(
+                voice_pitch(small, cry) > voice_pitch(big, cry) * 1.1,
+                "a {} at {:.2} is not heard as smaller than a {} at {:.2}",
+                small.name(),
+                voice_pitch(small, cry),
+                big.name(),
+                voice_pitch(big, cry)
+            );
+        };
+        higher(Species::Fox, Species::Wolf, Cry::Hurt);
+        higher(Species::Fox, Species::Wolf, Cry::Alarm);
+        higher(Species::Deer, Species::Elk, Cry::Alarm);
+        higher(Species::Deer, Species::Elk, Cry::Idle);
+        higher(Species::Fowl, Species::Duck, Cry::Idle);
+        higher(Species::Frog, Species::Hare, Cry::Death);
+        // A beaver's model is a hare's bulk laid long, so its squeal is only
+        // a shade under the hare's -- but never over it.
+        assert!(voice_pitch(Species::Beaver, Cry::Hurt) <= 1.0, "a beaver squeals higher than a hare");
+        for &species in Species::ALL {
+            for cry in [Cry::Idle, Cry::Alarm, Cry::Threat, Cry::Hurt, Cry::Death] {
+                let pitch = voice_pitch(species, cry);
+                assert!(
+                    (VOICE_PITCH.0..=VOICE_PITCH.1).contains(&pitch),
+                    "a {}'s {} is played at {pitch:.2}, a tape at the wrong speed",
+                    species.name(),
+                    cry.key()
+                );
+                if voice_of(species, cry) == Some(Sfx::Animal(species, cry)) {
+                    assert_eq!(pitch, 1.0, "a {} is pitched away from its own {}", species.name(), cry.key());
+                }
+            }
         }
     }
 

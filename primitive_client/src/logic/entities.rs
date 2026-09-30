@@ -1313,14 +1313,14 @@ impl Entities {
         std::mem::take(&mut self.gave_way)
     }
 
-    /// Every animal, as the soundscape and the small life round the player
-    /// need it: who, what, where it is drawn this frame, and how fast.
+    /// Every animal, as the soundscape needs it: who, what, where it is drawn
+    /// this frame, how fast, and what its body is doing.
     ///
     /// **Read off what was drawn, not what was sent**, so a gull's call comes
-    /// from the gull on the screen and a frog hushes at the wolf where the
-    /// player sees it -- and so a take-off is heard on the frame the wings
-    /// open (`animal_model::AIRBORNE_SPEED` and `soundscape::in_the_air`
-    /// read the same speed).
+    /// from the gull on the screen and a frog's croak from the frog on the
+    /// bank -- and so a take-off is heard on the frame the wings open
+    /// (`animal_model::AIRBORNE_SPEED` and `soundscape::in_the_air` read the
+    /// same speed).
     pub fn heard(&self) -> Vec<crate::audio::soundscape::Heard> {
         let now = self.now.unwrap_or_else(Instant::now);
         self.entities
@@ -1333,8 +1333,9 @@ impl Entities {
                     speed: entity.gait(now).1,
                     hurt,
                     // The body language the head is already drawn by
-                    // (`animal_model::head_carried`), heard as well.
-                    stalking: attitude == primitive_shared::protocol::Attitude::Stalking,
+                    // (`animal_model::head_carried`), heard as well: a
+                    // hunter on the ring, and a frog the server has hushed.
+                    attitude,
                 }),
                 _ => None,
             })
@@ -3712,8 +3713,9 @@ mod tests {
     ///
     /// Two lines, because the frame pays this table twice over: the geometry
     /// (`build_meshes_into`, at `DYNAMIC_REBUILD_HZ`), and `heard`, which the
-    /// frame loop asks at every frame rate -- once for the frogs' dangers and
-    /// once for the soundscape. No `tick`: it would forget the whole field if
+    /// frame loop asks at every frame rate, for the soundscape. (It asked
+    /// twice until the frogs were the server's: once more for the dangers a
+    /// client-side frog hushed at, `engine::critters`.) No `tick`: it would forget the whole field if
     /// a slow round outlasted `STALE_AFTER`, and every entity reads the same
     /// `Instant::now` without it.
     #[test]
