@@ -23,12 +23,17 @@ struct Top {
 }
 
 fn tops(gen: &WorldGen) -> (i32, i32, i32, Vec<Option<Top>>) {
-    let side = SPAN * CHUNK_SIZE_X as i32;
-    let (ox, oz) = (HILLS.0 * CHUNK_SIZE_X as i32, HILLS.1 * CHUNK_SIZE_Z as i32);
+    tops_at(gen, HILLS, SPAN)
+}
+
+/// `tops`, over `span` chunks square from `corner`.
+fn tops_at(gen: &WorldGen, corner: (i32, i32), span: i32) -> (i32, i32, i32, Vec<Option<Top>>) {
+    let side = span * CHUNK_SIZE_X as i32;
+    let (ox, oz) = (corner.0 * CHUNK_SIZE_X as i32, corner.1 * CHUNK_SIZE_Z as i32);
     let mut tops = vec![None; (side * side) as usize];
-    for cz in 0..SPAN {
-        for cx in 0..SPAN {
-            let chunk = gen.generate_chunk(ChunkPos::new(HILLS.0 + cx, HILLS.1 + cz));
+    for cz in 0..span {
+        for cx in 0..span {
+            let chunk = gen.generate_chunk(ChunkPos::new(corner.0 + cx, corner.1 + cz));
             for z in 0..CHUNK_SIZE_Z {
                 for x in 0..CHUNK_SIZE_X {
                     let top = (0..CHUNK_SIZE_Y).rev().find(|&y| is_collidable(chunk.get(x, y, z)) || is_liquid(chunk.get(x, y, z)));
@@ -270,5 +275,174 @@ fn nothing_on_a_generated_hillside_floats_over_a_lip_or_sinks_into_one() {
         }
     }
     assert!(checked > 100, "only {checked} things on the downs were looked at");
+}
+
+/// The rhythm of a slope, in numbers: what a walker's eye meets along every
+/// straight line of bare ground.
+///
+/// * **risers** -- every change of surface between two neighbouring bare
+///   columns, by its height in quarters;
+/// * **treads** -- how many columns lie between one riser and the next along
+///   a line;
+/// * **stairs** -- runs of three or more columns in a row each rising by the
+///   same amount, which is a flight of identical steps;
+/// * **wrapped** -- how many risers wear the turf's top picture on their
+///   face (`ground::turf_wraps_the_side`), which is green on green.
+#[derive(Default, Debug)]
+struct Rhythm {
+    risers: [u32; 6],
+    treads: [u32; 8],
+    stairs: u32,
+    stair_columns: u32,
+    columns: u32,
+    wrapped: u32,
+}
+
+fn rhythm_of(gen: &WorldGen, corner: (i32, i32), span: i32) -> Rhythm {
+    let (_, _, side, tops) = tops_at(gen, corner, span);
+    let at = |x: i32, z: i32| {
+        if x < 0 || z < 0 || x >= side || z >= side {
+            None
+        } else {
+            tops[(z * side + x) as usize]
+        }
+    };
+    let mut rhythm = Rhythm::default();
+    for (dx, dz) in [(1, 0), (0, 1)] {
+        for line in 0..side {
+            let mut last_riser: Option<i32> = None;
+            let (mut run, mut run_step) = (0, 0);
+            for k in 0..side - 1 {
+                let (x, z) = if dx == 1 { (k, line) } else { (line, k) };
+                let (Some(a), Some(b)) = (at(x, z), at(x + dx, z + dz)) else {
+                    last_riser = None;
+                    run = 0;
+                    continue;
+                };
+                rhythm.columns += 1;
+                let step = ((b.surface - a.surface) * 4.0).round() as i32;
+                if step == 0 {
+                    run = 0;
+                    continue;
+                }
+                rhythm.risers[(step.unsigned_abs() as usize).min(5)] += 1;
+                let (high, low) = if step > 0 { (b, a) } else { (a, b) };
+                let (beyond, diagonal) =
+                    if high.y == low.y { (low.block, crate::types::BLOCK_AIR) } else { (low.above, low.block) };
+                if crate::ground::turf_wraps_the_side(high.block, high.above, beyond, diagonal) {
+                    rhythm.wrapped += 1;
+                }
+                if let Some(prev) = last_riser {
+                    rhythm.treads[((k - prev) as usize).min(7)] += 1;
+                }
+                last_riser = Some(k);
+                if step == run_step && run > 0 {
+                    run += 1;
+                } else {
+                    run = 1;
+                    run_step = step;
+                }
+                if run == 3 {
+                    rhythm.stairs += 1;
+                    rhythm.stair_columns += 3;
+                } else if run > 3 {
+                    rhythm.stair_columns += 1;
+                }
+            }
+        }
+    }
+    rhythm
+}
+
+/// **Every shape a ramp can take is still walked.** The profile of a rise
+/// varies from column to column (`lips::profile`) -- bent by a field and
+/// pushed by a hash -- and the one thing that may not vary is the climb: a
+/// lip is at least a quarter, less than a whole block, and within a stride
+/// of whatever lip the column before or after it took, for any bend and any
+/// push those two can hand it. Checked over the whole range of both rather
+/// than over a world, because a world only visits the shapes its seed does.
+#[test]
+fn every_shape_of_a_ramp_climbs_no_more_than_a_stride_a_column() {
+    let stride = (PLAYER_STEP_HEIGHT * f32::from(dig::SLICES)) as i32;
+    let whole = i32::from(dig::SLICES);
+    let bends: Vec<f64> = (0..=40).map(|i| 2f64.powf(-1.0 + f64::from(i) / 20.0)).collect();
+    let jitters: Vec<f64> = (0..=24).map(|i| -0.6 + f64::from(i) * 0.05).collect();
+    for width in 2..=whole {
+        // Every lip each column of the terrace can take, whatever shape.
+        let range: Vec<(i32, i32)> = (1..width)
+            .map(|k| {
+                let lips = bends.iter().flat_map(|&b| jitters.iter().map(move |&j| super::lips::profile(k, width, b, j)));
+                (lips.clone().min().unwrap(), lips.max().unwrap())
+            })
+            .collect();
+        for (k, &(low, high)) in range.iter().enumerate() {
+            assert!(low >= 1 && high < whole, "column {} of {width}: lips {low}..={high}", k + 1);
+        }
+        // The climb onto the first lip, between any two neighbours, and off
+        // the last one onto the whole block.
+        assert!(range[0].1 <= stride, "a terrace {width} wide begins with a climb of {} quarters", range[0].1);
+        for pair in range.windows(2) {
+            assert!(pair[1].1 - pair[0].0 <= stride, "a terrace {width} wide climbs {pair:?} in one column");
+            assert!(pair[0].1 - pair[1].0 <= stride, "a terrace {width} wide drops {pair:?} in one column");
+        }
+        assert!(whole - range[width as usize - 2].0 <= stride, "a terrace {width} wide ends with a climb");
+    }
+}
+
+/// **A hillside of lips is not one flight of identical steps.** Before the
+/// profiles varied, 53 per cent of the downs' risers stood in a run of three
+/// or more identical steps and 80 per cent were a quarter tall: from the
+/// middle distance a corrugated sheet, from far off one tone. Held with the
+/// even ramp alongside, so the numbers say it is the profile that broke the
+/// rhythm and not the ground under it.
+#[test]
+fn a_hillside_of_lips_is_not_one_flight_of_identical_steps() {
+    let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
+    let share = |r: &Rhythm| {
+        let risers: u32 = r.risers.iter().sum();
+        (r.stair_columns as f32 / risers.max(1) as f32, r.risers[1] as f32 / risers.max(1) as f32)
+    };
+    super::lips::EVEN_LIPS.with(|e| e.set(true));
+    let (even_stairs, even_quarters) = share(&rhythm_of(&gen, HILLS, SPAN));
+    super::lips::EVEN_LIPS.with(|e| e.set(false));
+    let (stairs, quarters) = share(&rhythm_of(&gen, HILLS, SPAN));
+    assert!(even_stairs > 0.45, "the even ramp was not a flight to begin with: {even_stairs:.2}");
+    assert!(stairs < 0.30, "{:.0}% of the downs' risers still stand in a flight of identical steps", stairs * 100.0);
+    assert!(quarters < even_quarters - 0.1, "the risers are still all a quarter: {quarters:.2} against {even_quarters:.2}");
+}
+
+/// ```text
+/// cargo test -p primitive_shared --lib -- --ignored --nocapture probe_the_rhythm_of_a_slope
+/// ```
+#[test]
+#[ignore = "a measurement, not an assertion"]
+fn probe_the_rhythm_of_a_slope() {
+    let gen = WorldGen::with_scale(1337, Preset::Normal, Zone::Temperate, Scale::Landforms);
+    for (name, corner, even) in
+        [("downs, even", HILLS, true), ("downs", HILLS, false), ("origin, even", (-3, -3), true), ("origin", (-3, -3), false)]
+    {
+        super::lips::EVEN_LIPS.with(|e| e.set(even));
+        let r = rhythm_of(&gen, corner, SPAN);
+        super::lips::EVEN_LIPS.with(|e| e.set(false));
+        let risers: u32 = r.risers.iter().sum();
+        let treads: u32 = r.treads.iter().sum();
+        println!("{name}: {} column pairs, {risers} risers", r.columns);
+        println!(
+            "  riser height in quarters 1..5+: {:?} ({:.0}% a quarter)",
+            &r.risers[1..],
+            100.0 * r.risers[1] as f32 / risers.max(1) as f32
+        );
+        println!(
+            "  tread between risers 1..7+: {:?} ({:.0}% one column)",
+            &r.treads[1..],
+            100.0 * r.treads[1] as f32 / treads.max(1) as f32
+        );
+        println!(
+            "  identical stairs of 3+: {} ({:.0}% of risers stand in one)",
+            r.stairs,
+            100.0 * r.stair_columns as f32 / risers.max(1) as f32
+        );
+        println!("  risers wearing the top's picture: {:.0}%", 100.0 * r.wrapped as f32 / risers.max(1) as f32);
+    }
 }
 

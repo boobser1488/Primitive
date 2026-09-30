@@ -10347,10 +10347,20 @@ pub(crate) mod offscreen_repro {
                             let top = p(0, 1) * (1.0 - s) + p(1, 1) * s;
                             bottom * (1.0 - t) + top * t
                         };
+                        // **Only the coordinate is the cell's; every
+                        // other bit of the word is the face's.** This wrote
+                        // the coordinate alone and dropped the rest -- the
+                        // layer's top bits among them (`LAYER_TOP_SHIFT`) --
+                        // which was invisible while every merged face wore
+                        // a picture under layer 512, and drew the turf's cut
+                        // edge (`FaceLayers::turf_edge`, past 512) as some
+                        // other block's picture, failing this very test on a
+                        // fault of its own.
+                        let coordinate = UV_MASK | (UV_MASK << V_SHIFT);
                         out_v.push(Vertex {
                             position: [at(0), at(1), at(2)],
                             packed: corner.packed,
-                            uv: su | (sv << V_SHIFT),
+                            uv: (corner.uv & !coordinate) | su | (sv << V_SHIFT),
                         });
                     }
                     out_i.extend(six.iter().map(|i| piece + (i - base)));
@@ -24257,6 +24267,13 @@ mod lod_bands_repro;
 #[cfg(test)]
 #[path = "look_repro.rs"]
 mod look_repro;
+
+/// A grassy slope of the landforms near, middle and far under a low sun,
+/// through the real passes: how the lips read. A child for the reason
+/// `lod_repro` is.
+#[cfg(test)]
+#[path = "terrain_repro.rs"]
+mod terrain_repro;
 
 /// The eye swept through a whole y, for lines level with it while jumping.
 #[cfg(test)]

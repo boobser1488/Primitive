@@ -86,7 +86,7 @@ const WATER_ALPHA_LINE: &str = "alpha = 1.0 - window * exp(-WATER_DEPTH_FADE * d
 /// `ClientSettings::fog_start_share` replaced it.
 const OLD_FOG_START_RATIO: f32 = 0.55;
 
-fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+pub(super) fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     let per = items.len().div_ceil(threads).max(1);
     std::thread::scope(|scope| {

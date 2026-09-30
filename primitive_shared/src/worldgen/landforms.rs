@@ -187,6 +187,96 @@ const GRAIN_BY_ROCK: (f64, f64) = (0.55, 0.9);
 /// ground does not have to sink for that.
 const HARD_ROCK_GAIN: f64 = 0.4;
 
+// ---------------------------------------------------------------------
+// What makes a place a place
+// ---------------------------------------------------------------------
+//
+// "Сделай ландшафт интереснее." The landforms have country -- hill and
+// plain, hard rock and soft -- and grain, and a player crossing it still
+// met the same slope everywhere: a hillside was a hillside, and nothing on
+// one said "this one". Three things are added, each **somewhere and not
+// everywhere**, and each where the ground has a reason for it:
+//
+// * **Tors** (`tor`) -- knobs of bare rock on the crests of hard ground,
+//   the place a player climbs to look round and the landmark they walk
+//   back to. The boulders at their feet come by themselves: a tor's face is
+//   a cliff, and `place_boulders` already lays stones under cliffs.
+// * **Combes and swales** (`combe`) -- creases let down into hill country,
+//   narrow and deep on a down's flank and wide and shallow on its crown and
+//   in its folds. The crease is a line of a noise field, so a combe runs for
+//   a few hundred metres, branches and loses itself, which is what a dry
+//   valley in chalk does.
+// * **River terraces** (`river_terrace`) -- a flat bench along the wall of
+//   a river's valley, a few blocks over the floodplain: the dry, level
+//   ground a river leaves behind, and the obvious place to build.
+//
+// Rejected: *noise over everything*. Another octave of relief everywhere is
+// the texture the grain already is; it makes no place different from the
+// next. Every one of these is gated by a field that is off over most of
+// the world and by the ground it belongs to, so a combe is a find in hill
+// country and a tor a find on hard rock.
+//
+// **Walked, all three.** The seams they make are held by
+// `a_hillside_is_a_stack_of_shelves_rather_than_a_flight_of_walls` like any
+// other seam, and a combe's side and a terrace's edge are rises of a block
+// or less over most of their length, which the lips ramp. A tor is the one
+// that is meant to be climbed rather than walked, and it is small enough to
+// walk round.
+
+/// How tall a tor stands at its fullest, in blocks over the ground round it,
+/// and how the field that places them is read.
+///
+/// **Three and a half**: a knob a person looks over the top of from a step
+/// back and cannot walk up -- the tor is a landmark and a lookout, and its
+/// faces are rock by `TOR_BARE`. Taller was a seam over the five blocks
+/// `a_hillside_is_a_stack_of_shelves_rather_than_a_flight_of_walls` allows,
+/// where a tor stood on a grain crest that was already a face.
+///
+/// The field turns over in about fifty blocks and passes `TOR_FIELD.0` on
+/// a few per cent of the ground, and the rock and the crest take that down
+/// to the handful a square kilometre that makes one a place.
+const TOR_HEIGHT: f64 = 3.5;
+const TOR_FREQUENCY: f64 = 0.021;
+const TOR_FIELD: (f64, f64) = (0.38, 0.58);
+/// The hard end of the region field, where the tors stand: the same field
+/// that raises the ridges (`hardness`), so a tor is on the rock that holds
+/// the country up.
+const TOR_ROCK: (f64, f64) = (0.0, 0.3);
+/// The crest of the grain, as the raw field: a tor stands on the knuckle
+/// of a hillside, not in the hollow beside it.
+const TOR_CREST: (f64, f64) = (0.0, 0.3);
+/// How much tor makes a column bare rock rather than turf.
+const TOR_BARE: f64 = 1.0;
+
+/// How deep a combe is let into the ground, in blocks: on the crown or in a
+/// fold (`.0`) and on the steepest of a flank (`.1`), before the hill
+/// country's own weight.
+///
+/// **Two and a half at most**, because a crease is crossed: a deeper one on
+/// a flank came out as seams of three on its sides, which is a trench and
+/// not a combe.
+const COMBE_DEPTH: (f64, f64) = (1.2, 2.5);
+/// How wide the crease is, as the field's distance from its zero line: wide
+/// on the flat (`.0`, a swale), narrow on a flank (`.1`, a combe).
+const COMBE_WIDTH: (f64, f64) = (0.11, 0.07);
+/// About sixty blocks from one crease to the next.
+const COMBE_FREQUENCY: f64 = 0.016;
+
+/// How far over the floodplain a river terrace stands, in blocks.
+///
+/// **Three**: tall enough that the edge between the floodplain and the
+/// terrace reads as the bank of an older river, and low enough that it is a
+/// rise of a block or two along most of its length -- which the lips ramp --
+/// rather than a wall along every river in the world.
+const TERRACE_RISE: f64 = 3.0;
+/// How near that level the valley wall has to be to be pulled onto it.
+const TERRACE_CATCH: f64 = 3.0;
+/// How hard it is pulled: not all the way, or its two edges are walls.
+const TERRACE_PULL: f64 = 0.8;
+/// Which part of a valley is its wall, by the valley's weight: rising over
+/// the first two numbers and falling over the last two.
+const TERRACE_BAND: (f64, f64, f64, f64) = (0.10, 0.30, 0.65, 0.90);
+
 /// The Earth's three orders, drawn as courses. Every width, depth, valley and
 /// current is the Earth's; only the shape of the field is new.
 ///
@@ -335,6 +425,120 @@ impl WorldGen {
         field * Self::grain_height() * (soft + hard * smoothstep(-0.35, 0.35, region))
     }
 
+    /// **A tor**: how many blocks of bare rock stand out of the ground here,
+    /// nought nearly everywhere. See `TOR_HEIGHT`.
+    ///
+    /// Three things have to agree, and each is a reason the tor is *there*:
+    /// the tor field is over its threshold (a few in a square kilometre),
+    /// the rock is the hard end of the region field (`hardness`'s own), and
+    /// the column is on a crest of the grain -- the knuckle of a hillside,
+    /// not its foot. Never in plain country, which promises to lie flat
+    /// (`a_down_country_rolls_and_a_steppe_lies_flat`), and never at the
+    /// water, for the reason nothing at this scale is.
+    ///
+    /// The field is asked first and alone: it is two samples of noise, and
+    /// for most columns in the world it is the only thing this costs.
+    pub(super) fn tor(&self, gx: i32, gz: i32, region: f64, plain: f64) -> f64 {
+        if self.scale != Scale::Landforms || plain >= 1.0 {
+            return 0.0;
+        }
+        #[cfg(test)]
+        if super::PLACES_OFF.with(std::cell::Cell::get) {
+            return 0.0;
+        }
+        let field = fbm(&self.grain_noise, gx as f64 + 13_001.0, gz as f64 - 8_111.0, TOR_FREQUENCY, 2);
+        if field <= TOR_FIELD.0 {
+            return 0.0;
+        }
+        let hard = smoothstep(TOR_ROCK.0, TOR_ROCK.1, region);
+        if hard <= 0.0 {
+            return 0.0;
+        }
+        let grain = fbm(&self.grain_noise, gx as f64 - 2_221.0, gz as f64 + 6_133.0, GRAIN_FREQUENCY, 3);
+        let crest = smoothstep(TOR_CREST.0, TOR_CREST.1, grain);
+        smoothstep(TOR_FIELD.0, TOR_FIELD.1, field) * hard * crest * (1.0 - plain) * TOR_HEIGHT
+    }
+
+    /// Whether a column is a tor's bare rock rather than turf, asked by the
+    /// surface: its own tor at least `TOR_BARE` tall. The same arithmetic
+    /// the height used, so the rock is exactly where the knob stands.
+    pub(super) fn on_a_tor(&self, gx: i32, gz: i32) -> bool {
+        if self.scale != Scale::Landforms {
+            return false;
+        }
+        // The cheap refusal first, the one `tor` makes, before the landform
+        // and the region are sampled for the few columns it lets through.
+        let field = fbm(&self.grain_noise, gx as f64 + 13_001.0, gz as f64 - 8_111.0, TOR_FREQUENCY, 2);
+        if field <= TOR_FIELD.0 {
+            return false;
+        }
+        let (plain, _) = self.landform(gx, gz, self.highland(gx, gz));
+        self.tor(gx, gz, self.rock_region(gx, gz), plain) >= TOR_BARE
+    }
+
+    /// **A combe or a swale**: how deep the ground of hill country is let
+    /// down along a crease, in blocks. See `COMBE_DEPTH`.
+    ///
+    /// `shape` is the down's own smoothstep, 0 in the fold and 1 on the
+    /// crown: the flank is where it is changing fastest, `4 s (1 - s)`, and
+    /// a crease there is cut narrower and deeper -- a combe -- where on the
+    /// flat of a fold or a crown it is wide and shallow -- a swale. One
+    /// field, two looks, and the look follows the ground it is in.
+    pub(super) fn combe(&self, gx: i32, gz: i32, hill: f64, shape: f64) -> f64 {
+        if hill <= 0.0 {
+            return 0.0;
+        }
+        #[cfg(test)]
+        if super::PLACES_OFF.with(std::cell::Cell::get) {
+            return 0.0;
+        }
+        let flank = 4.0 * shape * (1.0 - shape);
+        let width = COMBE_WIDTH.0 + (COMBE_WIDTH.1 - COMBE_WIDTH.0) * flank;
+        let crease = fbm(&self.grain_noise, gx as f64 - 21_517.0, gz as f64 + 3_307.0, COMBE_FREQUENCY, 2).abs();
+        if crease >= width {
+            return 0.0;
+        }
+        // Where along the network: a slow field lets a combe run for a few
+        // hundred metres and then lose itself, so the creases are a few
+        // valleys and not a net thrown over the whole country.
+        let reach = smoothstep(-0.15, 0.25, fbm(&self.grain_noise, gx as f64 + 5_051.0, gz as f64 + 9_929.0, 0.004, 1));
+        let depth = COMBE_DEPTH.0 + (COMBE_DEPTH.1 - COMBE_DEPTH.0) * flank;
+        smoothstep(width, 0.0, crease) * depth * hill * reach
+    }
+
+    /// **A river terrace**: the height the valley wall of a river is pulled
+    /// to, given where it came out after the valley's own pull. See
+    /// `TERRACE_RISE`.
+    ///
+    /// On the side of the valley only -- `valley` between the band's ends,
+    /// which is the wall and not the floor or the country beyond it -- and
+    /// only where the ground is already near the terrace's level, so a
+    /// terrace is the part of the wall that was at that height, drawn flat,
+    /// with the wall going on up behind it. On some reaches and not others
+    /// (a slow field), because a river that has cut one terrace along its
+    /// whole course is a canal.
+    pub(super) fn river_terrace(&self, gx: i32, gz: i32, height: f64, valley: f64, floodplain: f64) -> f64 {
+        if self.scale != Scale::Landforms {
+            return height;
+        }
+        #[cfg(test)]
+        if super::PLACES_OFF.with(std::cell::Cell::get) {
+            return height;
+        }
+        let band = smoothstep(TERRACE_BAND.0, TERRACE_BAND.1, valley) * smoothstep(TERRACE_BAND.3, TERRACE_BAND.2, valley);
+        if band <= 0.0 {
+            return height;
+        }
+        let level = floodplain + TERRACE_RISE;
+        let near = smoothstep(TERRACE_CATCH, 0.0, (height - level).abs());
+        if near <= 0.0 {
+            return height;
+        }
+        let reach = smoothstep(-0.1, 0.2, fbm(&self.detail_noise, gx as f64 + 811.0, gz as f64 - 1_907.0, 0.006, 1));
+        let pull = band * near * reach * TERRACE_PULL;
+        height + (level - height) * pull
+    }
+
     /// The downs of hill country: rounded domes 0 .. `DOWNS_HEIGHT`, higher
     /// on hard rock. Before the hill country's weight is laid on.
     ///
@@ -353,9 +557,13 @@ impl WorldGen {
     /// is too little to steepen a flank into a climb and enough to give each
     /// dome a shoulder, a false crest and a side that falls away faster than
     /// the other.
-    pub(super) fn downs(&self, gx: i32, gz: i32, region: f64) -> f64 {
+    ///
+    /// Returns the height and the smoothstep it was eased through, which is
+    /// what `combe` reads the flank off.
+    pub(super) fn downs(&self, gx: i32, gz: i32, region: f64) -> (f64, f64) {
         let field = fbm(&self.hill_noise, gx as f64 + 7_717.0, gz as f64 - 5_503.0, DOWNS_FREQUENCY, 3);
-        smoothstep(-0.45, 0.45, field) * DOWNS_HEIGHT * (0.75 + 0.5 * smoothstep(-0.35, 0.35, region))
+        let shape = smoothstep(-0.45, 0.45, field);
+        (shape * DOWNS_HEIGHT * (0.75 + 0.5 * smoothstep(-0.35, 0.35, region)), shape)
     }
 
     /// A river order's field drawn as courses: zero along lines that cross

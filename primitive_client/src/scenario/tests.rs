@@ -140,7 +140,18 @@ fn meadow_top(s: &Scenario, x: i32, z: i32) -> Option<(i32, f64, BlockId)> {
         s.block((x, y, z)).is_some_and(|b| t::is_collidable(b) || t::is_liquid(b))
     })?;
     let block = s.block((x, y, z))?;
-    let clear = (1..=2).all(|dy| s.block((x, y + dy, z)).is_some_and(|b| !t::is_collidable(b) && !t::is_liquid(b)));
+    // **Clear as a body meets it, not as the cell's row says.** A sapling's
+    // twig is air to `is_collidable` and walked into at its wood
+    // (`geometry::for_each_block_box`), so a line through one read as open
+    // meadow and the walk stopped against a stem a few sixteenths thick.
+    let body_meets = |cell: (i32, i32, i32), b: BlockId| {
+        let mut solid = false;
+        primitive_shared::geometry::for_each_block_box(b, cell.0, cell.1, cell.2, |bx, by, bz| s.block((bx, by, bz)).unwrap_or(t::BLOCK_AIR), |_, _| solid = true);
+        solid
+    };
+    let clear = (1..=2).all(|dy| {
+        s.block((x, y + dy, z)).is_some_and(|b| !t::is_collidable(b) && !t::is_liquid(b) && !body_meets((x, y + dy, z), b))
+    });
     (t::block_kind(block) == t::BLOCK_GRASS && clear).then(|| (y, y as f64 + f64::from(t::collision_height(block)), block))
 }
 
@@ -168,7 +179,11 @@ fn gentle_rise(s: &Scenario) -> (i32, i32, Vec<(i32, f64, BlockId)>) {
             let Some(line) = (0..RISE_RUN).map(|k| meadow_top(s, x0 + k, z)).collect::<Option<Vec<_>>>() else {
                 continue;
             };
-            let walkable = line.windows(2).all(|w| (w[1].1 - w[0].1).abs() <= step);
+            // Up and never down: a rise. Since the ramps took other shapes
+            // (`lips::profile`) a line can climb two blocks and dip at its end
+            // over a crest, and the walk's last reading was then taken with
+            // the body still coming down onto that last column.
+            let walkable = line.windows(2).all(|w| w[1].1 >= w[0].1 && w[1].1 - w[0].1 <= step);
             let lips = line.iter().filter(|c| primitive_shared::dig::is_turf_lip(c.2)).count();
             if walkable && line[RISE_RUN as usize - 1].0 - line[0].0 >= 2 && lips >= 2 {
                 return (x0, z, line);
@@ -192,13 +207,31 @@ const CROSS_RUN: i32 = 24;
 /// commonly flat from end to end -- a band of one height ran twenty-two
 /// blocks on a steppe -- so a run with three blocks of shape in it is also
 /// the thing the grain was added to produce.
+///
+/// **And every rise of it one the lips claim to ramp**: no step between two
+/// columns taller than a body climbs. It had no such condition and passed
+/// because the first line the search met happened to have none -- the
+/// line after it, z = -7 on seed 1337, has a one-block rise onto a terrace
+/// one column wide, which `worldgen::lips` leaves a stair on purpose ("a
+/// terrace one wide is a slope of one"), and it was the same ground before
+/// the tors existed (heights read with `PLACES_OFF` and without: the same
+/// along the whole line). A tor thirty blocks from the spawn raised ground
+/// in the square the search walks, which changed the line it met first; the
+/// walk then hit the stair that line always had. What this claims is that the grain's rampable country is
+/// walked with no wall and no correction; which lines are rampable is what
+/// `a_gentle_generated_slope_has_no_whole_block_step_a_player_must_jump`
+/// counts.
 fn open_run(s: &Scenario, shape: i32) -> (i32, i32, Vec<(i32, f64, BlockId)>) {
     let spawn = cell_of(s.feet());
+    let step = f64::from(primitive_shared::geometry::PLAYER_STEP_HEIGHT);
     for z in spawn.2 - 40..spawn.2 + 40 {
         for x0 in spawn.0 - 40..spawn.0 + 40 - CROSS_RUN {
             let Some(line) = (0..CROSS_RUN).map(|k| meadow_top(s, x0 + k, z)).collect::<Option<Vec<_>>>() else {
                 continue;
             };
+            if !line.windows(2).all(|w| (w[1].1 - w[0].1).abs() <= step) {
+                continue;
+            }
             let low = line.iter().map(|c| c.0).min().expect("a line of columns");
             let high = line.iter().map(|c| c.0).max().expect("a line of columns");
             if high - low >= shape {
@@ -239,7 +272,12 @@ fn walk_up_the_rise(s: &mut Scenario, x0: i32, line: &[(i32, f64, BlockId)]) {
     s.seconds(0.5);
     assert!(
         at.x > last_column as f64 && (at.y - top).abs() < 0.05,
-        "the walk up the hill stopped at {at:?}, the top is {top} at x {last_column}",
+        "the walk up the hill stopped at {at:?}, the top is {top} at x {last_column}; the line {:?}, over it {:?}",
+        line.iter().map(|c| c.1).collect::<Vec<_>>(),
+        line.iter()
+            .enumerate()
+            .map(|(k, c)| s.block((x0 + k as i32, c.0 + 1, cell_of(at).2)).map(t::block_name))
+            .collect::<Vec<_>>(),
     );
     let biggest = rises.iter().copied().fold(0.0, f64::max);
     assert!(biggest <= step + 0.02, "one frame lifted the player {biggest:.3} of a block: {rises:?}");
@@ -368,10 +406,26 @@ fn the_grain_of_the_open_country_is_walked_over_and_never_walked_into() {
     s.release_all();
     s.seconds(0.25);
     let at = s.feet();
+    // What is in front of the body where it stopped, for the message: the
+    // cells of its row and the rows either side, from the ground up.
+    let around = || {
+        let (cx, cy, cz) = cell_of(at);
+        let mut cells = Vec::new();
+        for dz in -1..=1 {
+            for dx in 0..=1 {
+                for dy in -1..=1 {
+                    let cell = (cx + dx, cy + dy, cz + dz);
+                    cells.push((cell, s.block(cell).map(t::block_name)));
+                }
+            }
+        }
+        format!("{:?}; the line {:?}", cells, line.iter().map(|c| c.1).collect::<Vec<_>>())
+    };
     assert!(
         at.x > last_column as f64,
-        "the walk across the country stopped at {at:?}, {:.1} columns short of the far end at {last_column}",
-        last_column as f64 - at.x
+        "the walk across the country stopped at {at:?}, {:.1} columns short of the far end at {last_column}: {}",
+        last_column as f64 - at.x,
+        around()
     );
     // Half a second of standing still against the ground is being stuck;
     // the odd frame lost to a lip's corner is not.
@@ -461,10 +515,20 @@ fn a_winter_hillside_of_lips_is_white_all_over_is_walked_up_and_is_swept_back_to
     let floor_at = |x: i32, z: i32| {
         ground.iter().find(|((gx, _, gz), _)| (*gx, *gz) == (x, z)).map(|&((_, y, _), b)| f64::from(y) + f64::from(t::collision_height(b)))
     };
+    // **A lip whose neighbour on that side stands lower**, so the ray down
+    // across the edge meets this lip's snow and not the one before it. On
+    // the even ramp every column climbed a quarter over the last, and any
+    // lip would do; since the ramps took other shapes (`lips::profile`) the
+    // column before a lip can be a tread at its own height, and the hand --
+    // correctly -- reached the nearer snow.
     let (&((lx, ly, lz), lip), stand) = lips
         .iter()
-        .find_map(|l| Some((*l, floor_at(l.0 .0 - 2, l.0 .2)?)))
-        .expect("a lip with ground beside it");
+        .find_map(|l| {
+            let ((x, _, z), _) = **l;
+            (floor_at(x - 1, z)? < floor_at(x, z)?).then_some(())?;
+            Some((*l, floor_at(x - 2, z)?))
+        })
+        .expect("a lip with lower ground beside it");
     let snow = (lx, ly + 1, lz);
     s.stand_at((f64::from(lx) - 1.5, stand, f64::from(lz) + 0.5));
     s.look_at(DVec3::new(f64::from(lx) + 0.5, f64::from(ly) + f64::from(t::collision_height(lip)) + 0.01, f64::from(lz) + 0.5));
@@ -543,7 +607,8 @@ fn a_wooded_hillside_is_walked_up_without_a_jump_past_trees_and_stones_rooted_in
             let Some(line) = (0..RISE_RUN).map(|k| meadow_top(&s, x0 + k, z)).collect::<Option<Vec<_>>>() else {
                 continue;
             };
-            let walkable = line.windows(2).all(|w| (w[1].1 - w[0].1).abs() <= step);
+            // Up and never down, as `gentle_rise` asks and for its reason.
+            let walkable = line.windows(2).all(|w| w[1].1 >= w[0].1 && w[1].1 - w[0].1 <= step);
             let lips = line.iter().filter(|c| primitive_shared::dig::is_turf_lip(c.2)).count();
             if walkable && line[RISE_RUN as usize - 1].0 - line[0].0 >= 1 && lips >= 2 {
                 if found.is_none() || trunk(&s, foot) {

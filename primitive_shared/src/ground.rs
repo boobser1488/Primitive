@@ -367,6 +367,14 @@ pub fn is_turf(id: BlockId) -> bool {
 ///   with no new block, no new picture and no new layer -- the side wears the
 ///   top's own picture, which already carries the climate's tint.
 ///
+/// **The top's own picture was the wrong half of that.** A hillside of
+/// quarter steps, every riser the same grass as the treads round it, ran
+/// into one tone from thirty blocks off ("сливаются в кашу"). What this
+/// answers is still *whether* the turf goes on past the face; *what* the
+/// face then wears is the turf's cut edge -- blades over thatch, soil only
+/// where a step is tall -- one picture a turf, in the client
+/// (`FaceLayers::turf_edge`), tinted by the climate as the top is.
+///
 /// **Both halves of the slope are needed**, and the first was found missing
 /// from a picture. A generated slope is a ramp of lips
 /// (`worldgen::lips`): four columns of one cell whose turf stands a quarter,

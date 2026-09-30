@@ -34,6 +34,14 @@
 //! and not a walk. The most-lowered answer of the four ways wins, so a
 //! column at the corner of a rise is a ramp both ways.
 //!
+//! **That was the even ramp, and it is no longer every ramp.** A hillside
+//! of nothing but 1/4, 1/2, 3/4 was one flight of identical steps repeated
+//! to the horizon ("сливаются в кашу"), so the profile of each rise is bent
+//! by a slow field and pushed by a hash, held to a stride a column whatever
+//! shape it takes -- see [`profile`]. And the riser between two lips wears
+//! the turf's cut edge rather than its top (`FaceLayers::turf_edge` in the
+//! client), which is the other half of the same report.
+//!
 //! Rejected: *the fraction of the smooth field* (`terrain_height` before it
 //! rounds). It is the right number on open ground and the wrong one exactly
 //! where it matters: the lakes, the river cuts and the lake shores are all
@@ -204,6 +212,9 @@ thread_local! {
     /// a lip"): the before of a before-and-after in one binary, for the
     /// timing and for the prints that hold the rest of the ground still.
     pub(super) static FEATURES_KEEP_THEIR_STEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Every ramp the even 1/4, 1/2, 3/4 it was before the profiles varied
+    /// (`profile`): the before of `probe_the_rhythm_of_a_slope`.
+    pub(super) static EVEN_LIPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// What the top cell of a column becomes where the slope wants `lip` in it,
@@ -259,9 +270,93 @@ pub(super) fn takes_a_lip(ground: BlockId) -> bool {
     matches!(ground::rock_of(kind), Some((_, Some(Form::Sand | Form::Gravel))))
 }
 
+/// How many quarters a body climbs in one column without a jump: half a
+/// block, `geometry::PLAYER_STEP_HEIGHT`, in the lips' own unit. Every
+/// profile below is held to it, which is what lets the profile vary at all.
+const STRIDE: i32 = (crate::geometry::PLAYER_STEP_HEIGHT * SLICES as f32) as i32;
+const _: () = assert!(STRIDE == 2);
+
+/// How far a ramp's profile bends from even, as a power: `2^±BEND` over the
+/// even `k / w`, so a shoulder at one end of the range (the climb taken at
+/// the brink, 2, 3, 3) and a toe at the other (the climb taken late, 1, 1,
+/// 2). See [`profile`].
+const BEND: f64 = 1.0;
+
+/// How far one column's lip is pushed off its terrace's profile before it
+/// is rounded, in quarters either way: under a half, so a column moves at
+/// most one quarter and only where the profile was near a half already.
+const JITTER: f64 = 0.6;
+
+/// How fast the bend field turns over, per block: about fifteen blocks from
+/// one kind of rise to the other, so a contour line keeps one kind of rise
+/// for a few metres and then changes it -- the length a person reads as
+/// "this bank" rather than as noise.
+const BEND_FREQUENCY: f64 = 0.065;
+
+/// **The quarters of the `k`-th column of a terrace `w` wide**, counted from
+/// its lower edge, for a ramp bent by `bend` and a column pushed by
+/// `jitter`.
+///
+/// ## Why the ramp is not always 1/4, 1/2, 3/4
+///
+/// "Плавные переходы на траве выглядят как ступеньки какие-то однотипные и
+/// сливаются в кашу." It was exactly that. The even ramp `k / w` gives every
+/// terrace four or wider the same three lips, so every rise of a hillside
+/// was the same flight -- measured on the downs of seed 1337
+/// (`probe_the_rhythm_of_a_slope`): **80 per cent** of the risers a quarter
+/// tall, **78 per cent** of treads one column deep, and more than half of
+/// all risers standing in a run of three or more identical steps. A hillside
+/// of those is a corrugated sheet: from the middle distance it is stripes at
+/// one spacing, from far off one flat tone.
+///
+/// Now each column reads a slow field for how its rise is shaped -- a
+/// shoulder that takes the climb at the brink and lies back, or a toe that
+/// lies flat and climbs late, or anything between -- and a hash that pushes
+/// it a little off even that. What does *not* vary is the one thing a lip is
+/// for: every column is held to `STRIDE` over the column below it and under
+/// it, so a body still walks the ramp whatever shape it came out.
+///
+/// The bounds are the walk, stated both ways: the lip of the `k`-th column
+/// is at most `STRIDE * k` over the terrace below (it climbed no faster than
+/// a stride a column to get here) and at least `4 - STRIDE * (w - k)` (it
+/// can still reach the whole block at `w` a stride a column). Any two lips
+/// inside those bounds are within a stride of each other at neighbouring
+/// `k`, whichever columns they came from -- which is why the field and the
+/// hash may disagree from column to column along the contour as well.
+///
+/// Rejected: *a pattern per terrace*, chosen once at its edge. A terrace is
+/// not a thing the generator has -- it is whatever run of one height a line
+/// through a column happens to cross -- and the four ways out of a column
+/// cross four of them. A field and a hash are functions of the column, which
+/// is what a chunk made without its neighbours can agree on.
+pub(super) fn profile(k: i32, w: i32, bend: f64, jitter: f64) -> i32 {
+    let whole = SLICES as i32;
+    let even = f64::from(k) / f64::from(w);
+    let target = f64::from(whole) * even.powf(bend) + jitter;
+    let low = (whole - STRIDE * (w - k)).max(1);
+    let high = (STRIDE * k).min(whole - 1);
+    (target.round() as i32).clamp(low, high)
+}
+
+impl WorldGen {
+    /// How this column's rise is bent, and how far it is pushed off it. See
+    /// [`profile`]. Both nought in a test that asks for the even ramp.
+    fn lip_shape(&self, gx: i32, gz: i32) -> (f64, f64) {
+        #[cfg(test)]
+        if EVEN_LIPS.with(std::cell::Cell::get) {
+            return (1.0, 0.0);
+        }
+        let field = super::fbm(&self.grain_noise, f64::from(gx) + 911.0, f64::from(gz) - 4_127.0, BEND_FREQUENCY, 2);
+        let bend = (BEND * (field * 3.0).clamp(-1.0, 1.0)).exp2();
+        let roll = super::hash2(gx, gz, self.seed.wrapping_add(0x11B5)) & 0xFFFF;
+        let jitter = (f64::from(roll) / 65_535.0 * 2.0 - 1.0) * JITTER;
+        (bend, jitter)
+    }
+}
+
 /// How many quarters of its top block a column keeps, or `None` for the
 /// whole block. See the module note for the arithmetic.
-fn lip_quarters(columns: &ColumnCache, lx: i32, lz: i32, here: Column) -> Option<u8> {
+fn lip_quarters(columns: &ColumnCache, lx: i32, lz: i32, here: Column, (bend, jitter): (f64, f64)) -> Option<u8> {
     let height = here.height;
     // Under the water or at it: a bank, not a slope.
     if height <= here.water {
@@ -311,10 +406,13 @@ fn lip_quarters(columns: &ColumnCache, lx: i32, lz: i32, here: Column) -> Option
             }
         }
         let width = (down + up - 1).min(SLICES as i32);
-        // `down / width` of the way up the terrace, to the nearest quarter,
-        // and never less than one: a lip of nothing is a hole.
-        let lip = ((2 * SLICES as i32 * down + width) / (2 * width)).clamp(1, SLICES as i32);
-        quarters = quarters.min(lip);
+        if down >= width {
+            // The whole block the ramp climbs to.
+            continue;
+        }
+        // About `down / width` of the way up the terrace, bent and pushed
+        // (`profile`), and never less than one: a lip of nothing is a hole.
+        quarters = quarters.min(profile(down, width, bend, jitter));
     }
     (quarters < SLICES as i32).then_some(quarters as u8)
 }
@@ -336,7 +434,8 @@ impl WorldGen {
         let mut own = [SLICES; (SPAN * SPAN) as usize];
         for z in -1..=CHUNK_SIZE_Z as i32 {
             for x in -1..=CHUNK_SIZE_X as i32 {
-                if let Some(quarters) = lip_quarters(columns, x, z, columns.at(x, z)) {
+                let shape = self.lip_shape(origin_x + x, origin_z + z);
+                if let Some(quarters) = lip_quarters(columns, x, z, columns.at(x, z), shape) {
                     own[((z + 1) * SPAN + x + 1) as usize] = quarters;
                 }
             }
